@@ -1628,6 +1628,54 @@ Not included (explicit scope boundaries):
 
 Phase 2 (essential tabs) is complete. All of: chat panel with full message rendering pipeline, files tab orchestration, file picker, search integration (message + file), speech-to-text, history browser with per-message actions. Ready to proceed to Phase 3 (richer components — diff viewer with Monaco, SVG viewer, Context/Cache/Settings tabs, file navigation grid, TeX preview, Doc convert tab).
 
+### 5.15 — Phase 3.2c.2b SvgEditor resize handles — **delivered**
+
+Adds corner/edge resize handles for rect, circle, and ellipse on top of 3.2c.2a's drag-to-move. Rect gets eight handles (four corners + four edges), circle and ellipse get four cardinal handles. Per-handle drag math pins the opposite corner/edge. Width/height/r/rx/ry clamped to a positive minimum so dragging past the opposite edge collapses to a small shape rather than flipping.
+
+- `webapp/src/svg-editor.js` — additions:
+  - `HANDLE_ROLE_ATTR = 'data-handle-role'` — dataset attribute name carrying the handle's compass direction. `nw`/`n`/`ne`/`e`/`se`/`s`/`sw`/`w` for rects; `n`/`e`/`s`/`w` for circles/ellipses.
+  - `_MIN_RESIZE_DIMENSION = 1` — SVG-unit floor. A drag past the opposite edge clamps to this rather than producing a negative dimension (which renders as a flipped shape in most browsers but is confusing — which handle is the user now holding?).
+  - `_renderResizeHandles(group, el, bbox)` — dispatches by tag. Rect emits eight handles at the bbox corners + edge midpoints. Circle and ellipse emit four cardinal handles. Other tags emit nothing (line endpoints land in 3.2c.2c; polyline/polygon/path vertices in 3.2c.3).
+  - `_makeHandleDot(cx, cy, role)` — factory. Produces a `<circle>` with the shared `HANDLE_CLASS`, the role attribute, `pointer-events: auto` (opting back in from the group's `none`), accent-blue fill + white stroke. Radius from `_getHandleRadius()` so handles stay visually ~6px regardless of zoom.
+  - `_drag` gained a `mode` field (`'move'` or `'resize'`) and a `role` field (resize only). `_onPointerMove` dispatches by mode; `_cancelDrag` dispatches the restore call likewise.
+  - `_hitTestHandle(clientX, clientY)` — composed-aware `elementsFromPoint` walker that filters FOR handles rather than against them (the inverse of `_hitTest`). Returns the role string of the topmost handle under the pointer, or null.
+  - `_onPointerDown` runs handle hit-test FIRST when something is selected. A handle hit starts resize drag; otherwise the normal select/move-drag flow proceeds. Guarded on `_selected` so a fresh click on an unselected shape can never accidentally start a resize.
+  - `_beginResizeDrag(event, role)` — snapshots dimensional attributes via `_captureResizeAttributes`, captures pointer, sets `_drag.mode = 'resize'` with the role.
+  - `_captureResizeAttributes(el)` — per-shape snapshot: rect captures x/y/width/height; circle captures cx/cy/r; ellipse captures cx/cy/rx/ry. Unknown tags return null (defensive — shouldn't reach here because handles are shape-specific).
+  - `_applyResizeDelta(dx, dy)` — dispatches to `_applyRectResize`, `_applyCircleResize`, or `_applyEllipseResize`.
+  - `_applyRectResize(el, o, role, dx, dy)` — role-based dispatch. Corners (nw/ne/se/sw) affect both axes; edges (n/e/s/w) affect one. Clamp applies to width/height; when the clamp fires AND the role is position-moving (w/nw/sw for x, n/nw/ne for y), the position is pinned so the opposite edge stays put. Without the pin, clamping width to `_MIN_RESIZE_DIMENSION` would leave x tracking the pointer and the shape would walk off-screen.
+  - `_applyCircleResize(el, o, dx, dy)` — all four handles set radius = `hypot(pointer - center)`. Clamp to min.
+  - `_applyEllipseResize(el, o, role, dx, dy)` — n/s handles set `ry = abs(pointer_y - cy)`; e/w handles set `rx = abs(pointer_x - cx)`. Center unchanged. Clamp to min.
+  - `_restoreResizeAttributes(el, snapshot)` — mirror for cancel path.
+
+- `webapp/src/svg-editor.test.js` — 46 new tests across 10 describe blocks:
+  - **Handle rendering** (12 tests): rect produces eight handles, all compass directions present, handle positions match bbox corners + edge midpoints (NW at x/y, SE at x+width/y+height, etc.), circle produces four, ellipse produces four, line/polyline/path produce none, handles opt into pointer events, handles carry the shared class, handles replaced on reselection, clearing selection removes handles.
+  - **Handle hit-test routing** (6 tests): clicking a handle starts resize drag with the correct role, handle click does NOT initiate the move-drag flow (verified by spying on `_hitTest` and asserting it's not called), handle hit-test only runs when there's a selection, `_hitTestHandle` returns null when no handle under pointer, returns role when a real handle is under the pointer, stops propagation on handle hit.
+  - **Rect corners** (4 tests): se corner grows w/h; nw corner moves x/y AND shrinks w/h; ne moves y + grows w shrinks h; sw moves x + shrinks w grows h.
+  - **Rect edges** (4 tests): n moves y + shrinks h; e grows w only; s grows h only; w moves x + shrinks w.
+  - **Rect clamping** (3 tests): drag e past left edge clamps width to 1 and leaves x at origin; drag w past right edge clamps width to 1 AND pins x so the right edge (originally at 30) stays at 30 (x = 29); drag n past bottom edge clamps height to 1 and pins y.
+  - **Circle** (4 tests): outward drag grows r, inward shrinks, drag through center clamps to 1 (Math.hypot always positive + clamp), any cardinal handle adjusts r (tested with n instead of e).
+  - **Ellipse** (5 tests): e handle adjusts rx only, w handle also adjusts rx (abs distance), n handle adjusts ry, rx/ry clamp to 1 when dragged to center, center unchanged during resize.
+  - **Lifecycle** (4 tests): onChange fires after committed resize, tiny resize move doesn't commit, detach mid-rect-resize rolls back all four attributes, detach mid-circle-resize restores r, detach mid-ellipse-resize restores rx+ry.
+
+Design points pinned by tests:
+
+- **Clamp AND pin for position-moving handles.** `drag past opposite edge with position-moving handle pins x` verifies that dragging the w handle way past the right edge clamps width to 1 but also freezes x at `original_right_edge - min_width`. Without the pin, x would continue to track the pointer and the shape would walk off the original right edge — confusing behavior. This matters for nw/sw/n/ne too (any corner/edge that normally moves a position attribute).
+
+- **Circle symmetry.** All four cardinal handles use the same formula (radius = distance from center to pointer). `any cardinal handle adjusts the single radius` pins this by using the `n` handle and verifying the same vertical-distance math produces the expected radius. If we ever added per-handle behavior (which would be wrong for circles), this test would catch it.
+
+- **Ellipse axis independence.** `n handle adjusts ry only` and `e handle adjusts rx only` verify that dragging one axis doesn't affect the other. The `other axis unchanged` assertions in each test are the key pin.
+
+- **Handles are shape-specific.** `line selection produces no resize handles` pins that we don't render rect-style 8-handle overlays on non-resizable shapes. Line endpoint handles will land as a separate rendering path in 3.2c.2c.
+
+- **Handle hit-test precedes main hit-test.** `handle click does not initiate move drag` spies on `_hitTest` and asserts it's not called when `_hitTestHandle` returns a role. Order matters: if main hit-test ran first, a click on a handle over the selected rect would initiate a move drag (since the handle is above the rect in the DOM tree). The gate is on `_selected` being non-null — without a selection, there are no handles, so `_hitTestHandle` would waste time walking elements.
+
+- **Clamp floor is a positive value.** `_MIN_RESIZE_DIMENSION = 1` rather than 0 — a zero-width rect is legal SVG but renders as invisible, which would strand the user's resize drag in a state with no visible handle to grab. Positive minimum keeps the shape always-selectable.
+
+Open carried over for 3.2c.2c:
+
+- **Line endpoint drag.** Line elements get two endpoint handles (one at `x1,y1`, one at `x2,y2`). Differs from the bounding-box dragging 3.2c.2a provides because each endpoint moves independently — dragging the x1/y1 handle doesn't move x2/y2. Will reuse the `_beginResizeDrag` machinery with a line-specific dispatch that stores the original x1/y1/x2/y2 and adjusts only the endpoint matching the clicked handle.
+
 ### 5.14 — Phase 3.2c.2a SvgEditor drag-to-move — **delivered**
 
 Adds drag-to-move on top of 3.2c.1's foundation. Click a selected element and drag to move it. Per-element attribute dispatch for every supported tag. Pointer capture so drags continue smoothly off the SVG bounds. Click-without-drag threshold prevents spurious mutations from stray pointer jitter.

@@ -23,8 +23,24 @@
 //   - Handle overlay re-renders every pointermove so the
 //     bounding box follows the element
 //
-// Deferred to 3.2c.2b+:
-//   - Corner/edge resize handles
+// Phase 3.2c.2b adds: resize handles for rect/circle/ellipse.
+//   - Per-shape handle rendering: rect gets eight handles
+//     (four corners + four edges), circle and ellipse get
+//     four cardinal handles
+//   - Handle pointerdown initiates a resize drag (distinct
+//     from the move drag from 3.2c.2a)
+//   - Per-handle drag math: rect corners pin the opposite
+//     corner and adjust x/y/width/height simultaneously;
+//     rect edges pin the opposite edge; circle handles
+//     adjust r from the center; ellipse handles adjust
+//     rx or ry independently
+//   - Width/height/r/rx/ry clamped to 0 so a drag past the
+//     opposite edge collapses to zero rather than flipping
+//   - Handles are `pointer-events: auto` (the enclosing
+//     group remains `pointer-events: none`) so clicks route
+//     to them rather than the underlying element
+//
+// Deferred to 3.2c.2c+:
 //   - Line endpoint drag (3.2c.2c)
 //   - Vertex edit / inline text edit (3.2c.3)
 //   - Multi-selection + marquee (3.2c.4)
@@ -89,6 +105,28 @@ export const HANDLE_CLASS = 'svg-editor-handle';
  * above the content.
  */
 export const HANDLE_GROUP_ID = 'svg-editor-handles';
+
+/**
+ * Dataset key on individual resize handles identifying
+ * which corner or edge they represent. Values are compass
+ * directions: `nw`, `n`, `ne`, `e`, `se`, `s`, `sw`, `w`
+ * for rects; `n`, `e`, `s`, `w` for circles and ellipses.
+ *
+ * Stored on the DOM element itself so the pointerdown
+ * dispatch can read it without maintaining a separate
+ * handle → metadata map.
+ */
+export const HANDLE_ROLE_ATTR = 'data-handle-role';
+
+/**
+ * Minimum dimension for resize operations. Dragging past
+ * the opposite edge clamps dimensions to this value rather
+ * than flipping the shape (which would require swapping
+ * which handle is which mid-drag — complex and visually
+ * confusing). Expressed in SVG units; a pixel-ish value
+ * that won't render as visually zero at normal zoom.
+ */
+const _MIN_RESIZE_DIMENSION = 1;
 
 /**
  * Parse a numeric SVG attribute value to a number. SVG
@@ -201,18 +239,24 @@ export class SvgEditor {
 
     /**
      * Drag state. Null when not dragging; populated on
-     * pointerdown that hits the already-selected element.
-     * Cleared on pointerup.
+     * pointerdown that hits the already-selected element
+     * (move drag) or one of its resize handles (resize
+     * drag). Cleared on pointerup.
      *
-     * Fields:
+     * Common fields:
+     *   mode — 'move' or 'resize'
      *   pointerId — id of the captured pointer
      *   startX, startY — pointer position in SVG root
      *     coords at drag start
      *   originAttrs — snapshot of the element's positional
-     *     attributes at drag start, used to compute new
-     *     values from the absolute delta
+     *     or dimensional attributes at drag start
      *   committed — set true on first pointermove beyond
      *     threshold, triggers onChange on pointerup
+     *
+     * Resize-only fields:
+     *   role — which handle (nw / n / ne / e / se / s /
+     *     sw / w for rect; n / e / s / w for circle and
+     *     ellipse)
      */
     this._drag = null;
 
@@ -340,6 +384,23 @@ export class SvgEditor {
   _onPointerDown(event) {
     // Only react to primary button (left-click / touch).
     if (event.button !== 0 && event.pointerType === 'mouse') return;
+    // Handle hit-test runs FIRST — when the pointer is over
+    // one of the selected element's resize handles, start
+    // a resize drag rather than a move/select. Only fires
+    // when there's already a selection, so a fresh click on
+    // an unselected shape can't accidentally initiate a
+    // resize.
+    if (this._selected) {
+      const role = this._hitTestHandle(
+        event.clientX,
+        event.clientY,
+      );
+      if (role) {
+        event.stopPropagation();
+        this._beginResizeDrag(event, role);
+        return;
+      }
+    }
     const target = this._hitTest(event.clientX, event.clientY);
     if (!target) {
       // Click on empty space deselects.
@@ -365,6 +426,36 @@ export class SvgEditor {
     }
   }
 
+  /**
+   * Check whether the given screen coordinates are over
+   * one of the selected element's resize handles. Returns
+   * the handle's role string (`nw`/`n`/`ne`/... for rects
+   * or `n`/`e`/`s`/`w` for circles/ellipses) or null.
+   *
+   * Uses the same composed-aware elementsFromPoint as the
+   * main hit-test but filters FOR handles rather than
+   * against them.
+   */
+  _hitTestHandle(clientX, clientY) {
+    const root = this._svg.getRootNode();
+    let els = null;
+    if (root && typeof root.elementsFromPoint === 'function') {
+      els = root.elementsFromPoint(clientX, clientY);
+    } else if (typeof document.elementsFromPoint === 'function') {
+      els = document.elementsFromPoint(clientX, clientY);
+    }
+    if (!els || els.length === 0) return null;
+    for (const el of els) {
+      if (!el || !el.tagName) continue;
+      if (!el.classList || !el.classList.contains(HANDLE_CLASS)) {
+        continue;
+      }
+      const role = el.getAttribute(HANDLE_ROLE_ATTR);
+      if (role) return role;
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------------
   // Drag machinery
   // ---------------------------------------------------------------
@@ -384,6 +475,7 @@ export class SvgEditor {
       return;
     }
     this._drag = {
+      mode: 'move',
       pointerId: event.pointerId,
       startX: origin.x,
       startY: origin.y,
@@ -398,6 +490,36 @@ export class SvgEditor {
       // pointermove handler; capture is an enhancement,
       // not a requirement.
     }
+  }
+
+  /**
+   * Start a resize drag on the selected element. Like
+   * `_beginDrag` but captures dimensional attributes
+   * (width/height/r/rx/ry) in addition to position, and
+   * records which handle was grabbed so the move handler
+   * knows which corner/edge is being dragged.
+   */
+  _beginResizeDrag(event, role) {
+    if (!this._selected) return;
+    const origin = this._screenToSvg(event.clientX, event.clientY);
+    const originAttrs = this._captureResizeAttributes(this._selected);
+    if (!originAttrs) {
+      // Element isn't resizable (shouldn't happen — handle
+      // rendering is shape-specific — but defensive).
+      return;
+    }
+    this._drag = {
+      mode: 'resize',
+      role,
+      pointerId: event.pointerId,
+      startX: origin.x,
+      startY: origin.y,
+      originAttrs,
+      committed: false,
+    };
+    try {
+      this._svg.setPointerCapture(event.pointerId);
+    } catch (_) {}
   }
 
   _onPointerMove(event) {
@@ -418,7 +540,11 @@ export class SvgEditor {
       }
       this._drag.committed = true;
     }
-    this._applyDragDelta(dx, dy);
+    if (this._drag.mode === 'resize') {
+      this._applyResizeDelta(dx, dy);
+    } else {
+      this._applyDragDelta(dx, dy);
+    }
     this._renderHandles();
   }
 
@@ -448,8 +574,20 @@ export class SvgEditor {
    */
   _cancelDrag() {
     if (!this._drag) return;
-    // Roll back to the snapshot.
-    this._restoreDragAttributes(this._selected, this._drag.originAttrs);
+    // Roll back to the snapshot. Dispatch by drag mode —
+    // move uses position attributes, resize uses dimension
+    // attributes.
+    if (this._drag.mode === 'resize') {
+      this._restoreResizeAttributes(
+        this._selected,
+        this._drag.originAttrs,
+      );
+    } else {
+      this._restoreDragAttributes(
+        this._selected,
+        this._drag.originAttrs,
+      );
+    }
     try {
       this._svg.releasePointerCapture(this._drag.pointerId);
     } catch (_) {}
@@ -628,6 +766,230 @@ export class SvgEditor {
         } else {
           el.removeAttribute('transform');
         }
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Resize dispatch
+  // ---------------------------------------------------------------
+
+  /**
+   * Capture the element's current dimensional + positional
+   * attributes for a resize drag. Returns a snapshot shape
+   * specific to each supported element type:
+   *
+   *   - rect → {kind: 'rect', x, y, width, height}
+   *   - circle → {kind: 'circle', cx, cy, r}
+   *   - ellipse → {kind: 'ellipse', cx, cy, rx, ry}
+   *
+   * Returns null for unsupported shapes. Called only after
+   * `_renderResizeHandles` has placed handles, so the set
+   * of tags here matches the set that renders handles.
+   */
+  _captureResizeAttributes(el) {
+    if (!el || !el.tagName) return null;
+    const tag = el.tagName.toLowerCase();
+    switch (tag) {
+      case 'rect':
+        return {
+          kind: 'rect',
+          x: _parseNum(el.getAttribute('x')),
+          y: _parseNum(el.getAttribute('y')),
+          width: _parseNum(el.getAttribute('width')),
+          height: _parseNum(el.getAttribute('height')),
+        };
+      case 'circle':
+        return {
+          kind: 'circle',
+          cx: _parseNum(el.getAttribute('cx')),
+          cy: _parseNum(el.getAttribute('cy')),
+          r: _parseNum(el.getAttribute('r')),
+        };
+      case 'ellipse':
+        return {
+          kind: 'ellipse',
+          cx: _parseNum(el.getAttribute('cx')),
+          cy: _parseNum(el.getAttribute('cy')),
+          rx: _parseNum(el.getAttribute('rx')),
+          ry: _parseNum(el.getAttribute('ry')),
+        };
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Apply a resize delta to the currently-dragging
+   * element. Dispatches on the snapshot's `kind` and the
+   * drag's `role`. Each shape has its own math:
+   *
+   *   - **rect**: the handle position determines which
+   *     edge moves. `nw` moves the top-left corner —
+   *     x += dx, y += dy, width -= dx, height -= dy. `se`
+   *     moves the bottom-right — just width += dx,
+   *     height += dy. Edge handles (`n`, `e`, `s`, `w`)
+   *     adjust one dimension + position. Width and height
+   *     clamped to `_MIN_RESIZE_DIMENSION` — a drag past
+   *     the opposite edge collapses rather than flipping.
+   *
+   *   - **circle**: all four handles change the radius.
+   *     The new radius is the distance from the center
+   *     (cx, cy) to the current pointer position
+   *     (startX + dx, startY + dy). Clamped to min.
+   *
+   *   - **ellipse**: `n`/`s` handles change `ry` (vertical
+   *     radius); `e`/`w` change `rx` (horizontal). Each
+   *     independently; center unchanged. Clamped to min.
+   */
+  _applyResizeDelta(dx, dy) {
+    if (!this._drag || !this._selected) return;
+    if (this._drag.mode !== 'resize') return;
+    const el = this._selected;
+    const o = this._drag.originAttrs;
+    const role = this._drag.role;
+    switch (o.kind) {
+      case 'rect':
+        this._applyRectResize(el, o, role, dx, dy);
+        break;
+      case 'circle':
+        this._applyCircleResize(el, o, dx, dy);
+        break;
+      case 'ellipse':
+        this._applyEllipseResize(el, o, role, dx, dy);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Rect resize dispatch — maps a handle role to changes
+   * in x/y/width/height. Each corner/edge pins the opposite
+   * corner/edge:
+   *
+   *   nw → pins SE: x,y move; width,height shrink
+   *   ne → pins SW: y moves; width grows, height shrinks
+   *   se → pins NW: (no position change) width,height grow
+   *   sw → pins NE: x moves; width shrinks, height grows
+   *   n  → pins S:  y moves; height shrinks
+   *   e  → pins W:  (no position change) width grows
+   *   s  → pins N:  (no position change) height grows
+   *   w  → pins E:  x moves; width shrinks
+   */
+  _applyRectResize(el, o, role, dx, dy) {
+    let x = o.x;
+    let y = o.y;
+    let width = o.width;
+    let height = o.height;
+    // Horizontal axis.
+    if (role === 'nw' || role === 'w' || role === 'sw') {
+      x = o.x + dx;
+      width = o.width - dx;
+    } else if (role === 'ne' || role === 'e' || role === 'se') {
+      width = o.width + dx;
+    }
+    // Vertical axis.
+    if (role === 'nw' || role === 'n' || role === 'ne') {
+      y = o.y + dy;
+      height = o.height - dy;
+    } else if (role === 'sw' || role === 's' || role === 'se') {
+      height = o.height + dy;
+    }
+    // Clamp to minimum. When a corner drag past the
+    // opposite edge would make width/height negative, we
+    // clamp to _MIN_RESIZE_DIMENSION AND freeze the
+    // position at the opposite edge so the shape doesn't
+    // flip. Without this, x would track the pointer and
+    // width would go negative, which renders as an
+    // inverted rect in most browsers but is unreadable
+    // for the user.
+    if (width < _MIN_RESIZE_DIMENSION) {
+      width = _MIN_RESIZE_DIMENSION;
+      if (role === 'nw' || role === 'w' || role === 'sw') {
+        // x was moving; pin it so the right edge stays put.
+        x = o.x + o.width - _MIN_RESIZE_DIMENSION;
+      }
+    }
+    if (height < _MIN_RESIZE_DIMENSION) {
+      height = _MIN_RESIZE_DIMENSION;
+      if (role === 'nw' || role === 'n' || role === 'ne') {
+        y = o.y + o.height - _MIN_RESIZE_DIMENSION;
+      }
+    }
+    el.setAttribute('x', String(x));
+    el.setAttribute('y', String(y));
+    el.setAttribute('width', String(width));
+    el.setAttribute('height', String(height));
+  }
+
+  /**
+   * Circle resize — radius = distance from center to
+   * pointer. All four cardinal handles behave identically
+   * because a circle has a single radius; dragging any
+   * handle changes r. Center (cx, cy) unchanged.
+   */
+  _applyCircleResize(el, o, dx, dy) {
+    // Pointer position at drag start is stored in
+    // _drag.startX/startY (SVG root coords). The current
+    // pointer is at (startX + dx, startY + dy). Distance
+    // from the center gives the new radius.
+    const px = this._drag.startX + dx;
+    const py = this._drag.startY + dy;
+    const newR = Math.hypot(px - o.cx, py - o.cy);
+    const r = Math.max(newR, _MIN_RESIZE_DIMENSION);
+    el.setAttribute('r', String(r));
+  }
+
+  /**
+   * Ellipse resize — independent rx and ry. `n`/`s`
+   * handles set ry = |pointer_y - cy|; `e`/`w` handles
+   * set rx = |pointer_x - cx|. Other axis unchanged.
+   */
+  _applyEllipseResize(el, o, role, dx, dy) {
+    const px = this._drag.startX + dx;
+    const py = this._drag.startY + dy;
+    if (role === 'e' || role === 'w') {
+      const newRx = Math.max(
+        Math.abs(px - o.cx),
+        _MIN_RESIZE_DIMENSION,
+      );
+      el.setAttribute('rx', String(newRx));
+    } else if (role === 'n' || role === 's') {
+      const newRy = Math.max(
+        Math.abs(py - o.cy),
+        _MIN_RESIZE_DIMENSION,
+      );
+      el.setAttribute('ry', String(newRy));
+    }
+  }
+
+  /**
+   * Restore resize-drag snapshot on cancel. Mirror of
+   * `_applyRect/Circle/EllipseResize`; writes the origin
+   * values back.
+   */
+  _restoreResizeAttributes(el, snapshot) {
+    if (!el || !snapshot) return;
+    switch (snapshot.kind) {
+      case 'rect':
+        el.setAttribute('x', String(snapshot.x));
+        el.setAttribute('y', String(snapshot.y));
+        el.setAttribute('width', String(snapshot.width));
+        el.setAttribute('height', String(snapshot.height));
+        break;
+      case 'circle':
+        el.setAttribute('cx', String(snapshot.cx));
+        el.setAttribute('cy', String(snapshot.cy));
+        el.setAttribute('r', String(snapshot.r));
+        break;
+      case 'ellipse':
+        el.setAttribute('cx', String(snapshot.cx));
+        el.setAttribute('cy', String(snapshot.cy));
+        el.setAttribute('rx', String(snapshot.rx));
+        el.setAttribute('ry', String(snapshot.ry));
         break;
       default:
         break;
@@ -829,9 +1191,18 @@ export class SvgEditor {
 
   /**
    * Render the selection handles for the current selected
-   * element. For 3.2c.1 this is just a bounding-box
-   * rectangle — the interactive corner/edge/vertex handles
-   * land in 3.2c.2.
+   * element. Always draws a dashed bounding-box outline;
+   * for rect/circle/ellipse, also draws the per-shape
+   * resize handles at their appropriate positions.
+   *
+   * Drag-in-flight detection — during an active resize
+   * drag, skip re-rendering to avoid churning the DOM on
+   * every pointermove. The bounding box and handle
+   * positions would trail the mouse by one frame anyway
+   * because we update attributes FIRST then re-render;
+   * leaving the stale overlay up is visually acceptable
+   * and saves the per-move reflow. Move drags still
+   * re-render (the bbox tracks the element).
    */
   _renderHandles() {
     const group = this._ensureHandleGroup();
@@ -858,6 +1229,85 @@ export class SvgEditor {
     rect.setAttribute('stroke-dasharray', `${dashLen},${dashLen}`);
     rect.setAttribute('pointer-events', 'none');
     group.appendChild(rect);
+    // Per-shape resize handles.
+    this._renderResizeHandles(group, this._selected, bbox);
+  }
+
+  /**
+   * Render resize handles for shapes that support it.
+   * Dispatched by tag name — rect gets eight handles,
+   * circle and ellipse get four cardinal handles. Other
+   * shapes (line, polyline, polygon, path, text, g,
+   * image, use) get no resize handles in 3.2c.2b — line
+   * endpoints come in 3.2c.2c; polyline/polygon/path
+   * vertex handles come in 3.2c.3.
+   */
+  _renderResizeHandles(group, el, bbox) {
+    const tag = el.tagName?.toLowerCase();
+    if (tag === 'rect') {
+      // Eight handles — four corners plus four edge midpoints.
+      const midX = bbox.x + bbox.width / 2;
+      const midY = bbox.y + bbox.height / 2;
+      const right = bbox.x + bbox.width;
+      const bottom = bbox.y + bbox.height;
+      const positions = [
+        { role: 'nw', cx: bbox.x, cy: bbox.y },
+        { role: 'n', cx: midX, cy: bbox.y },
+        { role: 'ne', cx: right, cy: bbox.y },
+        { role: 'e', cx: right, cy: midY },
+        { role: 'se', cx: right, cy: bottom },
+        { role: 's', cx: midX, cy: bottom },
+        { role: 'sw', cx: bbox.x, cy: bottom },
+        { role: 'w', cx: bbox.x, cy: midY },
+      ];
+      for (const p of positions) {
+        group.appendChild(this._makeHandleDot(p.cx, p.cy, p.role));
+      }
+      return;
+    }
+    if (tag === 'circle' || tag === 'ellipse') {
+      // Four cardinal handles. Circle uses a single radius,
+      // so all four adjust `r`; ellipse uses rx + ry
+      // independently, so n/s adjust ry and e/w adjust rx.
+      const midX = bbox.x + bbox.width / 2;
+      const midY = bbox.y + bbox.height / 2;
+      const right = bbox.x + bbox.width;
+      const bottom = bbox.y + bbox.height;
+      const positions = [
+        { role: 'n', cx: midX, cy: bbox.y },
+        { role: 'e', cx: right, cy: midY },
+        { role: 's', cx: midX, cy: bottom },
+        { role: 'w', cx: bbox.x, cy: midY },
+      ];
+      for (const p of positions) {
+        group.appendChild(this._makeHandleDot(p.cx, p.cy, p.role));
+      }
+      return;
+    }
+    // Other tags get no resize handles in this sub-phase.
+  }
+
+  /**
+   * Build a single handle dot — a small circle with
+   * pointer events enabled so clicks route to it rather
+   * than the underlying element.
+   */
+  _makeHandleDot(cx, cy, role) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('class', HANDLE_CLASS);
+    dot.setAttribute(HANDLE_ROLE_ATTR, role);
+    dot.setAttribute('cx', String(cx));
+    dot.setAttribute('cy', String(cy));
+    dot.setAttribute('r', String(this._getHandleRadius()));
+    dot.setAttribute('fill', '#4fc3f7');
+    dot.setAttribute('stroke', '#ffffff');
+    const strokeWidth = this._screenDistToSvgDist(1);
+    dot.setAttribute('stroke-width', String(strokeWidth));
+    // Handles opt back into pointer events (the group is
+    // `pointer-events: none` by default).
+    dot.setAttribute('pointer-events', 'auto');
+    return dot;
   }
 
   /**
