@@ -72,6 +72,8 @@ The browser shows a full-screen overlay with the brand mark, a status message, a
 - Scans up to a reasonable number of attempts
 - First successfully bound port is used
 - If no port available in the range, server exits with an error
+- **Both ports are probed independently** — the WebSocket port AND the webapp port. Skipping the probe on either port is a correctness bug: a second instance launched with defaults would fail to bind the taken port in one of two silent ways (static-server constructor raises `OSError` inside a daemon thread and gets swallowed; or the browser-open call still fires and the user sees "their" app in the tab title while the loaded JS comes from the first instance). Users have no clear signal that something is wrong — the tab loads, looks right, and silently talks to the wrong backend
+- The CLI flags `--server-port` and `--webapp-port` specify the *starting* port for the probe, not a required port. This matches the "just works" principle — running two AC⚡DC instances back to back should never require the user to remember port arithmetic
 
 ## Browser Tab Title
 
@@ -135,5 +137,6 @@ Structured to stderr. Default level INFO. Verbose flag enables DEBUG.
 - Doc-index progress during phase 2 never re-shows or stalls the startup overlay
 - Git repository validation failure always produces both the HTML instruction page and the terminal banner
 - Port selection always succeeds or exits with a clear error — never silently binds to an unexpected port
+- Both the WebSocket port and webapp port are probed before the server starts; a second concurrent instance probes past the first's ports rather than cross-wiring into it
 - Browser tab title always matches the repo name; no branding prefix
 - SIGINT / SIGTERM always trigger clean shutdown with child process termination

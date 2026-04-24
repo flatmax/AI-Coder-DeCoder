@@ -112,6 +112,33 @@ async function settle(panel) {
 
 **Not worth fixing upstream:** vitest + jsdom + fake timers is a complex interaction; the setTimeout shim is a one-line workaround that keeps the tests fast and stable.
 
+### D16 — Both server and webapp ports must be probed independently
+
+`rpc.py`'s `find_available_port` already handled the WebSocket port. The webapp port was passed through verbatim to either Vite or the built-in static server. On the second concurrent `ac-dc` launch, the webapp bind would fail silently — either inside a daemon thread (static server `OSError` swallowed) or with a Vite crash-loop — but `webbrowser.open()` still fired, sending the user to the first instance's webapp. The browser tab would show the second instance's repo title while executing the first instance's JS bundle, producing the confusing "AC-DC4 title bar, AC-DC code" failure mode.
+
+**Fix:** probe both ports in `run()` using the same `find_available_port` helper already used for the server port. The CLI flags become *starting* ports rather than required ones.
+
+```python
+try:
+    server_port = find_available_port(start=server_port)
+except RuntimeError as exc:
+    logger.error("Could not find server port: %s", exc)
+    return
+try:
+    webapp_port = find_available_port(start=webapp_port)
+except RuntimeError as exc:
+    logger.error("Could not find webapp port: %s", exc)
+    return
+```
+
+Probe-host: loopback is a strict superset check — if `0.0.0.0:N` is taken, `127.0.0.1:N` is also unavailable. So the default loopback probe in `find_available_port` is correct in both single-user and `--collab` modes.
+
+**Diagnostic that found this:** a user running two concurrent `ac-dc` instances on the same machine saw edits applied to disk on the second instance but the browser never reflected them. `grep -c "console.log"` confirmed the logs were in the file; `fetch('/src/chat-panel.js', {cache: 'no-store'})` returned 790 bytes (a 404 HTML stub) because the request was being served by the *first* instance's Vite, rooted at a different project directory with a different source layout. `ps aux | grep vite` showed two Vite processes bound to the same port — the race loser had failed to bind but hadn't crashed the backend.
+
+**Lesson:** silent cross-wiring is worse than a loud error. Any subprocess or thread that binds a port must either go through the probe or check the bind result and surface the failure. Swallowing `OSError` inside a daemon thread is load-bearing for robustness during shutdown (broken-pipe errors) but masks genuine bind failures during startup. Future contributors adding new network listeners should follow the same probe-then-log pattern.
+
+**Spec reference:** specs4/6-deployment/startup.md § Port Selection documents the invariant.
+
 ### D14 — URL display_name truncation keeps two extra content chars
 
 `display_name` truncates long URLs to `_DISPLAY_MAX_CHARS - 2` characters of content plus a three-char `...` suffix, producing a 41-char output for a 40-char budget. This is one character "over budget" compared to a naive `budget - 3` truncation.
