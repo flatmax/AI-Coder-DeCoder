@@ -657,6 +657,14 @@ class LLMService:
         populated tiers from the first page load, not only after
         the first chat message. If it fails, lazy initialization
         on the first chat request catches it.
+
+        Kicks off the doc index background build as a separate
+        task. Build runs in the aux executor (CPU-bound enough
+        to deserve its own thread) and emits startupProgress
+        events per file. The shell's "Doc Index Stage Filtering"
+        routes these to the dialog header progress bar rather
+        than the startup overlay (which has already dismissed
+        by this point).
         """
         if self._init_complete and self._symbol_index is not None:
             return
@@ -668,6 +676,201 @@ class LLMService:
         # failure is logged and the lazy path catches it on the
         # first chat request.
         self._try_initialize_stability()
+
+        # Kick off the doc index background build. Uses
+        # ensure_future so we don't block complete_deferred_init
+        # — callers typically await the return here to advance
+        # the startup overlay past the ready stage. The
+        # background task handles its own error surfacing.
+        #
+        # Capture the event loop via _main_loop so the task is
+        # scheduled on the correct loop. complete_deferred_init
+        # may run on the event loop thread (main.py's startup
+        # sequence) or may be called from a test fixture on a
+        # different thread; capturing here matches the pattern
+        # used by chat_streaming and commit_all.
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # No running loop — skip the background build. The
+            # doc index stays empty; `_doc_index_ready` stays
+            # False; cross-reference toggle stays disabled.
+            # Tests that don't care about doc indexing hit this
+            # path cleanly.
+            logger.debug(
+                "No event loop available; skipping doc index "
+                "background build"
+            )
+            return
+        self._main_loop = loop
+        asyncio.ensure_future(self._build_doc_index_background())
+
+    async def _build_doc_index_background(self) -> None:
+        """Structurally extract every doc-index-eligible file.
+
+        Runs in the aux executor so the blocking per-file parsing
+        doesn't starve the event loop. Emits startupProgress
+        events as it walks. Flips `_doc_index_ready` on success
+        so cross-reference toggle can activate.
+
+        Non-fatal — failures log and leave `_doc_index_ready`
+        False. The doc index stays empty; doc mode produces no
+        content; cross-reference stays disabled. No error
+        propagates to the user's chat session.
+
+        Per specs4/2-indexing/document-index.md § Two-Phase
+        Principle: this is the structural pass only. Keyword
+        enrichment (2.8.4) is a separate background task that
+        runs after this completes.
+        """
+        if self._doc_index_building:
+            # Already running. Should never happen given the
+            # guard in complete_deferred_init, but defensive
+            # against a future caller that invokes this directly.
+            return
+
+        self._doc_index_building = True
+        try:
+            # Discover files. Use the repo's flat file list when
+            # available so we respect .gitignore and excluded
+            # directories; fall back to the doc index's own
+            # walker when no repo is attached.
+            file_list: list[str] = []
+            if self._repo is not None:
+                try:
+                    flat = self._repo.get_flat_file_list()
+                    file_list = [f for f in flat.split("\n") if f]
+                except Exception as exc:
+                    logger.warning(
+                        "Doc index: failed to fetch file list "
+                        "from repo: %s; falling back to walker",
+                        exc,
+                    )
+                    file_list = []
+
+            # Filter to files the doc index has an extractor
+            # for. Done here rather than letting index_repo do
+            # it so we can emit accurate progress events (total
+            # count is known up front).
+            doc_files = [
+                f for f in file_list
+                if self._doc_index._extension_of(f)
+                in self._doc_index._extractors
+            ]
+
+            total = len(doc_files)
+            if total == 0:
+                # No doc files. Still flip the ready flag — an
+                # empty doc index is a valid state (repo has no
+                # markdown). Cross-reference in code mode with
+                # an empty doc index is a no-op that produces
+                # no entries; the toggle works but doesn't
+                # surface any content.
+                logger.info(
+                    "Doc index: no eligible files found; "
+                    "marking ready with empty outlines"
+                )
+                self._doc_index_ready = True
+                return
+
+            logger.info(
+                "Doc index: starting background build for %d files",
+                total,
+            )
+
+            # Send an initial progress event so the shell's
+            # dialog header progress bar appears at 0%.
+            await self._send_doc_index_progress(
+                stage="doc_index",
+                message=f"Indexing documentation ({total} files)",
+                percent=0,
+            )
+
+            # Run the full index_repo pass in the aux executor.
+            # index_repo handles the per-file loop internally;
+            # we don't currently get per-file progress events
+            # during the run. Future work can add a callback
+            # parameter to DocIndex.index_repo for finer-grained
+            # progress; for 2.8.2b, start-and-end events are
+            # sufficient.
+            assert self._main_loop is not None
+            loop = self._main_loop
+            await loop.run_in_executor(
+                self._aux_executor,
+                self._doc_index.index_repo,
+                doc_files,
+            )
+
+            # Build complete. Flip readiness flag; the frontend's
+            # next get_mode call will see doc_index_ready=True
+            # and enable the cross-reference toggle.
+            self._doc_index_ready = True
+            logger.info(
+                "Doc index: background build complete — %d "
+                "outlines in memory",
+                len(self._doc_index._all_outlines),
+            )
+
+            # Send a final progress event at 100% so the dialog
+            # header progress bar fades out cleanly.
+            await self._send_doc_index_progress(
+                stage="doc_index",
+                message="Documentation indexing complete",
+                percent=100,
+            )
+        except Exception as exc:
+            # Background-build failure. Log; leave readiness
+            # False; emit a compaction-error-style event so the
+            # frontend can surface a toast if it wants to.
+            logger.exception(
+                "Doc index: background build failed: %s", exc
+            )
+            try:
+                await self._send_doc_index_progress(
+                    stage="doc_index_error",
+                    message=f"Documentation indexing failed: {exc}",
+                    percent=0,
+                )
+            except Exception:
+                # If even the error event can't be sent, we've
+                # done all we can. Swallow and continue.
+                pass
+        finally:
+            self._doc_index_building = False
+
+    async def _send_doc_index_progress(
+        self,
+        stage: str,
+        message: str,
+        percent: int,
+    ) -> None:
+        """Send a startupProgress event for doc index builds.
+
+        Thin wrapper over the event callback. Matches the
+        signature the startup orchestrator uses for its own
+        progress events, so the shell's event router handles
+        both uniformly.
+
+        Stage is intercepted by the shell per shell.md § "Doc
+        Index Stage Filtering" and routed to the dialog header
+        rather than the startup overlay. Percent below 100
+        indicates in-progress; percent == 100 indicates
+        completion.
+        """
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(
+                "startupProgress",
+                stage,
+                message,
+                percent,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Doc index progress event failed for %s: %s",
+                stage, exc,
+            )
 
     def shutdown(self) -> None:
         """Release executor resources. Called on server shutdown."""

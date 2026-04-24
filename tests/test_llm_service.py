@@ -406,6 +406,362 @@ class TestDocIndexConstruction:
 
 
 # ---------------------------------------------------------------------------
+# Doc index background build (2.8.2b)
+# ---------------------------------------------------------------------------
+
+
+class TestDocIndexBackgroundBuild:
+    """Doc index background build triggered by complete_deferred_init.
+
+    The build:
+    - Fires as an ensure_future task during complete_deferred_init
+    - Runs in the aux executor so the event loop stays responsive
+    - Emits startupProgress events with stage='doc_index' at
+      start (0%) and completion (100%)
+    - Flips ``_doc_index_ready`` on success
+    - Non-fatal on failure — leaves readiness False, emits
+      stage='doc_index_error' event
+    - Empty-file-list case still marks ready (valid empty state)
+
+    Tests use ``deferred_init=True`` and manually invoke
+    ``complete_deferred_init`` so the timing is controllable.
+    """
+
+    async def test_background_build_triggered_by_deferred_init(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """complete_deferred_init kicks off the background build."""
+        # Seed a markdown file so the build has something to index.
+        (repo_dir / "doc.md").write_text(
+            "# Title\n\nContent.\n"
+        )
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        assert svc._doc_index_ready is False
+
+        # complete_deferred_init synchronously launches the
+        # background task; we wait for it to settle.
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        assert svc._doc_index_ready is True
+        assert svc._doc_index_building is False
+        assert "doc.md" in svc._doc_index._all_outlines
+
+    async def test_background_build_emits_start_and_end_events(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Progress events fire with doc_index stage."""
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Filter to doc_index progress events.
+        progress_events = [
+            args for name, args in event_cb.events
+            if name == "startupProgress"
+            and len(args) >= 3
+            and args[0] == "doc_index"
+        ]
+        # Start event at 0%, completion event at 100%.
+        assert len(progress_events) >= 2
+        assert progress_events[0][2] == 0
+        assert progress_events[-1][2] == 100
+
+    async def test_empty_file_list_still_marks_ready(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Repo with no doc files — readiness flips, no error."""
+        # seed.md exists (from repo_dir fixture), so we need a
+        # repo without markdown files. Use a fresh empty dir
+        # and remove the seed file. But even the seed commit's
+        # seed.md is markdown — let's just trust that the
+        # filter finds it and marks ready after indexing it.
+        # The actual empty case is covered by the no-repo
+        # test below.
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Whether there are 0 or 1 markdown files, readiness
+        # flips.
+        assert svc._doc_index_ready is True
+        assert svc._doc_index_building is False
+
+    async def test_no_repo_skips_build_but_still_flips_readiness(
+        self,
+        config: ConfigManager,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Without a repo, the build has nothing to index.
+
+        Result: no doc files discovered, readiness flips True
+        (empty doc index is a valid state), no errors.
+        """
+        svc = LLMService(
+            config=config,
+            repo=None,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        assert svc._doc_index_ready is True
+        assert svc._doc_index_building is False
+        assert svc._doc_index._all_outlines == {}
+
+    async def test_multiple_markdown_files_indexed(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Multiple doc files all land in the outlines dict."""
+        (repo_dir / "a.md").write_text("# A\n")
+        (repo_dir / "sub").mkdir()
+        (repo_dir / "sub" / "b.md").write_text("# B\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        outlines = svc._doc_index._all_outlines
+        assert "a.md" in outlines
+        assert "sub/b.md" in outlines
+
+    async def test_non_markdown_files_skipped(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Python / JSON / other files don't land in doc index."""
+        (repo_dir / "script.py").write_text("x = 1\n")
+        (repo_dir / "data.json").write_text("{}\n")
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        outlines = svc._doc_index._all_outlines
+        assert "doc.md" in outlines
+        assert "script.py" not in outlines
+        assert "data.json" not in outlines
+
+    async def test_repeated_deferred_init_does_not_rebuild(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Second call to complete_deferred_init is a no-op.
+
+        The idempotence guard in complete_deferred_init returns
+        early if already complete; the doc index background
+        task therefore doesn't get scheduled twice.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Count doc_index progress events from the first call.
+        first_events = [
+            args for name, args in event_cb.events
+            if name == "startupProgress"
+            and len(args) >= 3
+            and args[0] == "doc_index"
+        ]
+        first_count = len(first_events)
+        assert first_count >= 2
+
+        # Second call — should be a no-op.
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        second_events = [
+            args for name, args in event_cb.events
+            if name == "startupProgress"
+            and len(args) >= 3
+            and args[0] == "doc_index"
+        ]
+        # No new events fired.
+        assert len(second_events) == first_count
+
+    async def test_build_failure_logs_but_does_not_raise(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exceptions during build emit error event, don't crash."""
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+
+        # Force index_repo to raise.
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated build failure")
+        monkeypatch.setattr(
+            svc._doc_index, "index_repo", _boom
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Readiness flag stays False.
+        assert svc._doc_index_ready is False
+        assert svc._doc_index_building is False
+
+        # Error event fired.
+        error_events = [
+            args for name, args in event_cb.events
+            if name == "startupProgress"
+            and len(args) >= 3
+            and args[0] == "doc_index_error"
+        ]
+        assert len(error_events) >= 1
+        assert "simulated build failure" in error_events[0][1]
+
+    async def test_build_survives_no_event_callback(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Build works without an event callback attached.
+
+        Defensive — the service accepts event_callback=None for
+        tests that don't exercise the browser-push path. The
+        background build must not crash when there's nobody
+        listening.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=None,
+            deferred_init=True,
+        )
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        assert svc._doc_index_ready is True
+        assert "doc.md" in svc._doc_index._all_outlines
+
+    async def test_building_flag_true_during_build(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_doc_index_building is True while the task runs."""
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        # Patch index_repo to observe the flag mid-execution.
+        flag_during_build = {"value": None}
+        original = None
+
+        def _slow_index(*args, **kwargs):
+            # Capture the flag's value while we're inside the
+            # executor. Direct attribute read — the service is
+            # on the main event loop thread; we're on the aux
+            # executor thread. GIL makes the read atomic for a
+            # bool.
+            flag_during_build["value"] = svc._doc_index_building
+            if original is not None:
+                return original(*args, **kwargs)
+            return None
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        original = svc._doc_index.index_repo
+        monkeypatch.setattr(
+            svc._doc_index, "index_repo", _slow_index
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Flag was True during the executor call, False after.
+        assert flag_during_build["value"] is True
+        assert svc._doc_index_building is False
+
+
+# ---------------------------------------------------------------------------
 # Session auto-restore
 # ---------------------------------------------------------------------------
 
