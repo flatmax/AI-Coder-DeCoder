@@ -61,8 +61,30 @@
 //   - Snapshot kind `polyline-vertices` / `polygon-vertices`
 //     (distinct from move-drag's `points` kind)
 //
-// Deferred to 3.2c.3b+:
-//   - Path command parsing + vertex handles (3.2c.3b)
+// Phase 3.2c.3b-i adds: path endpoint editing for M/L/H/V/Z.
+//   - `d` attribute parsed into command objects via
+//     `_parsePathData`
+//   - Endpoint handles emitted at each command's absolute
+//     endpoint with role `p{N}` where N is the command
+//     index in the parsed array
+//   - Dragging adjusts the command's args (respecting
+//     relative vs absolute form — relative commands keep
+//     their delta-style args)
+//   - Snapshot kind `path-commands` holds the parsed array
+//     plus a running "pen position" map so relative
+//     commands can be restored independently
+//   - Z commands have no endpoint (they close back to the
+//     subpath start), so no handle emitted for them
+//   - H and V single-axis commands work naturally — the
+//     handle's other-axis drag component is ignored
+//   - Curve (C/S/Q/T) and arc (A) control points deferred
+//     to 3.2c.3b-ii/iii; parser handles all commands
+//     up front so those sub-phases only add rendering
+//     and dispatch
+//
+// Deferred to 3.2c.3b-ii+:
+//   - C/S/Q/T curve handles (control points + endpoint)
+//   - A arc endpoint handles (arc shape parameters stay as-is)
 //   - Inline text edit via foreignObject textarea (3.2c.3c)
 //   - Multi-selection + marquee (3.2c.4)
 //   - Undo stack + copy/paste (3.2c.5)
@@ -186,6 +208,288 @@ function _parsePoints(value) {
     const y = parseFloat(tokens[i + 1]);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
     result.push([x, y]);
+  }
+  return result;
+}
+
+/**
+ * Number of arguments consumed by each path command.
+ * Both cases (absolute and relative) use the same arg
+ * count — case determines coordinate interpretation
+ * (absolute vs delta-from-pen), not arg shape.
+ *
+ * A commands take 7 args: rx, ry, x-axis-rotation,
+ * large-arc-flag, sweep-flag, x, y. The flags are
+ * booleans encoded as 0/1 in the path string but land
+ * in our args array as numbers for uniformity.
+ *
+ * Z takes no args — it just closes the subpath back to
+ * the most recent M point.
+ */
+const _PATH_ARG_COUNTS = {
+  M: 2, m: 2,
+  L: 2, l: 2,
+  H: 1, h: 1,
+  V: 1, v: 1,
+  C: 6, c: 6,
+  S: 4, s: 4,
+  Q: 4, q: 4,
+  T: 2, t: 2,
+  A: 7, a: 7,
+  Z: 0, z: 0,
+};
+
+/**
+ * Parse an SVG path `d` attribute into a flat array of
+ * command objects. Each command is `{cmd, args}` where
+ * `cmd` is the single-character command letter (case
+ * preserved — uppercase is absolute, lowercase is
+ * relative) and `args` is an array of numbers.
+ *
+ * SVG path syntax packs multiple command invocations
+ * after a single command letter — `M 0 0 10 10 20 20`
+ * means moveto followed by two linetos. Per SVG spec,
+ * trailing coordinates after M are treated as L (with
+ * matching case). Similarly, trailing coords after m
+ * are treated as l. We expand these into separate
+ * command objects during parsing so downstream code can
+ * treat every entry uniformly.
+ *
+ * Returns an empty array on any parse failure. Like
+ * `_parsePoints`, prefers silent no-op over throwing —
+ * a malformed `d` attribute strands the editor's
+ * handles but doesn't crash the whole viewer.
+ *
+ * @param {string} d
+ * @returns {Array<{cmd: string, args: number[]}>}
+ */
+function _parsePathData(d) {
+  if (!d || typeof d !== 'string') return [];
+  // Tokenize. Command letters are their own tokens;
+  // numbers are separated by whitespace, commas, or
+  // sign changes (-5-10 → [-5, -10]). The regex matches
+  // either a command letter or a signed number (with
+  // optional fractional and exponent parts).
+  const tokenRe = /([MmLlHhVvCcSsQqTtAaZz])|([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/g;
+  const tokens = [];
+  let match;
+  while ((match = tokenRe.exec(d)) !== null) {
+    if (match[1]) {
+      tokens.push({ type: 'cmd', value: match[1] });
+    } else if (match[2]) {
+      const n = parseFloat(match[2]);
+      if (!Number.isFinite(n)) return [];
+      tokens.push({ type: 'num', value: n });
+    }
+  }
+  // Walk tokens. Each command letter consumes the
+  // configured number of following number tokens. If
+  // more numbers follow, spawn implicit command
+  // repetitions — M becomes L, m becomes l, others
+  // repeat themselves.
+  const commands = [];
+  let i = 0;
+  let currentCmd = null;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (tok.type === 'cmd') {
+      currentCmd = tok.value;
+      i += 1;
+    } else if (currentCmd === null) {
+      // Number before any command — malformed.
+      return [];
+    }
+    if (currentCmd === null) continue;
+    const argCount = _PATH_ARG_COUNTS[currentCmd];
+    if (argCount === undefined) return [];
+    if (argCount === 0) {
+      // Z / z — no args consumed.
+      commands.push({ cmd: currentCmd, args: [] });
+      // Don't re-use currentCmd for subsequent tokens —
+      // explicit next command required after Z.
+      currentCmd = null;
+      continue;
+    }
+    // Consume argCount numbers.
+    const args = [];
+    for (let j = 0; j < argCount; j += 1) {
+      const next = tokens[i];
+      if (!next || next.type !== 'num') return [];
+      args.push(next.value);
+      i += 1;
+    }
+    commands.push({ cmd: currentCmd, args });
+    // Implicit repetition: after M/m, subsequent coord
+    // pairs become L/l. Other commands repeat themselves.
+    if (currentCmd === 'M') currentCmd = 'L';
+    else if (currentCmd === 'm') currentCmd = 'l';
+    // else currentCmd stays as-is for implicit repeat.
+  }
+  return commands;
+}
+
+/**
+ * Serialize an array of parsed path commands back to a
+ * `d` attribute string. Commands emitted individually
+ * (no implicit-repeat compaction) so round-tripping is
+ * lossless in the direction parser → serializer →
+ * parser. The serializer's output may be slightly more
+ * verbose than an optimized hand-written path, but
+ * visually identical.
+ *
+ * Number formatting: uses `.toString()` rather than
+ * `.toFixed(N)` to avoid silently truncating precision.
+ * A path with coordinates like 10.12345 round-trips
+ * verbatim; only integer cases drop the `.0`.
+ *
+ * @param {Array<{cmd: string, args: number[]}>} commands
+ * @returns {string}
+ */
+function _serializePathData(commands) {
+  if (!Array.isArray(commands)) return '';
+  const parts = [];
+  for (const c of commands) {
+    if (!c || typeof c.cmd !== 'string') continue;
+    if (c.cmd.toUpperCase() === 'Z') {
+      parts.push(c.cmd);
+      continue;
+    }
+    const args = Array.isArray(c.args) ? c.args : [];
+    parts.push(`${c.cmd} ${args.map((n) => String(n)).join(' ')}`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Compute absolute endpoint positions for each command
+ * in a parsed path. Walks commands tracking the current
+ * pen position and the most recent subpath start (for
+ * Z commands). Returns an array of `{x, y}` objects
+ * aligned with the input `commands` array.
+ *
+ * Z commands produce an endpoint at the subpath start
+ * (not the current pen position) since that's where
+ * the pen actually lands after the close — but we
+ * return null for Z entries to signal "no independently
+ * draggable endpoint" (dragging Z doesn't make sense).
+ *
+ * For relative commands, the absolute position is
+ * computed from the current pen plus the command's
+ * offset. For absolute commands, the position is taken
+ * directly from the command's args.
+ *
+ * H and V are single-axis — H sets only x, V sets
+ * only y, leaving the other coordinate at the pen's
+ * current value.
+ *
+ * Returns an empty array if `commands` is empty or
+ * malformed.
+ *
+ * @param {Array<{cmd: string, args: number[]}>} commands
+ * @returns {Array<{x: number, y: number} | null>}
+ */
+function _computePathEndpoints(commands) {
+  if (!Array.isArray(commands) || commands.length === 0) return [];
+  let penX = 0;
+  let penY = 0;
+  let subpathStartX = 0;
+  let subpathStartY = 0;
+  const result = [];
+  for (const c of commands) {
+    if (!c || typeof c.cmd !== 'string') {
+      result.push(null);
+      continue;
+    }
+    const abs = c.cmd === c.cmd.toUpperCase();
+    const args = Array.isArray(c.args) ? c.args : [];
+    const upper = c.cmd.toUpperCase();
+    switch (upper) {
+      case 'M': {
+        const [x, y] = args;
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        subpathStartX = nx;
+        subpathStartY = ny;
+        result.push({ x: nx, y: ny });
+        break;
+      }
+      case 'L':
+      case 'T': {
+        const [x, y] = args;
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        result.push({ x: nx, y: ny });
+        break;
+      }
+      case 'H': {
+        const [x] = args;
+        const nx = abs ? x : penX + x;
+        penX = nx;
+        // y unchanged.
+        result.push({ x: nx, y: penY });
+        break;
+      }
+      case 'V': {
+        const [y] = args;
+        const ny = abs ? y : penY + y;
+        penY = ny;
+        result.push({ x: penX, y: ny });
+        break;
+      }
+      case 'C': {
+        // Args: cx1, cy1, cx2, cy2, x, y. Endpoint is
+        // the last pair.
+        const x = args[4];
+        const y = args[5];
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        result.push({ x: nx, y: ny });
+        break;
+      }
+      case 'S':
+      case 'Q': {
+        // S: cx2, cy2, x, y. Q: cx, cy, x, y. Either way
+        // endpoint is args[2], args[3].
+        const x = args[2];
+        const y = args[3];
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        result.push({ x: nx, y: ny });
+        break;
+      }
+      case 'A': {
+        // Args: rx, ry, x-axis-rot, large-arc, sweep,
+        // x, y. Endpoint is last pair.
+        const x = args[5];
+        const y = args[6];
+        const nx = abs ? x : penX + x;
+        const ny = abs ? y : penY + y;
+        penX = nx;
+        penY = ny;
+        result.push({ x: nx, y: ny });
+        break;
+      }
+      case 'Z': {
+        // Close back to subpath start. No independently
+        // draggable endpoint, but update pen so a
+        // following command sees the correct position.
+        penX = subpathStartX;
+        penY = subpathStartY;
+        result.push(null);
+        break;
+      }
+      default:
+        result.push(null);
+        break;
+    }
   }
   return result;
 }
@@ -865,6 +1169,32 @@ export class SvgEditor {
             : 'polyline-vertices',
           points: _parsePoints(el.getAttribute('points')),
         };
+      case 'path': {
+        // Capture the full parsed command list. Drag
+        // dispatch needs the whole list (not just the
+        // dragged command) because relative commands
+        // following the dragged one reference the pen
+        // position at their start — and if we mutate an
+        // earlier relative command's args, later commands'
+        // absolute endpoint positions shift. That's
+        // visually correct (relative commands are meant
+        // to propagate downstream) but it means the
+        // restore path has to rewrite the whole `d`
+        // attribute, not just patch one command.
+        //
+        // Distinct kind from move-drag's 'transform'
+        // kind (which covers path move via transform
+        // attribute). Move translates via transform;
+        // vertex resize mutates the `d` attribute itself.
+        const commands = _parsePathData(el.getAttribute('d'));
+        return {
+          kind: 'path-commands',
+          commands: commands.map((c) => ({
+            cmd: c.cmd,
+            args: [...c.args],
+          })),
+        };
+      }
       default:
         return null;
     }
@@ -915,6 +1245,9 @@ export class SvgEditor {
       case 'polyline-vertices':
       case 'polygon-vertices':
         this._applyVertexResize(el, o, role, dx, dy);
+        break;
+      case 'path-commands':
+        this._applyPathEndpointResize(el, o, role, dx, dy);
         break;
       default:
         break;
@@ -1084,6 +1417,113 @@ export class SvgEditor {
   }
 
   /**
+   * Path endpoint resize — one command's endpoint moves,
+   * others unchanged. Role format is `p{N}` where N is
+   * the zero-indexed position in the command array.
+   *
+   * Relative vs absolute handling: for absolute commands
+   * (uppercase letters), the endpoint args become
+   * (endpoint + delta). For relative commands (lowercase),
+   * the args ARE the delta from the pen position — adding
+   * the drag delta to them shifts the endpoint visually by
+   * the same amount regardless of whether the form is
+   * absolute or relative. The pen position at the command's
+   * start doesn't change (earlier commands are untouched),
+   * so a relative command's effective endpoint moves by
+   * exactly the drag delta.
+   *
+   * Single-axis commands (H/V) ignore the irrelevant
+   * component: H takes only the x delta, V takes only y.
+   * This matches user expectation — dragging an H handle
+   * up/down should produce no visual change because H is
+   * horizontal-only. Strict user could drag exactly
+   * horizontally, but accepting both and discarding the
+   * irrelevant axis is more forgiving.
+   *
+   * C/S/Q/T arrive as endpoint-only here — control point
+   * handles land in 3.2c.3b-ii. Their endpoint arg
+   * positions vary by command (C has endpoint at args[4],
+   * args[5]; S/Q at args[2], args[3]; T at args[0], args[1]),
+   * so the dispatch peeks at the command letter.
+   *
+   * A (arc) endpoint is at args[5], args[6]. Arc shape
+   * parameters (rx, ry, rotation, flags) are preserved
+   * verbatim — 3.2c.3b-iii could add handles for those
+   * if needed.
+   *
+   * Z has no endpoint to drag; the role won't match a Z
+   * command because handle rendering skips Z.
+   *
+   * No clamping: path commands may produce self-intersecting
+   * or degenerate shapes, all legal SVG.
+   */
+  _applyPathEndpointResize(el, o, role, dx, dy) {
+    if (typeof role !== 'string' || !role.startsWith('p')) return;
+    const idx = parseInt(role.slice(1), 10);
+    if (
+      !Number.isFinite(idx) ||
+      idx < 0 ||
+      idx >= o.commands.length
+    ) {
+      return;
+    }
+    // Clone the command list so repeated pointermoves
+    // recompute from origin, not from the previous move.
+    const next = o.commands.map((c) => ({
+      cmd: c.cmd,
+      args: [...c.args],
+    }));
+    const target = next[idx];
+    if (!target) return;
+    const upper = target.cmd.toUpperCase();
+    const args = target.args;
+    // Endpoint arg positions differ by command. H and V
+    // are single-axis.
+    switch (upper) {
+      case 'M':
+      case 'L':
+      case 'T':
+        // Endpoint at args[0], args[1].
+        args[0] += dx;
+        args[1] += dy;
+        break;
+      case 'H':
+        // Single-axis: x only.
+        args[0] += dx;
+        break;
+      case 'V':
+        // Single-axis: y only.
+        args[0] += dy;
+        break;
+      case 'C':
+        // Endpoint at args[4], args[5]. 3.2c.3b-ii will
+        // add handles for control points (args[0..1] and
+        // args[2..3]).
+        args[4] += dx;
+        args[5] += dy;
+        break;
+      case 'S':
+      case 'Q':
+        // Endpoint at args[2], args[3].
+        args[2] += dx;
+        args[3] += dy;
+        break;
+      case 'A':
+        // Endpoint at args[5], args[6].
+        args[5] += dx;
+        args[6] += dy;
+        break;
+      case 'Z':
+        // Z has no draggable endpoint; shouldn't be
+        // reached because handle rendering skips Z.
+        return;
+      default:
+        return;
+    }
+    el.setAttribute('d', _serializePathData(next));
+  }
+
+  /**
    * Restore resize-drag snapshot on cancel. Mirror of
    * `_applyRect/Circle/EllipseResize`; writes the origin
    * values back.
@@ -1120,6 +1560,9 @@ export class SvgEditor {
           'points',
           snapshot.points.map(([x, y]) => `${x},${y}`).join(' '),
         );
+        break;
+      case 'path-commands':
+        el.setAttribute('d', _serializePathData(snapshot.commands));
         break;
       default:
         break;
@@ -1445,6 +1888,33 @@ export class SvgEditor {
       }
       return;
     }
+    if (tag === 'path') {
+      // One handle per command endpoint. Z commands
+      // (close-subpath) produce no handle — their
+      // "endpoint" is just the subpath start where the
+      // pen lands after close, which is already reachable
+      // via the preceding M's handle.
+      //
+      // Role format is `p{N}` where N is the command
+      // index in the parsed array. Parser preserves case
+      // and relative vs absolute form, so dispatch can
+      // apply deltas correctly whichever form the command
+      // uses.
+      //
+      // 3.2c.3b-i only surfaces endpoints. Control-point
+      // handles for C/S/Q/T and arc shape parameters land
+      // in 3.2c.3b-ii/iii.
+      const commands = _parsePathData(el.getAttribute('d'));
+      const endpoints = _computePathEndpoints(commands);
+      for (let i = 0; i < endpoints.length; i += 1) {
+        const pt = endpoints[i];
+        if (!pt) continue;
+        group.appendChild(
+          this._makeHandleDot(pt.x, pt.y, `p${i}`),
+        );
+      }
+      return;
+    }
     // Other tags get no resize handles in this sub-phase.
   }
 
@@ -1523,6 +1993,9 @@ export class SvgEditor {
 export {
   _NON_SELECTABLE_TAGS,
   _SELECTABLE_TAGS,
+  _computePathEndpoints,
   _parseNum,
+  _parsePathData,
   _parsePoints,
+  _serializePathData,
 };

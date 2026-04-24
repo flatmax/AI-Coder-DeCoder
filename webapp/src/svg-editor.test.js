@@ -37,8 +37,11 @@ import {
   SvgEditor,
   _NON_SELECTABLE_TAGS,
   _SELECTABLE_TAGS,
+  _computePathEndpoints,
   _parseNum,
+  _parsePathData,
   _parsePoints,
+  _serializePathData,
 } from './svg-editor.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1651,7 +1654,8 @@ describe('SvgEditor resize handle rendering', () => {
     expect(roles).toEqual(['v0', 'v1', 'v2']);
   });
 
-  it('path selection produces no resize handles', () => {
+  it('path selection produces handles for each command endpoint', () => {
+    // M + L = two commands, two endpoint handles.
     const path = makeChild('path', { d: 'M 0 0 L 10 10' });
     path.getBBox = () => ({
       x: 0,
@@ -1663,7 +1667,12 @@ describe('SvgEditor resize handle rendering', () => {
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.setSelection(path);
-    expect(getHandles(svg)).toHaveLength(0);
+    const handles = getHandles(svg);
+    expect(handles).toHaveLength(2);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toEqual(['p0', 'p1']);
   });
 
   it('handles opt into pointer events', () => {
@@ -2977,5 +2986,844 @@ describe('SvgEditor resize drag: polygon vertices', () => {
     expect(poly.getAttribute('points')).toBe('0,0 10,0 40,40 0,10');
     editor.detach();
     expect(poly.getAttribute('points')).toBe('0,0 10,0 10,10 0,10');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path command parser
+// ---------------------------------------------------------------------------
+
+describe('_parsePathData', () => {
+  it('parses an empty string as empty', () => {
+    expect(_parsePathData('')).toEqual([]);
+    expect(_parsePathData(null)).toEqual([]);
+    expect(_parsePathData(undefined)).toEqual([]);
+  });
+
+  it('parses simple M + L', () => {
+    const result = _parsePathData('M 0 0 L 10 10');
+    expect(result).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+    ]);
+  });
+
+  it('preserves case (absolute vs relative)', () => {
+    const result = _parsePathData('M 0 0 l 10 10');
+    expect(result).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'l', args: [10, 10] },
+    ]);
+  });
+
+  it('handles all commands', () => {
+    const result = _parsePathData(
+      'M 0 0 L 10 10 H 20 V 30 C 0 0 5 5 10 10 S 15 15 20 20 Q 25 25 30 30 T 35 35 A 5 5 0 0 1 40 40 Z',
+    );
+    expect(result).toHaveLength(10);
+    expect(result[0].cmd).toBe('M');
+    expect(result[1].cmd).toBe('L');
+    expect(result[2].cmd).toBe('H');
+    expect(result[2].args).toEqual([20]);
+    expect(result[3].cmd).toBe('V');
+    expect(result[3].args).toEqual([30]);
+    expect(result[4].cmd).toBe('C');
+    expect(result[4].args).toEqual([0, 0, 5, 5, 10, 10]);
+    expect(result[5].cmd).toBe('S');
+    expect(result[5].args).toEqual([15, 15, 20, 20]);
+    expect(result[6].cmd).toBe('Q');
+    expect(result[6].args).toEqual([25, 25, 30, 30]);
+    expect(result[7].cmd).toBe('T');
+    expect(result[7].args).toEqual([35, 35]);
+    expect(result[8].cmd).toBe('A');
+    expect(result[8].args).toEqual([5, 5, 0, 0, 1, 40, 40]);
+    expect(result[9].cmd).toBe('Z');
+    expect(result[9].args).toEqual([]);
+  });
+
+  it('splits tokens on commas', () => {
+    const result = _parsePathData('M0,0 L10,10');
+    expect(result).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+    ]);
+  });
+
+  it('splits tokens on sign changes', () => {
+    // "M-5-10L20-30" should tokenize as M, -5, -10, L, 20, -30.
+    const result = _parsePathData('M-5-10L20-30');
+    expect(result).toEqual([
+      { cmd: 'M', args: [-5, -10] },
+      { cmd: 'L', args: [20, -30] },
+    ]);
+  });
+
+  it('handles decimals and scientific notation', () => {
+    const result = _parsePathData('M 1.5 2.75 L 1e2 3.14');
+    expect(result).toEqual([
+      { cmd: 'M', args: [1.5, 2.75] },
+      { cmd: 'L', args: [100, 3.14] },
+    ]);
+  });
+
+  it('expands implicit repetitions after M as L', () => {
+    // "M 0 0 10 10 20 20" = moveto, then two linetos.
+    const result = _parsePathData('M 0 0 10 10 20 20');
+    expect(result).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+      { cmd: 'L', args: [20, 20] },
+    ]);
+  });
+
+  it('expands implicit repetitions after m as l (lowercase)', () => {
+    const result = _parsePathData('m 0 0 10 10 20 20');
+    expect(result).toEqual([
+      { cmd: 'm', args: [0, 0] },
+      { cmd: 'l', args: [10, 10] },
+      { cmd: 'l', args: [20, 20] },
+    ]);
+  });
+
+  it('expands implicit repetitions for non-M commands', () => {
+    // "L 10 10 20 20" = two linetos.
+    const result = _parsePathData('M 0 0 L 10 10 20 20');
+    expect(result).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+      { cmd: 'L', args: [20, 20] },
+    ]);
+  });
+
+  it('requires explicit command after Z', () => {
+    // After Z, the next coord needs an explicit command.
+    // Malformed input (coord with no command) returns empty.
+    const result = _parsePathData('M 0 0 L 10 10 Z 20 20');
+    expect(result).toEqual([]);
+  });
+
+  it('handles whitespace variations', () => {
+    expect(
+      _parsePathData('  M   0  0   L  10  10  '),
+    ).toEqual([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+    ]);
+  });
+
+  it('returns empty array on malformed input', () => {
+    // Missing args.
+    expect(_parsePathData('M 0')).toEqual([]);
+    // Unknown command letter is just not matched by the
+    // regex, so it's skipped silently — downstream args
+    // become stranded and the walk fails.
+    expect(_parsePathData('X 0 0 L 10 10')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path command serializer
+// ---------------------------------------------------------------------------
+
+describe('_serializePathData', () => {
+  it('serializes an empty array as empty string', () => {
+    expect(_serializePathData([])).toBe('');
+    expect(_serializePathData(null)).toBe('');
+    expect(_serializePathData(undefined)).toBe('');
+  });
+
+  it('serializes a simple M + L', () => {
+    const result = _serializePathData([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+    ]);
+    expect(result).toBe('M 0 0 L 10 10');
+  });
+
+  it('serializes Z with no args', () => {
+    const result = _serializePathData([
+      { cmd: 'M', args: [0, 0] },
+      { cmd: 'L', args: [10, 10] },
+      { cmd: 'Z', args: [] },
+    ]);
+    expect(result).toBe('M 0 0 L 10 10 Z');
+  });
+
+  it('preserves case', () => {
+    expect(
+      _serializePathData([
+        { cmd: 'M', args: [0, 0] },
+        { cmd: 'l', args: [5, 5] },
+      ]),
+    ).toBe('M 0 0 l 5 5');
+  });
+
+  it('preserves numeric precision', () => {
+    expect(
+      _serializePathData([{ cmd: 'M', args: [1.5, 2.75] }]),
+    ).toBe('M 1.5 2.75');
+  });
+
+  it('round-trips through parser losslessly', () => {
+    const input = 'M 0 0 L 10 10 H 20 V 30 Z';
+    const parsed = _parsePathData(input);
+    const reparsed = _parsePathData(_serializePathData(parsed));
+    expect(reparsed).toEqual(parsed);
+  });
+
+  it('handles mixed absolute and relative', () => {
+    expect(
+      _serializePathData([
+        { cmd: 'M', args: [0, 0] },
+        { cmd: 'l', args: [10, 10] },
+        { cmd: 'H', args: [50] },
+        { cmd: 'z', args: [] },
+      ]),
+    ).toBe('M 0 0 l 10 10 H 50 z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path endpoint computation
+// ---------------------------------------------------------------------------
+
+describe('_computePathEndpoints', () => {
+  it('returns empty array for empty commands', () => {
+    expect(_computePathEndpoints([])).toEqual([]);
+    expect(_computePathEndpoints(null)).toEqual([]);
+  });
+
+  it('computes absolute M endpoint', () => {
+    const commands = [{ cmd: 'M', args: [10, 20] }];
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 10, y: 20 },
+    ]);
+  });
+
+  it('computes absolute L endpoints', () => {
+    const commands = _parsePathData('M 0 0 L 10 10 L 20 30');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 20, y: 30 },
+    ]);
+  });
+
+  it('computes relative L endpoints by accumulating', () => {
+    // m 0 0 l 10 10 l 20 30 — pen at (0,0), then (10,10), then (30,40).
+    const commands = _parsePathData('m 0 0 l 10 10 l 20 30');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 0, y: 0 },
+      { x: 10, y: 10 },
+      { x: 30, y: 40 },
+    ]);
+  });
+
+  it('handles H (single-axis) — y unchanged', () => {
+    const commands = _parsePathData('M 10 20 H 50');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 10, y: 20 },
+      { x: 50, y: 20 },
+    ]);
+  });
+
+  it('handles V (single-axis) — x unchanged', () => {
+    const commands = _parsePathData('M 10 20 V 100');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 10, y: 20 },
+      { x: 10, y: 100 },
+    ]);
+  });
+
+  it('handles relative H', () => {
+    const commands = _parsePathData('M 10 20 h 15');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 10, y: 20 },
+      { x: 25, y: 20 },
+    ]);
+  });
+
+  it('handles relative V', () => {
+    const commands = _parsePathData('M 10 20 v 30');
+    expect(_computePathEndpoints(commands)).toEqual([
+      { x: 10, y: 20 },
+      { x: 10, y: 50 },
+    ]);
+  });
+
+  it('returns null for Z commands', () => {
+    const commands = _parsePathData('M 0 0 L 10 10 Z');
+    const result = _computePathEndpoints(commands);
+    expect(result).toHaveLength(3);
+    expect(result[0]).toEqual({ x: 0, y: 0 });
+    expect(result[1]).toEqual({ x: 10, y: 10 });
+    expect(result[2]).toBe(null);
+  });
+
+  it('Z updates pen position to subpath start', () => {
+    // After Z, the pen should be back at the most recent M
+    // (0, 0). A following L with absolute coords should
+    // still work correctly, but we verify via a relative L
+    // that uses the pen position.
+    const commands = _parsePathData('M 0 0 L 10 10 Z l 5 5');
+    const result = _computePathEndpoints(commands);
+    // After Z (null), the relative l 5 5 starts from (0, 0)
+    // — the subpath start — so endpoint is (5, 5).
+    expect(result).toHaveLength(4);
+    expect(result[3]).toEqual({ x: 5, y: 5 });
+  });
+
+  it('tracks subpath start across multiple M commands', () => {
+    // Two subpaths. Z closes to the most recent M's start.
+    const commands = _parsePathData(
+      'M 0 0 L 10 10 Z M 100 100 L 110 110 Z l 5 5',
+    );
+    const result = _computePathEndpoints(commands);
+    // The final relative l 5 5 starts from the second
+    // subpath's start (100, 100) after the second Z.
+    expect(result).toHaveLength(7);
+    expect(result[6]).toEqual({ x: 105, y: 105 });
+  });
+
+  it('handles C endpoint (last pair)', () => {
+    const commands = _parsePathData(
+      'M 0 0 C 5 5 15 5 20 0',
+    );
+    const result = _computePathEndpoints(commands);
+    expect(result[1]).toEqual({ x: 20, y: 0 });
+  });
+
+  it('handles Q endpoint (last pair)', () => {
+    const commands = _parsePathData('M 0 0 Q 10 10 20 0');
+    const result = _computePathEndpoints(commands);
+    expect(result[1]).toEqual({ x: 20, y: 0 });
+  });
+
+  it('handles A endpoint (last pair of args)', () => {
+    const commands = _parsePathData(
+      'M 0 0 A 5 5 0 0 1 20 20',
+    );
+    const result = _computePathEndpoints(commands);
+    expect(result[1]).toEqual({ x: 20, y: 20 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path endpoint handle rendering
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor path handle rendering', () => {
+  function getHandles(svg) {
+    const group = svg.querySelector('#svg-editor-handles');
+    if (!group) return [];
+    return Array.from(
+      group.querySelectorAll('[data-handle-role]'),
+    );
+  }
+
+  it('emits one handle per non-Z command', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10 L 20 20',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    expect(handles).toHaveLength(3);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toEqual(['p0', 'p1', 'p2']);
+  });
+
+  it('skips Z commands when rendering handles', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10 Z',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    // Two commands have endpoints (M, L); Z has none.
+    expect(handles).toHaveLength(2);
+    const roles = handles.map((h) =>
+      h.getAttribute('data-handle-role'),
+    );
+    expect(roles).toEqual(['p0', 'p1']);
+  });
+
+  it('handles positioned at absolute coords', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 L 50 80',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 60,
+    });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole.p0).toEqual({ cx: 10, cy: 20 });
+    expect(byRole.p1).toEqual({ cx: 50, cy: 80 });
+  });
+
+  it('handles positioned at computed coords for relative commands', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 l 15 10',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 15,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    expect(byRole.p0).toEqual({ cx: 10, cy: 20 });
+    // Relative l 15 10 from (10, 20) → (25, 30).
+    expect(byRole.p1).toEqual({ cx: 25, cy: 30 });
+  });
+
+  it('H handle positioned on same y as pen', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 H 50',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 0,
+    });
+    const svg = track(makeSvg([path]));
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    const handles = getHandles(svg);
+    const byRole = {};
+    for (const h of handles) {
+      byRole[h.getAttribute('data-handle-role')] = {
+        cx: parseFloat(h.getAttribute('cx')),
+        cy: parseFloat(h.getAttribute('cy')),
+      };
+    }
+    // H endpoint at (50, 20) — y inherited from pen.
+    expect(byRole.p1).toEqual({ cx: 50, cy: 20 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path endpoint drag
+// ---------------------------------------------------------------------------
+
+describe('SvgEditor resize drag: path endpoints', () => {
+  it('dragging p1 on M+L updates L endpoint only', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p1',
+      { x: 10, y: 10 },
+      { x: 25, y: 30 },
+    );
+    // L endpoint moved; M unchanged.
+    expect(path.getAttribute('d')).toBe('M 0 0 L 25 30');
+  });
+
+  it('dragging p0 on M+L updates M only', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p0',
+      { x: 0, y: 0 },
+      { x: 5, y: 5 },
+    );
+    // M moved; L's args unchanged (though its effective
+    // endpoint shifts because it's relative to pen — but
+    // L is absolute, so its endpoint at (10, 10) stays).
+    expect(path.getAttribute('d')).toBe('M 5 5 L 10 10');
+  });
+
+  it('dragging H handle adjusts x only (y delta ignored)', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 H 50',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 40,
+      height: 0,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p1',
+      { x: 50, y: 20 },
+      { x: 70, y: 35 },
+    );
+    // H's single arg updated by dx=20; dy ignored.
+    expect(path.getAttribute('d')).toBe('M 10 20 H 70');
+  });
+
+  it('dragging V handle adjusts y only (x delta ignored)', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 V 100',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 0,
+      height: 80,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p1',
+      { x: 10, y: 100 },
+      { x: 30, y: 150 },
+    );
+    // V's single arg updated by dy=50; dx ignored.
+    expect(path.getAttribute('d')).toBe('M 10 20 V 150');
+  });
+
+  it('relative command endpoint drag applies delta to args', () => {
+    const path = makeChild('path', {
+      d: 'M 10 20 l 15 10',
+    });
+    path.getBBox = () => ({
+      x: 10,
+      y: 20,
+      width: 15,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    // l handle is at absolute (25, 30). Drag to (40, 50)
+    // — delta (+15, +20). l's args become (30, 30).
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p1',
+      { x: 25, y: 30 },
+      { x: 40, y: 50 },
+    );
+    expect(path.getAttribute('d')).toBe('M 10 20 l 30 30');
+  });
+
+  it('dragging p2 on 3-command path leaves others unchanged', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10 L 20 20',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p2',
+      { x: 20, y: 20 },
+      { x: 30, y: 40 },
+    );
+    expect(path.getAttribute('d')).toBe(
+      'M 0 0 L 10 10 L 30 40',
+    );
+  });
+
+  it('negative deltas work', () => {
+    const path = makeChild('path', {
+      d: 'M 50 50 L 100 100',
+    });
+    path.getBBox = () => ({
+      x: 50,
+      y: 50,
+      width: 50,
+      height: 50,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    runResizeDrag(
+      svg,
+      editor,
+      path,
+      'p1',
+      { x: 100, y: 100 },
+      { x: 80, y: 70 },
+    );
+    expect(path.getAttribute('d')).toBe('M 50 50 L 80 70');
+  });
+
+  it('repeated pointermoves recompute from origin', () => {
+    // Each pointermove must recompute from the snapshot,
+    // not from the previous move's result — otherwise
+    // compounding would run the handle away from the pointer.
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 20, 20);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 20 20');
+    firePointer(svg, 'pointermove', 30, 40);
+    // NOT 50, 60 which would be compounding from previous.
+    expect(path.getAttribute('d')).toBe('M 0 0 L 30 40');
+    firePointer(svg, 'pointerup', 30, 40);
+  });
+
+  it('clicking a p0 handle starts a resize drag', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p0');
+    firePointer(svg, 'pointerdown', 0, 0);
+    expect(editor._drag).not.toBe(null);
+    expect(editor._drag.mode).toBe('resize');
+    expect(editor._drag.role).toBe('p0');
+    expect(editor._drag.originAttrs.kind).toBe('path-commands');
+  });
+
+  it('fires onChange after committed path endpoint drag', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 25, 30);
+    firePointer(svg, 'pointerup', 25, 30);
+    expect(changeListener).toHaveBeenCalledOnce();
+  });
+
+  it('tiny path endpoint move does not commit', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const changeListener = vi.fn();
+    const editor = new SvgEditor(svg, { onChange: changeListener });
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p1');
+    firePointer(svg, 'pointerdown', 10, 10);
+    firePointer(svg, 'pointermove', 11, 10);
+    firePointer(svg, 'pointerup', 11, 10);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10');
+    expect(changeListener).not.toHaveBeenCalled();
+  });
+
+  it('detach mid-path-drag restores d attribute', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10 L 20 20',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    vi.spyOn(editor, '_hitTestHandle').mockReturnValue('p2');
+    firePointer(svg, 'pointerdown', 20, 20);
+    firePointer(svg, 'pointermove', 50, 50);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10 L 50 50');
+    editor.detach();
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10 L 20 20');
+  });
+
+  it('ignores malformed role (not p{N})', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'invalid',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'L', args: [10, 10] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10');
+    editor._drag = null;
+  });
+
+  it('ignores out-of-range command index', () => {
+    const path = makeChild('path', {
+      d: 'M 0 0 L 10 10',
+    });
+    path.getBBox = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    const svg = track(makeSvg([path]));
+    stubPointerCapture(svg);
+    const editor = new SvgEditor(svg);
+    editor.attach();
+    editor.setSelection(path);
+    editor._drag = {
+      mode: 'resize',
+      role: 'p99',
+      pointerId: 1,
+      startX: 0,
+      startY: 0,
+      originAttrs: {
+        kind: 'path-commands',
+        commands: [
+          { cmd: 'M', args: [0, 0] },
+          { cmd: 'L', args: [10, 10] },
+        ],
+      },
+      committed: true,
+    };
+    editor._applyResizeDelta(5, 5);
+    expect(path.getAttribute('d')).toBe('M 0 0 L 10 10');
+    editor._drag = null;
   });
 });
