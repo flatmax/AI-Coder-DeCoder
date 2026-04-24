@@ -212,6 +212,17 @@ Edit block rendering uses instance methods on `AcChatPanel` (not standalone func
 
 Banner **after** all edit blocks (at the end of the assistant message, not the top): counts of applied/failed/skipped/not-in-context with color-coded stat badges (green/red/orange/amber). When not-in-context edits are present, the banner includes a note about the auto-populated retry prompt. Rendered by `_renderEditSummary(msg)` using Lit templates (not HTML strings).
 
+### Finish Reason Badge
+
+Below the edit summary, a small `.finish-reason` badge surfaces the LLM's stop reason when present on the message. See [Streaming Lifecycle — Finish Reason](../3-llm-engine/streaming_lifecycle.md#finish-reason) for the full value table and UI mapping.
+
+- **Natural stops** (`stop`, `end_turn`) render as `.finish-reason.natural` — muted opacity 0.6, just a subtle "✓ stopped" / "✓ end of turn" hint
+- **Non-natural stops** (`length`, `content_filter`, `tool_calls`, etc.) render as `.finish-reason.warn` — red border, tinted background, with a descriptive label like "✂️ truncated (max_tokens)" or "🚫 content filter"
+
+For non-natural, non-cancelled stops, an additional error toast is shown on `streamComplete` so the user notices without having to scroll to the badge. Cancelled streams suppress both the toast and badge — the `[stopped]` marker appended to the response body is sufficient signalling.
+
+Rendered by `_renderFinishReason(msg)` using Lit templates. Placed between the edit summary banner and the bottom action toolbar.
+
 ### Not-In-Context Retry Prompt
 
 When `streamComplete` delivers `files_auto_added`, the system auto-populates the chat textarea with a retry prompt. **Note:** This runs after the edit failure retry prompt checks, so if both not-in-context files and edit failures (ambiguous or mismatch) are present in the same response, the not-in-context prompt overwrites the edit failure prompt in the textarea:

@@ -373,6 +373,7 @@ Three top-level service classes, registered via `add_class()`:
 | `LLMService.commit_all` | `() → {status: "started"}` | Stage, generate message, commit — result via `commitResult` broadcast |
 | `LLMService.reset_to_head` | `() → {status, system_event_message}` | Reset git to HEAD, record system event in conversation context and history |
 | `LLMService.get_context_breakdown` | `() → {model, total_tokens, blocks, breakdown, ...}` | Token/tier breakdown |
+| `LLMService.rebuild_cache` | `() → {status, mode, items_before, items_after, tier_counts, file_tier_counts, message}` | Wipe and redistribute all symbol/doc/file tier assignments from scratch (localhost-only) |
 | `LLMService.check_review_ready` | `() → {clean, message?}` | Check for clean tree |
 | `LLMService.get_commit_graph` | `(limit?, offset?, include_remote?) → {commits, branches, has_more}` | Delegates to Repo |
 | `LLMService.start_review` | `(branch, base_commit) → {status, commits, changed_files, stats}` | Enter review mode |

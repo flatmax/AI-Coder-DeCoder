@@ -241,6 +241,36 @@ Character-by-character matching against item names. Hides non-matching items and
 
 A **Size / Name** sort toggle button in the toolbar switches between sorting tier contents by token count descending (default) or alphabetically by name. The active sort mode is persisted to localStorage (`ac-dc-cache-sort`). Clicking the button cycles between modes. The button label shows the current sort mode with a down-arrow indicator (`⬇ Size` or `⬇ Name`).
 
+#### Rebuild Button
+
+A **🔄 Rebuild** button in the toolbar triggers a full cache tier redistribution via `LLMService.rebuild_cache()`. See [Cache Tiering — Manual Cache Rebuild](../3-llm-engine/cache_tiering.md#manual-cache-rebuild) for the full backend behavior.
+
+**Visual states:**
+
+| State | Label | Disabled |
+|-------|-------|----------|
+| Idle | `🔄 Rebuild` | No |
+| In-flight | `⏳ Rebuilding…` | Yes (also disabled while refresh loading) |
+| Cross-disabled | `🔄 Rebuild` | Yes (while any other load is in progress) |
+
+The button exposes a `title` tooltip: *"Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."* This short description sells the outcome without requiring the user to know the tier mechanics.
+
+**Interaction flow:**
+
+1. User clicks **Rebuild** — the button transitions to `⏳ Rebuilding…` and disables
+2. Frontend calls `LLMService.rebuild_cache` via RPC
+3. Backend performs the rebuild sequence atomically (a few hundred milliseconds for typical repos)
+4. On success, the backend returns `{status: "rebuilt", message: str, tier_counts: {...}, file_tier_counts: {...}}`
+5. Frontend dispatches a `show-toast` event with the message (success toast)
+6. Frontend calls `_refresh()` to reload the cache breakdown — the UI repopulates showing the new tier distribution
+7. On error, the backend returns `{error: str}` and the frontend dispatches an error toast; `_refresh()` still runs to show the current (possibly partial) state
+
+**Concurrency guard:** A `_rebuilding` state flag on the component prevents multiple concurrent rebuild requests. The button is also disabled while `_loading` is true (to prevent collision with an in-flight refresh).
+
+**Restricted visibility:** The button is visible to all clients but the RPC is localhost-only. Remote participants clicking it receive a `{error: "restricted"}` response which surfaces as an error toast. Future work may hide the button for non-localhost participants (the client has access to `collabRole` via `SharedRpc`).
+
+**Not tied to auto-refresh triggers:** Rebuild does not fire automatically on `stream-complete`, `files-changed`, or `mode-changed` events — it is purely user-initiated. The auto-refresh logic still runs normally and will reflect the rebuilt state whenever it next triggers.
+
 #### Defaults
 
 L0 and active tiers expanded by default; L1/L2/L3 collapsed.

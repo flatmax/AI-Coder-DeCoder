@@ -2055,6 +2055,421 @@ class LLMService:
         }
 
     # ------------------------------------------------------------------
+    # Public RPC — manual cache rebuild
+    # ------------------------------------------------------------------
+
+    def rebuild_cache(self) -> dict[str, Any]:
+        """Wipe and redistribute all tier assignments from scratch.
+
+        User-initiated via the cache viewer's Rebuild button.
+        One-shot disruptive operation for cases where the normal
+        N-value graduation flow would take many request cycles
+        to reach a sensible distribution (e.g., just after
+        selecting a large working set).
+
+        Governing spec: specs3/3-llm-engine/cache_tiering.md
+        § Manual Cache Rebuild.
+
+        Sequence (atomic from the RPC caller's perspective):
+
+        1. Preserve ``history:*`` entries in the current tracker
+        2. Wipe everything else (system/symbol/doc/file/url)
+        3. Mark all tiers broken (so any follow-up _update_stability
+           can freely rebalance — though we don't run one here)
+        4. Load content for selected files into file context so
+           real hashes and token counts can be computed
+        5. Re-initialize from the reference graph (places every
+           indexed file as a ``symbol:{path}`` or ``doc:{path}``
+           entry across L0-L3 via clustering)
+        6. Measure tokens to fill in real counts (replacing the
+           placeholder tokens from init)
+        7. Swap selected files: ``symbol:``/``doc:`` → ``file:``
+           at the same tier they landed in (selected files get
+           full-content entries in cached tiers, not ACTIVE)
+        8. Distribute orphan selected files (those not in the
+           primary index — ``.md``, ``.json``, images, etc.)
+           across L1/L2/L3 via bin-packing. Without this step,
+           orphans would default to ACTIVE and defeat the
+           purpose of rebuild
+        9. Re-seed ``system:prompt`` into L0
+        10. Re-seed cross-reference items if cross-ref mode is
+            active (matches the set_cross_reference(True) flow)
+        11. Graduate history via piggyback: newest messages
+            totalling up to ``cache_target_tokens`` stay in
+            ACTIVE (verbatim window); older messages graduate
+            to L3 with that tier's entry_n
+        12. Mark trackers as initialized so subsequent chat
+            requests skip the lazy-init path
+
+        Notably does NOT call ``_update_stability()``. The
+        deterministic placement IS the final state. A follow-up
+        cascade would demote underfilled tiers, undoing the
+        careful placement. The next real chat request runs
+        ``_update_stability()`` normally and tiers behave like
+        any other post-init state.
+
+        Returns a status dict with per-tier counts and a
+        human-readable summary. On failure returns ``{error: ...}``
+        with no side effects beyond whatever partial state the
+        failure left (the next chat request's _update_stability
+        will repair it).
+
+        Localhost-only. Remote collaborators get the restricted
+        error shape — the rebuild affects shared LLM cache state
+        for the whole session.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+
+        if self._symbol_index is None or self._repo is None:
+            return {
+                "error": (
+                    "Cache rebuild requires a repository and "
+                    "symbol index"
+                )
+            }
+
+        try:
+            return self._rebuild_cache_impl()
+        except Exception as exc:
+            logger.exception("Cache rebuild failed: %s", exc)
+            return {"error": f"Cache rebuild failed: {exc}"}
+
+    def _rebuild_cache_impl(self) -> dict[str, Any]:
+        """The actual rebuild pipeline — see rebuild_cache docstring."""
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        assert self._symbol_index is not None
+        assert self._repo is not None
+
+        tracker = self._stability_tracker
+        mode = self._context.mode
+
+        items_before = len(tracker.get_all_items())
+
+        # Step 1-2: preserve history, wipe everything else.
+        # We snapshot the history items and reinstate them after
+        # init. Everything else (system, symbol, doc, file, url)
+        # gets cleared.
+        history_items = {
+            key: item
+            for key, item in tracker.get_all_items().items()
+            if key.startswith("history:")
+        }
+        tracker._items.clear()
+        # Re-install history items at their previous tier/N so
+        # they carry through the rebuild unchanged.
+        for key, item in history_items.items():
+            tracker._items[key] = item
+
+        # Step 3: mark all tiers broken. Defensive — ensures any
+        # follow-up pass can freely rebalance. We don't run an
+        # update ourselves, so this mostly matters if something
+        # upstream inspects broken_tiers between rebuild and the
+        # next chat.
+        tracker._broken_tiers = {
+            Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE,
+        }
+        tracker._changes = []
+
+        # Step 4: load content for all selected files into
+        # the file context. Without this, the file: entries we
+        # construct later would have no content to hash or
+        # count tokens against.
+        for path in self._selected_files:
+            if not self._file_context.has_file(path):
+                try:
+                    self._file_context.add_file(path)
+                except Exception as exc:
+                    # Non-fatal — a file might fail to load
+                    # (binary, permissions). It just won't get a
+                    # file: entry; it may still become a symbol:
+                    # or orphan entry below.
+                    logger.debug(
+                        "Could not load %s during rebuild: %s",
+                        path, exc,
+                    )
+
+        # Step 5: re-initialize from the reference graph. This
+        # places every indexed file as a symbol: (code mode) or
+        # doc: (doc mode) entry distributed across L0-L3 via
+        # clustering. Keys use the mode-appropriate prefix.
+        ref_index = self._symbol_index._ref_index
+        file_list_raw = self._repo.get_flat_file_list()
+        file_list = [f for f in file_list_raw.split("\n") if f]
+        cache_target = self._config.cache_target_tokens_for_model()
+        tracker.set_cache_target_tokens(cache_target)
+
+        if mode == Mode.DOC:
+            prefix = "doc:"
+        else:
+            prefix = "symbol:"
+        keys = [f"{prefix}{path}" for path in file_list]
+        tracker.initialize_with_keys(
+            ref_index,
+            keys=keys,
+            files=file_list,
+            l0_target_tokens=cache_target,
+        )
+
+        # Step 6: measure real token counts for the just-placed
+        # index entries. _measure_tracker_tokens already handles
+        # the prefix dispatch (doc: vs symbol:) correctly — it
+        # iterates all items and skips mismatched prefixes.
+        self._measure_tracker_tokens()
+
+        # Step 7: swap selected files — for each selected file
+        # that landed as a symbol: or doc: entry, replace it
+        # with a file: entry at the same tier and with the same
+        # N value. This enforces the "never appears twice"
+        # invariant — selected files get full-content file:
+        # entries in cached tiers rather than both symbol: and
+        # as full content in ACTIVE.
+        selected_set = set(self._selected_files)
+        swapped_paths: set[str] = set()
+        for path in list(selected_set):
+            index_key = f"{prefix}{path}"
+            existing = tracker._items.get(index_key)
+            if existing is None:
+                continue
+            # Compute file-entry hash and tokens from the loaded
+            # content. Fall back to the symbol entry's data if
+            # the file couldn't be loaded in step 4.
+            content = self._file_context.get_content(path)
+            if content is None:
+                continue
+            import hashlib
+            file_hash = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+            file_tokens = self._counter.count(content)
+            # Remove the index entry and install a file: entry
+            # at the same tier with the same N. Anchoring state
+            # is transient per-cascade and doesn't need
+            # preservation.
+            tracker._items.pop(index_key, None)
+            tracker._items[f"file:{path}"] = TrackedItem(
+                key=f"file:{path}",
+                tier=existing.tier,
+                n_value=existing.n_value,
+                content_hash=file_hash,
+                tokens=file_tokens,
+            )
+            swapped_paths.add(path)
+
+        # Step 8: distribute orphan selected files. These are
+        # selected files that aren't in the primary index
+        # (non-source files — .md, .json, images, config). They
+        # didn't land as symbol: entries in step 5 and weren't
+        # swapped in step 7. Without this step they'd default to
+        # ACTIVE on the next _update_stability pass, which
+        # defeats the purpose of rebuild.
+        orphan_paths = [
+            path for path in self._selected_files
+            if path not in swapped_paths
+            and self._file_context.has_file(path)
+        ]
+        if orphan_paths:
+            self._distribute_orphan_files(orphan_paths)
+
+        # Step 9: re-seed system prompt into L0. Matches the
+        # _try_initialize_stability flow.
+        import hashlib as _hashlib
+        if mode == Mode.DOC:
+            system_prompt = self._config.get_doc_system_prompt()
+        else:
+            system_prompt = self._config.get_system_prompt()
+        if system_prompt:
+            legend = self._symbol_index.get_legend()
+            prompt_hash = _hashlib.sha256(
+                system_prompt.encode("utf-8")
+            ).hexdigest()
+            prompt_tokens = self._counter.count(system_prompt + legend)
+            tracker.register_system_prompt(prompt_hash, prompt_tokens)
+
+        # Step 10: re-seed cross-reference items if active.
+        # The doc index hasn't landed yet so this is currently
+        # a no-op (matches the comment in set_cross_reference),
+        # but we preserve the flag so when doc index lands, a
+        # rebuild while cross-ref is on does the right thing.
+        # (No explicit action needed today.)
+
+        # Step 11: graduate history via piggyback. Specs3 says
+        # rebuild is a disruptive event equivalent to "L3 is
+        # already being rebuilt this cycle", which unlocks the
+        # piggyback path. The newest messages totalling up to
+        # cache_target_tokens stay in ACTIVE as the verbatim
+        # window; everything older graduates to L3.
+        self._rebuild_graduate_history(cache_target)
+
+        # Step 12: mark initialized so subsequent chat requests
+        # skip the lazy-init path.
+        self._stability_initialized = True
+
+        # Assemble the result dict.
+        items_after = len(tracker.get_all_items())
+        all_items = tracker.get_all_items()
+        tier_counts: dict[str, int] = {
+            t.value: 0 for t in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE)
+        }
+        file_tier_counts: dict[str, int] = {
+            t.value: 0 for t in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE)
+        }
+        for item in all_items.values():
+            tier_counts[item.tier.value] += 1
+            if item.key.startswith("file:"):
+                file_tier_counts[item.tier.value] += 1
+
+        files_distributed = sum(file_tier_counts.values())
+
+        # Short summary string for the toast.
+        tier_summary = " ".join(
+            f"{name}={count}"
+            for name, count in tier_counts.items()
+            if count > 0
+        )
+        message = (
+            f"Cache rebuild ({mode.value}): "
+            f"{items_before} → {items_after} items | {tier_summary}"
+        )
+
+        logger.info(message)
+
+        return {
+            "status": "rebuilt",
+            "mode": mode.value,
+            "items_before": items_before,
+            "items_after": items_after,
+            "files_distributed": files_distributed,
+            "tier_counts": tier_counts,
+            "file_tier_counts": file_tier_counts,
+            "message": message,
+        }
+
+    def _distribute_orphan_files(
+        self, orphan_paths: list[str]
+    ) -> None:
+        """Bin-pack orphan selected files across L1/L2/L3.
+
+        Called by rebuild for files that are selected but aren't
+        in the primary index (non-source files — ``.md``,
+        ``.json``, images, etc.). Without this they'd land in
+        ACTIVE on the next update pass.
+
+        Uses a simple greedy bin-pack by current tier token
+        count: each orphan is placed in whichever of L1/L2/L3
+        currently holds the fewest tokens. Produces a balanced
+        distribution without needing a global clustering pass.
+
+        L0 is excluded as a target — L0 must be earned via
+        promotion or explicit seeding (the system prompt and
+        high-connectivity index entries). Dropping orphans into
+        L0 would dilute the most-stable tier.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+        import hashlib
+
+        tracker = self._stability_tracker
+        target_tiers = (Tier.L1, Tier.L2, Tier.L3)
+
+        # Initial tier token counts from currently-placed items.
+        tier_tokens: dict[Tier, int] = {t: 0 for t in target_tiers}
+        for item in tracker.get_all_items().values():
+            if item.tier in tier_tokens:
+                tier_tokens[item.tier] += item.tokens
+
+        # Sort orphans by token size descending so the larger
+        # files get placed first — improves bin-pack balance.
+        orphans_with_tokens: list[tuple[str, int, str]] = []
+        for path in orphan_paths:
+            content = self._file_context.get_content(path)
+            if content is None:
+                continue
+            tokens = self._counter.count(content)
+            file_hash = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+            orphans_with_tokens.append((path, tokens, file_hash))
+        orphans_with_tokens.sort(key=lambda x: (-x[1], x[0]))
+
+        for path, tokens, file_hash in orphans_with_tokens:
+            # Pick the tier with the smallest current token
+            # count. Ties broken by tier value ordering (L1 < L2
+            # < L3 lexicographically) for determinism.
+            target_tier = min(
+                target_tiers,
+                key=lambda t: (tier_tokens[t], t.value),
+            )
+            entry_n = _TIER_CONFIG_LOOKUP[target_tier]["entry_n"]
+            tracker._items[f"file:{path}"] = TrackedItem(
+                key=f"file:{path}",
+                tier=target_tier,
+                n_value=entry_n,
+                content_hash=file_hash,
+                tokens=tokens,
+            )
+            tier_tokens[target_tier] += tokens
+
+    def _rebuild_graduate_history(
+        self, cache_target_tokens: int
+    ) -> None:
+        """Graduate older history to L3, keeping a verbatim window.
+
+        Called by rebuild as step 11. Walks history messages
+        newest → oldest, accumulating tokens until the next
+        message would exceed ``cache_target_tokens``. Everything
+        newer stays in ACTIVE as the verbatim window; everything
+        older graduates to L3 with that tier's entry_n.
+
+        No-op when ``cache_target_tokens == 0`` (history stays
+        in ACTIVE permanently per the cache-target=0 contract).
+        """
+        from ac_dc.stability_tracker import Tier
+
+        if cache_target_tokens <= 0:
+            return
+
+        tracker = self._stability_tracker
+        history_len = len(self._context.get_history())
+        if history_len == 0:
+            return
+
+        # Walk newest → oldest, accumulating tokens. The first
+        # message whose inclusion would exceed cache_target
+        # becomes the graduation boundary — everything from it
+        # backward (older) graduates to L3, everything forward
+        # (newer) stays in ACTIVE.
+        accumulated = 0
+        verbatim_start = 0  # inclusive index of first verbatim msg
+        for idx in range(history_len - 1, -1, -1):
+            key = f"history:{idx}"
+            item = tracker._items.get(key)
+            if item is None:
+                continue
+            if accumulated + item.tokens > cache_target_tokens:
+                # Adding this message would overflow the verbatim
+                # window; it becomes the first to graduate.
+                verbatim_start = idx + 1
+                break
+            accumulated += item.tokens
+        else:
+            # Loop completed without breaking — all messages fit
+            # in the verbatim window. Nothing graduates.
+            return
+
+        # Graduate everything before verbatim_start to L3.
+        l3_entry_n = _TIER_CONFIG_LOOKUP[Tier.L3]["entry_n"]
+        for idx in range(verbatim_start):
+            key = f"history:{idx}"
+            item = tracker._items.get(key)
+            if item is None:
+                continue
+            item.tier = Tier.L3
+            item.n_value = l3_entry_n
+
+
+    # ------------------------------------------------------------------
     # Public RPC — session management
     # ------------------------------------------------------------------
 

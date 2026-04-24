@@ -81,6 +81,13 @@ export class ContextTab extends RpcMixin(LitElement) {
     _stale: { type: Boolean, state: true },
     /** Set of expanded tier names in the cache sub-view. */
     _cacheExpanded: { type: Object, state: true },
+    /**
+     * Whether a cache rebuild RPC is in flight. Distinct from
+     * ``_loading`` (which covers ``get_context_breakdown``) so
+     * the rebuild button can show its own disabled/progress
+     * state without fighting with a concurrent refresh.
+     */
+    _rebuilding: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -296,6 +303,31 @@ export class ContextTab extends RpcMixin(LitElement) {
     }
 
     /* Cache sub-view */
+    .cache-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 0.75rem;
+    }
+    .rebuild-btn {
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      color: var(--accent-primary, #58a6ff);
+      padding: 0.35rem 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .rebuild-btn:hover:not(:disabled) {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: rgba(88, 166, 255, 0.5);
+    }
+    .rebuild-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .cache-header {
       margin-bottom: 1rem;
     }
@@ -452,6 +484,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._data = null;
     this._loading = false;
     this._stale = false;
+    this._rebuilding = false;
     this._cacheExpanded = this._loadCacheExpanded();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
@@ -543,6 +576,92 @@ export class ContextTab extends RpcMixin(LitElement) {
     } finally {
       this._loading = false;
     }
+  }
+
+  /**
+   * Trigger a server-side cache tier rebuild.
+   *
+   * Calls ``LLMService.rebuild_cache`` — a one-shot disruptive
+   * operation that wipes all tier assignments (except history)
+   * and redistributes using the clustering algorithm. The
+   * server returns a summary dict with per-tier counts and a
+   * human-readable ``message`` string.
+   *
+   * Surfaces feedback via ``ac-toast`` events:
+   *
+   * - Success → the server's ``message`` (shape:
+   *   "Cache rebuild (code): 40 → 194 items | L0=4 L1=31 …")
+   * - Restricted (non-localhost) → info toast explaining the
+   *   localhost-only policy
+   * - Other error → error toast with the server's error text
+   *
+   * Always calls ``_refresh()`` afterward — on success to show
+   * the new tier distribution, on failure to show whatever
+   * partial state the failure left (rebuild is atomic from the
+   * RPC caller's perspective, but the next chat request's
+   * ``_update_stability`` will repair any inconsistency).
+   *
+   * Guarded by ``_rebuilding`` against double-clicks, and by
+   * ``_loading`` against overlapping with an in-flight refresh
+   * — kicking off a rebuild while a refresh is reading the
+   * tracker would produce inconsistent viewer state.
+   */
+  async _rebuild() {
+    if (this._rebuilding || this._loading) return;
+    if (!this.rpcConnected) return;
+    this._rebuilding = true;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.rebuild_cache',
+      );
+      if (result && typeof result === 'object' && result.error) {
+        // Differentiate the restricted-error shape from other
+        // errors. specs4/1-foundation/rpc-transport.md pins
+        // the {error: "restricted", reason: ...} shape for
+        // non-localhost callers.
+        const isRestricted = result.error === 'restricted';
+        this._emitToast(
+          isRestricted
+            ? (result.reason
+               || 'Cache rebuild is localhost-only')
+            : `Rebuild failed: ${result.error}`,
+          isRestricted ? 'info' : 'error',
+        );
+      } else if (result && typeof result === 'object' && result.message) {
+        this._emitToast(result.message, 'success');
+      } else {
+        // Defensive — a rebuilt response without a message
+        // field would indicate a backend contract change.
+        // Show a generic success so the user knows it
+        // completed.
+        this._emitToast('Cache rebuilt', 'success');
+      }
+    } catch (err) {
+      // Transport-level errors (RPC disconnect, method not
+      // found on an older backend).
+      const msg = err?.message || String(err);
+      this._emitToast(`Rebuild failed: ${msg}`, 'error');
+    } finally {
+      this._rebuilding = false;
+      // Refresh even on failure — shows the current tracker
+      // state, which the user may need to see to diagnose.
+      this._refresh();
+    }
+  }
+
+  /**
+   * Dispatch an ``ac-toast`` window event — consumed by the
+   * app shell's toast layer. Uses bubbles + composed so the
+   * event crosses shadow DOM boundaries.
+   */
+  _emitToast(message, type = 'info') {
+    this.dispatchEvent(
+      new CustomEvent('ac-toast', {
+        bubbles: true,
+        composed: true,
+        detail: { message, type },
+      }),
+    );
   }
 
   // ---------------------------------------------------------------
@@ -773,6 +892,17 @@ export class ContextTab extends RpcMixin(LitElement) {
     const hasChanges = promotions.length > 0 || demotions.length > 0;
 
     return html`
+      <div class="cache-actions">
+        <button
+          class="rebuild-btn"
+          ?disabled=${this._rebuilding || this._loading || !this.rpcConnected}
+          @click=${() => this._rebuild()}
+          title="Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
+        >
+          ${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}
+        </button>
+      </div>
+
       <div class="cache-header">
         <div class="cache-hit-label">
           <span>Cache Performance</span>
