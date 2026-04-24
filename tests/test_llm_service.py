@@ -2964,18 +2964,101 @@ class TestBuildTieredContent:
         assert result is not None
         assert result["L1"]["symbols"] == ""
 
-    def test_doc_key_is_skipped(
+    def test_doc_key_dispatches_to_doc_index(
         self, service: LLMService
     ) -> None:
-        """doc:* items skipped pre-Layer-3.10 (doc index not landed)."""
+        """doc:{path} items fetch blocks from the doc index.
+
+        Doc blocks land in the tier's `symbols` field alongside
+        symbol blocks — both render under the continued-structure
+        header per specs4/3-llm/prompt-assembly.md.
+        """
+        from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
+        from pathlib import Path as _Path
+
+        # Seed an outline directly on the doc index so we don't
+        # need a real file on disk. _all_outlines is the
+        # authoritative store that get_file_doc_block reads.
+        extractor = MarkdownExtractor()
+        outline = extractor.extract(
+            _Path("README.md"),
+            "# Project\n\nSome prose.\n",
+        )
+        service._doc_index._all_outlines["README.md"] = outline
+
         _place_item(service._stability_tracker, "doc:README.md", "L1")
         result = service._build_tiered_content()
         assert result is not None
-        # doc: dispatched but produces no content and no
-        # graduated_files entry.
+        # Block landed in the symbols field (not files) — doc
+        # and symbol blocks share the same tier section.
+        assert "README.md" in result["L1"]["symbols"]
+        assert "Project" in result["L1"]["symbols"]
+        # Not in other tiers.
+        assert result["L0"]["symbols"] == ""
+        assert result["L2"]["symbols"] == ""
+
+    def test_doc_key_missing_outline_skipped(
+        self, service: LLMService
+    ) -> None:
+        """doc:{path} with no outline in the index is omitted.
+
+        Matches the symbol: pattern — missing blocks don't
+        crash assembly, they just produce no content for that
+        tier item. Defensive against partial tracker state
+        (a doc: key seeded from a cached session before the
+        doc index finished rebuilding).
+        """
+        _place_item(service._stability_tracker, "doc:missing.md", "L1")
+        result = service._build_tiered_content()
+        assert result is not None
         assert result["L1"]["symbols"] == ""
         assert result["L1"]["files"] == ""
-        assert result["L1"]["graduated_files"] == []
+
+    def test_doc_and_symbol_blocks_mix_in_same_tier(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Cross-reference tier holds both symbol: and doc: items.
+
+        When cross-reference mode is active, a single tier can
+        contain items from both indexes. Both blocks land in
+        the tier's `symbols` field and the sorted-key walk
+        orders them deterministically across runs.
+        """
+        from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
+        from pathlib import Path as _Path
+
+        fake_index = _FakeSymbolIndex({
+            "src/foo.py": "symbol-block-foo",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        # Seed a doc outline.
+        extractor = MarkdownExtractor()
+        outline = extractor.extract(
+            _Path("guide.md"),
+            "# Guide\n\nContent.\n",
+        )
+        svc._doc_index._all_outlines["guide.md"] = outline
+
+        # Both items in L1.
+        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
+        _place_item(svc._stability_tracker, "doc:guide.md", "L1")
+
+        result = svc._build_tiered_content()
+        assert result is not None
+        text = result["L1"]["symbols"]
+        # Both blocks present in the same tier field.
+        assert "symbol-block-foo" in text
+        assert "Guide" in text
+        # Sorted by full key: "doc:guide.md" < "symbol:src/foo.py"
+        # (alphabetical comparison), so doc block appears first.
+        assert text.index("Guide") < text.index("symbol-block-foo")
 
     def test_file_key_dispatches_to_file_context(
         self, service: LLMService

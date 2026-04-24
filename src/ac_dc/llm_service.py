@@ -3906,12 +3906,22 @@ class LLMService:
                 if block:
                     tier_symbol_fragments[tier_name].append(block)
             elif key.startswith("doc:"):
-                # Doc index lands with Layer 3.10+. Items appear
-                # here during cross-ref mode or doc mode; we skip
-                # them for now rather than erroring so partial
-                # tracker state (e.g. a doc-mode session restored
-                # before Layer 3.10) doesn't crash assembly.
-                continue
+                # Doc blocks share the tier's `symbols` field
+                # with symbol blocks — both render under the
+                # TIER_SYMBOLS_HEADER ("Repository Structure
+                # (continued)") in the same content section per
+                # specs4/3-llm/prompt-assembly.md § "L1–L3
+                # Blocks". Treating them uniformly means
+                # cross-reference mode (where a tier holds items
+                # from both indexes) produces one coherent block
+                # rather than two separate headers. Fragment
+                # ordering is deterministic via the sorted()
+                # walk above, so symbol and doc blocks interleave
+                # by path rather than by source index.
+                path = key[len("doc:"):]
+                block = self._doc_index.get_file_doc_block(path)
+                if block:
+                    tier_symbol_fragments[tier_name].append(block)
             elif key.startswith("file:"):
                 path = key[len("file:"):]
                 content = self._file_context.get_content(path)
