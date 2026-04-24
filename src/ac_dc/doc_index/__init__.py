@@ -31,6 +31,7 @@ Import design notes:
 
 from __future__ import annotations
 
+from ac_dc.doc_index.cache import DocCache
 from ac_dc.doc_index.models import (
     DocHeading,
     DocLink,
@@ -40,6 +41,7 @@ from ac_dc.doc_index.models import (
 )
 
 __all__ = [
+    "DocCache",
     "DocHeading",
     "DocLink",
     "DocOutline",
