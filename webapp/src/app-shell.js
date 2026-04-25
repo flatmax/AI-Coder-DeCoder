@@ -21,7 +21,13 @@
 // richer UX concerns.
 
 import { LitElement, html, css } from 'lit';
-import { JRPCClient } from '@flatmax/jrpc-oo/jrpc-client.js';
+// Import from the pre-bundled distribution rather than the
+// ESM source. The package's jrpc-client.js re-exports
+// JRPCExport.js which references a `JRPC` global set up by
+// the UMD bundle's side effects — importing the ESM path
+// directly produces `ReferenceError: JRPC is not defined`
+// at runtime. The dist bundle inlines everything it needs.
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 
 import { SharedRpc } from './rpc.js';
 import './files-tab.js';

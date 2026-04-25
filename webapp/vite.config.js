@@ -1,19 +1,31 @@
 // Vite configuration for the AC-DC webapp.
 //
-// Two constraints from specs4 drive the non-default settings here:
+// Constraints from specs4 driving the non-default settings:
 //
 //   1. specs4/6-deployment/build.md — base must be './' so the built
 //      bundle works when served from any origin (bundled static server,
 //      GitHub Pages, Vite preview, etc.). Absolute paths would break
 //      when the webapp is mounted at an unexpected prefix.
 //
-//   2. specs4/1-foundation/jrpc-oo.md — @flatmax/jrpc-oo depends on the
-//      UMD `jrpc` package which assigns to a global (`JRPC`). Vite's
-//      esbuild-based dep optimizer mangles that during pre-bundling,
-//      producing `Uncaught ReferenceError: JRPC is not defined` at
-//      runtime. Excluding the package from optimizeDeps lets the
-//      browser resolve the ESM chain natively via the dev server.
-//      If this config changes, also `rm -rf node_modules/.vite`.
+//   2. specs4/1-foundation/jrpc-oo.md — @flatmax/jrpc-oo depends on
+//      the UMD `jrpc` package which assigns a global (`JRPC`).
+//      Dev and production modes need different handling:
+//
+//      - Dev (`vite`): esbuild's dep pre-bundling mangles the UMD
+//        wrapper, producing `Uncaught ReferenceError: JRPC is not
+//        defined` at runtime. We skip pre-bundling jrpc-oo so the
+//        browser resolves the ESM chain natively. Monaco is also
+//        excluded because its worker scripts don't survive
+//        pre-bundling.
+//      - Production (`vite build` / `vite preview`): Rollup doesn't
+//        apply `optimizeDeps` at all, and Rollup's module resolver
+//        handles jrpc-oo correctly without special treatment.
+//        Excluding monaco from optimizeDeps affects dev only;
+//        prod chunking is handled via manualChunks below so the
+//        ~5MB editor doesn't bloat the main bundle.
+//
+//      If this config changes, also `rm -rf node_modules/.vite` to
+//      flush the stale dep-bundle cache.
 //
 // Host binding — default is loopback. The Python CLI passes `--host`
 // at launch when `--collab` is active; we do NOT hardcode 0.0.0.0
@@ -28,6 +40,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   base: './',
   optimizeDeps: {
+    // Dev-mode only. Rollup (prod) ignores this field entirely.
     exclude: ['@flatmax/jrpc-oo', 'monaco-editor'],
   },
   build: {
@@ -38,6 +51,20 @@ export default defineConfig({
     sourcemap: true,
     // Use relative asset paths so the bundle is origin-agnostic.
     assetsDir: 'assets',
+    // Monaco is ~5MB pre-gzip. Split it into its own chunk so the
+    // main bundle stays small and monaco is cached separately
+    // across builds that don't touch the editor.
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('monaco-editor')) return 'monaco';
+          if (id.includes('node_modules/marked')) return 'marked';
+          if (id.includes('node_modules/katex')) return 'katex';
+        },
+      },
+    },
+    // Monaco alone exceeds the default 500 KB warning limit.
+    chunkSizeWarningLimit: 6000,
   },
   server: {
     // Default to loopback; the Python launcher overrides with --host

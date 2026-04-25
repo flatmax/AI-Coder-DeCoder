@@ -89,26 +89,26 @@ export class InputHistory extends LitElement {
       bottom: 100%;
       left: 0;
       right: 0;
-      margin-bottom: 0.5rem;
+      margin-bottom: 2px;
       background: rgba(22, 27, 34, 0.98);
       border: 1px solid rgba(240, 246, 252, 0.2);
       border-radius: 6px;
       box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
       display: flex;
       flex-direction: column;
-      max-height: 60vh;
+      max-height: 50vh;
       overflow: hidden;
       z-index: 50;
     }
     .filter-input {
       flex-shrink: 0;
-      padding: 0.5rem 0.75rem;
+      padding: 0.4rem 0.6rem;
       background: rgba(13, 17, 23, 0.6);
       border: none;
       border-bottom: 1px solid rgba(240, 246, 252, 0.1);
       color: var(--text-primary, #c9d1d9);
       font-family: inherit;
-      font-size: 0.875rem;
+      font-size: 0.8125rem;
     }
     .filter-input:focus {
       outline: none;
@@ -119,16 +119,19 @@ export class InputHistory extends LitElement {
       flex-direction: column;
     }
     .entry {
-      padding: 0.4rem 0.75rem;
+      padding: 0.25rem 0.6rem;
       cursor: pointer;
-      font-size: 0.875rem;
+      font-size: 0.8125rem;
+      line-height: 1.4;
       color: var(--text-primary, #c9d1d9);
       border-bottom: 1px solid rgba(240, 246, 252, 0.04);
-      /* Preserve whitespace so multi-line entries render
-       * with their line breaks, but cap at a few lines so
-       * long messages don't blow up the list. */
-      white-space: pre-wrap;
-      max-height: 4.5em;
+      /* Single-line with ellipsis — multi-line entries collapse
+       * to their first line so the list stays dense. The
+       * filter input and focused-row preview make the full
+       * content discoverable without consuming vertical space
+       * in the list itself. Newlines become spaces via the
+       * white-space rule. */
+      white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
@@ -138,7 +141,7 @@ export class InputHistory extends LitElement {
     .entry.focused {
       background: rgba(88, 166, 255, 0.12);
       border-left: 3px solid var(--accent-primary, #58a6ff);
-      padding-left: calc(0.75rem - 3px);
+      padding-left: calc(0.6rem - 3px);
     }
     .empty {
       padding: 0.75rem;
@@ -149,11 +152,11 @@ export class InputHistory extends LitElement {
     }
     .hint {
       flex-shrink: 0;
-      padding: 0.35rem 0.75rem;
+      padding: 0.25rem 0.6rem;
       background: rgba(13, 17, 23, 0.4);
       border-top: 1px solid rgba(240, 246, 252, 0.05);
       color: var(--text-secondary, #8b949e);
-      font-size: 0.7rem;
+      font-size: 0.6875rem;
       text-align: center;
     }
   `;

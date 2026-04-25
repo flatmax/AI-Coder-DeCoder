@@ -1114,6 +1114,101 @@ export class ChatPanel extends RpcMixin(LitElement) {
       border-top: 1px solid rgba(248, 81, 73, 0.15);
     }
 
+    /* Edit summary banner — rendered at the end of an
+     * assistant message (after all edit cards) when the
+     * response contained at least one edit. Shows aggregate
+     * counts as color-coded stat badges; lists individual
+     * failures; notes when a retry prompt was populated.
+     * Per specs4/5-webapp/chat.md §Edit Summary Banner. */
+    .edit-summary {
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: rgba(22, 27, 34, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      border-radius: 6px;
+      font-size: 0.8125rem;
+    }
+    .edit-summary-header {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .edit-summary-title {
+      font-weight: 600;
+      color: var(--text-secondary, #8b949e);
+      margin-right: 0.25rem;
+    }
+    .edit-summary-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .edit-summary-stat.applied {
+      background: rgba(126, 231, 135, 0.12);
+      color: #7ee787;
+      border: 1px solid rgba(126, 231, 135, 0.3);
+    }
+    .edit-summary-stat.failed {
+      background: rgba(248, 81, 73, 0.12);
+      color: #f85149;
+      border: 1px solid rgba(248, 81, 73, 0.3);
+    }
+    .edit-summary-stat.skipped,
+    .edit-summary-stat.not-in-context {
+      background: rgba(210, 153, 34, 0.12);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.3);
+    }
+    .edit-summary-failures {
+      margin-top: 0.5rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+    .edit-summary-failure {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.4rem;
+      font-size: 0.8125rem;
+    }
+    .edit-summary-failure-path {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: var(--accent-primary, #58a6ff);
+      cursor: pointer;
+    }
+    .edit-summary-failure-path:hover {
+      text-decoration: underline;
+    }
+    .edit-summary-failure-type {
+      font-size: 0.7rem;
+      padding: 0.05rem 0.35rem;
+      background: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border-radius: 3px;
+      text-transform: lowercase;
+    }
+    .edit-summary-failure-message {
+      color: var(--text-secondary, #8b949e);
+      flex: 1 1 100%;
+      padding-left: 0.5rem;
+    }
+    .edit-summary-retry-note {
+      margin-top: 0.5rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+      font-size: 0.8125rem;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
+
     /* File mentions — clickable path references inside
      * assistant prose. Styled to look like a link without
      * actually being one (no underline by default to keep
@@ -3717,9 +3812,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * chips only toggle. Same info, different interaction
    * contract, different event name means no conditional
    * on the handler side.
+   *
+   * When adding a not-in-context file (not removing an
+   * in-context one), accumulate natural-language text in
+   * the chat input per specs4/5-webapp/chat.md §Input
+   * Accumulation on Add. The `inContext` flag on the
+   * message-rendered chip tells us which direction this
+   * click is going; we infer it by checking whether the
+   * path is currently in selectedFiles.
    */
   _onFileChipClick(path) {
     if (typeof path !== 'string' || !path) return;
+    const selected = new Set(
+      Array.isArray(this.selectedFiles) ? this.selectedFiles : [],
+    );
+    const isAdd = !selected.has(path);
     this.dispatchEvent(
       new CustomEvent('file-chip-click', {
         detail: { path, navigate: false },
@@ -3727,6 +3834,112 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+    if (isAdd) {
+      this._accumulateAddedFilesInInput([path]);
+    }
+  }
+
+  /**
+   * Accumulate natural-language text into the chat input
+   * announcing files the user just added to context.
+   *
+   * Per specs4/5-webapp/chat.md §Input Accumulation on
+   * Add:
+   *   - Templates — "The file X added. Do you want to
+   *     see more files before you continue?" for the
+   *     first add; updated to join multiple files
+   *     naturally on subsequent adds.
+   *   - Only basename (filename without directory path)
+   *     used in accumulated text.
+   *   - Falls back to appending a parenthetical note for
+   *     non-matching input states.
+   *
+   * The "matching input state" is text that already
+   * follows the generated template — we can splice
+   * additional filenames into the existing phrase
+   * (e.g. "The file foo.py added. …" → "The files
+   * foo.py, bar.py added. …"). Anything else (the user
+   * typed their own message, or the phrasing diverged)
+   * falls back to a parenthetical note appended at the
+   * end so we don't rewrite user content.
+   *
+   * Input shape — array of repo-relative paths. All
+   * paths are treated as "just added"; de-duplication
+   * is caller responsibility (single-chip passes one,
+   * Add-All passes the not-in-context subset).
+   */
+  _accumulateAddedFilesInInput(paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    // Basename only per spec — trailing segment after the
+    // last slash. Works for both forward and back slashes
+    // so Windows-style paths don't slip through.
+    const toBasename = (p) => {
+      const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+      return idx >= 0 ? p.slice(idx + 1) : p;
+    };
+    const newNames = paths
+      .map(toBasename)
+      .filter((n) => typeof n === 'string' && n);
+    if (newNames.length === 0) return;
+
+    const current = this._input;
+    const trailing =
+      ' Do you want to see more files before you continue?';
+
+    // Detect an existing accumulated phrase we can extend.
+    // Matches both singular ("The file X added.") and
+    // plural ("The files X, Y added.") forms followed by
+    // the trailing question.
+    const existingRe =
+      /^The files? ([^.]+?) added\. Do you want to see more files before you continue\?\s*$/;
+    const match = current.match(existingRe);
+
+    let next;
+    if (match) {
+      // Splice new basenames into the existing list,
+      // deduplicating so a double-click doesn't repeat
+      // filenames.
+      const existing = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      const seen = new Set(existing);
+      const merged = [...existing];
+      for (const name of newNames) {
+        if (!seen.has(name)) {
+          seen.add(name);
+          merged.push(name);
+        }
+      }
+      const noun = merged.length === 1 ? 'file' : 'files';
+      next = `The ${noun} ${merged.join(', ')} added.${trailing}`;
+    } else if (current.trim() === '') {
+      // Empty input — clean template.
+      const noun = newNames.length === 1 ? 'file' : 'files';
+      next = `The ${noun} ${newNames.join(', ')} added.${trailing}`;
+    } else {
+      // Non-matching input — user typed something of their
+      // own. Don't rewrite their text; append a
+      // parenthetical note so the context addition is
+      // still visible.
+      const noun = newNames.length === 1 ? 'file' : 'files';
+      const suffix = ` (${noun} added: ${newNames.join(', ')})`;
+      next = current + suffix;
+    }
+
+    this._input = next;
+    // Reflect into the textarea and place cursor at end
+    // so the user can continue typing. Defer to
+    // updateComplete so Lit has committed the value
+    // before we measure/position. Mirrors the pattern in
+    // _insertSnippet and _pasteMessageToPrompt.
+    this.updateComplete.then(() => {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (!ta) return;
+      ta.value = next;
+      ta.setSelectionRange(next.length, next.length);
+      // Auto-resize — the textarea's input listener runs
+      // _onInputChange, which handles height. Dispatch an
+      // input event to trigger it.
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
   }
 
   /**
@@ -3735,6 +3948,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * the list of not-in-context paths. The files-tab
    * handler (Step 2) batches them into a single
    * `set_selected_files` call rather than N round-trips.
+   *
+   * Also accumulates natural-language text in the chat
+   * input — same path as single-chip add (per
+   * specs4/5-webapp/chat.md §Input Accumulation on Add),
+   * just with every added filename joined in.
    */
   _onAddAllFiles(notInContext) {
     if (!Array.isArray(notInContext) || notInContext.length === 0) return;
@@ -3749,6 +3967,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+    this._accumulateAddedFilesInInput(paths);
   }
 
   _scrollToBottom() {
