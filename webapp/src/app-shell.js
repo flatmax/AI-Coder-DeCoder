@@ -439,23 +439,10 @@ export class AppShell extends JRPCClient {
       cursor: not-allowed;
     }
 
-    /* Header git actions — copy diff, commit, reset.
-     * Grouped with a small gap, placed in the center
-     * of the header between the tab buttons and the
-     * mode toggle per specs3/5-webapp/app_shell_and_dialog.md
-     * §Header Sections. The symmetric
-     * margin-left/margin-right: auto pattern centers
-     * the group in whatever space remains between its
-     * flex siblings; this only works when no other
-     * sibling claims `margin-left: auto` (the mode
-     * toggle's auto-left push was removed above for
-     * exactly this reason).
-     *
-     * Icons are emoji for zero-asset cost; tooltips
-     * carry the full action text for discoverability.
-     * Danger variant (reset) gets a red-tinted hover
-     * so the destructive action is visually distinct
-     * from the benign ones. */
+    /* Header git actions: symmetric auto margins center the
+     * group between flex siblings; mode toggle's auto-left push
+     * was removed so this centering holds. Danger variant
+     * (reset) tints red to distinguish from benign actions. */
     .header-git-actions {
       display: inline-flex;
       align-items: center;

@@ -126,13 +126,14 @@ import { SharedRpc } from './rpc.js';
 // shares the same stub — see that file for the JRPCClient
 // contract.
 //
-// We still `await import('./app-shell.js')` dynamically (not
-// a top-level static import) because app-shell.js transitively
-// imports the jrpc-oo bundle, and the setup-file mock must be
-// registered and applied before the first real import of the
-// module tree.
+// Static import works because `vi.mock` calls in
+// `vitest.setup.js` are hoisted globally — the jrpc-oo bundle
+// is replaced by our stub before any test file's imports
+// evaluate. A previous version used top-level `await import()`
+// but Rollup's SSR parser (used by vitest 2.x) rejects
+// top-level await in test files with "Expected a semicolon".
 
-const { AppShell } = await import('./app-shell.js');
+import { AppShell } from './app-shell.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers

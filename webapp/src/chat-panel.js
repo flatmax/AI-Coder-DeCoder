@@ -2151,18 +2151,47 @@ export class ChatPanel extends RpcMixin(LitElement) {
   /**
    * Handle the `commit-result` window event dispatched by
    * AppShell when the backend's background commit_all task
-   * finishes. The detail is the commit result dict — we
-   * don't consume it here (AppShell refreshes open viewers
-   * for us), we just flip the `_committing` flag off so
-   * the commit button returns to its idle state.
+   * finishes. The detail is the commit result dict carrying:
+   *   - sha / short_sha / message — commit metadata
+   *   - system_event_message — pre-formatted markdown text
+   *     matching what the server persisted to history
+   *   - error — present on failure
    *
-   * Safe to call even when `_committing` is already false
-   * (e.g. a stray event from a commit another client
-   * initiated): assigning false to false is a no-op from
-   * Lit's perspective.
+   * Two jobs:
+   *   1. Flip `_committing` off so the commit button returns
+   *      to idle.
+   *   2. Append the commit's system event message to the
+   *      local `messages` array so the user sees it in the
+   *      chat. The server already persisted the same text
+   *      to the history store, so a subsequent session
+   *      reload picks it up too — this handler is what
+   *      makes it appear in the current session's UI
+   *      without waiting for a reload.
+   *
+   * Per specs3/5-webapp/chat_interface.md § System Event
+   * Messages — commit events render as role=user with
+   * system_event=true, distinct styling.
+   *
+   * Server broadcasts `commitResult` to all connected
+   * clients (not just the initiator), so every client
+   * appends exactly once per commit. Unlike `userMessage`,
+   * there's no dedupe needed — commits don't stream and
+   * there's no optimistic local-add on the initiator.
    */
-  _onCommitResult() {
+  _onCommitResult(event) {
     this._committing = false;
+    const detail = event?.detail;
+    if (!detail || typeof detail !== 'object') return;
+    // Error path — don't append a message; the shell has
+    // already surfaced a toast. The frontend error state
+    // stops here.
+    if (detail.error) return;
+    const text = detail.system_event_message;
+    if (typeof text !== 'string' || !text) return;
+    this.messages = [
+      ...this.messages,
+      { role: 'user', content: text, system_event: true },
+    ];
   }
 
   /**
