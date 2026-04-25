@@ -276,6 +276,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // membership checks; the picker consumes a Set prop
     // directly.
     this._selectedFiles = new Set();
+    // Authoritative exclusion state — the third position in
+    // the picker's three-state checkbox model. Parallel to
+    // `_selectedFiles`: orchestrator owns the Set, picker
+    // receives a copy via direct-update pattern, server is
+    // notified via `LLMService.set_excluded_index_files` on
+    // every change.
+    this._excludedFiles = new Set();
     // Default picker width. Phase 3 wires a draggable handle
     // and localStorage persistence.
     this._pickerWidthPx = 280;
@@ -633,6 +640,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.tree = this._latestTree;
     picker.statusData = this._latestStatusData;
     picker.branchInfo = this._latestBranchInfo;
+    picker.excludedFiles = new Set(this._excludedFiles);
     picker.requestUpdate();
     chat.repoFiles = this._repoFiles;
     chat.requestUpdate();
@@ -757,6 +765,66 @@ export class FilesTab extends RpcMixin(LitElement) {
       console.error('[files-tab] set_selected_files failed', err);
       this._showToast(
         `Failed to update selection: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  _onExclusionChanged(event) {
+    // Picker emits this when the user shift+clicks a file
+    // checkbox or a directory checkbox (the latter applies
+    // to every descendant file). The event carries an array
+    // of excluded paths; we update our authoritative state,
+    // push to the picker via direct-update, and notify the
+    // server.
+    const incoming = event.detail?.excludedFiles;
+    if (!Array.isArray(incoming)) return;
+    this._applyExclusion(new Set(incoming), /* notifyServer */ true);
+  }
+
+  _applyExclusion(newExcluded, notifyServer) {
+    // Fast-path no-op when the set hasn't actually changed.
+    // Prevents loopback from the server broadcast (when
+    // collab mode lands this for real) doing another
+    // round-trip for our own update.
+    if (this._setsEqual(this._excludedFiles, newExcluded)) return;
+    this._excludedFiles = newExcluded;
+    // Direct-update pattern (load-bearing — see class
+    // docstring). Assign to picker prop then requestUpdate.
+    const picker = this._picker();
+    if (picker) {
+      picker.excludedFiles = new Set(newExcluded);
+      picker.requestUpdate();
+    }
+    if (notifyServer) {
+      this._sendExclusionToServer(Array.from(newExcluded));
+    }
+  }
+
+  async _sendExclusionToServer(files) {
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.set_excluded_index_files',
+        files,
+      );
+      // Same shape as set_selected_files — array on success,
+      // restricted-error dict for non-localhost callers in
+      // collab mode.
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        if (result.error === 'restricted') {
+          this._showToast(
+            result.reason || 'Restricted operation',
+            'warning',
+          );
+        }
+      }
+    } catch (err) {
+      console.error(
+        '[files-tab] set_excluded_index_files failed',
+        err,
+      );
+      this._showToast(
+        `Failed to update exclusion: ${err?.message || err}`,
         'error',
       );
     }
@@ -1014,7 +1082,9 @@ export class FilesTab extends RpcMixin(LitElement) {
           .statusData=${this._latestStatusData}
           .branchInfo=${this._latestBranchInfo}
           .selectedFiles=${this._selectedFiles}
+          .excludedFiles=${this._excludedFiles}
           @selection-changed=${this._onSelectionChanged}
+          @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}
         ></ac-file-picker>
       </div>

@@ -835,6 +835,403 @@ describe('FilePicker component', () => {
     });
   });
 
+  // ---------------------------------------------------------------
+  // Three-state checkbox (exclusion) — Increment 5
+  // ---------------------------------------------------------------
+
+  describe('three-state exclusion', () => {
+    // Helper — simulate a shift+click on a checkbox. jsdom
+    // doesn't honour shiftKey on a synthetic click(), so we
+    // dispatch a MouseEvent directly with the modifier set.
+    function shiftClick(el) {
+      const event = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        shiftKey: true,
+      });
+      el.dispatchEvent(event);
+      return event;
+    }
+
+    it('excluded file gets the is-excluded class', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('is-excluded')).toBe(true);
+    });
+
+    it('non-excluded file does not get the is-excluded class', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('is-excluded')).toBe(false);
+    });
+
+    it('excluded file shows the ✕ badge', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const badge = p.shadowRoot.querySelector('.excluded-badge');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toContain('✕');
+    });
+
+    it('non-excluded file does not show the ✕ badge', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      expect(
+        p.shadowRoot.querySelector('.excluded-badge'),
+      ).toBeNull();
+    });
+
+    it('excluded file tooltip includes "(excluded)"', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.getAttribute('title')).toContain('(excluded)');
+    });
+
+    it('checkbox tooltip adapts to exclusion state', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      expect(cb.getAttribute('title')).toContain('include');
+    });
+
+    it('shift+click from normal → excluded', async () => {
+      // Default state → shift+click adds to excluded set.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      shiftClick(cb);
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(
+        exclusionListener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual(['a.md']);
+      // Selection did NOT change — this file wasn't
+      // previously selected.
+      expect(selectionListener).not.toHaveBeenCalled();
+    });
+
+    it('shift+click from selected → excluded AND deselected', async () => {
+      // Selected file: shift+click removes from selection
+      // AND adds to excluded. Two events fire.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(['a.md']),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      shiftClick(cb);
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(
+        exclusionListener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual(['a.md']);
+      expect(selectionListener).toHaveBeenCalledOnce();
+      expect(
+        selectionListener.mock.calls[0][0].detail.selectedFiles,
+      ).toEqual([]);
+    });
+
+    it('shift+click from excluded → back to normal', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      shiftClick(cb);
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(
+        exclusionListener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual([]);
+      // Selection unchanged — shift+click from excluded
+      // goes to index-only (normal), not selected.
+      expect(selectionListener).not.toHaveBeenCalled();
+    });
+
+    it('regular click on excluded file → un-excludes AND selects', async () => {
+      // Specs4: "Regular click on an excluded file —
+      // un-excludes and selects." One gesture, one step.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      cb.click();
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(
+        exclusionListener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual([]);
+      expect(selectionListener).toHaveBeenCalledOnce();
+      expect(
+        selectionListener.mock.calls[0][0].detail.selectedFiles,
+      ).toEqual(['a.md']);
+    });
+
+    it('regular click on unselected file → select (unchanged behaviour)', async () => {
+      // Pre-Increment-5 behaviour still works for the
+      // default state.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      cb.click();
+      expect(selectionListener).toHaveBeenCalledOnce();
+      expect(
+        selectionListener.mock.calls[0][0].detail.selectedFiles,
+      ).toEqual(['a.md']);
+      // Exclusion NOT touched.
+      expect(exclusionListener).not.toHaveBeenCalled();
+    });
+
+    it('shift+click calls preventDefault to suppress native toggle', async () => {
+      // Without preventDefault, the browser's own checkbox
+      // toggle would fire, producing a one-frame visual
+      // glitch before our state change re-renders. Verified
+      // by checking defaultPrevented on the event after
+      // dispatch.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      const event = shiftClick(cb);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('regular click does NOT call preventDefault', async () => {
+      // Native toggle is desirable for the normal click
+      // path — the checkbox's native .checked matches our
+      // new state so no glitch.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-file .checkbox',
+      );
+      const event = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      });
+      cb.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('shift+click on a directory excludes all descendant files', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('exclusion-changed', listener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-dir .checkbox',
+      );
+      shiftClick(cb);
+      expect(listener).toHaveBeenCalledOnce();
+      const excluded =
+        listener.mock.calls[0][0].detail.excludedFiles;
+      expect(excluded.sort()).toEqual(['src/a.md', 'src/b.md']);
+    });
+
+    it('shift+click on a dir with all-excluded children un-excludes them', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(['src/a.md', 'src/b.md']),
+      });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('exclusion-changed', listener);
+      const cb = p.shadowRoot.querySelector(
+        '.row.is-dir .checkbox',
+      );
+      shiftClick(cb);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(
+        listener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual([]);
+    });
+
+    it('shift+click on dir with selected children excludes AND deselects', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(['src/a.md']),
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      shiftClick(
+        p.shadowRoot.querySelector('.row.is-dir .checkbox'),
+      );
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(selectionListener).toHaveBeenCalledOnce();
+      expect(
+        selectionListener.mock.calls[0][0].detail.selectedFiles,
+      ).toEqual([]);
+    });
+
+    it('regular click on dir with excluded children un-excludes them', async () => {
+      // Specs4: "Regular click to select directory children
+      // — un-excludes any excluded children." The dir
+      // checkbox's primary purpose is selection; clicking
+      // it to select descendants shouldn't leave anyone
+      // excluded.
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(),
+        excludedFiles: new Set(['src/a.md']),
+      });
+      await p.updateComplete;
+      const exclusionListener = vi.fn();
+      const selectionListener = vi.fn();
+      p.addEventListener('exclusion-changed', exclusionListener);
+      p.addEventListener('selection-changed', selectionListener);
+      p.shadowRoot
+        .querySelector('.row.is-dir .checkbox')
+        .click();
+      // Un-excluded src/a.md.
+      expect(exclusionListener).toHaveBeenCalledOnce();
+      expect(
+        exclusionListener.mock.calls[0][0].detail.excludedFiles,
+      ).toEqual([]);
+      // Selected both.
+      expect(selectionListener).toHaveBeenCalledOnce();
+      expect(
+        selectionListener.mock.calls[0][0].detail.selectedFiles.sort(),
+      ).toEqual(['src/a.md', 'src/b.md']);
+    });
+
+    it('exclusion-changed bubbles across the shadow boundary', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      const parentListener = vi.fn();
+      document.body.addEventListener(
+        'exclusion-changed',
+        parentListener,
+      );
+      shiftClick(
+        p.shadowRoot.querySelector('.row.is-file .checkbox'),
+      );
+      document.body.removeEventListener(
+        'exclusion-changed',
+        parentListener,
+      );
+      expect(parentListener).toHaveBeenCalledOnce();
+    });
+
+    it('excludedFiles prop default is an empty Set', async () => {
+      // Constructor default — tests without the prop
+      // explicitly set shouldn't crash.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      expect(p.excludedFiles).toBeInstanceOf(Set);
+      expect(p.excludedFiles.size).toBe(0);
+    });
+  });
+
   describe('filter', () => {
     it('filters the tree as the user types', async () => {
       const tree = rootOf([

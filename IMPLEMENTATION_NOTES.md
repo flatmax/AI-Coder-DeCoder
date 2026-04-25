@@ -2989,13 +2989,36 @@ Design points pinned by tests:
 
 - **Ancestor expansion is side-effect, not prerequisite.** The auto-select still completes even if the picker isn't mounted yet (`_expandAncestorsOf` returns early when the picker isn't reachable). In the extremely rare case where the picker mounts after the first load, the user can still reach the auto-selected files by manually expanding — nothing is broken, just less polished.
 
-### Increment 5 — Three-state checkbox with exclusion
+### ~~Increment 5 — Three-state checkbox with exclusion~~ (delivered)
 
-Needs a new event (picker → tab → server). Backend RPC `set_excluded_index_files` already exists. Shift-click interaction is subtle — its own commit.
+Picker now supports the three-state interaction (normal / selected / excluded) with shift+click as the exclusion gesture. Backend RPC `set_excluded_index_files` already existed from Layer 3.10; frontend wires it via the same direct-update pattern as selection.
 
-- `file-picker.js` — shift+click on file checkbox toggles between index-only and excluded; shift+click on selected file excludes; regular click on excluded un-excludes and selects; shift+click on directory toggles exclusion for all children; visual treatment (strikethrough + opacity 0.45 for file name, opacity 0.5 for checkbox, ✕ badge, tooltip text); `excludedFiles` Set property
-- `files-tab.js` — `_onExclusionChanged` handler, RPC call to `LLMService.set_excluded_index_files`, pass `excludedFiles` Set to picker via direct-update pattern
-- tests — all four shift+click paths, visual classes applied, event contract, RPC dispatch, preventDefault to suppress native checkbox toggle
+- `file-picker.js` — new `excludedFiles` Set property (parent-owned, pushed via `_pushChildProps`). `_onFileCheckbox` branches on `event.shiftKey`: shift+click toggles exclusion via new `_toggleExclusion(path)` helper; regular click on excluded file un-excludes AND selects in one step (matches specs4 "Regular click on an excluded file — un-excludes and selects"). `_onDirCheckbox` adds shift+click branch that toggles exclusion for every descendant file; regular click on a dir with excluded descendants un-excludes them as a side effect (specs4 "Regular click to select directory children — un-excludes any excluded children"). New `_emitExclusionChanged(newSet)` helper dispatches `exclusion-changed` with `bubbles: true, composed: true`. `_renderFile` applies `is-excluded` class when applicable, renders `✕` badge, adapts the checkbox tooltip. `_tooltipFor` accepts `isExcluded` flag and appends "(excluded)" so the state is visible on hover.
+
+- `files-tab.js` — `_excludedFiles: Set` field in constructor. `_pushChildProps` pushes `excludedFiles` alongside `tree` / `statusData` / `branchInfo`. New `_onExclusionChanged` handler and `_applyExclusion(newExcluded, notifyServer)` helper (same shape as `_applySelection` — set-equality short-circuit prevents loopback). `_sendExclusionToServer` calls `LLMService.set_excluded_index_files` and surfaces restricted / error responses via toast. Template binds `.excludedFiles=${this._excludedFiles}` on the picker and `@exclusion-changed=${this._onExclusionChanged}`.
+
+- Tests — 18 new picker tests (visual class, ✕ badge presence, tooltip adaptations, all four shift+click paths, `preventDefault` on shift+click but not regular click, shift+click on dir excludes all, shift+click on all-excluded dir un-excludes, shift+click on dir with selected children excludes AND deselects, regular dir click un-excludes any excluded children, event bubbles across shadow, default Set prop). 8 new files-tab tests (initial push, dispatch triggers RPC, internal state + picker prop update, short-circuit on redundant updates, restricted toast, RPC rejection toast, malformed payload tolerance, tree reload preserves exclusion state).
+
+Design points pinned by tests:
+
+- **Shift+click vs regular click — `preventDefault` asymmetry.** The shift+click path ALWAYS calls `preventDefault()` on the native checkbox event. Without it, the browser's own toggle fires before our state change, producing a one-frame visual glitch where the checkbox flips, then flips back on our re-render. The regular click path does NOT preventDefault because the native toggle's resulting state matches ours (or the reactive `.checked` binding on the next render enforces consistency). Pinned explicitly by separate tests — the asymmetry is easy to miss in a future refactor.
+
+- **Regular click on excluded = un-exclude AND select (one step).** Specs4 calls this out as a single gesture. The handler dispatches BOTH events in sequence (`exclusion-changed` first, then `selection-changed`) — the orchestrator's two RPCs fire back-to-back. Could be collapsed into a single combined event, but keeping them separate keeps the per-event contract clean and lets each RPC short-circuit independently.
+
+- **Selected and excluded are mutually exclusive.** `_toggleExclusion` always deselects when adding to the excluded set. `_onDirCheckbox`'s shift+click branch deselects descendants when excluding them. A file can be in exactly one of: selected, excluded, or neither (the default index-only state). Without this invariant, the LLM service's `_update_stability` would have to arbitrate between conflicting tracker entries for the same path.
+
+- **Shift+click from excluded returns to NORMAL, not selected.** The three-state cycle is normal → shift+click → excluded → shift+click → normal. Going to "selected" on the back-swing would be surprising — the user's shift+click gesture meant "change index inclusion," not "select." The regular-click-on-excluded path covers the "I want this selected AND re-included" case with a single gesture.
+
+- **Dir click un-excludes descendants as a side effect.** A user ticking a parent directory's checkbox to select all its files doesn't want some children silently excluded afterwards. Regular dir click un-excludes first, then applies the normal select-all logic. Pinned by `regular click on dir with excluded children un-excludes them` — checks both the exclusion-changed event (empties the set) and the selection-changed event (selects every descendant).
+
+- **`excludedFiles` prop default is an empty Set.** Constructor initialises the field so `_renderFile`'s `Set.has()` calls have a target before the first server response. Without the default, `new FilePicker()` would have `excludedFiles = undefined` and every render would throw. Pinned by `excludedFiles prop default is an empty Set`.
+
+- **Tree reload preserves exclusion state.** The `_excludedFiles` Set lives in the orchestrator and isn't touched by `_loadFileTree`. `_pushChildProps` pushes it to the picker on every reload alongside the new tree. Exclusion state survives commits, file changes, and manual refreshes — only the user explicitly un-excluding a file removes it from the set.
+
+Open carried over for later increments:
+
+- **Collab broadcast of excluded state.** Layer 4.4's CollabServer doesn't currently emit a broadcast when `set_excluded_index_files` is called; only `set_selected_files` has that plumbing. Adding the broadcast would let a collab host's exclusion changes reach participants without a full reload. Not blocking any current flow (single-user operation works fully; participants can't call the RPC anyway per 4.4's restrictions).
+- **Context menu items for include / exclude.** Specs4 calls for these as an alternative to the shift+click gesture. Lands with Increment 8 (context menu) — the exclusion backend + event path is already in place, so the menu items just dispatch `exclusion-changed` with the appropriate set.
 
 ### Increment 6 — Active-file highlight
 

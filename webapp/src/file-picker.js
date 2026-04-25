@@ -257,6 +257,17 @@ export class FilePicker extends LitElement {
      */
     selectedFiles: { type: Object },
     /**
+     * Excluded file paths — the third state in the three-state
+     * checkbox model. An excluded file has no content, no index
+     * block, and no tracker item in the LLM context. The
+     * checkbox visually distinguishes excluded files with
+     * strikethrough + dimmed + a ✕ badge. Set for O(1) lookup
+     * during render (the picker iterates over many files). The
+     * parent (files-tab) owns the canonical set and assigns it
+     * via the direct-update pattern after each server response.
+     */
+    excludedFiles: { type: Object },
+    /**
      * Current filter query (fuzzy substring matching).
      */
     filterQuery: { type: String, state: true },
@@ -505,6 +516,36 @@ export class FilePicker extends LitElement {
       color: #f85149;
     }
 
+    /* Excluded file visual treatment (third state in the
+     * three-state checkbox model). Strikethrough + reduced
+     * opacity on the name, dimmed checkbox, ✕ badge. Signals
+     * "not indexed, not in context" — distinct from both
+     * selected (ticked) and index-only (default unticked). */
+    .row.is-file.is-excluded .name {
+      text-decoration: line-through;
+      opacity: 0.45;
+    }
+    .row.is-file.is-excluded .checkbox {
+      opacity: 0.5;
+    }
+    .excluded-badge {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1rem;
+      height: 1rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #f85149;
+      opacity: 0.8;
+      margin-left: 0.25rem;
+      user-select: none;
+      /* Match the status-badge visual weight so the ✕ sits
+       * in the row alongside M/S/U/D badges without looking
+       * out of place. */
+    }
+
     /* Root row — repo name + branch pill. Non-interactive
      * (no click handler, no checkbox, no twisty), sits
      * above the rest of the tree as a stable header. */
@@ -589,6 +630,10 @@ export class FilePicker extends LitElement {
       deleted: new Set(),
       diffStats: {},
     };
+    // Excluded files — the third state. Default empty Set so
+    // `Set.has()` during render works before the first server
+    // response. Parent assigns via direct-update pattern.
+    this.excludedFiles = new Set();
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
@@ -935,14 +980,21 @@ export class FilePicker extends LitElement {
 
   _renderFile(node, depth) {
     const isSelected = this.selectedFiles.has(node.path);
+    const isExcluded = this.excludedFiles.has(node.path);
     const indentPx = depth * 16;
     const isFocused = node.path === this._focusedPath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
-    const tooltip = this._tooltipFor(node);
+    const tooltip = this._tooltipFor(node, isExcluded);
+    // Checkbox tooltip adapts so shift+click guidance
+    // surfaces on hover. Users discover the exclusion
+    // gesture without needing to read docs.
+    const checkboxTitle = isExcluded
+      ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
+      : 'Click to select, shift+click to exclude from index.';
     return html`
       <div
-        class="row is-file ${isFocused ? 'focused' : ''}"
+        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''}"
         style="padding-left: ${indentPx}px"
         @click=${(e) => this._onFileClick(e, node)}
         role="treeitem"
@@ -957,8 +1009,17 @@ export class FilePicker extends LitElement {
           .checked=${isSelected}
           @click=${(e) => this._onFileCheckbox(e, node)}
           aria-label="Select ${node.name}"
+          title=${checkboxTitle}
         />
         <span class="name">${node.name}</span>
+        ${isExcluded
+          ? html`<span
+              class="excluded-badge"
+              title="Excluded from index"
+              aria-label="Excluded from index"
+              >✕</span
+            >`
+          : ''}
         ${status
           ? html`<span
               class="status-badge status-${status.kind}"
@@ -1068,14 +1129,18 @@ export class FilePicker extends LitElement {
    * layouts. Em-dash rather than a colon since a
    * Windows-style path `C:/…` with a colon separator
    * reads ambiguously.
+   *
+   * Excluded files get an extra "(excluded)" marker so
+   * the state is visible on hover without needing to
+   * squint at the row's strikethrough styling.
    */
-  _tooltipFor(node) {
+  _tooltipFor(node, isExcluded = false) {
     if (!node || typeof node !== 'object') return '';
     const name = typeof node.name === 'string' ? node.name : '';
     const path = typeof node.path === 'string' ? node.path : '';
     if (!name && !path) return '';
-    if (!path || path === name) return name;
-    return `${path} — ${name}`;
+    const base = !path || path === name ? name : `${path} — ${name}`;
+    return isExcluded ? `${base} (excluded)` : base;
   }
 
   // ---------------------------------------------------------------
@@ -1166,6 +1231,57 @@ export class FilePicker extends LitElement {
     event.stopPropagation();
     const descendants = this._collectDescendantFiles(node);
     if (descendants.length === 0) return;
+    // Shift+click on a directory toggles exclusion for
+    // every descendant file. If ALL descendants are
+    // currently excluded, un-exclude them all; otherwise
+    // exclude them all (including those already excluded
+    // — idempotent). Mirrors the file-level shift+click
+    // semantics.
+    if (event.shiftKey) {
+      event.preventDefault();
+      const allExcluded = descendants.every((p) =>
+        this.excludedFiles.has(p),
+      );
+      const nextExcluded = new Set(this.excludedFiles);
+      if (allExcluded) {
+        for (const p of descendants) nextExcluded.delete(p);
+      } else {
+        for (const p of descendants) nextExcluded.add(p);
+      }
+      this._emitExclusionChanged(nextExcluded);
+      // Excluding descendants also deselects any that
+      // were previously selected — the states are
+      // mutually exclusive. Un-excluding doesn't re-add
+      // to selection (matches the file-level behaviour
+      // where shift+click from excluded returns to
+      // index-only, not to selected).
+      if (!allExcluded) {
+        const nextSelected = new Set(this.selectedFiles);
+        let selectionChanged = false;
+        for (const p of descendants) {
+          if (nextSelected.has(p)) {
+            nextSelected.delete(p);
+            selectionChanged = true;
+          }
+        }
+        if (selectionChanged) this._emitSelectionChanged(nextSelected);
+      }
+      return;
+    }
+    // Regular click. If any descendants are excluded,
+    // un-exclude them as a side effect — a user ticking
+    // a parent directory wants its children in context,
+    // not hidden. Specs4: "Regular click to select
+    // directory children — un-excludes any excluded
+    // children."
+    const anyExcluded = descendants.some((p) =>
+      this.excludedFiles.has(p),
+    );
+    if (anyExcluded) {
+      const nextExcluded = new Set(this.excludedFiles);
+      for (const p of descendants) nextExcluded.delete(p);
+      this._emitExclusionChanged(nextExcluded);
+    }
     const allSelected = descendants.every((p) =>
       this.selectedFiles.has(p),
     );
@@ -1183,7 +1299,10 @@ export class FilePicker extends LitElement {
   _onFileClick(event, node) {
     // Clicking the name area (outside the checkbox) dispatches
     // a file-clicked event. Phase 2c wires the viewer to open
-    // the file in response.
+    // the file in response. Excluded files still open in the
+    // viewer on name click — the exclusion is about LLM
+    // context, not about preventing the user from reading
+    // the file in the editor.
     if (event.target.classList.contains('checkbox')) return;
     this.dispatchEvent(
       new CustomEvent('file-clicked', {
@@ -1195,7 +1314,43 @@ export class FilePicker extends LitElement {
   }
 
   _onFileCheckbox(event, node) {
+    // The three-state checkbox dispatches depending on
+    // modifier and current state:
+    //
+    //   shift+click from normal  → excluded
+    //   shift+click from selected → excluded (and deselected)
+    //   shift+click from excluded → normal (re-include)
+    //   regular click from normal → selected
+    //   regular click from selected → normal
+    //   regular click from excluded → selected (un-exclude
+    //     and tick)
+    //
+    // Shift+click always calls preventDefault on the native
+    // checkbox event to suppress the browser's own toggle —
+    // otherwise the checkbox flips visually, then our state
+    // change flips it back, producing a one-frame glitch.
+    // Regular click lets the native toggle fire because the
+    // new state matches it (or else we override via the
+    // reactive .checked binding on the next render).
     event.stopPropagation();
+    if (event.shiftKey) {
+      event.preventDefault();
+      this._toggleExclusion(node.path);
+      return;
+    }
+    // Regular click. If the file is currently excluded,
+    // this un-excludes AND selects in one step — matches
+    // the "un-excludes and selects" rule from specs4.
+    // Otherwise, toggles between index-only and selected.
+    if (this.excludedFiles.has(node.path)) {
+      const nextExcluded = new Set(this.excludedFiles);
+      nextExcluded.delete(node.path);
+      const nextSelected = new Set(this.selectedFiles);
+      nextSelected.add(node.path);
+      this._emitExclusionChanged(nextExcluded);
+      this._emitSelectionChanged(nextSelected);
+      return;
+    }
     const next = new Set(this.selectedFiles);
     if (next.has(node.path)) {
       next.delete(node.path);
@@ -1203,6 +1358,33 @@ export class FilePicker extends LitElement {
       next.add(node.path);
     }
     this._emitSelectionChanged(next);
+  }
+
+  /**
+   * Toggle a single file's exclusion state. Transitions
+   * from excluded → normal OR from not-excluded → excluded.
+   *
+   * Excluding a selected file also deselects it — the two
+   * states are mutually exclusive. A file can be in
+   * exactly one of: selected, excluded, or neither
+   * (the default index-only state).
+   */
+  _toggleExclusion(path) {
+    const nextExcluded = new Set(this.excludedFiles);
+    if (nextExcluded.has(path)) {
+      nextExcluded.delete(path);
+      this._emitExclusionChanged(nextExcluded);
+      return;
+    }
+    nextExcluded.add(path);
+    this._emitExclusionChanged(nextExcluded);
+    // If the file was selected, also deselect — excluded
+    // and selected can't coexist.
+    if (this.selectedFiles.has(path)) {
+      const nextSelected = new Set(this.selectedFiles);
+      nextSelected.delete(path);
+      this._emitSelectionChanged(nextSelected);
+    }
   }
 
   _emitSelectionChanged(newSet) {
@@ -1214,6 +1396,24 @@ export class FilePicker extends LitElement {
     this.dispatchEvent(
       new CustomEvent('selection-changed', {
         detail: { selectedFiles: Array.from(newSet) },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Propagate the new excluded set to the orchestrator.
+   * Parallel to `_emitSelectionChanged` — the files-tab
+   * catches this, updates server-side state via
+   * `LLMService.set_excluded_index_files`, and pushes
+   * the canonical set back via the `excludedFiles`
+   * property.
+   */
+  _emitExclusionChanged(newSet) {
+    this.dispatchEvent(
+      new CustomEvent('exclusion-changed', {
+        detail: { excludedFiles: Array.from(newSet) },
         bubbles: true,
         composed: true,
       }),
