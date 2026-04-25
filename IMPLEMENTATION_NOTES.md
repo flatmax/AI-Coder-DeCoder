@@ -2948,10 +2948,46 @@ Design points pinned by tests:
 
 - **Defensive field handling.** Missing `mtime` → treated as 0 (oldest). Missing `lines` → treated as 0 (smallest). Missing `name` → empty string for localeCompare. Null/undefined children filtered out. Catches malformed tree data from backend without crashing the comparator.
 
-### Increment 4 — Auto-selection of changed files on first load
+### ~~Increment 4 — Auto-selection of changed files on first load~~ (delivered)
 
-- `files-tab.js` — `_initialAutoSelect` per-component-lifetime flag; on first successful `_loadFileTree`, union changed files (modified ∪ staged ∪ untracked ∪ deleted) with existing selection rather than replacing; auto-expand ancestor directories of selected files
-- tests — auto-selection runs once per component lifetime, union semantics preserve server-provided selection, ancestor expansion
+Opens the app with every file that has pending work already ticked — user doesn't have to re-select what they were clearly just editing. Union (not replace) semantics preserve any selection the server broadcast during startup (collab host's state, prior session restore). Ancestor directories of auto-selected files expand so the checkboxes are visible without manual clicking.
+
+Implementation in `files-tab.js`:
+
+- `_initialAutoSelect` boolean field, initialised `true`. Flips to `false` the first time `_loadFileTree` gets past its `await`. Never resets.
+- `_applyInitialAutoSelect()` — collects the union of `modified`, `staged`, `untracked`, `deleted` sets, unions with existing `_selectedFiles`, calls `_applySelection(union, notifyServer=true)`. When the union is empty (clean working tree) the method returns early — no `_applySelection` call, no server RPC, silent startup.
+- `_expandAncestorsOf(paths)` — mutates the picker's `_expanded` set directly (same pattern as the file-search `_onFileSearchScroll` handler). Splits each path on `/`, accumulates prefix strings stopping before the last part (which is the file itself). Ancestor additions are a union with whatever the picker already has expanded, so pre-existing user expansion survives.
+- Flag flip is synchronous — flipped BEFORE `_applyInitialAutoSelect` runs, so a hypothetical re-entrant load can't double-fire. Tree-load failures leave the flag at `true` so a subsequent successful load (via `files-modified`) can still auto-select.
+
+13 new tests in a `first-load auto-select` describe block:
+
+1. auto-selects modified files + notifies server
+2. unions all four change categories (modified/staged/untracked/deleted); clean files stay unselected
+3. skips server notification when no files are changed (clean startup is silent)
+4. unions with existing selection rather than replacing (seeded via `files-changed` before tree load resolves)
+5. skips server notify when union equals existing selection (set-equality short-circuit inside `_applySelection`)
+6. runs exactly once per component lifetime — second load from `files-modified` does not re-select (would undo user's manual deselections)
+7. flag flips synchronously — always `false` after mount settles
+8. expands ancestor directories of nested auto-selected files
+9. expands ancestors across multiple subtrees
+10. top-level files produce no expansion (no ancestors to expand)
+11. preserves user-expanded directories (union semantics, not replacement)
+12. skipped entirely when tree load fails — flag stays `true`
+13. runs on next successful load after initial failure (transient errors recoverable)
+
+Three existing tests needed `set_selected_files` stubs added because they seed non-empty status arrays and now trigger the auto-select's notify path: `plumbs git status data through to the picker`, `passes status arrays through to the picker as Sets`, `refreshes status data on files-modified`. Stubs are trivial — `vi.fn().mockResolvedValue([])` — and each gets a comment explaining why it's there so future maintainers don't treat them as noise.
+
+Design points pinned by tests:
+
+- **Once per lifetime, not per load.** A user who deselects an auto-selected file should see that deselection survive across a commit. The second `_loadFileTree` call (from `files-modified`) skips the entire auto-select block. Pinned by test 6 — deselect `b.md`, trigger reload, assert `b.md` stays deselected even though it's still in the `modified` array. Without this, the feature would become the opposite of useful: every commit would fight the user.
+
+- **Union, not replace.** Test 4 seeds a prior selection (`prior.md`) via a `files-changed` broadcast that races the tree load to completion, then verifies both `prior.md` AND the auto-selected `new.md` end up selected. Collab and session-restore both depend on this — the server's authoritative state must not be overwritten by our local auto-select logic.
+
+- **Notify-server gates on actual change.** Tests 3 and 5 pin that the server isn't called when nothing changed. Matters for network cost in large collab sessions and for test signal-to-noise — an auto-select that always notifies would pollute every unrelated test's RPC call count.
+
+- **Flag survives failed loads.** Test 13 reproduces the transient-network case — first RPC rejects, user sees a toast, files-modified triggers a retry, second RPC succeeds. The auto-select runs on the retry because the flag is only flipped AFTER the await resolves successfully. If we flipped before the await (or inside a `finally`), the retry would silently skip the auto-select and the user would have to manually re-tick.
+
+- **Ancestor expansion is side-effect, not prerequisite.** The auto-select still completes even if the picker isn't mounted yet (`_expandAncestorsOf` returns early when the picker isn't reachable). In the extremely rare case where the picker mounts after the first load, the user can still reach the auto-selected files by manually expanding — nothing is broken, just less polished.
 
 ### Increment 5 — Three-state checkbox with exclusion
 
