@@ -2814,6 +2814,193 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 - **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
 
+## Compaction UI completion plan
+
+History compaction is fully implemented end-to-end (backend compactor, detector closure, streaming-handler invocation, frontend event handling, config). Two small UI enhancements remain: a progress overlay during the blocking detector call, and compaction events visible in the chat scrollback.
+
+A third candidate — a dedicated "Compact Now" button — was considered and dropped. Starting a new session already provides what proactive compaction would offer (clean context, freed budget) with clearer semantics. The only case compact-now would serve differently (keep the thread, shrink it) is niche and handled automatically by the threshold check on the next response.
+
+A fourth candidate — a dedicated compaction log modal with its own persistent store — was reduced to the simpler system-event approach below. Compactions now piggyback on the existing system-event infrastructure (same path as commit / reset / mode switch messages), surfacing in both the live chat scrollback and the history browser without new storage, new RPCs, or new modal components.
+
+### Increment A — Progress overlay during compaction
+
+Currently a toast says "Compacting conversation..." and disappears. Compaction can take 10–30 seconds (detector LLM call + message reshuffle); users stare at an empty screen. A persistent overlay with elapsed-time feedback fixes this without any backend change — the event stream already fires `compacting` → `compacted` / `compaction_error`.
+
+- new `webapp/src/compaction-progress.js` — floating overlay component
+  - listens for `compaction-event` window events (same channel the chat panel's `_onCompactionEvent` already uses)
+  - on `stage: "compacting"` → appears with spinner, "Compacting history" label, elapsed-seconds counter ticking once per second
+  - on `stage: "compacted"` → shows "Done — {case}" for 800ms then fades over 400ms
+  - on `stage: "compaction_error"` → shows "Compaction failed" with error message for 3s then fades
+  - positioned top-center of the viewer area; high z-index so it floats above the dialog but below toasts
+  - cleans up the interval timer on disconnect
+  - ignores `url_fetch` / `url_ready` events (those share the channel but belong to URL fetching)
+- `webapp/src/app-shell.js` — import and mount `<ac-compaction-progress>` alongside the toast layer
+- `webapp/src/compaction-progress.test.js` — 8–10 tests: initial hidden state, appears on compacting event, elapsed counter ticks, wrong-stage events ignored, transitions compacting → compacted with 800ms success display, compacted → hidden after fade, error stage shows message, disconnect clears timer, URL events don't activate the overlay
+
+No change to the event callback contract, no change to the compactor, no new RPCs. Pure frontend.
+
+### Increment B — Compaction events in chat scrollback
+
+Compaction is a conversation-shaping event. Committing, resetting, and switching modes all produce system-event messages in the chat history. Compaction should too — it gives the user transparency (what was removed, when, why), searchability via the history browser's existing search, and persistence via the existing JSONL path.
+
+No new storage file, no new RPC, no new component. Reuses the `system_event: true` message flag that `commit_all` and `reset_to_head` already produce.
+
+**Shape of the system-event message** (3-part, keeps one-line scanability while giving substance to the search hits):
+
+```
+**History compacted** — truncate
+
+Boundary: user switched from auth work to logging review (confidence 0.92)
+
+Removed 18 messages • 24000 → 8400 tokens
+```
+
+For the summarize case, an additional collapsible section embeds the detector's summary text so users can see what was summarized:
+
+```
+**History compacted** — summarize
+
+No clear topic boundary detected; summarized earlier context.
+
+Removed 32 messages • 28000 → 9200 tokens
+
+<details>
+<summary>Summary</summary>
+The prior conversation covered adding a rate limiter to the auth endpoint...
+</details>
+```
+
+The `<details>` tag renders natively in the chat panel's markdown path (marked.js with gfm enabled passes HTML through). Searchable because the text is in the message content.
+
+**Backend changes:**
+
+- `src/ac_dc/llm_service.py` — in `_post_response`, after the successful `context.set_history(result.messages)` + `tracker.purge_history()` path, build the event text and call `context.add_message("user", event_text, system_event=True)` plus (if `history_store`) `history_store.append_message(session_id=session_id, role="user", content=event_text, system_event=True)`. The `session_id` is the one captured at the top of `_post_response` — same pattern as `commit_all_background`. Do NOT append on the error path (the `compaction_error` event is enough; appending a message about a failed compaction to history that we couldn't compact would be noise).
+- new private helper `_build_compaction_event_text(result, tokens_before, tokens_after, messages_before_count, messages_after_count) -> str` — produces the 3-part text. Tokens before/after measured at the `_post_response` call site (before the compactor runs, and after `set_history` installs the new list).
+- the event message goes into the context AFTER the history replacement, so the chat panel sees the compacted list with the system event already appended. This matters because on a browser reload the system-event message needs to reflect the final state, not a pre-compaction state.
+
+**Tests:**
+
+- `tests/test_llm_service.py` — extend `TestStreamingHappyPath` or add a new `TestCompactionSystemEvent` class
+  - triggers compaction via a tiny `compaction_trigger_tokens` value, seeded history, controlled detector
+  - asserts a system-event message lands in both the context manager's history and the `HistoryStore` JSONL
+  - asserts the content contains `**History compacted**`, the case name, the boundary reason (or "No clear topic boundary" for summarize-with-no-boundary), and the token counts
+  - asserts the `<details>` block is only added for summarize case
+  - asserts error-path compaction does NOT add a system event
+  - asserts the message is added AFTER `set_history`, so it's the final entry in the compacted history
+- `tests/test_history_store.py` — add a sanity test that `search_messages("History compacted")` finds the event (already covered by generic search but worth pinning the specific string so a future rename catches a test failure)
+
+**Frontend changes:** none. The chat panel's existing system-event rendering path handles this already (distinct styling, search hit highlighting, history-browser visibility). The `<details>` tag renders via the existing marked.js pipeline.
+
+### Delivery order
+
+1. **Increment A** first — pure frontend, no RPC changes, low risk. Immediate UX win.
+2. **Increment B** second — backend change is small (one method call + helper) but touches the streaming lifecycle; tests verify the event reaches both stores and renders correctly.
+
+Each increment is a standalone commit with tests alongside. After each lands, strike through the heading here and add a one-line delivery note.
+
+## File picker completion plan
+
+Backend status / diff / branch data flows into `files-tab.js` via `_loadFileTree` today but is discarded at the picker boundary. The picker renders a plain file list with a line count. The plan below closes the gap in 12 increments, each with tests alongside. Order prioritises visible value per commit and dependency order (data plumbing before interaction, simple renders before complex state).
+
+Per-increment contract:
+- one coherent feature per commit
+- tests land with the code (webapp test infrastructure is mature — `vitest` run catches regressions)
+- picker stays in a working state between commits
+- the IMPLEMENTATION_NOTES.md plan updates after each lands, striking through what's delivered and adding a short delivery note
+
+### Increment 1 — Status badges + diff stats + line-count color
+
+Pure render change. `Repo.get_file_tree()` already returns `{modified, staged, untracked, deleted, diff_stats}` arrays; files-tab receives them and throws them away.
+
+- `files-tab.js` — build a `_statusData` object from the response, pass to picker alongside `tree`
+- `file-picker.js` — `statusData` property, `_renderFile` emits M/S/U/D badge with appropriate color, `+N -N` diff stats next to line count, line-count color classes (green < 130, orange 130–170, red > 170)
+- tests — status-array → badge mapping for all five states, diff stats rendering, line-count thresholds
+
+### Increment 2 — Branch badge + tooltips
+
+- `files-tab.js` — second RPC call `Repo.get_current_branch` during `_loadFileTree`, thread `branchInfo` to picker
+- `file-picker.js` — render `⎇ main` pill on root row; orange `⎇ abc1234` for detached HEAD; `title` attribute on every row formatted as `full/path — name` (root falls back to repo name)
+- tests — branch pill render for normal / detached / empty branch cases, tooltip format
+
+### Increment 3 — Sort modes
+
+- `file-picker.js` — three sort-mode buttons (A / 🕐 / #) in filter bar, active-button styling, clicking the active button toggles ascending/descending, localStorage keys `ac-dc-sort-mode` + `ac-dc-sort-asc`, sort logic applies after the existing dir-before-file rule
+- tests — mode toggle, direction toggle on re-click, localStorage round-trip, dirs still sort alphabetically regardless of mode
+
+### Increment 4 — Auto-selection of changed files on first load
+
+- `files-tab.js` — `_initialAutoSelect` per-component-lifetime flag; on first successful `_loadFileTree`, union changed files (modified ∪ staged ∪ untracked ∪ deleted) with existing selection rather than replacing; auto-expand ancestor directories of selected files
+- tests — auto-selection runs once per component lifetime, union semantics preserve server-provided selection, ancestor expansion
+
+### Increment 5 — Three-state checkbox with exclusion
+
+Needs a new event (picker → tab → server). Backend RPC `set_excluded_index_files` already exists. Shift-click interaction is subtle — its own commit.
+
+- `file-picker.js` — shift+click on file checkbox toggles between index-only and excluded; shift+click on selected file excludes; regular click on excluded un-excludes and selects; shift+click on directory toggles exclusion for all children; visual treatment (strikethrough + opacity 0.45 for file name, opacity 0.5 for checkbox, ✕ badge, tooltip text); `excludedFiles` Set property
+- `files-tab.js` — `_onExclusionChanged` handler, RPC call to `LLMService.set_excluded_index_files`, pass `excludedFiles` Set to picker via direct-update pattern
+- tests — all four shift+click paths, visual classes applied, event contract, RPC dispatch, preventDefault to suppress native checkbox toggle
+
+### Increment 6 — Active-file highlight
+
+- `app-shell.js` — relay `active-file-changed` events from viewer to files-tab (likely already present; confirm)
+- `files-tab.js` — listen, pass `activePath` string prop to picker
+- `file-picker.js` — `.active-in-viewer` class when `node.path === activePath`
+- tests — prop propagation, class toggling on change, no class when active-path is null
+
+### Increment 7 — Keyboard navigation
+
+- `file-picker.js` — tabindex on tree container, keydown handler (ArrowUp/ArrowDown move focus, ArrowRight expand dir, ArrowLeft collapse dir or move to parent, Space/Enter toggle selection on file or expand-toggle on dir, Home/End first/last row), focused-row state, scroll-into-view on focus change
+- tests — each key's behaviour, focus never escapes visible rows, scroll behaviour
+
+### Increment 8 — Context menu (files)
+
+Largest single feature. Stage / unstage / discard (with confirm) / rename (inline input) / duplicate (inline input, pre-filled) / load-in-left-panel / load-in-right-panel / exclude-or-include-in-index / delete (confirm).
+
+- `file-picker.js` — context-menu component with positioning via `position: fixed` at click coordinates, dismiss on outside-click (document listener with `composedPath()` check), Escape to close, action dispatchers
+- inline-input pattern — renders at the correct indentation level in the tree (not a browser `prompt()`), Enter submits, Escape/blur cancels, pre-filled + auto-selected for rename
+- `files-tab.js` — RPC dispatchers for each action, confirm dialogs for destructive ops, `load-diff-panel` event dispatch for load-in-panel items
+- tests — menu open/dismiss paths, each action's RPC dispatch, inline input Enter/Escape/blur, confirm-dialog flow for destructive actions
+
+### Increment 9 — Context menu (directories)
+
+Same mechanism as #8 with different actions — stage-all / unstage-all / rename (inline) / new-file (inline) / new-directory (inline, creates with `.gitkeep`) / exclude-or-include-in-index.
+
+- `file-picker.js` — dir-specific menu item set
+- `files-tab.js` — dir-level RPC dispatchers; new-directory creates `.gitkeep` inside the new dir so git tracks it
+- tests — all six actions, inline input integration, `.gitkeep` creation
+
+### Increment 10 — Middle-click path insertion + @-filter bridge
+
+Two cross-component features. Middle-click path insertion uses the one-shot flag pattern to suppress the browser's selection-buffer paste.
+
+- `file-picker.js` — middle-click on any row dispatches `insert-path` event with `{path}`
+- `files-tab.js` — `_onInsertPath` handler queries chat panel's textarea, inserts path at cursor with space padding, sets `chatPanel._suppressNextPaste = true` **before** focus, then calls focus
+- `chat-panel.js` — `_suppressNextPaste` instance field (not reactive), paste handler checks-and-clears the flag, calls `preventDefault()` when set
+- `filter-from-chat` bridge — files-tab listens for the event and forwards to picker's `setFilter()`
+- tests — middle-click insertion with cursor position preserved, paste suppression fires exactly once per insertion, @-filter round-trip
+
+### Increment 11 — Review mode banner
+
+- `file-picker.js` — banner at top of picker showing branch / commit range / file+line stats / exit button when `reviewState.active`; `reviewState` prop
+- `files-tab.js` — `_onReviewStarted` handler clears selection (defense-in-depth with server-side clear), refreshes tree, updates chat panel's review state; `_onReviewEnded` symmetric
+- tests — banner visibility, stats rendering, exit button dispatch, selection clearing on entry
+
+### Increment 12 — `_syncMessagesFromChat` defensive pattern
+
+Per specs4 this is the architectural fix for stale-message overwrites on selection changes. Subtle. Best landed once every other selection path is in place so it can be verified end-to-end.
+
+- `files-tab.js` — `_syncMessagesFromChat()` reads `chatPanel.messages` into the tab's own `_messages` field; called at the start of every method that ends up calling `requestUpdate` on the chat panel (selection change, file mention click, exclusion change, review start, state load, files changed)
+- tests — regression test: send message → click file mention → assert message still in chat panel state
+
+### Out of scope for this plan
+
+- Dialog polish (dragging, resizing, minimizing, position persistence) — separate follow-up
+- Doc Convert tab frontend — own feature
+- Collaboration UI (admission flow, pending screen, participant indicators) — own feature
+- Window resize handling, remaining global keyboard shortcuts — own small commit
+
+Each increment above is a standalone commit. After each lands, strike through the heading in this plan, add a one-line delivery note with the commit hash, and note any deviations from the spec as decisions (D-N) in the main notes body.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:
