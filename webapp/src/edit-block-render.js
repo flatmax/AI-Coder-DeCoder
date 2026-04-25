@@ -345,24 +345,30 @@ export function renderEditBody(segment) {
   // `_computeDiff` — the diff library already orders
   // remove-then-add for each changed run, which matches
   // the unified-diff convention.
-  // Join with the empty string rather than `\n`. The
-  // `.diff-line` spans are `display: block`, so they
-  // stack vertically on their own. A literal newline
-  // between them would render as a visible blank row
-  // inside the parent `<pre>` (which preserves
-  // whitespace), producing unsightly gaps between
-  // coloured bands. The preformatted spacing within
-  // each line is still preserved by `white-space: pre`
-  // on `.diff-line` itself.
+  //
+  // Join with `\n` between lines and wrap in a `<div>`
+  // (not `<pre>`) so that:
+  //   - `textContent` of the container includes the
+  //     newlines — tests and clipboard round-trips see
+  //     line breaks between diff lines, not
+  //     concatenated runs
+  //   - visually the `\n` text nodes between `.diff-line`
+  //     block elements collapse (the outer container has
+  //     default `white-space: normal`, and whitespace
+  //     between adjacent blocks is ignored by block
+  //     layout) — so no visible blank rows
+  //   - intra-line whitespace is still preserved because
+  //     `.diff-line` itself carries `white-space: pre`
+  //     in its CSS
   const body = lines
     .map((l) => {
       const side = l.type === 'add' ? 'new' : 'old';
       return _renderDiffLine(l, side);
     })
-    .join('');
+    .join('\n');
   return (
     `<div class="edit-body">` +
-      `<pre class="edit-pane-content">${body}</pre>` +
+      `<div class="edit-pane-content">${body}</div>` +
     `</div>`
   );
 }

@@ -196,6 +196,42 @@ export class AppShell extends JRPCClient {
      * live in single-user mode without a collab check.
      */
     _isLocalhost: { type: Boolean, state: true },
+    /**
+     * True while a commit_all background task is in
+     * flight. Drives the header commit button's spinner
+     * state and disables both commit and reset until the
+     * completion event fires. Cleared by the
+     * `commit-result` window event handler (see
+     * _onCommitResult). Mirrors the same flag on
+     * ChatPanel — both need it because both need to
+     * reflect in-flight state in their own UI.
+     */
+    _committing: { type: Boolean, state: true },
+    /**
+     * True while review mode is active. Disables the
+     * header commit button — review is read-only per
+     * specs3/4-features/code_review.md. Reset is NOT
+     * disabled in review mode (user may legitimately
+     * want to discard review-mode changes). Synced via
+     * the review-started / review-ended window events.
+     */
+    _reviewActive: { type: Boolean, state: true },
+    /**
+     * True while an LLM stream is in flight. Disables
+     * commit and reset — both mutate the working tree,
+     * and the backend's post-stream edit-application
+     * phase (LLMService._stream_chat → apply_edits) is
+     * not serialized against stage_all or reset_hard.
+     * A commit during that window could stage
+     * partially-written files; a reset could discard
+     * edits mid-apply. The backend's per-path write
+     * locks cover edits vs edits but not edits vs
+     * stage_all / reset_hard. Gating at the UI is the
+     * cheapest fix. Tracked by listening to
+     * stream-chunk (first chunk flips true) and
+     * stream-complete (flips false).
+     */
+    _streaming: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -336,12 +372,14 @@ export class AppShell extends JRPCClient {
 
     /* Mode toggle — segmented code/doc buttons plus a
      * separate cross-ref overlay toggle. Sits between
-     * the tab buttons and the minimize button. Pushed
-     * right by margin-left: auto on the group wrapper
-     * so it hugs the minimize button regardless of how
-     * many tab buttons are present. */
+     * the git actions group and the minimize button.
+     * No margin-left: auto here — the git-actions
+     * group's symmetric auto margins already push
+     * everything to the right of it against the
+     * minimize button per specs3 §Header Sections
+     * ("centered in the gap between the tab buttons
+     * and the right-side controls"). */
     .mode-toggle {
-      margin-left: auto;
       display: flex;
       align-items: center;
       gap: 0.5rem;
@@ -397,6 +435,60 @@ export class AppShell extends JRPCClient {
       color: #d29922;
     }
     .crossref-btn[disabled] {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* Header git actions — copy diff, commit, reset.
+     * Grouped with a small gap, placed in the center
+     * of the header between the tab buttons and the
+     * mode toggle per specs3/5-webapp/app_shell_and_dialog.md
+     * §Header Sections. The symmetric
+     * margin-left/margin-right: auto pattern centers
+     * the group in whatever space remains between its
+     * flex siblings; this only works when no other
+     * sibling claims `margin-left: auto` (the mode
+     * toggle's auto-left push was removed above for
+     * exactly this reason).
+     *
+     * Icons are emoji for zero-asset cost; tooltips
+     * carry the full action text for discoverability.
+     * Danger variant (reset) gets a red-tinted hover
+     * so the destructive action is visually distinct
+     * from the benign ones. */
+    .header-git-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .git-action-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      line-height: 1;
+      opacity: 0.75;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .git-action-btn:hover:not([disabled]) {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.08);
+    }
+    .git-action-btn.danger:hover:not([disabled]) {
+      background: rgba(248, 81, 73, 0.15);
+      border-color: rgba(248, 81, 73, 0.3);
+    }
+    .git-action-btn.in-flight {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.12);
+      border-color: rgba(88, 166, 255, 0.3);
+    }
+    .git-action-btn[disabled] {
       opacity: 0.3;
       cursor: not-allowed;
     }
@@ -622,6 +714,16 @@ export class AppShell extends JRPCClient {
     // otherwise. A future collab probe could flip this;
     // for now single-user mode is always localhost.
     this._isLocalhost = true;
+    // Header git action state. _committing toggles while
+    // a commit_all background task is running; cleared on
+    // commit-result. _reviewActive mirrors backend review
+    // state so we can disable commit in review mode.
+    // _streaming toggles while an LLM request is active;
+    // gates commit and reset to avoid racing the
+    // post-stream edit-application phase.
+    this._committing = false;
+    this._reviewActive = false;
+    this._streaming = false;
     // Whether a file reopen is pending (waiting for the
     // startup overlay to dismiss before issuing the RPC).
     this._pendingReopen = false;
@@ -666,6 +768,16 @@ export class AppShell extends JRPCClient {
     this._onPointerUp = this._onPointerUp.bind(this);
     // Window resize — RAF-throttled.
     this._onWindowResize = this._onWindowResize.bind(this);
+    // Header git action handlers and commit-result.
+    this._onCommitResultHeader =
+      this._onCommitResultHeader.bind(this);
+    this._onReviewStateChanged =
+      this._onReviewStateChanged.bind(this);
+    // Stream state — header gates commit/reset on these.
+    this._onStreamChunkHeader =
+      this._onStreamChunkHeader.bind(this);
+    this._onStreamCompleteHeader =
+      this._onStreamCompleteHeader.bind(this);
   }
 
   connectedCallback() {
@@ -710,6 +822,34 @@ export class AppShell extends JRPCClient {
     // Spec is explicit: all clients follow the server's
     // authoritative mode via this broadcast.
     window.addEventListener('mode-changed', this._onModeChanged);
+    // commit-result broadcasts via the server to all
+    // clients; we use it here to clear the in-flight
+    // flag so the header button returns to idle. The
+    // viewer refresh is handled inside commitResult()
+    // already.
+    window.addEventListener(
+      'commit-result', this._onCommitResultHeader,
+    );
+    // Review state — drives commit button disabling.
+    // Dispatched by chat panel / files tab when review
+    // starts/ends. Fallback: the get_current_state
+    // snapshot hydrates it on connect.
+    window.addEventListener(
+      'review-started', this._onReviewStateChanged,
+    );
+    window.addEventListener(
+      'review-ended', this._onReviewStateChanged,
+    );
+    // Streaming — any chunk arrival means a stream is
+    // active; completion (for any request) clears it.
+    // Simpler than request-ID tracking at this layer,
+    // and the single-stream invariant makes it accurate.
+    window.addEventListener(
+      'stream-chunk', this._onStreamChunkHeader,
+    );
+    window.addEventListener(
+      'stream-complete', this._onStreamCompleteHeader,
+    );
   }
 
   disconnectedCallback() {
@@ -743,6 +883,21 @@ export class AppShell extends JRPCClient {
     );
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     window.removeEventListener('mode-changed', this._onModeChanged);
+    window.removeEventListener(
+      'commit-result', this._onCommitResultHeader,
+    );
+    window.removeEventListener(
+      'review-started', this._onReviewStateChanged,
+    );
+    window.removeEventListener(
+      'review-ended', this._onReviewStateChanged,
+    );
+    window.removeEventListener(
+      'stream-chunk', this._onStreamChunkHeader,
+    );
+    window.removeEventListener(
+      'stream-complete', this._onStreamCompleteHeader,
+    );
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -814,6 +969,14 @@ export class AppShell extends JRPCClient {
       }
       if (typeof state.cross_ref_enabled === 'boolean') {
         this._crossRefEnabled = state.cross_ref_enabled;
+      }
+      // Review state — the snapshot carries a review
+      // object with `active: bool`. Missing field means
+      // no review in progress.
+      if (state.review && typeof state.review === 'object') {
+        this._reviewActive = !!state.review.active;
+      } else {
+        this._reviewActive = false;
       }
       // If the backend reports init is already complete,
       // dismiss the startup overlay. Handles the common
@@ -2136,6 +2299,237 @@ export class AppShell extends JRPCClient {
   }
 
   // ---------------------------------------------------------------
+  // Git actions (header)
+  // ---------------------------------------------------------------
+
+  /**
+   * Clear the _committing flag when commit_all finishes.
+   * ChatPanel has its own _onCommitResult for its own
+   * state; this is the header's copy. Both listen to
+   * the same window event independently.
+   */
+  _onCommitResultHeader() {
+    this._committing = false;
+  }
+
+  /**
+   * Follow review-started / review-ended window events to
+   * drive the commit button's disabled state. The detail
+   * shape isn't inspected — the event type alone tells us
+   * the direction.
+   */
+  _onReviewStateChanged(event) {
+    this._reviewActive = event.type === 'review-started';
+  }
+
+  /**
+   * First chunk of a stream flips the gate. Subsequent
+   * chunks are idempotent no-ops. We don't care which
+   * request is streaming — the single-stream invariant
+   * means "any chunk in flight" is equivalent to
+   * "streaming active" for button-gating purposes.
+   */
+  _onStreamChunkHeader() {
+    if (!this._streaming) this._streaming = true;
+  }
+
+  /**
+   * Stream completion — whether natural, cancelled, or
+   * errored — clears the gate. The backend fires
+   * streamComplete on all three paths, so this is the
+   * single reliable release point.
+   */
+  _onStreamCompleteHeader() {
+    this._streaming = false;
+  }
+
+  /**
+   * Copy the current working-tree diff (staged + unstaged)
+   * to the clipboard. Uses Repo.get_staged_diff and
+   * Repo.get_unstaged_diff, concatenates with a section
+   * header for each. If both are empty, toasts "Nothing
+   * to copy" rather than silently copying an empty string.
+   */
+  async _onCopyDiff() {
+    if (!this.call) return;
+    const getStaged = this.call['Repo.get_staged_diff'];
+    const getUnstaged = this.call['Repo.get_unstaged_diff'];
+    if (
+      typeof getStaged !== 'function'
+      || typeof getUnstaged !== 'function'
+    ) {
+      this._showToast('Diff not available', 'warning');
+      return;
+    }
+    try {
+      const [stagedRaw, unstagedRaw] = await Promise.all([
+        getStaged(), getUnstaged(),
+      ]);
+      const unwrap = (raw) => {
+        if (typeof raw === 'string') return raw;
+        if (raw && typeof raw === 'object') {
+          const keys = Object.keys(raw);
+          if (keys.length === 1) {
+            const v = raw[keys[0]];
+            return typeof v === 'string' ? v : '';
+          }
+        }
+        return '';
+      };
+      const staged = unwrap(stagedRaw);
+      const unstaged = unwrap(unstagedRaw);
+      const parts = [];
+      if (staged.trim()) {
+        parts.push('# === STAGED ===\n' + staged);
+      }
+      if (unstaged.trim()) {
+        parts.push('# === UNSTAGED ===\n' + unstaged);
+      }
+      if (parts.length === 0) {
+        this._showToast('No changes to copy', 'info');
+        return;
+      }
+      const text = parts.join('\n\n');
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        this._showToast('Diff copied to clipboard', 'success');
+      } else {
+        this._showToast('Clipboard not available', 'warning');
+      }
+    } catch (err) {
+      this._showToast(
+        `Copy diff failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Start a commit via LLMService.commit_all. The server
+   * does staging → diff → LLM-generated message → commit
+   * as a background task and broadcasts commit-result
+   * when done. We just set _committing=true to disable
+   * the button, and let commit-result flip it back.
+   *
+   * Disabled during review (read-only), during an
+   * existing commit (reentrancy guard), and for
+   * non-localhost callers.
+   */
+  async _onCommit() {
+    if (!this.call) return;
+    if (this._committing || this._reviewActive) return;
+    if (this._streaming) return;
+    if (!this._isLocalhost) return;
+    const fn = this.call['LLMService.commit_all'];
+    if (typeof fn !== 'function') {
+      this._showToast('Commit not available', 'warning');
+      return;
+    }
+    this._committing = true;
+    try {
+      const raw = await fn();
+      let payload = raw;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const keys = Object.keys(raw);
+        if (keys.length === 1) {
+          const inner = raw[keys[0]];
+          if (inner && typeof inner === 'object') payload = inner;
+        }
+      }
+      if (payload && payload.error) {
+        this._committing = false;
+        const reason = payload.reason || payload.error;
+        this._showToast(`Commit failed: ${reason}`, 'warning');
+        return;
+      }
+      // Server returns {status: "started"} — the actual
+      // result arrives via the commit-result broadcast,
+      // which is where _committing gets cleared.
+      this._showToast('Generating commit message…', 'info');
+    } catch (err) {
+      this._committing = false;
+      this._showToast(
+        `Commit failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Reset working tree + index to HEAD. Destructive —
+   * requires confirmation. Disabled during an in-flight
+   * commit and for non-localhost callers. Per
+   * specs4/5-webapp/chat.md, review mode does NOT
+   * disable reset — a user may legitimately want to
+   * discard review-mode modifications.
+   */
+  async _onResetToHead() {
+    if (!this.call) return;
+    if (this._committing) return;
+    if (this._streaming) return;
+    if (!this._isLocalhost) return;
+    const confirmed = window.confirm(
+      'Reset working tree to HEAD?\n\nAll uncommitted changes (staged and unstaged) will be discarded. This cannot be undone.',
+    );
+    if (!confirmed) return;
+    const fn = this.call['LLMService.reset_to_head'];
+    if (typeof fn !== 'function') {
+      this._showToast('Reset not available', 'warning');
+      return;
+    }
+    try {
+      const raw = await fn();
+      let payload = raw;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const keys = Object.keys(raw);
+        if (keys.length === 1) {
+          const inner = raw[keys[0]];
+          if (inner && typeof inner === 'object') payload = inner;
+        }
+      }
+      if (payload && payload.error) {
+        const reason = payload.reason || payload.error;
+        this._showToast(`Reset failed: ${reason}`, 'warning');
+        return;
+      }
+      this._showToast('Reset to HEAD', 'success');
+      // Refresh open viewers so the stale post-edit
+      // content is replaced with the HEAD state.
+      const diffViewer =
+        this.shadowRoot?.querySelector('ac-diff-viewer');
+      const svgViewer =
+        this.shadowRoot?.querySelector('ac-svg-viewer');
+      if (diffViewer?.refreshOpenFiles) {
+        diffViewer.refreshOpenFiles().catch(() => {});
+      }
+      if (svgViewer?.refreshOpenFiles) {
+        svgViewer.refreshOpenFiles().catch(() => {});
+      }
+    } catch (err) {
+      this._showToast(
+        `Reset failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Button title helpers
+  // ---------------------------------------------------------------
+
+  _commitButtonTitle() {
+    if (this._reviewActive) return 'Commit disabled during review';
+    if (this._streaming) return 'Commit disabled while AI is responding';
+    if (this._committing) return 'Committing…';
+    return 'Stage all changes and commit with an auto-generated message';
+  }
+
+  _resetButtonTitle() {
+    if (this._streaming) return 'Reset disabled while AI is responding';
+    return 'Reset to HEAD (discard all uncommitted changes)';
+  }
+
+  // ---------------------------------------------------------------
   // Tabs
   // ---------------------------------------------------------------
 
@@ -2246,6 +2640,33 @@ export class AppShell extends JRPCClient {
               aria-pressed=${this._crossRefEnabled}
               @click=${this._toggleCrossRef}
             >🔀 ${this._crossRefEnabled ? 'Cross-ref ON' : 'Cross-ref'}</button>
+          </div>
+          <div class="header-git-actions" role="group"
+            aria-label="Git actions">
+            <button
+              class="git-action-btn"
+              ?disabled=${!this.call}
+              title="Copy working-tree diff to clipboard"
+              aria-label="Copy diff"
+              @click=${this._onCopyDiff}
+            >📋</button>
+            <button
+              class="git-action-btn ${this._committing ? 'in-flight' : ''}"
+              ?disabled=${!this.call || this._committing
+                || this._reviewActive || this._streaming
+                || !this._isLocalhost}
+              title=${this._commitButtonTitle()}
+              aria-label="Commit all changes"
+              @click=${this._onCommit}
+            >${this._committing ? '⏳' : '💾'}</button>
+            <button
+              class="git-action-btn danger"
+              ?disabled=${!this.call || this._committing
+                || this._streaming || !this._isLocalhost}
+              title=${this._resetButtonTitle()}
+              aria-label="Reset to HEAD"
+              @click=${this._onResetToHead}
+            >⚠️</button>
           </div>
           <button
             class="minimize-button"

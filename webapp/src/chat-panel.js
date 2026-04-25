@@ -4214,7 +4214,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
             class="input-textarea"
             placeholder="Send a message… (Enter to send, Shift+Enter for newline)"
             .value=${this._input}
-            ?disabled=${!this.rpcConnected || this._streaming}
+            ?disabled=${!this.rpcConnected}
             @input=${this._onInputChange}
             @keydown=${this._onInputKeyDown}
             @paste=${this._onInputPaste}
