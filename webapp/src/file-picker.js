@@ -392,6 +392,14 @@ export class FilePicker extends LitElement {
       overflow-y: auto;
       overflow-x: auto;
       padding: 0.25rem 0;
+      outline: none;
+    }
+    .tree-scroll:focus-visible {
+      /* Subtle in-container focus indicator so keyboard
+       * users see they've landed in the tree. Native
+       * :focus outline is suppressed above because it
+       * clips under the scrollbar on some platforms. */
+      box-shadow: inset 0 0 0 2px var(--accent-primary, #58a6ff);
     }
 
     .empty-state {
@@ -841,7 +849,12 @@ export class FilePicker extends LitElement {
         />
         ${this._renderSortButtons()}
       </div>
-      <div class="tree-scroll" role="tree">
+      <div
+        class="tree-scroll"
+        role="tree"
+        tabindex="0"
+        @keydown=${this._onTreeKeyDown}
+      >
         ${this._renderRoot()}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
       </div>
@@ -991,6 +1004,7 @@ export class FilePicker extends LitElement {
       <div
         class="row is-dir"
         style="padding-left: ${indentPx}px"
+        data-row-path=${node.path}
         @click=${(e) => this._onDirClick(e, node)}
         role="treeitem"
         aria-expanded=${isOpen}
@@ -1035,6 +1049,7 @@ export class FilePicker extends LitElement {
       <div
         class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isActive ? 'active-in-viewer' : ''}"
         style="padding-left: ${indentPx}px"
+        data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
         role="treeitem"
         aria-current=${isFocused ? 'true' : 'false'}
@@ -1456,6 +1471,247 @@ export class FilePicker extends LitElement {
         bubbles: true,
         composed: true,
       }),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // Keyboard navigation (Increment 7)
+  // ---------------------------------------------------------------
+
+  /**
+   * Handle keydown events on the tree container. Only
+   * responds when focus is inside the tree (the filter
+   * input and sort buttons are siblings, so their key
+   * events never reach here thanks to the scoped listener).
+   *
+   * Uses `_focusedPath` as the shared focus state — the
+   * same state file-search uses to highlight its current
+   * match. Merging them keeps exactly one highlighted
+   * row at all times: if the user kbd-navigates during
+   * file-search, their arrow keys implicitly drive the
+   * focus forward.
+   *
+   * All actions are scoped to the currently-visible row
+   * set (the tree after filter + effective expansion).
+   * Collapsed directories hide their children; the
+   * navigation order matches what the user sees.
+   */
+  _onTreeKeyDown(event) {
+    const rows = this._collectVisibleRows();
+    if (rows.length === 0) return;
+    // Establish a focused row. First-ever key press with
+    // no focus lands on the first row. Subsequent presses
+    // use the stored _focusedPath unless it's no longer
+    // visible (filter changed, dir collapsed) — in which
+    // case we treat it as "no focus" and start at the
+    // first row.
+    let currentIdx = rows.findIndex(
+      (n) => n.path === this._focusedPath,
+    );
+    if (currentIdx < 0) currentIdx = -1;
+    const current = currentIdx >= 0 ? rows[currentIdx] : null;
+    switch (event.key) {
+      case 'ArrowDown': {
+        event.preventDefault();
+        const nextIdx =
+          currentIdx < 0
+            ? 0
+            : Math.min(currentIdx + 1, rows.length - 1);
+        this._setFocusedAndScroll(rows[nextIdx].path);
+        return;
+      }
+      case 'ArrowUp': {
+        event.preventDefault();
+        const prevIdx =
+          currentIdx < 0
+            ? 0
+            : Math.max(currentIdx - 1, 0);
+        this._setFocusedAndScroll(rows[prevIdx].path);
+        return;
+      }
+      case 'ArrowRight': {
+        if (!current) return;
+        event.preventDefault();
+        if (current.type === 'dir') {
+          const expanded = this._effectiveExpanded();
+          if (!expanded.has(current.path)) {
+            // Closed dir → expand.
+            this._toggleExpanded(current.path);
+          } else {
+            // Open dir → move to first child. Use the
+            // fresh row list after expansion; for already-
+            // open dirs, the next row in `rows` IS the
+            // first child (rows is a flat traversal).
+            const nextIdx = currentIdx + 1;
+            if (nextIdx < rows.length) {
+              this._setFocusedAndScroll(rows[nextIdx].path);
+            }
+          }
+        }
+        // Files: no-op. Nothing sensible to do for Right
+        // on a file (it has no children). The spec's
+        // wording "no-op" is honoured by the absence of
+        // any action here.
+        return;
+      }
+      case 'ArrowLeft': {
+        if (!current) return;
+        event.preventDefault();
+        const expanded = this._effectiveExpanded();
+        if (current.type === 'dir' && expanded.has(current.path)) {
+          // Open dir → collapse.
+          this._toggleExpanded(current.path);
+          return;
+        }
+        // Otherwise move focus to parent dir. A path's
+        // parent is derived by dropping the last segment;
+        // if there's no parent (root-level node), no-op.
+        const parentPath = this._parentPathOf(current.path);
+        if (parentPath === null) return;
+        // The parent may not be in the visible row set if
+        // it's the synthetic root (empty path). Skip to
+        // the first visible ancestor instead.
+        const parentRow = rows.find((n) => n.path === parentPath);
+        if (parentRow) {
+          this._setFocusedAndScroll(parentPath);
+        }
+        return;
+      }
+      case 'Enter':
+      case ' ': {
+        // Space is the document scroll key by default;
+        // preventDefault stops the page from jumping.
+        if (!current) return;
+        event.preventDefault();
+        if (current.type === 'dir') {
+          this._toggleExpanded(current.path);
+        } else {
+          // File: toggle selection via the same path
+          // the checkbox click uses. We don't route
+          // through the event target because the
+          // checkbox isn't the active element.
+          const next = new Set(this.selectedFiles);
+          if (next.has(current.path)) {
+            next.delete(current.path);
+          } else {
+            next.add(current.path);
+          }
+          this._emitSelectionChanged(next);
+        }
+        return;
+      }
+      case 'Home': {
+        event.preventDefault();
+        this._setFocusedAndScroll(rows[0].path);
+        return;
+      }
+      case 'End': {
+        event.preventDefault();
+        this._setFocusedAndScroll(rows[rows.length - 1].path);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  /**
+   * Flatten the visible portion of the tree into an
+   * ordered list of nodes. Walks the filtered tree in
+   * render order; only descends into directories that
+   * are effectively expanded (user-expanded OR filter-
+   * expanded via `_effectiveExpanded`). The synthetic
+   * root node is NOT included — the root row is non-
+   * interactive.
+   *
+   * Result order matches the visual row order in the
+   * rendered picker, so arrow-key movement stays in
+   * sync with what the user sees.
+   */
+  _collectVisibleRows() {
+    const tree = filterTree(this.tree, this.filterQuery);
+    const expanded = this._effectiveExpanded();
+    const out = [];
+    const walk = (node) => {
+      const children = sortChildrenWithMode(
+        node.children,
+        this._sortMode,
+        this._sortAsc,
+      );
+      for (const child of children) {
+        out.push(child);
+        if (child.type === 'dir' && expanded.has(child.path)) {
+          walk(child);
+        }
+      }
+    };
+    if (tree) walk(tree);
+    return out;
+  }
+
+  /**
+   * Return the parent directory path for a given path,
+   * or null when the path is at the repo root (no
+   * parent within the tree).
+   */
+  _parentPathOf(path) {
+    if (typeof path !== 'string' || !path) return null;
+    const idx = path.lastIndexOf('/');
+    if (idx < 0) return null;
+    return path.slice(0, idx);
+  }
+
+  /**
+   * Update `_focusedPath` and scroll the matching row
+   * into view with minimal motion. Called from every
+   * arrow-key / Home / End handler. Falls back to a
+   * deferred scroll when the DOM hasn't committed the
+   * latest render yet (focused path changed in the
+   * same tick as e.g. an expand toggle).
+   */
+  _setFocusedAndScroll(path) {
+    this._focusedPath = path;
+    // Defer scroll until after Lit commits the update,
+    // so the row's final position reflects any layout
+    // changes from the same keystroke (e.g., expanding
+    // a dir that pushes later rows downward).
+    this.updateComplete.then(() => {
+      const row = this._findRowElementForPath(path);
+      if (row && typeof row.scrollIntoView === 'function') {
+        row.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  /**
+   * Find the DOM row element matching a given path.
+   * Uses a data attribute on each rendered row so the
+   * lookup is O(1) rather than scanning all rows.
+   */
+  _findRowElementForPath(path) {
+    if (!this.shadowRoot) return null;
+    return this.shadowRoot.querySelector(
+      `[data-row-path="${this._cssEscape(path)}"]`,
+    );
+  }
+
+  /**
+   * CSS attribute-selector escaping — same subset the
+   * chat panel uses. Escapes characters that would
+   * otherwise terminate the selector or be treated as
+   * combinators. Backticks, forward slashes, dots, and
+   * hyphens all need escaping in attribute values.
+   */
+  _cssEscape(value) {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(value);
+    }
+    // jsdom tests don't expose CSS.escape; fall back to
+    // a best-effort regex replacement that covers the
+    // characters real-world paths contain.
+    return String(value).replace(
+      /[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g,
+      '\\$&',
     );
   }
 }

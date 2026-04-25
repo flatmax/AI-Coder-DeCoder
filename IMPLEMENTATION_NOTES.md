@@ -3049,10 +3049,35 @@ Not included (explicit scope boundaries):
 - **Scroll-into-view on active change.** The spec doesn't call for auto-scrolling the picker to keep the active row visible. If the user manually scrolls past the active row and then switches files in the viewer, the highlight moves but the picker's scroll position doesn't follow. Users scanning code in the viewer typically aren't looking at the picker simultaneously, so the absence of auto-scroll isn't a regression. If usage shows otherwise, it's a one-line addition to the handler.
 - **Highlight for directory containing active file.** Would be visually noisy — the picker already expands parent dirs for various reasons, and adding a highlight cascade would compete with selection and exclusion styling. File-level only keeps the signal clean.
 
-### Increment 7 — Keyboard navigation
+### ~~Increment 7 — Keyboard navigation~~ (delivered)
 
-- `file-picker.js` — tabindex on tree container, keydown handler (ArrowUp/ArrowDown move focus, ArrowRight expand dir, ArrowLeft collapse dir or move to parent, Space/Enter toggle selection on file or expand-toggle on dir, Home/End first/last row), focused-row state, scroll-into-view on focus change
-- tests — each key's behaviour, focus never escapes visible rows, scroll behaviour
+Picker tree is now fully keyboard-navigable when the scroll container has focus. Arrow keys, Home/End, Enter/Space for activation. Focus state reuses the existing `_focusedPath` (same state file-search uses to highlight its current match) so exactly one highlighted row exists at all times.
+
+- `file-picker.js` — `<div class="tree-scroll" tabindex="0" @keydown=${this._onTreeKeyDown}>`. The tabindex makes it Tab-focusable; subtle `box-shadow: inset 0 0 0 2px var(--accent-primary)` in `:focus-visible` shows where keyboard focus landed.
+- Handler dispatches on `event.key`: ArrowDown / ArrowUp move within `_collectVisibleRows()` output (a flat traversal honouring current expansion + filter), clamping at start/end. ArrowRight expands a closed dir, or moves to first child if already open (files: no-op). ArrowLeft collapses an open dir, or moves to parent dir path. Enter/Space toggle selection on file OR expansion on dir. Home/End jump to first/last visible row.
+- `_collectVisibleRows()` walks the filtered tree through `sortChildrenWithMode` so the order exactly matches the rendered row sequence. Collapsed dirs hide their children from the navigation list.
+- `_setFocusedAndScroll(path)` defers the scroll through `updateComplete.then(...)` so layout changes from the same keystroke (expanding a dir that pushes later rows down) are reflected before `scrollIntoView` reads the row's position. Uses `data-row-path` attribute on each row for O(1) lookup via `querySelector`; CSS-escape helper handles path characters like `/` and `.`.
+- Both file and directory row renders now carry `data-row-path=${node.path}`. Attribute not interpolated inside className strings — Lit's attribute binding handles the escape for us.
+- Handler listens on the `.tree-scroll` container, not `document`. Tab order from the filter input → tree → sort buttons, so the handler only fires when the user has actually Tab'd into the tree (or clicked on a row). The chat input's arrow keys never reach this handler.
+- Focus recovery: if `_focusedPath` points at a path that's no longer visible (filter typed, dir collapsed), the next arrow press treats it as "no focus" and lands on the first visible row rather than getting stuck.
+
+25 new tests: empty-focus-to-first-row, ArrowDown advance/clamp, ArrowUp backward/clamp, Home/End, ArrowRight on closed dir expands, ArrowRight on open dir moves to first child, ArrowRight on file no-op, ArrowLeft collapses open dir, ArrowLeft on file moves to parent, ArrowLeft on top-level row no-op, Enter/Space selection toggle, Space preventDefault (no page scroll), dir Enter toggles expansion, navigation skips collapsed dirs, descends into expanded dirs, focus recovery after filter hides focused path, empty tree silent, unhandled keys pass through, scrollIntoView called on focus change, tree-scroll tabindex=0, aria-current=true on focused file.
+
+Design points pinned by tests:
+
+- **Shared focus state.** `_focusedPath` is reused across keyboard nav and file-search highlight. A user arrow-navigating during active file search implicitly drives the search cursor forward. The alternative (two parallel focus states with different CSS) would double the visual highlights and create "which one wins" ambiguity.
+
+- **Visible-row order matches render.** `_collectVisibleRows` uses `sortChildrenWithMode` internally so arrow-key order matches exactly what the user sees. Without this, switching to mtime or size sort would produce an invisible "tab order" mismatch.
+
+- **Focus recovery.** If the focused path goes invisible (filter changes, dir collapsed), the handler computes `findIndex` returning -1, treats that as "no focus," and the next arrow lands on row 0. Pinned by `focus recovery when focused path becomes invisible`. Without this, a filter-then-arrow sequence would silently do nothing or throw.
+
+- **`scrollIntoView` uses `block: 'nearest'`.** Minimal motion — only scrolls when the row isn't already fully visible. Matches specs4's "scroll-into-view on focus change" expectation.
+
+- **Deferred scroll via `updateComplete.then`.** Expanding a dir with ArrowRight pushes subsequent rows down. Scrolling before Lit commits the update would read stale positions. The await-then-scroll pattern ensures layout is settled first. Not easily test-observable (jsdom has no layout); pinned indirectly by the `scrollIntoView called on focus change` test passing.
+
+- **Handler scoped to `.tree-scroll`, not document.** Prevents arrow keys from hijacking chat input or filter field. Pinned implicitly — other test files using chat-input arrow keys continue to work because the picker's handler doesn't reach them.
+
+- **`data-row-path` attribute, not ID.** IDs would need uniqueness handling (paths with `/` are valid IDs but browsers sometimes choke on unusual characters). A data attribute is robust and uniquely scoped per-row. `CSS.escape` (with jsdom fallback) handles path characters in the querySelector.
 
 ### Increment 8 — Context menu (files)
 
