@@ -4012,7 +4012,13 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """_stability_initialized flips True so lazy init is skipped."""
+        """_stability_initialized flips True so lazy init is skipped.
+
+        _stability_initialized is a per-mode dict now —
+        rebuild sets the flag only for the active mode,
+        leaving the other mode's tracker to do its own
+        init on first switch.
+        """
         fake_index = _FakeSymbolIndexWithRefs()
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -4021,9 +4027,9 @@ class TestRebuildCache:
             repo_files=[],
             monkeypatch=monkeypatch,
         )
-        assert svc._stability_initialized is False
+        assert svc._stability_initialized.get(Mode.CODE, False) is False
         svc.rebuild_cache()
-        assert svc._stability_initialized is True
+        assert svc._stability_initialized.get(Mode.CODE, False) is True
 
     def test_returns_documented_result_shape(
         self,
@@ -4100,7 +4106,7 @@ class TestRebuildCache:
         result = svc.rebuild_cache()
         assert result.get("error") == "restricted"
         # Tracker not touched by a rejected call.
-        assert svc._stability_initialized is False
+        assert svc._stability_initialized.get(Mode.CODE, False) is False
 
     def test_exception_during_impl_surfaces_as_error(
         self,
@@ -5391,7 +5397,7 @@ class TestLazyInitModeAware:
 
         svc._try_initialize_stability()
 
-        assert svc._stability_initialized is True
+        assert svc._stability_initialized.get(Mode.CODE, False) is True
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
@@ -5428,7 +5434,7 @@ class TestLazyInitModeAware:
 
         svc._try_initialize_stability()
 
-        assert svc._stability_initialized is True
+        assert svc._stability_initialized.get(Mode.DOC, False) is True
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
@@ -5467,7 +5473,7 @@ class TestLazyInitModeAware:
         svc._try_initialize_stability()
 
         # Not initialized — next retry will pick it up.
-        assert svc._stability_initialized is False
+        assert svc._stability_initialized.get(Mode.DOC, False) is False
         # Tracker empty (system:prompt isn't seeded without init).
         assert svc._stability_tracker.get_all_items() == {}
 
@@ -5498,13 +5504,13 @@ class TestLazyInitModeAware:
         # First attempt — not ready, bails.
         assert svc._doc_index_ready is False
         svc._try_initialize_stability()
-        assert svc._stability_initialized is False
+        assert svc._stability_initialized.get(Mode.DOC, False) is False
 
         # Background build "completes"; retry.
         svc._doc_index_ready = True
         svc._try_initialize_stability()
 
-        assert svc._stability_initialized is True
+        assert svc._stability_initialized.get(Mode.DOC, False) is True
         assert "doc:guide.md" in (
             svc._stability_tracker.get_all_items()
         )
@@ -5595,7 +5601,7 @@ class TestLazyInitModeAware:
 
         svc._try_initialize_stability()
 
-        assert svc._stability_initialized is False
+        assert svc._stability_initialized.get(Mode.CODE, False) is False
 
     def test_init_is_idempotent(
         self,
@@ -5612,7 +5618,7 @@ class TestLazyInitModeAware:
             monkeypatch=monkeypatch,
         )
         svc._try_initialize_stability()
-        assert svc._stability_initialized is True
+        assert svc._stability_initialized.get(Mode.CODE, False) is True
         first_items = set(
             svc._stability_tracker.get_all_items().keys()
         )

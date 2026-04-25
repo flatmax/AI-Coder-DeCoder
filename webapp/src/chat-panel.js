@@ -407,6 +407,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * -1 means no focus (empty results).
      */
     _fileSearchFocusedIndex: { type: Number, state: true },
+    /**
+     * True while a commit_all background task is in flight.
+     * Drives the commit button's spinner state and disables
+     * both commit and reset until the completion event fires.
+     * Cleared by the `commit-result` window event handler.
+     */
+    _committing: { type: Boolean, state: true },
+    /**
+     * True when review mode is active. Pushed down from the
+     * files-tab orchestrator when the server's review state
+     * is populated. Disables the commit button — review is
+     * read-only per specs3/4-features/code_review.md § Read-Only
+     * Mode. Reset is NOT disabled in review mode; a user may
+     * legitimately want to discard review-mode modifications.
+     *
+     * Defaults to false so component works standalone before
+     * the files-tab wires up the push.
+     */
+    reviewActive: { type: Boolean },
   };
 
   static styles = css`
@@ -1413,6 +1432,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // clicking a file to scroll the overlay). Prevents
     // feedback loops. Cleared after a short timeout.
     this._fileSearchScrollPaused = false;
+    // Commit state. `_committing` flips true on click, false
+    // when the `commit-result` window event fires. Review
+    // state defaults false and is driven by the parent
+    // component via property push.
+    this._committing = false;
+    this.reviewActive = false;
 
     // Per-request streaming state. Map<requestId, {content,
     // sticky}> where sticky is true when scroll is engaged. We
@@ -1453,11 +1478,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onUserMessage = this._onUserMessage.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
     this._onMessagesClick = this._onMessagesClick.bind(this);
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
     this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
+    this._onCommitResult = this._onCommitResult.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -1470,6 +1497,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    // `state-loaded` fires once on connect carrying the
+    // full backend state snapshot (from get_current_state).
+    // Distinct from `session-changed`, which fires when the
+    // active session is explicitly replaced via new_session
+    // or load_session_into_context. On startup the backend
+    // silently auto-restores the most recent prior session;
+    // without this listener the chat panel would show an
+    // empty message list even though the backend already
+    // has the prior conversation in its context.
+    window.addEventListener('state-loaded', this._onStateLoaded);
     window.addEventListener(
       'compaction-event',
       this._onCompactionEvent,
@@ -1483,6 +1520,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       'review-ended',
       this._onModeOrReviewChanged,
     );
+    window.addEventListener('commit-result', this._onCommitResult);
   }
 
   disconnectedCallback() {
@@ -1490,6 +1528,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener('state-loaded', this._onStateLoaded);
     window.removeEventListener(
       'compaction-event',
       this._onCompactionEvent,
@@ -1506,6 +1545,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       'review-ended',
       this._onModeOrReviewChanged,
     );
+    window.removeEventListener('commit-result', this._onCommitResult);
     if (this._rafHandle != null) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
@@ -1703,6 +1743,55 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   /**
+   * Handle the `state-loaded` event dispatched by AppShell
+   * after `get_current_state` returns on startup / reconnect.
+   *
+   * The backend auto-restores the most recent prior session
+   * when it boots, so `get_current_state` includes the
+   * restored message list. Without consuming this event, the
+   * chat panel would render empty even though the backend's
+   * context already has the prior conversation loaded — any
+   * new message would be appended to that history from the
+   * backend's perspective, but the user would see only their
+   * own new turn.
+   *
+   * Shape mirrors `_onSessionChanged` — the snapshot carries
+   * messages in the same format. We replace the local list
+   * rather than merging; the backend's state is
+   * authoritative.
+   *
+   * Guarded against wiping an in-flight stream: if the user
+   * reconnects mid-stream (rare but possible), we skip the
+   * replace. The stream's own completion will bring the UI
+   * back into sync.
+   */
+  _onStateLoaded(event) {
+    if (this._streaming) return;
+    const state = event.detail || {};
+    const msgs = Array.isArray(state.messages) ? state.messages : [];
+    // Only overwrite when we actually have something to
+    // restore. An empty snapshot during a fresh-install
+    // first-connect shouldn't clobber any optimistic local
+    // state (there shouldn't be any, but defensive).
+    if (msgs.length === 0 && this.messages.length === 0) return;
+    this.messages = msgs.map((m) => {
+      const normalized = normalizeMessageContent(m);
+      const images = Array.isArray(m.images)
+        ? m.images
+        : normalized.images;
+      return {
+        role: m.role,
+        content: normalized.content,
+        ...(images.length > 0 ? { images } : {}),
+        ...(m.system_event ? { system_event: true } : {}),
+      };
+    });
+    // Seed input history so up-arrow recall works for the
+    // restored session's prompts on first keystroke.
+    this._seedInputHistory(msgs);
+  }
+
+  /**
    * Handle a compaction / progress event from the server.
    *
    * These events arrive on the same channel as stream-chunk /
@@ -1832,6 +1921,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // idempotent and cheap; a stray event that doesn't
     // actually change the mode just re-sets the same list.
     this._loadSnippets();
+  }
+
+  /**
+   * Handle the `commit-result` window event dispatched by
+   * AppShell when the backend's background commit_all task
+   * finishes. The detail is the commit result dict — we
+   * don't consume it here (AppShell refreshes open viewers
+   * for us), we just flip the `_committing` flag off so
+   * the commit button returns to its idle state.
+   *
+   * Safe to call even when `_committing` is already false
+   * (e.g. a stray event from a commit another client
+   * initiated): assigning false to false is a no-op from
+   * Lit's perspective.
+   */
+  _onCommitResult() {
+    this._committing = false;
   }
 
   /**

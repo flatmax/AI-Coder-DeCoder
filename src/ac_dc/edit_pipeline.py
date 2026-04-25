@@ -235,12 +235,12 @@ def _diagnose_missing_anchor(content: str, anchor: str) -> str:
         return (
             "Old text not found — first line matches but "
             "subsequent lines differ. Re-read the file and "
-            "copy the exact current content."
+            "copy the exact current content. Don't rely on chat history."
         )
 
     return (
         "Old text not found in file. Re-read the file content "
-        "from context and copy the exact text."
+        "from context and copy the exact text. Don't rely on chat history."
     )
 
 

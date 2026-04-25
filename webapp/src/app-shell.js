@@ -463,6 +463,30 @@ export class AppShell extends JRPCClient {
       flex: 1;
       min-height: 0;
     }
+    /* Tab panels — all mounted into the DOM, but only the
+     * active one is visible. Matches specs3
+     * app_shell_and_dialog.md "Lazy Loading and DOM
+     * Preservation": "tab panels remain in DOM (hidden
+     * via CSS, not destroyed). Switching tabs toggles
+     * the .active class."
+     *
+     * Using display: none on inactive panels (rather than
+     * visibility: hidden) takes them out of the flex
+     * layout entirely so the active panel can claim the
+     * full dialog body height via flex: 1. The inactive
+     * panel's internal state — including the chat
+     * panel's textarea value, scroll position, and
+     * streaming state — is preserved because Lit never
+     * unmounts the element. */
+    .tab-panel {
+      flex: 1;
+      min-height: 0;
+      display: none;
+      flex-direction: column;
+    }
+    .tab-panel.active {
+      display: flex;
+    }
     .tab-placeholder {
       opacity: 0.5;
       font-style: italic;
@@ -2224,7 +2248,15 @@ export class AppShell extends JRPCClient {
           >${this._minimized ? '▴' : '▾'}</button>
         </div>
         <div class="dialog-body">
-          ${this._renderTab()}
+          <div class="tab-panel ${this.activeTab === 'files' ? 'active' : ''}">
+            <ac-files-tab></ac-files-tab>
+          </div>
+          <div class="tab-panel ${this.activeTab === 'context' ? 'active' : ''}">
+            <ac-context-tab></ac-context-tab>
+          </div>
+          <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}">
+            <ac-settings-tab></ac-settings-tab>
+          </div>
         </div>
         <div
           class="resize-handle right"
@@ -2267,22 +2299,6 @@ export class AppShell extends JRPCClient {
     `;
   }
 
-  _renderTab() {
-    if (this.activeTab === 'files') {
-      return html`<ac-files-tab></ac-files-tab>`;
-    }
-    if (this.activeTab === 'context') {
-      return html`<ac-context-tab></ac-context-tab>`;
-    }
-    if (this.activeTab === 'settings') {
-      return html`<ac-settings-tab></ac-settings-tab>`;
-    }
-    return html`
-      <div class="tab-placeholder">
-        ${this.activeTab} tab — not yet implemented.
-      </div>
-    `;
-  }
 }
 
 customElements.define('ac-app-shell', AppShell);
