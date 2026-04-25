@@ -8,7 +8,7 @@
     {
       "icon": "🔍",
       "tooltip": "Check context",
-      "message": "Before editing, please list the files and symbols you need to see. If any are missing from context, tell me which ones to add."
+      "message": "Check in your context for the full file(s)."
     },
     {
       "icon": "✏️",

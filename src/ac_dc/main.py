@@ -346,16 +346,20 @@ async def run(
             )
             return
 
-        # Preview mode requires a built dist/. Without it
-        # `vite preview` silently serves a 404 page and the
-        # browser never registers as AcApp — the backend
-        # then fires startupProgress into a void and the
-        # startup overlay never dismisses. Auto-build on
-        # demand so the user doesn't have to remember.
-        if preview and not (webapp_dir / "dist").is_dir():
+        # Preview mode always rebuilds. Without it,
+        # `vite preview` silently serves whatever stale
+        # bundle was last built — users see old code and
+        # the browser may fail to register as AcApp at all
+        # if the backend contract changed since the last
+        # build. The `prebuild` hook in webapp/package.json
+        # wipes dist/ and Vite's dep cache so every
+        # --preview starts from a clean slate; Vite's
+        # incremental build keeps the cost small when
+        # nothing changed.
+        if preview:
             logger.info(
-                "webapp/dist not found — running `npm run build` "
-                "(first-time preview build)..."
+                "Running `npm run build` for --preview "
+                "(clean rebuild via prebuild hook)..."
             )
             try:
                 build_result = subprocess.run(

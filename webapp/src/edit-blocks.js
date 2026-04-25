@@ -323,10 +323,20 @@ export function matchSegmentsToResults(segments, editResults) {
     return segments.map(() => null);
   }
   // Group results by file, preserving order within each group.
+  //
+  // Backend key is `file_path` per
+  // specs3/3-llm-engine/edit_protocol.md. Fall back to `file`
+  // so tests using shortened fixture shape still work.
   /** @type {Map<string, Array<object>>} */
   const byFile = new Map();
   for (const result of editResults) {
-    const file = result && result.file;
+    const file =
+      result &&
+      (typeof result.file_path === 'string'
+        ? result.file_path
+        : typeof result.file === 'string'
+          ? result.file
+          : null);
     if (typeof file !== 'string') continue;
     if (!byFile.has(file)) byFile.set(file, []);
     byFile.get(file).push(result);

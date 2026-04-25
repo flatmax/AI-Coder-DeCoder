@@ -316,22 +316,25 @@ describe('ChatPanel edit block rendering', () => {
     expect(cards[0].querySelector('.edit-file-path').textContent).toBe(
       'src/foo.py',
     );
-    // Old and new panes both present for a modify block.
-    expect(cards[0].querySelector('.edit-pane-old')).toBeTruthy();
-    expect(cards[0].querySelector('.edit-pane-new')).toBeTruthy();
-    // Content of each pane preserved. Lines carry a
-    // non-selectable prefix (`-`/`+`/` `) so copy-paste of
-    // a diff round-trips as unified-diff-shaped text. The
-    // prefix is part of textContent even though the prefix
-    // span is marked aria-hidden for screen readers.
-    const oldPane = cards[0].querySelector(
-      '.edit-pane-old .edit-pane-content',
+    // Unified diff body — single `.edit-pane-content`
+    // container holds both remove and add lines. No
+    // labeled side panes.
+    expect(cards[0].querySelector('.edit-pane-content')).toBeTruthy();
+    expect(cards[0].querySelector('.edit-pane-old')).toBeNull();
+    expect(cards[0].querySelector('.edit-pane-new')).toBeNull();
+    // Per-line diff rows for remove and add. Lines carry
+    // a non-selectable prefix (`-`/`+`/` `) so copy-paste
+    // round-trips as unified-diff-shaped text. The prefix
+    // is part of textContent even though the prefix span
+    // is marked aria-hidden for screen readers.
+    const removeLine = cards[0].querySelector(
+      '.diff-line.remove',
     );
-    const newPane = cards[0].querySelector(
-      '.edit-pane-new .edit-pane-content',
-    );
-    expect(oldPane.textContent).toBe('-old line');
-    expect(newPane.textContent).toBe('+new line');
+    const addLine = cards[0].querySelector('.diff-line.add');
+    expect(removeLine).toBeTruthy();
+    expect(addLine).toBeTruthy();
+    expect(removeLine.textContent).toBe('-old line');
+    expect(addLine.textContent).toBe('+new line');
   });
 
   it('renders message without editResults in pending state', async () => {
@@ -436,8 +439,9 @@ describe('ChatPanel edit block rendering', () => {
   });
 
   it('renders create block with NEW pane only', async () => {
-    // A create block has empty old-text. The renderer shows
-    // only the NEW pane and uses the `new` status for cards
+    // A create block has empty old-text. Unified-diff
+    // body renders every line as an add — no remove
+    // counterpart. Status badge is `new` for cards
     // without a backend result.
     const createBlock = [
       'src/new.py',
@@ -454,13 +458,16 @@ describe('ChatPanel edit block rendering', () => {
     await settle(p);
     const card = p.shadowRoot.querySelector('.edit-block-card');
     expect(card.classList.contains('edit-status-new')).toBe(true);
+    // Single unified pane — no labeled side panes.
+    expect(card.querySelector('.edit-pane-content')).toBeTruthy();
     expect(card.querySelector('.edit-pane-old')).toBeNull();
-    expect(card.querySelector('.edit-pane-new')).toBeTruthy();
-    // Create blocks render every line as an add, so each
-    // carries the `+` prefix marker.
+    expect(card.querySelector('.edit-pane-new')).toBeNull();
+    // Only add lines; no remove lines.
+    expect(card.querySelector('.diff-line.add')).toBeTruthy();
+    expect(card.querySelector('.diff-line.remove')).toBeNull();
+    // Add line carries the `+` prefix marker.
     expect(
-      card.querySelector('.edit-pane-new .edit-pane-content')
-        .textContent,
+      card.querySelector('.diff-line.add').textContent,
     ).toBe('+print("hello")');
   });
 
@@ -499,14 +506,19 @@ describe('ChatPanel edit block rendering', () => {
     const card = streaming.querySelector('.edit-block-card');
     expect(card).toBeTruthy();
     expect(card.classList.contains('edit-status-pending')).toBe(true);
-    // Old pane shows the in-progress content. Each line
-    // carries the `-` prefix marker; the line separator is
-    // the `\n` between diff-line spans in the rendered
-    // <pre>.
+    // Unified pane shows the in-progress content. The
+    // segmenter is still in `reading-old` — no REPL marker
+    // yet — so the buffered lines have no add counterparts
+    // and render as remove-only in the unified diff. Each
+    // line carries the `-` prefix marker; the line
+    // separator is `\n` between diff-line spans.
     expect(
-      card.querySelector('.edit-pane-old .edit-pane-content')
-        .textContent,
+      card.querySelector('.edit-pane-content').textContent,
     ).toBe('-old line one\n-old line t');
+    // Two remove lines, no add lines — this is a
+    // reading-old pending segment.
+    expect(card.querySelectorAll('.diff-line.remove')).toHaveLength(2);
+    expect(card.querySelector('.diff-line.add')).toBeNull();
   });
 
   it('streaming cursor appears after the body', async () => {

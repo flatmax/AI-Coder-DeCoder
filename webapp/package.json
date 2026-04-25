@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "vite",
+    "clean": "rm -rf dist node_modules/.vite node_modules/.vite-temp",
+    "prebuild": "npm run clean",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",

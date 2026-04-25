@@ -123,7 +123,9 @@ function buildAmbiguousRetryPrompt(editResults) {
     '',
   ];
   for (const r of ambiguous) {
-    const file = r.file || '(unknown file)';
+    // Backend key is `file_path`; fall back to `file` so
+    // older test fixtures still work.
+    const file = r.file_path || r.file || '(unknown file)';
     const msg = r.message || 'Ambiguous match';
     lines.push(`- ${file}: ${msg}`);
   }
@@ -158,12 +160,11 @@ function buildInContextMismatchRetryPrompt(
   selectedFiles,
 ) {
   const selectedSet = new Set(selectedFiles);
-  const mismatches = editResults.filter(
-    (r) =>
-      r &&
-      r.error_type === 'anchor_not_found' &&
-      selectedSet.has(r.file),
-  );
+  const mismatches = editResults.filter((r) => {
+    if (!r || r.error_type !== 'anchor_not_found') return false;
+    const path = r.file_path || r.file;
+    return typeof path === 'string' && selectedSet.has(path);
+  });
   if (mismatches.length === 0) return null;
   const lines = [
     'The following edit(s) failed because the old text didn\'t',
@@ -173,7 +174,7 @@ function buildInContextMismatchRetryPrompt(
     '',
   ];
   for (const r of mismatches) {
-    const file = r.file || '(unknown file)';
+    const file = r.file_path || r.file || '(unknown file)';
     const msg = r.message || 'Old text not found';
     lines.push(`- ${file}: ${msg}`);
   }
@@ -1120,6 +1121,64 @@ export class ChatPanel extends RpcMixin(LitElement) {
       font-size: 0.8125rem;
       line-height: 1.45;
       color: var(--text-primary, #c9d1d9);
+    }
+    /* Unified-diff line styling inside an edit card. Each
+     * line renders as a span.diff-line with a TYPE modifier
+     * (context/add/remove), a non-selectable prefix column
+     * carrying the +/-/space glyph, and a text column.
+     * Line-level background colours echo GitHub / GitLab
+     * diff conventions — green for add, red for remove,
+     * transparent for context — so a reader can scan
+     * vertically without parsing the prefix glyphs. */
+    .diff-line {
+      display: block;
+      white-space: pre;
+      padding: 0 0.25rem;
+      margin: 0 -0.25rem;
+      border-left: 2px solid transparent;
+    }
+    .diff-line.context {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .diff-line.add {
+      background: rgba(126, 231, 135, 0.12);
+      border-left-color: rgba(126, 231, 135, 0.5);
+      color: #a6e3af;
+    }
+    .diff-line.remove {
+      background: rgba(248, 81, 73, 0.12);
+      border-left-color: rgba(248, 81, 73, 0.5);
+      color: #ff9b93;
+    }
+    /* Prefix column — single-char glyph with fixed width
+     * so text aligns vertically regardless of content. */
+    .diff-prefix {
+      display: inline-block;
+      width: 1em;
+      user-select: none;
+      opacity: 0.55;
+      margin-right: 0.25rem;
+    }
+    .diff-text {
+      display: inline;
+    }
+    /* Word-level highlight within an already-coloured
+     * line. Paired remove/add runs pick up a
+     * span.diff-change around the specific words that
+     * changed — a saturated background on top of the
+     * line-level colour draws the eye to the actual
+     * edit without hiding the surrounding context. */
+    .diff-change {
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+    .diff-line.add .diff-change {
+      background: rgba(126, 231, 135, 0.35);
+      color: #fff;
+    }
+    .diff-line.remove .diff-change {
+      background: rgba(248, 81, 73, 0.35);
+      color: #fff;
     }
     .edit-error-message {
       padding: 0.4rem 0.75rem;
@@ -4346,6 +4405,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
       msg.role === 'assistant' && !msg.system_event
         ? this._renderFileSummary(this._collectMessageFiles(msg))
         : '';
+    // Edit summary banner — settled assistant messages
+    // with edit results. Rendered BEFORE the file summary
+    // so the order in the card is: body, edits, files.
+    // Edits are the actionable outcome; the file summary
+    // is a convenience affordance. If both render, edits
+    // go first.
+    const editSummary =
+      msg.role === 'assistant' && !msg.system_event
+        ? this._renderEditSummary(msg)
+        : '';
     return html`
       <div
         class="message-card ${roleClass}${highlightClass}"
@@ -4357,6 +4426,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
         ${images.length > 0
           ? this._renderMessageImages(images)
           : ''}
+        ${editSummary}
         ${fileSummary}
         <div class="message-toolbar bottom">${toolbar}</div>
       </div>
@@ -4463,6 +4533,178 @@ export class ChatPanel extends RpcMixin(LitElement) {
       >
         ↩
       </button>
+    `;
+  }
+
+  /**
+   * Render the edit summary banner for an assistant message.
+   * Appears at the end of the message (after all edit cards)
+   * when the response contained at least one edit.
+   *
+   * Per specs3/5-webapp/chat_interface.md §Edit Summary and
+   * specs4/5-webapp/chat.md §Edit Summary Banner:
+   *
+   *   - Aggregate counts as color-coded stat badges
+   *   - Individual failure listing when failures are present
+   *     (clickable file path, error-type badge, message)
+   *   - Note about a populated retry prompt when applicable
+   *
+   * Returns empty when there are no edit results, or when
+   * the results array is all zero counts (pure prose reply
+   * the backend tagged with an empty results array).
+   */
+  _renderEditSummary(msg) {
+    if (!msg || msg.role !== 'assistant') return '';
+    const results = Array.isArray(msg.editResults)
+      ? msg.editResults
+      : [];
+    if (results.length === 0) return '';
+
+    // Aggregate by status. Count `applied` and
+    // `already_applied` separately so the badge text
+    // matches what the user actually got (idempotent
+    // re-applies shouldn't look like fresh writes).
+    let applied = 0;
+    let alreadyApplied = 0;
+    let failed = 0;
+    let skipped = 0;
+    let notInContext = 0;
+    const failures = [];
+    for (const r of results) {
+      if (!r) continue;
+      const status = r.status;
+      if (status === 'applied') applied += 1;
+      else if (status === 'already_applied') alreadyApplied += 1;
+      else if (status === 'failed') {
+        failed += 1;
+        failures.push(r);
+      } else if (status === 'skipped') {
+        skipped += 1;
+        failures.push(r);
+      } else if (status === 'not_in_context') {
+        notInContext += 1;
+        failures.push(r);
+      }
+    }
+
+    // Detect whether a retry prompt was populated. We
+    // don't track this as state; re-derive from the same
+    // conditions the builder uses. The note is
+    // informational — mismatched state (user cleared the
+    // textarea between streamComplete and re-render) just
+    // shows a stale note, which is harmless.
+    const selected = new Set(
+      Array.isArray(this.selectedFiles) ? this.selectedFiles : [],
+    );
+    const hasAmbiguous = results.some(
+      (r) => r && r.error_type === 'ambiguous_anchor',
+    );
+    const hasInContextMismatch = results.some((r) => {
+      if (!r || r.error_type !== 'anchor_not_found') return false;
+      const path = r.file_path || r.file;
+      return typeof path === 'string' && selected.has(path);
+    });
+    const hasNotInContext = notInContext > 0;
+    const retryPromptPopulated =
+      hasAmbiguous || hasInContextMismatch || hasNotInContext;
+
+    // Build the header badge list. Only non-zero counts
+    // render — a successful response with no failures
+    // shows just "✅ N applied".
+    const stats = [];
+    if (applied > 0) {
+      stats.push(html`
+        <span class="edit-summary-stat applied">
+          ✅ ${applied} applied
+        </span>
+      `);
+    }
+    if (alreadyApplied > 0) {
+      stats.push(html`
+        <span class="edit-summary-stat applied">
+          ✅ ${alreadyApplied} already applied
+        </span>
+      `);
+    }
+    if (failed > 0) {
+      stats.push(html`
+        <span class="edit-summary-stat failed">
+          ❌ ${failed} failed
+        </span>
+      `);
+    }
+    if (skipped > 0) {
+      stats.push(html`
+        <span class="edit-summary-stat skipped">
+          ⚠️ ${skipped} skipped
+        </span>
+      `);
+    }
+    if (notInContext > 0) {
+      stats.push(html`
+        <span class="edit-summary-stat not-in-context">
+          ⚠️ ${notInContext} not in context
+        </span>
+      `);
+    }
+    // Nothing to show — all results had unknown statuses
+    // (defensive; shouldn't happen under normal operation).
+    if (stats.length === 0) return '';
+
+    return html`
+      <div class="edit-summary" role="status">
+        <div class="edit-summary-header">
+          <span class="edit-summary-title">Edits:</span>
+          ${stats}
+        </div>
+        ${failures.length > 0
+          ? html`
+              <div class="edit-summary-failures">
+                ${failures.map((r) => {
+                  const path = r.file_path || r.file || '(unknown)';
+                  const errorType =
+                    typeof r.error_type === 'string' ? r.error_type : '';
+                  const message =
+                    typeof r.message === 'string' ? r.message : '';
+                  return html`
+                    <div class="edit-summary-failure">
+                      <span
+                        class="edit-summary-failure-path"
+                        @click=${() => {
+                          window.dispatchEvent(
+                            new CustomEvent('navigate-file', {
+                              detail: { path },
+                              bubbles: false,
+                            }),
+                          );
+                        }}
+                        title="Open ${path}"
+                      >${path}</span>
+                      ${errorType
+                        ? html`<span
+                            class="edit-summary-failure-type"
+                          >${errorType}</span>`
+                        : ''}
+                      ${message
+                        ? html`<span
+                            class="edit-summary-failure-message"
+                          >${message}</span>`
+                        : ''}
+                    </div>
+                  `;
+                })}
+              </div>
+            `
+          : ''}
+        ${retryPromptPopulated
+          ? html`
+              <div class="edit-summary-retry-note">
+                A retry prompt has been prepared in the input
+                below.
+              </div>
+            `
+          : ''}
+      </div>
     `;
   }
 

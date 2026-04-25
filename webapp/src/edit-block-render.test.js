@@ -277,7 +277,10 @@ describe('renderFilePath', () => {
 // ---------------------------------------------------------------------------
 
 describe('renderEditBody', () => {
-  it('renders both OLD and NEW panes when both have content', () => {
+  it('renders remove and add lines in a single unified pane', () => {
+    // Unified-diff layout — one column of lines, not
+    // separate OLD/NEW panes. Remove and add runs
+    // interleave in source order.
     const seg = {
       type: 'edit',
       filePath: 'a.py',
@@ -286,28 +289,29 @@ describe('renderEditBody', () => {
       isCreate: false,
     };
     const html = renderEditBody(seg);
-    expect(html).toContain('edit-pane-old');
-    expect(html).toContain('edit-pane-new');
-    // Content lives inside diff-line spans now. The two
-    // input lines differ by one word, which the word-level
-    // diff wraps in a `<span class="diff-change">`. The
-    // full `old content` substring no longer exists as a
-    // contiguous run — `old` and `content` get split
-    // across the change span and the equal-tail.
-    //
-    // Checking each token individually proves they both
-    // surfaced without pinning the exact highlighting shape.
+    // Single-pane structure — one content wrapper, no
+    // labeled side panes.
+    expect(html).toContain('edit-body');
+    expect(html).toContain('edit-pane-content');
+    expect(html).not.toContain('edit-pane-old');
+    expect(html).not.toContain('edit-pane-new');
+    // Both remove and add lines render.
+    expect(html).toContain('diff-line remove');
+    expect(html).toContain('diff-line add');
+    // The changed tokens are each wrapped in a
+    // `diff-change` span so the word-level highlight
+    // stands out within the line-level coloured
+    // background.
+    expect(html).toContain('diff-change');
     expect(html).toContain('old');
     expect(html).toContain('new');
     expect(html).toContain('content');
-    // Both panes have structural markers.
-    expect(html).toContain('diff-line');
-    expect(html).toContain('diff-change');
   });
 
-  it('suppresses OLD pane when oldText is empty', () => {
-    // Create blocks and pending-in-reading-old segments with
-    // empty buffers both skip this pane.
+  it('omits remove lines when oldText is empty', () => {
+    // Create blocks have only `add` lines — nothing to
+    // remove. The body still renders as a unified pane;
+    // just with no `diff-line remove` entries.
     const seg = {
       type: 'edit',
       filePath: 'a.py',
@@ -316,16 +320,17 @@ describe('renderEditBody', () => {
       isCreate: true,
     };
     const html = renderEditBody(seg);
-    expect(html).not.toContain('edit-pane-old');
-    expect(html).toContain('edit-pane-new');
+    expect(html).toContain('edit-body');
+    expect(html).toContain('diff-line add');
+    expect(html).not.toContain('diff-line remove');
     expect(html).toContain('new content');
   });
 
-  it('always renders NEW pane, even when empty', () => {
+  it('renders an empty body when both sides are empty', () => {
     // Predictable layout: during a fresh pending segment in
-    // the reading-old phase with no content yet, the NEW pane
-    // is still there as a placeholder. Gives the streaming
-    // cursor somewhere to live visually.
+    // the reading-old phase with no content yet, the body
+    // still renders (as a container) so the streaming
+    // cursor has a predictable home. No diff lines appear.
     const seg = {
       type: 'edit-pending',
       filePath: 'a.py',
@@ -334,11 +339,16 @@ describe('renderEditBody', () => {
       newText: '',
     };
     const html = renderEditBody(seg);
-    expect(html).toContain('edit-pane-new');
-    expect(html).not.toContain('edit-pane-old');
+    expect(html).toContain('edit-body');
+    expect(html).toContain('edit-pane-content');
+    expect(html).not.toContain('diff-line');
   });
 
-  it('labels each pane with OLD / NEW', () => {
+  it('prefixes each line with its diff marker', () => {
+    // Unified-diff convention — each line begins with
+    // `+`, `-`, or ` `. The prefix column is rendered
+    // as a non-selectable span so copy-paste round-trips
+    // produce unified-diff-shaped output.
     const seg = {
       type: 'edit',
       filePath: 'a.py',
@@ -347,8 +357,10 @@ describe('renderEditBody', () => {
       isCreate: false,
     };
     const html = renderEditBody(seg);
-    expect(html).toContain('>OLD<');
-    expect(html).toContain('>NEW<');
+    expect(html).toContain('diff-prefix');
+    // Both prefix glyphs appear at least once.
+    expect(html).toMatch(/diff-prefix[^>]*>-</);
+    expect(html).toMatch(/diff-prefix[^>]*>\+</);
   });
 
   it('escapes HTML in OLD and NEW content', () => {
@@ -384,10 +396,11 @@ describe('renderEditBody', () => {
   });
 
   it('preserves every input line as a distinct diff-line', () => {
-    // Two-line input produces two sibling `<span class=
-    // "diff-line ...">` elements per pane. Line content
-    // appears inside `<span class="diff-text">` children —
-    // newlines between spans are structural, not textual.
+    // Two-line input produces sibling `<span class=
+    // "diff-line ...">` elements in the unified pane.
+    // Line content appears inside `<span class="diff-text">`
+    // children — newlines between spans are structural,
+    // not textual.
     const seg = {
       type: 'edit',
       filePath: 'a.py',
@@ -407,19 +420,18 @@ describe('renderEditBody', () => {
     expect(html).toContain('line ');
     expect(html).toContain('two');
     expect(html).toContain('three');
-    // Exactly one diff-line per input line per pane.
-    // OLD pane: 1 context + 1 remove. NEW pane: 1 context
-    // + 1 add. Four diff-line elements total.
+    // Unified-diff: each input line → one diff-line row.
+    // 1 shared context line + 1 remove line + 1 add line
+    // = three rows total.
     const diffLineMatches = html.match(/class="diff-line/g) || [];
-    expect(diffLineMatches).toHaveLength(4);
-    // The divergent lines each get their own row with the
-    // expected class.
+    expect(diffLineMatches).toHaveLength(3);
+    // Each change side has exactly one row; context has
+    // exactly one row (shared, not duplicated across
+    // panes).
     expect(html).toContain('diff-line remove');
     expect(html).toContain('diff-line add');
-    // Context appears in both panes — at least two
-    // instances.
     const contextMatches = html.match(/diff-line context/g) || [];
-    expect(contextMatches.length).toBeGreaterThanOrEqual(2);
+    expect(contextMatches).toHaveLength(1);
   });
 
   it('handles non-string oldText and newText defensively', () => {
@@ -432,10 +444,11 @@ describe('renderEditBody', () => {
       isCreate: false,
     };
     const html = renderEditBody(seg);
-    // Both coerced to empty. No OLD pane (empty), NEW pane
-    // renders empty.
-    expect(html).not.toContain('edit-pane-old');
-    expect(html).toContain('edit-pane-new');
+    // Both coerced to empty — no diff lines, but the
+    // container still renders predictably.
+    expect(html).toContain('edit-body');
+    expect(html).toContain('edit-pane-content');
+    expect(html).not.toContain('diff-line');
   });
 
   it('wraps panes in edit-body container', () => {
@@ -570,11 +583,17 @@ describe('renderEditCard', () => {
     expect(html).toContain('src/foo.py');
   });
 
-  it('includes body with OLD and NEW panes', () => {
+  it('includes body with unified diff pane', () => {
     const html = renderEditCard(EDIT_SEG, null);
     expect(html).toContain('edit-body');
-    expect(html).toContain('edit-pane-old');
-    expect(html).toContain('edit-pane-new');
+    expect(html).toContain('edit-pane-content');
+    // Unified layout — no separate OLD/NEW side panes.
+    expect(html).not.toContain('edit-pane-old');
+    expect(html).not.toContain('edit-pane-new');
+    // Both remove and add lines present for a modify
+    // block with differing old/new text.
+    expect(html).toContain('diff-line remove');
+    expect(html).toContain('diff-line add');
   });
 
   it('includes error message for failed edits', () => {
@@ -591,7 +610,7 @@ describe('renderEditCard', () => {
     expect(html).not.toContain('edit-error-message');
   });
 
-  it('renders create block with NEW pane only', () => {
+  it('renders create block with add-only unified body', () => {
     const createSeg = {
       type: 'edit',
       filePath: 'src/new.py',
@@ -601,8 +620,11 @@ describe('renderEditCard', () => {
     };
     const html = renderEditCard(createSeg, null);
     expect(html).toContain('edit-status-new');
-    expect(html).not.toContain('edit-pane-old');
-    expect(html).toContain('edit-pane-new');
+    expect(html).toContain('edit-body');
+    // Create blocks have only add lines — no remove
+    // counterparts.
+    expect(html).toContain('diff-line add');
+    expect(html).not.toContain('diff-line remove');
   });
 
   it('renders pending segment with pending status', () => {

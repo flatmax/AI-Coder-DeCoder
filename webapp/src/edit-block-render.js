@@ -313,16 +313,22 @@ function _renderDiffLine(line, side) {
 }
 
 /**
- * Render the body of an edit card as a two-pane coloured
- * diff. OLD pane shows context + remove lines; NEW pane
- * shows context + add lines. Paired remove/add runs get
- * word-level highlighting via `_computeCharDiff`.
+ * Render the body of an edit card as a unified diff — one
+ * column of lines, each prefixed `-` / `+` / ` ` for
+ * remove / add / context. Paired remove/add runs get
+ * word-level highlights inside the line-level coloured
+ * background via `_computeCharDiff`.
  *
- * Create blocks (empty OLD buffer) render only the NEW
- * pane. Pending segments mid-stream use whatever text has
- * accumulated so far — the diff library handles partial
- * input gracefully (a mid-word truncation just shows up as
- * an unchanged-then-truncated line pair).
+ * Per specs3/5-webapp/chat_interface.md §Two-Level Diff
+ * Highlighting — the visual model is unified-diff style
+ * (one column), not side-by-side. Side-by-side OLD/NEW
+ * panes make short edits look like huge blocks and waste
+ * horizontal space on tall cards.
+ *
+ * Create blocks (empty OLD buffer) still render correctly
+ * — every line is `+`/add with no remove counterpart.
+ * Pending segments mid-stream work too; the diff library
+ * handles partial input gracefully.
  *
  * @param {Object} segment
  * @returns {string}
@@ -330,47 +336,35 @@ function _renderDiffLine(line, side) {
 export function renderEditBody(segment) {
   const oldText = typeof segment.oldText === 'string' ? segment.oldText : '';
   const newText = typeof segment.newText === 'string' ? segment.newText : '';
-  const parts = [];
-  // Compute the full diff once; project onto each pane by
-  // filtering out the lines that don't belong there. The
-  // `diff` library's input is the two buffers; its output is
-  // an ordered line list that already preserves source
-  // order, which is what both panes render.
   const rawLines = _computeDiff(oldText, newText);
   const lines = _pairDiffLines(rawLines);
-  // OLD pane — only render when the old buffer was
-  // non-empty. Create blocks skip this pane entirely.
-  if (oldText !== '') {
-    const oldLines = lines.filter(
-      (l) => l.type === 'context' || l.type === 'remove',
-    );
-    const oldContent = oldLines
-      .map((l) => _renderDiffLine(l, 'old'))
-      .join('\n');
-    parts.push(
-      `<div class="edit-pane edit-pane-old">` +
-        `<div class="edit-pane-label">OLD</div>` +
-        `<pre class="edit-pane-content">${oldContent}</pre>` +
-        `</div>`,
-    );
-  }
-  // NEW pane — always render so the card has predictable
-  // layout. Empty new buffer produces an empty `<pre>`; the
-  // streaming-card cursor provides visual feedback that
-  // content is incoming.
-  const newLines = lines.filter(
-    (l) => l.type === 'context' || l.type === 'add',
+  // Render every line in a single column. For a paired
+  // remove/add pair, the remove line picks the `old` side
+  // of the char-diff and the add line picks the `new` side.
+  // The overall visual order comes straight from
+  // `_computeDiff` — the diff library already orders
+  // remove-then-add for each changed run, which matches
+  // the unified-diff convention.
+  // Join with the empty string rather than `\n`. The
+  // `.diff-line` spans are `display: block`, so they
+  // stack vertically on their own. A literal newline
+  // between them would render as a visible blank row
+  // inside the parent `<pre>` (which preserves
+  // whitespace), producing unsightly gaps between
+  // coloured bands. The preformatted spacing within
+  // each line is still preserved by `white-space: pre`
+  // on `.diff-line` itself.
+  const body = lines
+    .map((l) => {
+      const side = l.type === 'add' ? 'new' : 'old';
+      return _renderDiffLine(l, side);
+    })
+    .join('');
+  return (
+    `<div class="edit-body">` +
+      `<pre class="edit-pane-content">${body}</pre>` +
+    `</div>`
   );
-  const newContent = newLines
-    .map((l) => _renderDiffLine(l, 'new'))
-    .join('\n');
-  parts.push(
-    `<div class="edit-pane edit-pane-new">` +
-      `<div class="edit-pane-label">NEW</div>` +
-      `<pre class="edit-pane-content">${newContent}</pre>` +
-      `</div>`,
-  );
-  return `<div class="edit-body">${parts.join('')}</div>`;
 }
 
 /**
