@@ -2918,21 +2918,19 @@ Per-increment contract:
 - picker stays in a working state between commits
 - the IMPLEMENTATION_NOTES.md plan updates after each lands, striking through what's delivered and adding a short delivery note
 
-### Increment 1 — Status badges + diff stats + line-count color
+### ~~Increment 1 — Status badges + diff stats + line-count color~~ (delivered)
 
-Pure render change. `Repo.get_file_tree()` already returns `{modified, staged, untracked, deleted, diff_stats}` arrays; files-tab receives them and throws them away.
+Pure render change. `Repo.get_file_tree()` already returns `{modified, staged, untracked, deleted, diff_stats}` arrays; files-tab now surfaces them via the picker's `statusData` prop. Line-count color thresholds (green < 130, orange 130–170, red > 170) render on file rows.
 
-- `files-tab.js` — build a `_statusData` object from the response, pass to picker alongside `tree`
-- `file-picker.js` — `statusData` property, `_renderFile` emits M/S/U/D badge with appropriate color, `+N -N` diff stats next to line count, line-count color classes (green < 130, orange 130–170, red > 170)
-- tests — status-array → badge mapping for all five states, diff stats rendering, line-count thresholds
+### ~~Increment 2 — Branch badge + tooltips~~ (delivered `71ea694`)
 
-### Increment 2 — Branch badge + tooltips
+- `files-tab.js` fires `Repo.get_current_branch` in parallel with `Repo.get_file_tree` via `Promise.allSettled`. A branch-fetch failure degrades gracefully (log + no pill) rather than blocking the tree render. `tree.name` threaded into `branchInfo.repoName` as a fallback so the root row renders even when branch info is absent.
+- `file-picker.js` gains `branchInfo` reactive prop with safe defaults. New `_renderRoot()` + `_renderBranchPill()` helpers emit a non-interactive root row with repo name and a branch pill (muted gray for normal branches, orange with short SHA for detached HEAD). Full SHA in tooltip on detached pill.
+- `_tooltipFor(node)` helper produces `{path} — {name}` tooltips, reducing to just `{name}` when path and name match (top-level entries).
+- 16 new tests covering root rendering, branch pill states (normal / muted / detached / empty-repo / null-prop / malformed response), tooltip forms, plus 8 files-tab plumbing tests (RPC fires, picker receives, repoName threading, detached response, branch failure isolation, tree failure fatality, refresh on files-modified, malformed response tolerance).
+- Five pre-existing `.name` queries scoped to `.row.is-dir:not(.is-root) .name, .row.is-file .name` so the new root row doesn't inflate counts. One duplicate test block from a partial earlier edit was removed; the canonical "when they differ" version remains, asserting `path === name` → just `{name}` (no redundant `src — src`).
 
-- `files-tab.js` — second RPC call `Repo.get_current_branch` during `_loadFileTree`, thread `branchInfo` to picker
-- `file-picker.js` — render `⎇ main` pill on root row; orange `⎇ abc1234` for detached HEAD; `title` attribute on every row formatted as `full/path — name` (root falls back to repo name)
-- tests — branch pill render for normal / detached / empty branch cases, tooltip format
-
-### Increment 3 — Sort modes
+### Increment 3 — Sort modes (next)
 
 - `file-picker.js` — three sort-mode buttons (A / 🕐 / #) in filter bar, active-button styling, clicking the active button toggles ascending/descending, localStorage keys `ac-dc-sort-mode` + `ac-dc-sort-asc`, sort logic applies after the existing dir-before-file rule
 - tests — mode toggle, direction toggle on re-click, localStorage round-trip, dirs still sort alphabetically regardless of mode
