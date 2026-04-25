@@ -2462,3 +2462,563 @@ describe('FilesTab cleanup', () => {
     expect(getTree).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Context-menu action dispatch (Increment 8b)
+// ---------------------------------------------------------------------------
+
+describe('FilesTab context-menu action dispatch', () => {
+  /**
+   * Fire a `context-menu-action` event from the picker
+   * child with the given detail. Uses the picker as the
+   * source so the bubbles-through-shadow-DOM path
+   * matches production.
+   */
+  function fireContextAction(tab, detail) {
+    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('context-menu-action', {
+        detail,
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Stub `window.confirm` for the duration of a test.
+   * Returns a restore function to call in teardown.
+   */
+  function stubConfirm(result) {
+    const original = window.confirm;
+    window.confirm = vi.fn().mockReturnValue(result);
+    return () => {
+      window.confirm = original;
+    };
+  }
+
+  async function setupTabWithFile(path = 'a.md') {
+    const getTree = vi
+      .fn()
+      .mockResolvedValue(
+        fakeTreeResponse([
+          { name: path, path, type: 'file', lines: 5 },
+        ]),
+      );
+    const stage = vi.fn().mockResolvedValue({});
+    const unstage = vi.fn().mockResolvedValue({});
+    const discard = vi.fn().mockResolvedValue({});
+    const deleteFile = vi.fn().mockResolvedValue({});
+    publishFakeRpc({
+      'Repo.get_file_tree': getTree,
+      'Repo.stage_files': stage,
+      'Repo.unstage_files': unstage,
+      'Repo.discard_changes': discard,
+      'Repo.delete_file': deleteFile,
+    });
+    const t = mountTab();
+    await settle(t);
+    return { t, getTree, stage, unstage, discard, deleteFile };
+  }
+
+  // -------------------------------------------------------
+  // Stage
+  // -------------------------------------------------------
+
+  describe('stage action', () => {
+    it('calls Repo.stage_files with the path wrapped in an array', async () => {
+      const { t, stage } = await setupTabWithFile('src/a.md');
+      fireContextAction(t, {
+        action: 'stage',
+        type: 'file',
+        path: 'src/a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(stage).toHaveBeenCalledOnce();
+      // Repo.stage_files accepts an array; single-path
+      // wrap keeps the wire format consistent with
+      // multi-path staging.
+      expect(stage.mock.calls[0][0]).toEqual(['src/a.md']);
+    });
+
+    it('reloads the file tree after staging', async () => {
+      const { t, stage, getTree } = await setupTabWithFile();
+      const initialCalls = getTree.mock.calls.length;
+      fireContextAction(t, {
+        action: 'stage',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(stage).toHaveBeenCalledOnce();
+      // Exactly one reload (status badges update).
+      expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+    });
+
+    it('shows a success toast', async () => {
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const { t } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'stage',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        const successToasts = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'success');
+        expect(successToasts.length).toBeGreaterThan(0);
+        expect(successToasts[0].message).toContain('a.md');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('surfaces restricted error as warning toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+            ]),
+          ),
+        'Repo.stage_files': vi.fn().mockResolvedValue({
+          error: 'restricted',
+          reason: 'Participants cannot stage files',
+        }),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        fireContextAction(t, {
+          action: 'stage',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        const warningToasts = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warningToasts.length).toBeGreaterThan(0);
+        expect(warningToasts[0].message).toContain('Participants');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('surfaces RPC rejection as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+            ]),
+          ),
+        'Repo.stage_files': vi
+          .fn()
+          .mockRejectedValue(new Error('stage boom')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        fireContextAction(t, {
+          action: 'stage',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        const errorToasts = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errorToasts.length).toBeGreaterThan(0);
+        expect(errorToasts.at(-1).message).toContain('stage boom');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+  });
+
+  // -------------------------------------------------------
+  // Unstage — symmetric to stage, fewer tests
+  // -------------------------------------------------------
+
+  describe('unstage action', () => {
+    it('calls Repo.unstage_files with the path wrapped', async () => {
+      const { t, unstage } = await setupTabWithFile();
+      fireContextAction(t, {
+        action: 'unstage',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(unstage).toHaveBeenCalledOnce();
+      expect(unstage.mock.calls[0][0]).toEqual(['a.md']);
+    });
+
+    it('reloads the file tree', async () => {
+      const { t, getTree } = await setupTabWithFile();
+      const initialCalls = getTree.mock.calls.length;
+      fireContextAction(t, {
+        action: 'unstage',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+    });
+  });
+
+  // -------------------------------------------------------
+  // Discard — destructive, requires confirmation
+  // -------------------------------------------------------
+
+  describe('discard action', () => {
+    it('prompts for confirmation before calling RPC', async () => {
+      const restore = stubConfirm(true);
+      try {
+        const { t, discard } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'discard',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(window.confirm).toHaveBeenCalledOnce();
+        expect(window.confirm.mock.calls[0][0]).toContain('a.md');
+        expect(discard).toHaveBeenCalledOnce();
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not call RPC when user cancels', async () => {
+      const restore = stubConfirm(false);
+      try {
+        const { t, discard, getTree } = await setupTabWithFile();
+        const initialCalls = getTree.mock.calls.length;
+        fireContextAction(t, {
+          action: 'discard',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(discard).not.toHaveBeenCalled();
+        // No tree reload either — cancel is a full no-op.
+        expect(getTree.mock.calls.length).toBe(initialCalls);
+      } finally {
+        restore();
+      }
+    });
+
+    it('calls Repo.discard_changes with the path wrapped', async () => {
+      const restore = stubConfirm(true);
+      try {
+        const { t, discard } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'discard',
+          type: 'file',
+          path: 'src/b.md',
+          name: 'b.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(discard.mock.calls[0][0]).toEqual(['src/b.md']);
+      } finally {
+        restore();
+      }
+    });
+
+    it('reloads the file tree after discard succeeds', async () => {
+      const restore = stubConfirm(true);
+      try {
+        const { t, getTree } = await setupTabWithFile();
+        const initialCalls = getTree.mock.calls.length;
+        fireContextAction(t, {
+          action: 'discard',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('shows error toast on RPC rejection', async () => {
+      const restore = stubConfirm(true);
+      try {
+        publishFakeRpc({
+          'Repo.get_file_tree': vi
+            .fn()
+            .mockResolvedValue(
+              fakeTreeResponse([
+                { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+              ]),
+            ),
+          'Repo.discard_changes': vi
+            .fn()
+            .mockRejectedValue(new Error('discard boom')),
+        });
+        const consoleSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        const toastListener = vi.fn();
+        window.addEventListener('ac-toast', toastListener);
+        try {
+          const t = mountTab();
+          await settle(t);
+          fireContextAction(t, {
+            action: 'discard',
+            type: 'file',
+            path: 'a.md',
+            name: 'a.md',
+            isExcluded: false,
+          });
+          await settle(t);
+          const errorToasts = toastListener.mock.calls
+            .map((call) => call[0].detail)
+            .filter((d) => d.type === 'error');
+          expect(errorToasts.length).toBeGreaterThan(0);
+        } finally {
+          window.removeEventListener('ac-toast', toastListener);
+          consoleSpy.mockRestore();
+        }
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  // -------------------------------------------------------
+  // Delete — destructive, requires confirmation
+  // -------------------------------------------------------
+
+  describe('delete action', () => {
+    it('prompts for confirmation before calling RPC', async () => {
+      const restore = stubConfirm(true);
+      try {
+        const { t, deleteFile } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'delete',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(window.confirm).toHaveBeenCalledOnce();
+        expect(window.confirm.mock.calls[0][0]).toContain('a.md');
+        expect(deleteFile).toHaveBeenCalledOnce();
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not call RPC when user cancels', async () => {
+      const restore = stubConfirm(false);
+      try {
+        const { t, deleteFile } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'delete',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(deleteFile).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    });
+
+    it('calls Repo.delete_file with the raw path (not wrapped)', async () => {
+      // delete_file takes a single path, not an array —
+      // unlike stage/unstage/discard which accept arrays.
+      const restore = stubConfirm(true);
+      try {
+        const { t, deleteFile } = await setupTabWithFile();
+        fireContextAction(t, {
+          action: 'delete',
+          type: 'file',
+          path: 'src/a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(deleteFile.mock.calls[0][0]).toBe('src/a.md');
+      } finally {
+        restore();
+      }
+    });
+
+    it('reloads the file tree after delete succeeds', async () => {
+      const restore = stubConfirm(true);
+      try {
+        const { t, getTree } = await setupTabWithFile();
+        const initialCalls = getTree.mock.calls.length;
+        fireContextAction(t, {
+          action: 'delete',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+      } finally {
+        restore();
+      }
+    });
+
+    it('clears exclusion for the deleted path if it was excluded', async () => {
+      // Files disappearing from the tree also disappear
+      // from exclusion state; without this the excluded
+      // set would carry a dead reference forever.
+      const restore = stubConfirm(true);
+      try {
+        publishFakeRpc({
+          'Repo.get_file_tree': vi
+            .fn()
+            .mockResolvedValue(
+              fakeTreeResponse([
+                { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+              ]),
+            ),
+          'Repo.delete_file': vi.fn().mockResolvedValue({}),
+          'LLMService.set_excluded_index_files': vi
+            .fn()
+            .mockResolvedValue([]),
+        });
+        const t = mountTab();
+        await settle(t);
+        // Exclude the file first (picker event path).
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('exclusion-changed', {
+            detail: { excludedFiles: ['a.md'] },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        expect(t._excludedFiles.has('a.md')).toBe(true);
+        // Now delete.
+        fireContextAction(t, {
+          action: 'delete',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: true,
+        });
+        await settle(t);
+        expect(t._excludedFiles.has('a.md')).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  // -------------------------------------------------------
+  // Routing edge cases
+  // -------------------------------------------------------
+
+  describe('dispatch edge cases', () => {
+    it('ignores malformed event detail', async () => {
+      const { t, stage } = await setupTabWithFile();
+      // Missing everything.
+      fireContextAction(t, undefined);
+      await settle(t);
+      // Missing action.
+      fireContextAction(t, { type: 'file', path: 'a.md' });
+      await settle(t);
+      // Non-string action.
+      fireContextAction(t, { action: 42, type: 'file', path: 'a.md' });
+      await settle(t);
+      // Missing path.
+      fireContextAction(t, { action: 'stage', type: 'file' });
+      await settle(t);
+      // Empty path.
+      fireContextAction(t, {
+        action: 'stage',
+        type: 'file',
+        path: '',
+      });
+      await settle(t);
+      expect(stage).not.toHaveBeenCalled();
+    });
+
+    it('ignores non-file types (directory menu reserved for later)', async () => {
+      const { t, stage } = await setupTabWithFile();
+      fireContextAction(t, {
+        action: 'stage',
+        type: 'dir',
+        path: 'src',
+        name: 'src',
+      });
+      await settle(t);
+      expect(stage).not.toHaveBeenCalled();
+    });
+
+    it('unknown actions are silently dropped (reserved for later sub-commits)', async () => {
+      const { t, stage, unstage, discard, deleteFile } =
+        await setupTabWithFile();
+      for (const action of [
+        'rename',
+        'duplicate',
+        'load-left',
+        'load-right',
+        'include',
+        'exclude',
+        'bogus',
+      ]) {
+        fireContextAction(t, {
+          action,
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+      }
+      await settle(t);
+      // None of the implemented RPCs fired.
+      expect(stage).not.toHaveBeenCalled();
+      expect(unstage).not.toHaveBeenCalled();
+      expect(discard).not.toHaveBeenCalled();
+      expect(deleteFile).not.toHaveBeenCalled();
+    });
+  });
+});

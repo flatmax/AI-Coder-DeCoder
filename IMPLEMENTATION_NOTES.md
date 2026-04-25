@@ -3084,7 +3084,7 @@ Design points pinned by tests:
 Largest single feature. Delivered in sub-commits to keep each change reviewable:
 
 - **8a — shell** (delivered): right-click opens menu, positioning with viewport clamping, outside-click + Escape dismissal, action-routing scaffold via `context-menu-action` events.
-- **8b — simple RPC actions** (planned): stage / unstage / discard / delete with confirm.
+- **8b — simple RPC actions** (delivered): stage / unstage / discard / delete with confirm.
 - **8c — inline-input actions** (planned): rename / duplicate with inline textbox rendered at row indent.
 - **8d — include/exclude + load-in-panel** (planned): route include/exclude through existing exclusion path; dispatch `load-diff-panel` events.
 
@@ -3121,6 +3121,38 @@ Design points pinned by tests:
 - **Disconnect closes + releases.** `disconnectedCallback` override calls `_closeContextMenu`, which releases document listeners. Without this, a picker removed mid-menu would leak listeners permanently. Pinned by `disconnect closes menu and releases listeners` — verifies the menu state is null and a subsequent `document.body.click()` doesn't throw (which would indicate a stale handler still trying to call back into an unmounted element).
 
 Next sub-commit — **8b**: wire the simple RPC actions (stage / unstage / discard / delete with confirm) in `files-tab.js`. Picker already fires `context-menu-action` with the right detail; the orchestrator listens and dispatches to `Repo.*` RPCs with toast feedback.
+
+### ~~Increment 8b — Stage / unstage / discard / delete~~ (delivered)
+
+Four context-menu actions now dispatch to real RPCs. Stage and unstage are fire-and-forget. Discard and delete prompt for confirmation via `window.confirm` before the RPC fires. Every action path reloads the file tree on success so status badges update; every failure surfaces via `ac-toast` window events (restricted as warning, RPC rejection as error); collaboration-mode `{error: "restricted"}` responses route to the warning toast just like selection changes do.
+
+- `files-tab.js` — new `_onContextMenuAction(event)` dispatcher catches `context-menu-action` bubbling from the picker. Filters to `type === 'file'` (directory menus reserved for a later sub-commit), validates the path shape, then routes on `action` to one of four per-action async methods: `_dispatchStage`, `_dispatchUnstage`, `_dispatchDiscard`, `_dispatchDelete`.
+- `Repo.stage_files` / `Repo.unstage_files` / `Repo.discard_changes` accept path arrays; each dispatcher wraps the single path in `[path]` for consistency with the multi-path form. `Repo.delete_file` takes a raw path; delete sends it unwrapped (and the test pins this asymmetry).
+- `_confirm(message)` is a thin wrapper around `window.confirm` that tests can stub cleanly. Real implementation delegates directly; the wrapper exists so tests don't have to reach into global state for every confirmation path.
+- `_isRestrictedError(result)` shared helper for the four new dispatchers. Matches the pattern inline-defined in `_sendSelectionToServer` / `_sendExclusionToServer` — the older sites weren't migrated since they're stable code paths, but new dispatchers use the helper to avoid copy-paste.
+- Delete also clears the file from `_excludedFiles` if it was excluded — a deleted file no longer exists in the tree, so carrying an exclusion entry for a non-existent path would be a dead reference. Selection is cleared by the server's `filesChanged` broadcast if the deleted file was selected; exclusion has no such broadcast yet, so we clear locally and notify via `_applyExclusion`.
+- Unrecognised actions (rename / duplicate / load-left / load-right / include / exclude) fall through the dispatcher silently. They're the contract targets of 8c and 8d; picking them up here would require disabling the menu items (specs4 says they stay visible) or logging noise on every right-click preview. Silent drop + sub-commit coverage is cleaner.
+- `_onContextMenuAction` bound in the constructor alongside the other bound handlers. Template binding added to `ac-file-picker` alongside the existing picker event listeners. No new window-level listeners — the event reaches us via shadow-DOM bubbling through Lit's property-binding path.
+
+Twenty-six new tests across five describe blocks: stage (five tests — RPC shape, reload, success toast, restricted warning, error toast), unstage (two — RPC shape, reload; error paths share the stage pattern and don't need duplicating), discard (five — confirm prompt, cancel no-op, RPC shape, reload, error toast), delete (five — confirm prompt, cancel no-op, unwrapped path, reload, clears exclusion), edge cases (three — malformed detail, non-file types, unknown actions).
+
+Design points pinned by tests:
+
+- **Confirm prompt is blocking and mandatory for destructive actions.** Discard and delete both call `_confirm(...)` and bail early if the user cancels. `does not call RPC when user cancels` pins this for both — no RPC, no tree reload, no toast. The message includes the file path so users know exactly what's about to go away.
+
+- **`_confirm` wrapper insulates tests from the global prompt.** Tests stub `window.confirm` with a vitest mock returning `true` or `false` for the duration of a block. Real code path is `window.confirm(message)` so production keeps the native modal.
+
+- **`Repo.delete_file` takes a raw path; stage / unstage / discard take arrays.** The test `calls Repo.delete_file with the raw path (not wrapped)` pins the asymmetry. It matches the RPC layer's actual contract — `delete_file` is single-target by design since there's no natural batch-delete semantic in git; the others accept arrays because `git add -- a b c` and friends genuinely do batch.
+
+- **Deleted files are cleared from exclusion locally.** Server doesn't broadcast excluded-set changes (as of 4.4.2 — only selection gets `filesChanged`), so the tab clears `_excludedFiles` when deleting an excluded file. Otherwise re-adding a file at the same path would find it mysteriously pre-excluded. Pinned by `clears exclusion for the deleted path if it was excluded`.
+
+- **Restricted errors surface as warning toast, RPC rejection as error toast.** Same shape the picker's selection / exclusion paths use. Collab participants see "Participants cannot stage files" rather than a generic failure. Pinned by `surfaces restricted error as warning toast` and `surfaces RPC rejection as error toast`.
+
+- **Malformed events are silently dropped.** A `context-menu-action` without detail, or with non-string action, missing path, empty path, or non-file type, does not fire any RPC. Pinned by `ignores malformed event detail` which fires five malformed variants and asserts `stage` was never called. Catches regressions where a future refactor might crash on null-detail or on type coercion.
+
+- **Unknown actions don't trigger implemented RPCs.** Firing `rename`, `duplicate`, `load-left`, `load-right`, `include`, `exclude`, or `bogus` doesn't accidentally route to the implemented dispatchers. Tests on all seven. Matters because the picker renders the menu items today and 8c/8d will implement them later; nothing should leak into the active code paths in the interim.
+
+Next sub-commit — **8c**: inline-input pattern for rename and duplicate. Rename shows an inline textbox at the row's indentation level, pre-filled with the current name and auto-selected. Duplicate shows the same pattern pre-filled with the full path so the user can edit the target location. Enter submits, Escape / blur cancels.
 
 ### Increment 9 — Context menu (directories)
 

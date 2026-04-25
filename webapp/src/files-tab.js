@@ -367,6 +367,12 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
     this._onActiveFileChanged =
       this._onActiveFileChanged.bind(this);
+    // Context-menu action handler — bubbles up from the
+    // picker via `bubbles: true, composed: true`. Phase
+    // 8b wires stage / unstage / discard / delete; later
+    // sub-commits wire rename / duplicate / include /
+    // exclude / load-in-panel.
+    this._onContextMenuAction = this._onContextMenuAction.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -1082,6 +1088,210 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Context-menu action routing (Increment 8b — simple RPCs)
+  // ---------------------------------------------------------------
+
+  /**
+   * Route a `context-menu-action` event from the picker
+   * to the corresponding backend RPC. Detail shape (from
+   * 8a): `{action, type, path, name, isExcluded}`. 8b
+   * handles stage / unstage / discard / delete. Later
+   * sub-commits add rename / duplicate / include /
+   * exclude / load-in-panel; unrecognised actions fall
+   * through to a debug log and wait for their owning
+   * sub-commit.
+   */
+  _onContextMenuAction(event) {
+    const detail = event.detail;
+    if (!detail || typeof detail.action !== 'string') return;
+    const { action, type, path } = detail;
+    // 8a ships with file-row menus only. Directory menus
+    // land later; reject non-file types cleanly rather
+    // than dispatching to per-file RPCs.
+    if (type !== 'file') return;
+    if (typeof path !== 'string' || !path) return;
+    switch (action) {
+      case 'stage':
+        this._dispatchStage(path);
+        return;
+      case 'unstage':
+        this._dispatchUnstage(path);
+        return;
+      case 'discard':
+        this._dispatchDiscard(path);
+        return;
+      case 'delete':
+        this._dispatchDelete(path);
+        return;
+      default:
+        // Known actions (rename, duplicate, include,
+        // exclude, load-left, load-right) not yet wired
+        // — dropped silently rather than logged, since
+        // the event reaches here on every right-click
+        // + hover path and logging would be noisy.
+        return;
+    }
+  }
+
+  /**
+   * Stage a single file. `Repo.stage_files` accepts an
+   * array so we wrap the path.
+   */
+  async _dispatchStage(path) {
+    try {
+      const result = await this.rpcExtract(
+        'Repo.stage_files',
+        [path],
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(result.reason || 'Restricted operation', 'warning');
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(`Staged ${path}`, 'success');
+    } catch (err) {
+      console.error('[files-tab] stage_files failed', err);
+      this._showToast(
+        `Failed to stage ${path}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Unstage a single file. Symmetric to stage.
+   */
+  async _dispatchUnstage(path) {
+    try {
+      const result = await this.rpcExtract(
+        'Repo.unstage_files',
+        [path],
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(result.reason || 'Restricted operation', 'warning');
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(`Unstaged ${path}`, 'success');
+    } catch (err) {
+      console.error('[files-tab] unstage_files failed', err);
+      this._showToast(
+        `Failed to unstage ${path}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Discard changes to a file — tracked files revert
+   * to HEAD; untracked files are deleted. Confirm
+   * dialog because both outcomes are destructive.
+   *
+   * Using `window.confirm` is the simplest accessible
+   * option. A future pass could swap in a Lit modal
+   * that matches the app's styling, but the user-
+   * facing contract (a blocking yes/no before the
+   * action runs) stays the same.
+   */
+  async _dispatchDiscard(path) {
+    const confirmed = this._confirm(
+      `Discard changes to ${path}? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.discard_changes',
+        [path],
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(result.reason || 'Restricted operation', 'warning');
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(`Discarded changes to ${path}`, 'success');
+    } catch (err) {
+      console.error('[files-tab] discard_changes failed', err);
+      this._showToast(
+        `Failed to discard ${path}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Delete a file from the working tree. Confirm with
+   * a strongly-worded prompt since this is permanent
+   * from the picker's perspective (git history still
+   * has the file, but from the current branch tip
+   * forward it's gone).
+   */
+  async _dispatchDelete(path) {
+    const confirmed = this._confirm(
+      `Delete ${path}? The file will be removed from the working tree.`,
+    );
+    if (!confirmed) return;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.delete_file',
+        path,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(result.reason || 'Restricted operation', 'warning');
+        return;
+      }
+      await this._loadFileTree();
+      // Deleted files are also removed from selection /
+      // exclusion if they were there. Server's broadcast
+      // via `filesChanged` will adjust selection; we
+      // clear exclusion locally since there's no
+      // broadcast for that today.
+      if (this._excludedFiles.has(path)) {
+        const next = new Set(this._excludedFiles);
+        next.delete(path);
+        this._applyExclusion(next, /* notifyServer */ true);
+      }
+      this._showToast(`Deleted ${path}`, 'success');
+    } catch (err) {
+      console.error('[files-tab] delete_file failed', err);
+      this._showToast(
+        `Failed to delete ${path}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Wrap `window.confirm` so tests can stub it cleanly.
+   * The real implementation delegates directly; tests
+   * mock this method to drive the confirm / cancel
+   * branches deterministically.
+   */
+  _confirm(message) {
+    return typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(message)
+      : false;
+  }
+
+  /**
+   * Check the result of an RPC call against the
+   * restricted-caller shape. Matches the helper inline-
+   * defined in `_sendSelectionToServer` and
+   * `_sendExclusionToServer` — extracted here so the
+   * four context-menu dispatchers don't duplicate the
+   * shape check. Older sites haven't been migrated;
+   * they're stable code paths that don't touch 8b's
+   * changes.
+   */
+  _isRestrictedError(result) {
+    return (
+      result &&
+      typeof result === 'object' &&
+      !Array.isArray(result) &&
+      result.error === 'restricted'
+    );
+  }
+
+  // ---------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------
 
@@ -1131,6 +1341,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @selection-changed=${this._onSelectionChanged}
           @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}
+          @context-menu-action=${this._onContextMenuAction}
         ></ac-file-picker>
       </div>
       <div class="chat-pane">
