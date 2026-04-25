@@ -9,7 +9,154 @@
 // commit that adds localization or restyles the badges touches
 // exactly one file.
 
+import { diffLines, diffWords } from 'diff';
+
 import { escapeHtml } from './markdown.js';
+
+/**
+ * Compute a line-level diff between two text buffers. Returns
+ * a flat array of `{type, text}` objects where `type` is one
+ * of `'context'`, `'add'`, `'remove'`.
+ *
+ * Empty inputs produce an empty array rather than a single
+ * zero-length line — callers (renderEditBody) already handle
+ * the empty-pane case separately so this stays small.
+ *
+ * Uses the `diff` package's Myers algorithm via `diffLines`.
+ * We strip the trailing newline the library produces for
+ * each chunk so our line model is one-record-per-line.
+ */
+export function _computeDiff(oldText, newText) {
+  const a = typeof oldText === 'string' ? oldText : '';
+  const b = typeof newText === 'string' ? newText : '';
+  if (a === '' && b === '') return [];
+  const changes = diffLines(a, b);
+  const out = [];
+  for (const change of changes) {
+    const type = change.added
+      ? 'add'
+      : change.removed
+        ? 'remove'
+        : 'context';
+    // `diffLines` returns a single `value` string containing
+    // every line in the run, terminated by newlines. Split
+    // per-line so downstream renderers can style each
+    // individually. The final empty element after a trailing
+    // newline is dropped — it's the "end of buffer" marker,
+    // not an actual blank line.
+    const raw = change.value;
+    const parts = raw.split('\n');
+    if (parts.length > 1 && parts[parts.length - 1] === '') {
+      parts.pop();
+    }
+    for (const text of parts) {
+      out.push({ type, text });
+    }
+  }
+  return out;
+}
+
+/**
+ * Compute a word-level diff between two single-line strings.
+ * Used inside `renderEditBody` to highlight the specific
+ * within-line changes when a `remove` run pairs cleanly with
+ * an `add` run.
+ *
+ * Returns two parallel arrays of `{type, text}` segments:
+ *   - `old` segments: `'equal'` or `'delete'`
+ *   - `new` segments: `'equal'` or `'insert'`
+ *
+ * Consecutive same-type segments are merged so the rendered
+ * output doesn't fragment on word boundaries. The `diff`
+ * package's output can split on every word boundary which
+ * produces visually noisy highlighting; merging adjacent
+ * equals makes the rendered diff readable.
+ */
+export function _computeCharDiff(oldStr, newStr) {
+  const a = typeof oldStr === 'string' ? oldStr : '';
+  const b = typeof newStr === 'string' ? newStr : '';
+  const changes = diffWords(a, b);
+  const oldSegs = [];
+  const newSegs = [];
+  for (const change of changes) {
+    if (change.added) {
+      newSegs.push({ type: 'insert', text: change.value });
+    } else if (change.removed) {
+      oldSegs.push({ type: 'delete', text: change.value });
+    } else {
+      oldSegs.push({ type: 'equal', text: change.value });
+      newSegs.push({ type: 'equal', text: change.value });
+    }
+  }
+  return {
+    old: _mergeAdjacent(oldSegs),
+    new: _mergeAdjacent(newSegs),
+  };
+}
+
+/**
+ * Merge adjacent segments of the same `type` into one. The
+ * `diff` package's word tokenizer can produce runs like
+ * `[equal 'foo', equal ' ', equal 'bar']` which all collapse
+ * to a single `equal 'foo bar'`. Shortens the output HTML
+ * and avoids visual fragmentation.
+ */
+function _mergeAdjacent(segs) {
+  const out = [];
+  for (const seg of segs) {
+    const last = out.length > 0 ? out[out.length - 1] : null;
+    if (last && last.type === seg.type) {
+      last.text += seg.text;
+    } else {
+      out.push({ type: seg.type, text: seg.text });
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk a line-level diff and pair adjacent remove/add runs
+ * for character-level diffing. Returns an array parallel to
+ * the input where each `add` or `remove` entry may carry a
+ * `charDiff` field: `{old: [...], new: [...]}` for the
+ * paired-line case, absent for unpaired runs.
+ *
+ * Pairing rule: N consecutive `remove` lines followed by N
+ * consecutive `add` lines pair 1:1 in order. Asymmetric runs
+ * (more removes than adds, or vice versa) leave the excess
+ * unpaired — they get whole-line highlighting only, per
+ * specs §Pairing.
+ */
+export function _pairDiffLines(lines) {
+  const out = lines.map((l) => ({ ...l }));
+  let i = 0;
+  while (i < out.length) {
+    if (out[i].type !== 'remove') {
+      i += 1;
+      continue;
+    }
+    let removeEnd = i;
+    while (removeEnd < out.length && out[removeEnd].type === 'remove') {
+      removeEnd += 1;
+    }
+    let addEnd = removeEnd;
+    while (addEnd < out.length && out[addEnd].type === 'add') {
+      addEnd += 1;
+    }
+    const removes = removeEnd - i;
+    const adds = addEnd - removeEnd;
+    const paired = Math.min(removes, adds);
+    for (let k = 0; k < paired; k += 1) {
+      const oldIdx = i + k;
+      const newIdx = removeEnd + k;
+      const cd = _computeCharDiff(out[oldIdx].text, out[newIdx].text);
+      out[oldIdx].charDiff = cd;
+      out[newIdx].charDiff = cd;
+    }
+    i = addEnd;
+  }
+  return out;
+}
 
 /**
  * Map of backend `EditStatus` values to display metadata.
@@ -122,14 +269,60 @@ export function renderFilePath(filePath) {
 }
 
 /**
- * Render the body of an edit card — two fenced blocks labelled
- * OLD and NEW, each with the content escaped.
+ * Render a single diff line as a `<span class="diff-line
+ * {type}">` element. A non-selectable prefix (`+`/`-`/` `)
+ * marks the line type so copy-paste round-trips produce
+ * unified-diff-shaped output, matching common editor
+ * conventions.
  *
- * Create blocks (empty old text) render only the NEW block.
- * Pending segments render whatever they have accumulated so
- * far, preserving streaming visibility. The `<pre>` elements
- * get role-specific classes so a later commit can layer a
- * character-level diff without changing the DOM shape.
+ * Lines with a `charDiff` wrap changed segments in
+ * `<span class="diff-change">` so word-level changes stand
+ * out inside the line-level coloured background. Context
+ * lines and unpaired add/remove lines (where word-level
+ * diffing doesn't apply) render as flat escaped text.
+ */
+function _renderDiffLine(line, side) {
+  const prefix = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ';
+  let content;
+  if (line.charDiff) {
+    const segs = side === 'old' ? line.charDiff.old : line.charDiff.new;
+    const wantType = side === 'old' ? 'delete' : 'insert';
+    const renderedSegs = segs
+      .map((seg) => {
+        const escaped = escapeHtml(seg.text);
+        if (seg.type === 'equal') return escaped;
+        if (seg.type === wantType) {
+          return `<span class="diff-change">${escaped}</span>`;
+        }
+        // Shouldn't happen — old-side segments are
+        // equal/delete, new-side are equal/insert. Defensive
+        // passthrough.
+        return escaped;
+      })
+      .join('');
+    content = renderedSegs;
+  } else {
+    content = escapeHtml(line.text);
+  }
+  return (
+    `<span class="diff-line ${line.type}">` +
+    `<span class="diff-prefix" aria-hidden="true">${prefix}</span>` +
+    `<span class="diff-text">${content}</span>` +
+    `</span>`
+  );
+}
+
+/**
+ * Render the body of an edit card as a two-pane coloured
+ * diff. OLD pane shows context + remove lines; NEW pane
+ * shows context + add lines. Paired remove/add runs get
+ * word-level highlighting via `_computeCharDiff`.
+ *
+ * Create blocks (empty OLD buffer) render only the NEW
+ * pane. Pending segments mid-stream use whatever text has
+ * accumulated so far — the diff library handles partial
+ * input gracefully (a mid-word truncation just shows up as
+ * an unchanged-then-truncated line pair).
  *
  * @param {Object} segment
  * @returns {string}
@@ -138,26 +331,43 @@ export function renderEditBody(segment) {
   const oldText = typeof segment.oldText === 'string' ? segment.oldText : '';
   const newText = typeof segment.newText === 'string' ? segment.newText : '';
   const parts = [];
-  // Show OLD only when it has content. Create blocks and
-  // pending-in-old-phase blocks with empty buffers both skip
-  // this pane.
+  // Compute the full diff once; project onto each pane by
+  // filtering out the lines that don't belong there. The
+  // `diff` library's input is the two buffers; its output is
+  // an ordered line list that already preserves source
+  // order, which is what both panes render.
+  const rawLines = _computeDiff(oldText, newText);
+  const lines = _pairDiffLines(rawLines);
+  // OLD pane — only render when the old buffer was
+  // non-empty. Create blocks skip this pane entirely.
   if (oldText !== '') {
+    const oldLines = lines.filter(
+      (l) => l.type === 'context' || l.type === 'remove',
+    );
+    const oldContent = oldLines
+      .map((l) => _renderDiffLine(l, 'old'))
+      .join('\n');
     parts.push(
       `<div class="edit-pane edit-pane-old">` +
         `<div class="edit-pane-label">OLD</div>` +
-        `<pre class="edit-pane-content">${escapeHtml(oldText)}</pre>` +
+        `<pre class="edit-pane-content">${oldContent}</pre>` +
         `</div>`,
     );
   }
-  // NEW pane — always render, even empty, so the card has
-  // predictable layout. An empty NEW pane with an empty OLD
-  // pane (edit-pending in reading-old phase with no content
-  // yet) still produces the cursor / placeholder layout; the
-  // user sees "something is incoming" rather than a blank card.
+  // NEW pane — always render so the card has predictable
+  // layout. Empty new buffer produces an empty `<pre>`; the
+  // streaming-card cursor provides visual feedback that
+  // content is incoming.
+  const newLines = lines.filter(
+    (l) => l.type === 'context' || l.type === 'add',
+  );
+  const newContent = newLines
+    .map((l) => _renderDiffLine(l, 'new'))
+    .join('\n');
   parts.push(
     `<div class="edit-pane edit-pane-new">` +
       `<div class="edit-pane-label">NEW</div>` +
-      `<pre class="edit-pane-content">${escapeHtml(newText)}</pre>` +
+      `<pre class="edit-pane-content">${newContent}</pre>` +
       `</div>`,
   );
   return `<div class="edit-body">${parts.join('')}</div>`;

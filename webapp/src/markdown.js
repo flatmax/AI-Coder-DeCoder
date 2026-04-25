@@ -70,21 +70,179 @@ hljs.registerLanguage('xml', xml);
 hljs.registerLanguage('yaml', yaml);
 hljs.registerLanguage('yml', yaml);
 
-// Configure a shared Marked instance. The `breaks` option makes
-// single newlines render as <br>, which matches how users
-// mentally compose chat messages (a return press means "new
-// line" even when they didn't leave a blank line).
-//
-// GFM enables GitHub-flavored markdown: tables, task lists,
-// strikethrough, autolinks. All useful for technical chat.
-const marked = new Marked({
-  breaks: true,
-  gfm: true,
-  // Silently degrade on bad input rather than throwing. A
-  // streaming response mid-construction can easily be invalid
-  // markdown; we render what we can and move on.
-  silent: true,
-});
+/**
+ * Render a single `$...$` or `$$...$$` math expression to
+ * HTML via KaTeX. Parse failures fall back to escaped plain
+ * text so a bad formula doesn't crash the whole message —
+ * the user sees the raw source with a visual cue that
+ * rendering failed.
+ */
+function _renderMath(src, display) {
+  try {
+    return katex.renderToString(src, {
+      displayMode: display,
+      throwOnError: false,
+      output: 'htmlAndMathml',
+    });
+  } catch (err) {
+    console.warn('[markdown] katex render failed', err);
+    const tag = display ? 'div' : 'code';
+    return (
+      `<${tag} class="math-error">` +
+      escapeHtml(display ? `$$${src}$$` : `$${src}$`) +
+      `</${tag}>`
+    );
+  }
+}
+
+// Marked extension implementing `$$...$$` (display) and
+// `$...$` (inline). Block-level display math renders at
+// paragraph granularity rather than getting wrapped in a <p>.
+// Inline math stays on one line with non-whitespace neighbors
+// (the usual "dollar as delimiter, not dollar as currency"
+// rule).
+const _mathExtension = {
+  extensions: [
+    {
+      name: 'displayMath',
+      level: 'block',
+      start(src) {
+        const idx = src.indexOf('$$');
+        return idx < 0 ? undefined : idx;
+      },
+      tokenizer(src) {
+        const match = /^\$\$([\s\S]+?)\$\$/.exec(src);
+        if (!match) return undefined;
+        return {
+          type: 'displayMath',
+          raw: match[0],
+          text: match[1].trim(),
+        };
+      },
+      renderer(token) {
+        return _renderMath(token.text, true);
+      },
+    },
+    {
+      name: 'inlineMath',
+      level: 'inline',
+      start(src) {
+        const idx = src.indexOf('$');
+        return idx < 0 ? undefined : idx;
+      },
+      tokenizer(src) {
+        // Inline math: single-line, no whitespace right
+        // after opening `$` or right before closing `$`.
+        // Prevents "costs $5 and $10 more" from turning
+        // into a math span.
+        const match = /^\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$(?!\d)/.exec(src);
+        if (!match) return undefined;
+        return {
+          type: 'inlineMath',
+          raw: match[0],
+          text: match[1],
+        };
+      },
+      renderer(token) {
+        return _renderMath(token.text, false);
+      },
+    },
+  ],
+};
+
+/**
+ * Build the chat Marked instance with highlighting, math,
+ * and the code-block renderer override wired in. Called
+ * once at module load; the result is reused for every
+ * `renderMarkdown()` call.
+ *
+ * The `code()` override emits the spec-documented
+ * `<pre class="code-block">` shape with a language label
+ * and a copy button. The chat panel owns the delegated
+ * click handler, so no per-element listeners attach here.
+ */
+function _makeChatMarked() {
+  const instance = new Marked({
+    breaks: true,
+    gfm: true,
+    // Silently degrade on malformed input rather than
+    // throwing. A streaming response mid-construction can
+    // easily be invalid markdown; render what we can and
+    // move on.
+    silent: true,
+  });
+  instance.use(_mathExtension);
+  instance.use({
+    renderer: {
+      code(code, infostring) {
+        // Marked 14+ can pass either a token object
+        // (`{text, lang}`) or positional args depending on
+        // how the renderer is invoked. Normalize.
+        let text;
+        let lang;
+        if (code && typeof code === 'object' && 'text' in code) {
+          text = code.text;
+          lang = code.lang;
+        } else {
+          text = code;
+          lang = infostring;
+        }
+        const langName =
+          typeof lang === 'string' ? lang.trim().split(/\s+/)[0] : '';
+        // Highlighting strategy:
+        //   1. Named language registered with hljs →
+        //      highlight directly, preserving the requested
+        //      class name.
+        //   2. Anything else (including empty) →
+        //      highlightAuto. The auto-detect uses the
+        //      detected language (if any) as the display
+        //      label so users see what hljs picked.
+        let highlighted;
+        let displayLang = langName;
+        try {
+          if (langName && hljs.getLanguage(langName)) {
+            highlighted = hljs.highlight(text, {
+              language: langName,
+              ignoreIllegals: true,
+            }).value;
+          } else {
+            const auto = hljs.highlightAuto(text);
+            highlighted = auto.value;
+            if (!displayLang) displayLang = auto.language || '';
+          }
+        } catch (err) {
+          // Pathological input can trip hljs in rare cases.
+          // Fall back to escaped plain text so the user still
+          // sees their code, just without coloring.
+          console.warn('[markdown] hljs failed', err);
+          highlighted = escapeHtml(text);
+        }
+        const label = displayLang
+          ? `<span class="code-lang">${escapeHtml(displayLang)}</span>`
+          : '';
+        // Copy button is always present so the delegated
+        // click handler has a consistent target. CSS fades
+        // it in on hover to avoid streaming flicker.
+        const copyBtn =
+          '<button type="button" class="copy-code-button" ' +
+          'aria-label="Copy code" title="Copy">📋</button>';
+        const codeClass = displayLang
+          ? `hljs language-${escapeHtml(displayLang)}`
+          : 'hljs';
+        return (
+          '<pre class="code-block">' +
+          label +
+          copyBtn +
+          `<code class="${codeClass}">${highlighted}</code>` +
+          '</pre>'
+        );
+      },
+    },
+  });
+  return instance;
+}
+
+const marked = _makeChatMarked();
 
 /**
  * Render a markdown string to an HTML string.

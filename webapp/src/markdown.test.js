@@ -26,22 +26,70 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<p>hello world</p>');
   });
 
-  it('renders fenced code blocks as <pre><code>', () => {
+  it('renders fenced code blocks with code-block chrome', () => {
     const html = renderMarkdown('```\nsome code\n```');
-    // The inner <code> carries the content; <pre> provides the
-    // monospace block layout. Phase 2d will add syntax
-    // highlighting; for now we just want the block structure.
-    expect(html).toContain('<pre>');
-    expect(html).toContain('<code');
-    expect(html).toContain('some code');
+    // Spec shape — `<pre class="code-block">` wraps every
+    // fenced block. The inner `<code class="hljs ...">`
+    // carries the highlighted content. Without a language
+    // hint, `highlightAuto` picks one (or leaves the class
+    // as the bare `hljs` marker); either way the code text
+    // survives the highlighting pass. We check the two
+    // source tokens separately because hljs may wrap one of
+    // them in a highlighting span — the substring with both
+    // tokens joined won't survive that, but each token on
+    // its own does.
+    expect(html).toContain('<pre class="code-block">');
+    expect(html).toContain('<code class="hljs');
+    expect(html).toContain('some');
+    expect(html).toContain('code');
+  });
+
+  it('always emits a copy button on fenced code blocks', () => {
+    // The chat panel owns the delegated click handler;
+    // every block must carry the target class so the
+    // handler has something to match. CSS fades the button
+    // in on hover to avoid streaming flicker.
+    const html = renderMarkdown('```\nfoo\n```');
+    expect(html).toContain('class="copy-code-button"');
+    expect(html).toContain('📋');
+  });
+
+  it('emits a language label when a language is specified', () => {
+    const html = renderMarkdown('```python\nprint("hi")\n```');
+    expect(html).toContain('<span class="code-lang">python</span>');
   });
 
   it('preserves the language hint on fenced code blocks', () => {
-    // Even without syntax highlighting, the language tag should
-    // appear as a class so later sub-phases can wire up hljs
-    // without the chat panel changing shape.
+    // Syntax highlighting adds the `hljs` base class and the
+    // `language-<name>` modifier. Both land on the `<code>`
+    // element; the outer `<pre class="code-block">` owns the
+    // layout and chrome.
     const html = renderMarkdown('```python\nprint("hi")\n```');
     expect(html).toContain('language-python');
+    // The content survives highlighting — the syntax-coloured
+    // output still contains the source keyword as a
+    // substring, just wrapped in highlight spans.
+    expect(html).toContain('print');
+  });
+
+  it('applies hljs highlighting spans inside the code element', () => {
+    // Proves highlighting actually ran, not just that the
+    // class landed. A highlighted python print() call will
+    // always contain at least one `hljs-` class in its
+    // output — keyword, string, or built-in.
+    const html = renderMarkdown('```python\nprint("hi")\n```');
+    expect(html).toMatch(/hljs-/);
+  });
+
+  it('auto-detects language when none is specified', () => {
+    // Spec: unspecified fence + `highlightAuto`. The exact
+    // language hljs picks for a JSON-shaped snippet is not
+    // guaranteed, but a recognisable JSON fragment should
+    // pick up at least one hljs- class.
+    const html = renderMarkdown(
+      '```\n{"name": "ac-dc", "version": "1.0"}\n```',
+    );
+    expect(html).toMatch(/hljs-/);
   });
 
   it('renders inline code with <code>', () => {
@@ -96,9 +144,9 @@ describe('renderMarkdown', () => {
   });
 
   it('passes raw HTML through in prose (we trust the source)', () => {
-    // Modern marked does NOT escape inline HTML in prose by
-    // default — it renders it as literal HTML. This is safe
-    // for our use:
+    // Marked's default behaviour for inline HTML in prose is
+    // passthrough — it renders tags literally rather than
+    // escaping them. This is safe for our use:
     //   - User messages never reach renderMarkdown; they go
     //     through escapeHtml instead. See the chat panel's
     //     _renderMessage which dispatches on role.
@@ -106,13 +154,42 @@ describe('renderMarkdown', () => {
     //     trust in the same way we trust the code it writes
     //     into our files.
     //
-    // The test pins this intentional behaviour so if we ever
-    // swap to a library that escapes by default (or add a
-    // sanitizer), the expectations surface for review rather
-    // than silently changing the rendering model.
-    const html = renderMarkdown('use <script>alert(1)</script> tag');
-    // Literal tag passes through.
-    expect(html).toContain('<script>alert(1)</script>');
+    // The test pins the passthrough so if we ever swap to a
+    // library that escapes by default (or add a sanitizer),
+    // the expectations surface for review rather than silently
+    // changing the rendering model.
+    const html = renderMarkdown('use <b>bold</b> tag');
+    expect(html).toContain('<b>bold</b>');
+  });
+
+  it('renders inline math via KaTeX', () => {
+    // `$...$` delimited inline math is transformed to KaTeX
+    // HTML. The exact markup is long; we check for the
+    // outer `katex` class marker which KaTeX always emits.
+    const html = renderMarkdown('Euler: $e^{i\\pi} + 1 = 0$');
+    expect(html).toContain('katex');
+  });
+
+  it('renders display math via KaTeX', () => {
+    // `$$...$$` delimited display math becomes a block-level
+    // KaTeX render. The display variant sets `displayMode`
+    // which KaTeX signals via a distinct class marker.
+    const html = renderMarkdown('$$\\int_0^1 x \\, dx$$');
+    expect(html).toContain('katex');
+    expect(html).toContain('katex-display');
+  });
+
+  it('does not treat currency `$` as math', () => {
+    // The inline math tokenizer requires non-whitespace
+    // adjacent to both delimiters and rejects digits
+    // immediately after the closer so "costs $5 and $10"
+    // stays as prose. Without this guard the whole sentence
+    // would become one invalid math expression and either
+    // render as an error or collapse into KaTeX output.
+    const html = renderMarkdown('Item costs $5 and item B costs $10 more');
+    expect(html).not.toContain('katex');
+    expect(html).toContain('$5');
+    expect(html).toContain('$10');
   });
 
   it('does not crash on malformed markdown', () => {

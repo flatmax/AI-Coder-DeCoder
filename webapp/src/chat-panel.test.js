@@ -319,15 +319,19 @@ describe('ChatPanel edit block rendering', () => {
     // Old and new panes both present for a modify block.
     expect(cards[0].querySelector('.edit-pane-old')).toBeTruthy();
     expect(cards[0].querySelector('.edit-pane-new')).toBeTruthy();
-    // Content of each pane preserved.
+    // Content of each pane preserved. Lines carry a
+    // non-selectable prefix (`-`/`+`/` `) so copy-paste of
+    // a diff round-trips as unified-diff-shaped text. The
+    // prefix is part of textContent even though the prefix
+    // span is marked aria-hidden for screen readers.
     const oldPane = cards[0].querySelector(
       '.edit-pane-old .edit-pane-content',
     );
     const newPane = cards[0].querySelector(
       '.edit-pane-new .edit-pane-content',
     );
-    expect(oldPane.textContent).toBe('old line');
-    expect(newPane.textContent).toBe('new line');
+    expect(oldPane.textContent).toBe('-old line');
+    expect(newPane.textContent).toBe('+new line');
   });
 
   it('renders message without editResults in pending state', async () => {
@@ -452,10 +456,12 @@ describe('ChatPanel edit block rendering', () => {
     expect(card.classList.contains('edit-status-new')).toBe(true);
     expect(card.querySelector('.edit-pane-old')).toBeNull();
     expect(card.querySelector('.edit-pane-new')).toBeTruthy();
+    // Create blocks render every line as an add, so each
+    // carries the `+` prefix marker.
     expect(
       card.querySelector('.edit-pane-new .edit-pane-content')
         .textContent,
-    ).toBe('print("hello")');
+    ).toBe('+print("hello")');
   });
 
   it('renders pending block during streaming', async () => {
@@ -493,11 +499,14 @@ describe('ChatPanel edit block rendering', () => {
     const card = streaming.querySelector('.edit-block-card');
     expect(card).toBeTruthy();
     expect(card.classList.contains('edit-status-pending')).toBe(true);
-    // Old pane shows the in-progress content.
+    // Old pane shows the in-progress content. Each line
+    // carries the `-` prefix marker; the line separator is
+    // the `\n` between diff-line spans in the rendered
+    // <pre>.
     expect(
       card.querySelector('.edit-pane-old .edit-pane-content')
         .textContent,
-    ).toBe('old line one\nold line t');
+    ).toBe('-old line one\n-old line t');
   });
 
   it('streaming cursor appears after the body', async () => {
