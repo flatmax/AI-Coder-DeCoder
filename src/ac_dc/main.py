@@ -346,18 +346,65 @@ async def run(
             )
             return
 
+        # Preview mode requires a built dist/. Without it
+        # `vite preview` silently serves a 404 page and the
+        # browser never registers as AcApp — the backend
+        # then fires startupProgress into a void and the
+        # startup overlay never dismisses. Auto-build on
+        # demand so the user doesn't have to remember.
+        if preview and not (webapp_dir / "dist").is_dir():
+            logger.info(
+                "webapp/dist not found — running `npm run build` "
+                "(first-time preview build)..."
+            )
+            try:
+                build_result = subprocess.run(
+                    ["npm", "run", "build"],
+                    cwd=str(webapp_dir),
+                    timeout=300,
+                )
+            except FileNotFoundError:
+                logger.error(
+                    "npm not found on PATH. Install Node.js, or "
+                    "build manually: cd webapp && npm run build"
+                )
+                return
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "npm run build timed out after 5 minutes. "
+                    "Try running it manually: "
+                    "cd webapp && npm run build"
+                )
+                return
+            if build_result.returncode != 0:
+                logger.error(
+                    "npm run build failed (exit %d). "
+                    "See output above.",
+                    build_result.returncode,
+                )
+                return
+            if not (webapp_dir / "dist").is_dir():
+                logger.error(
+                    "Build completed but webapp/dist is still "
+                    "missing — check webapp/vite.config.js"
+                )
+                return
+            logger.info("Build complete.")
+
         cmd = ["npx"]
         if dev:
             cmd.extend(["vite", "--host", bind_host, "--port", str(webapp_port)])
         else:
             cmd.extend(["vite", "preview", "--host", bind_host, "--port", str(webapp_port)])
 
+        # Surface Vite's stdout/stderr so build errors or port
+        # binding failures are visible. Previously piped to
+        # DEVNULL, which hid the "dist/ not found" message
+        # and made the hang impossible to diagnose.
         try:
             vite_process = subprocess.Popen(
                 cmd,
                 cwd=str(webapp_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
             )
             logger.info("Vite %s server started (PID %d)",
                         "dev" if dev else "preview", vite_process.pid)
