@@ -86,5 +86,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['src/**/*.test.js'],
+    // Setup runs before every test file. Registers global
+    // module mocks for @flatmax/jrpc-oo so the UMD bundle
+    // doesn't evaluate in jsdom (where `Window` isn't
+    // resolvable the way the bundle expects).
+    setupFiles: ['./vitest.setup.js'],
   },
 });

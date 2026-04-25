@@ -120,49 +120,18 @@ import { SharedRpc } from './rpc.js';
 // Stub JRPCClient
 // ---------------------------------------------------------------------------
 //
-// The real JRPCClient has a setter on `serverURI` that opens a
-// WebSocket. We can't import `@flatmax/jrpc-oo/jrpc-client.js`
-// directly in tests because it would try to construct a WebSocket.
-// Vitest's module mocking lets us substitute a stub.
+// The real JRPCClient has a setter on `serverURI` that opens
+// a WebSocket. Tests don't want that. Mocks are registered
+// globally in `webapp/vitest.setup.js` so every test file
+// shares the same stub — see that file for the JRPCClient
+// contract.
 //
-// The stub extends HTMLElement so LitElement's inheritance chain
-// still works, plus declares the hook methods as no-ops that
-// AppShell overrides with `super` calls.
+// We still `await import('./app-shell.js')` dynamically (not
+// a top-level static import) because app-shell.js transitively
+// imports the jrpc-oo bundle, and the setup-file mock must be
+// registered and applied before the first real import of the
+// module tree.
 
-vi.mock('@flatmax/jrpc-oo/jrpc-client.js', async () => {
-  // Stub extends LitElement (not HTMLElement) because AppShell
-  // uses Lit's reactive-property / render / updateComplete
-  // machinery. In production, JRPCClient itself extends
-  // LitElement; our stub must match that contract or the Lit
-  // hooks in AppShell won't work (static styles / render /
-  // updateComplete all disappear).
-  //
-  // Lit's own `connectedCallback` / `disconnectedCallback` are
-  // defined on LitElement.prototype, so AppShell's `super.`
-  // calls resolve naturally.
-  const { LitElement } = await import('lit');
-  class JRPCClient extends LitElement {
-    constructor() {
-      super();
-      this.remoteTimeout = 60;
-      this.call = {};
-    }
-    addClass(_instance, _name) {
-      // Stub — real library would register methods for
-      // server → client calls. Tests don't exercise that path.
-    }
-    setupDone() {}
-    setupSkip() {}
-    remoteDisconnected() {}
-    remoteIsUp() {}
-    // `serverURI` as a plain field rather than a setter — the
-    // real library opens a WebSocket in the setter but tests
-    // don't need that behaviour.
-  }
-  return { JRPCClient };
-});
-
-// Import AFTER the mock is registered.
 const { AppShell } = await import('./app-shell.js');
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1082,21 @@ describe('AppShell', () => {
     afterEach(() => { localStorage.clear(); });
 
     it('throttles handler to one call per animation frame', async () => {
-      vi.useFakeTimers();
+      // Explicitly include rAF/cAF in the fake-timer set.
+      // In vitest 2.x + jsdom, rAF is not wired through
+      // setTimeout by default; fake timers won't intercept
+      // it unless we ask. Previously this test relied on
+      // an implementation detail that no longer holds.
+      vi.useFakeTimers({
+        toFake: [
+          'setTimeout',
+          'clearTimeout',
+          'setInterval',
+          'clearInterval',
+          'requestAnimationFrame',
+          'cancelAnimationFrame',
+        ],
+      });
       const shell = mountShell();
       await shell.updateComplete;
       const spy = vi.spyOn(shell, '_handleWindowResize');
@@ -1123,21 +1106,34 @@ describe('AppShell', () => {
         shell._onWindowResize();
       }
       expect(spy).not.toHaveBeenCalled();
-      // Flush the animation frame (jsdom's rAF runs as a
-      // setTimeout under the hood, which fake timers catch).
+      // Flush — with rAF faked, runAllTimers drains the
+      // queued callback.
       vi.runAllTimers();
       expect(spy).toHaveBeenCalledTimes(1);
       spy.mockRestore();
     });
 
     it('cancels pending RAF on disconnect', async () => {
-      vi.useFakeTimers();
+      // Same fake-timer extension as the throttle test —
+      // cancelAnimationFrame must be faked too, otherwise
+      // disconnect can't cancel the pending rAF and the
+      // spy fires anyway.
+      vi.useFakeTimers({
+        toFake: [
+          'setTimeout',
+          'clearTimeout',
+          'setInterval',
+          'clearInterval',
+          'requestAnimationFrame',
+          'cancelAnimationFrame',
+        ],
+      });
       const shell = mountShell();
       await shell.updateComplete;
       const spy = vi.spyOn(shell, '_handleWindowResize');
       shell._onWindowResize();
       shell.remove();
-      // Flush — the cancelled RAF must not fire.
+      // Flush — the cancelled rAF must not fire.
       vi.runAllTimers();
       expect(spy).not.toHaveBeenCalled();
       spy.mockRestore();
