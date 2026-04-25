@@ -2930,10 +2930,23 @@ Pure render change. `Repo.get_file_tree()` already returns `{modified, staged, u
 - 16 new tests covering root rendering, branch pill states (normal / muted / detached / empty-repo / null-prop / malformed response), tooltip forms, plus 8 files-tab plumbing tests (RPC fires, picker receives, repoName threading, detached response, branch failure isolation, tree failure fatality, refresh on files-modified, malformed response tolerance).
 - Five pre-existing `.name` queries scoped to `.row.is-dir:not(.is-root) .name, .row.is-file .name` so the new root row doesn't inflate counts. One duplicate test block from a partial earlier edit was removed; the canonical "when they differ" version remains, asserting `path === name` → just `{name}` (no redundant `src — src`).
 
-### Increment 3 — Sort modes (next)
+### ~~Increment 3 — Sort modes~~ (delivered `1e32eb2`)
 
-- `file-picker.js` — three sort-mode buttons (A / 🕐 / #) in filter bar, active-button styling, clicking the active button toggles ascending/descending, localStorage keys `ac-dc-sort-mode` + `ac-dc-sort-asc`, sort logic applies after the existing dir-before-file rule
-- tests — mode toggle, direction toggle on re-click, localStorage round-trip, dirs still sort alphabetically regardless of mode
+Three sort-mode buttons (A / 🕐 / #) in the filter bar. Clicking a different mode switches to it and resets direction to ascending (fresh sort starts at the familiar anchor — A-Z, oldest-first, smallest-first). Clicking the active mode toggles direction. Active button gets `.active` styling + `aria-pressed="true"` + direction glyph (↑/↓); inactive buttons show mode glyph only. Mode and direction persisted to localStorage keys `ac-dc-sort-mode` and `ac-dc-sort-asc`; restored on mount with safe defaults when storage is missing, unknown, or malformed. Directories always sort alphabetically ascending regardless of mode or direction — users expect a stable directory layout, and mtime/size aren't meaningful for directory nodes (the file-tree schema doesn't populate them for dirs).
+
+Implementation was already present in `file-picker.js` when tests landed — `sortChildrenWithMode`, `SORT_MODE_*` constants, `_loadSortPrefs`/`_saveSortPrefs`, `_renderSortButtons`, `_onSortButtonClick`. The commit adds 25 tests across two describe blocks: 13 helper tests for `sortChildrenWithMode` (dir-before-file invariant across all modes, name/mtime/size each in both directions, direction-ignored for dirs, unknown-mode fallback, missing-field tolerance, falsy-child filtering, no-mutation), 12 component-level tests for the sort buttons (render shape, default state, one-active-at-a-time, mode switch resets direction, active toggle flips direction, files render in selected order, dirs alphabetical regardless, localStorage round-trip for mode + direction, malformed-storage fallback, direction-glyph on active button only).
+
+Design points pinned by tests:
+
+- **Mode switch resets direction to ascending.** Clicking a different mode sets `_sortAsc = true` rather than preserving the previous direction. Users scanning a new axis expect the familiar anchor first — A-Z for name, oldest for mtime, smallest for size. Pinned by `test_clicking_a_different_mode_switches_and_resets_to_ascending`.
+
+- **Direction glyph only on the active button.** Inactive buttons show just the mode glyph (A / 🕐 / #); the active one appends ↑ or ↓. Keeps the filter bar compact while making the current state unambiguous. Pinned by `test_active_button_shows_direction_glyph;_inactive_buttons_do_not`.
+
+- **Malformed storage falls back to defaults, doesn't crash.** `_loadSortPrefs` validates mode against `SORT_MODES` and direction against `'1'`/`'0'`; anything else produces `name` / ascending. Private-browsing localStorage exceptions are swallowed. Pinned by `test_ignores_unknown_mode_in_localStorage` and `test_ignores_malformed_direction_in_localStorage`.
+
+- **Directory ordering is an invariant, not a preference.** Every test mode exercises the dir-stay-alphabetical rule. A future refactor that "helpfully" made dirs participate in mtime or size sort would trip `test_directories_stay_alphabetical_regardless_of_mode` which iterates all three modes and both directions.
+
+- **Defensive field handling.** Missing `mtime` → treated as 0 (oldest). Missing `lines` → treated as 0 (smallest). Missing `name` → empty string for localeCompare. Null/undefined children filtered out. Catches malformed tree data from backend without crashing the comparator.
 
 ### Increment 4 — Auto-selection of changed files on first load
 
