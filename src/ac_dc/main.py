@@ -150,6 +150,19 @@ async def _heavy_init(
         except Exception as exc:
             logger.warning("Deferred init failed: %s", exc)
 
+    # Step 2b: Schedule the doc index background build. Split
+    # from complete_deferred_init because that method runs in
+    # an executor thread (step 2 wraps it in run_in_executor),
+    # where asyncio.get_event_loop() returns a fresh dead loop
+    # rather than the main one. We're back on the event loop
+    # thread now, so schedule_doc_index_build can safely call
+    # asyncio.get_running_loop() and ensure_future against the
+    # real loop.
+    try:
+        llm_service.schedule_doc_index_build()
+    except Exception as exc:
+        logger.warning("Doc index build scheduling failed: %s", exc)
+
     # Step 3: Index repository in batches
     if symbol_index is not None and repo is not None:
         await _send_progress(event_callback, "indexing",

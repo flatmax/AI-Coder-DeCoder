@@ -88,6 +88,15 @@ export class ContextTab extends RpcMixin(LitElement) {
      * state without fighting with a concurrent refresh.
      */
     _rebuilding: { type: Boolean, state: true },
+    /**
+     * Map-block modal state. Null when no modal is open;
+     * otherwise ``{key, name, loading, content, error, mode}``
+     * tracking the click-to-view modal for a tracker item.
+     * The cache viewer opens this modal when the user clicks
+     * an item row — see specs4/5-webapp/viewers-hud.md §
+     * "Item Click → View Map Block".
+     */
+    _mapModal: { type: Object, state: true },
   };
 
   static styles = css`
@@ -476,6 +485,98 @@ export class ContextTab extends RpcMixin(LitElement) {
       display: flex;
       justify-content: space-between;
     }
+
+    .tier-item-name {
+      cursor: pointer;
+    }
+    .tier-item-name:hover {
+      color: var(--accent-primary, #58a6ff);
+      text-decoration: underline;
+    }
+
+    /* Map-block modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .modal-dialog {
+      background: var(--bg-primary, #0d1117);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 8px;
+      max-width: 900px;
+      width: 100%;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    .modal-header {
+      flex-shrink: 0;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .modal-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .modal-mode-badge {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 3px;
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary, #8b949e);
+      font-size: 1.25rem;
+      cursor: pointer;
+      padding: 0 0.25rem;
+      line-height: 1;
+    }
+    .modal-close:hover {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .modal-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 1rem;
+    }
+    .modal-body pre {
+      margin: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .modal-loading,
+    .modal-error {
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-secondary, #8b949e);
+    }
+    .modal-error {
+      color: #f85149;
+    }
   `;
 
   constructor() {
@@ -486,10 +587,12 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._stale = false;
     this._rebuilding = false;
     this._cacheExpanded = this._loadCacheExpanded();
+    this._mapModal = null;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
+    this._onModalKeyDown = this._onModalKeyDown.bind(this);
   }
 
   connectedCallback() {
@@ -497,12 +600,14 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('mode-changed', this._onModeChanged);
+    window.addEventListener('keydown', this._onModalKeyDown);
   }
 
   disconnectedCallback() {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener('mode-changed', this._onModeChanged);
+    window.removeEventListener('keydown', this._onModalKeyDown);
     super.disconnectedCallback();
   }
 
@@ -665,6 +770,71 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Map-block modal (item click → view index block)
+  // ---------------------------------------------------------------
+  //
+  // Per specs4/5-webapp/viewers-hud.md § "Item Click → View Map
+  // Block", clicking a tracker item name opens a modal with the
+  // full index block for that file. Backend dispatch at
+  // LLMService.get_file_map_block — it handles the system:prompt
+  // special case, current-mode primary, cross-mode fallback, and
+  // error-when-neither-has-data.
+
+  async _openMapModal(key, name) {
+    this._mapModal = {
+      key,
+      name,
+      loading: true,
+      content: '',
+      error: null,
+      mode: null,
+    };
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.get_file_map_block',
+        key,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        this._mapModal = {
+          ...this._mapModal,
+          loading: false,
+          error: result.error,
+        };
+      } else if (result && typeof result === 'object') {
+        this._mapModal = {
+          ...this._mapModal,
+          loading: false,
+          content: result.content || '',
+          mode: result.mode || null,
+        };
+      } else {
+        this._mapModal = {
+          ...this._mapModal,
+          loading: false,
+          error: 'No content returned',
+        };
+      }
+    } catch (err) {
+      this._mapModal = {
+        ...this._mapModal,
+        loading: false,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
+  _closeMapModal() {
+    this._mapModal = null;
+  }
+
+  _onModalKeyDown(event) {
+    if (event.key === 'Escape' && this._mapModal) {
+      event.preventDefault();
+      this._closeMapModal();
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Sub-view toggle
   // ---------------------------------------------------------------
 
@@ -746,6 +916,7 @@ export class ContextTab extends RpcMixin(LitElement) {
           ? this._renderBudget()
           : this._renderCache()}
       </div>
+      ${this._renderMapModal()}
     `;
   }
 
@@ -996,11 +1167,18 @@ export class ContextTab extends RpcMixin(LitElement) {
     const nPct = hasN && item.threshold > 0
       ? Math.min(100, (item.n / item.threshold) * 100)
       : 0;
+    const key = item.name || item.path || '';
+    const displayName = item.path || item.name || '—';
 
     return html`
       <div class="tier-item">
         <span class="tier-item-icon">${icon}</span>
-        <span class="tier-item-name" title=${item.path || item.name || ''}>
+        <span
+          class="tier-item-name"
+          title="Click to view index block for ${displayName}"
+          @click=${() => this._openMapModal(key, displayName)}
+          role="button"
+        >
           ${item.name || item.path || '—'}
         </span>
         ${hasN
@@ -1015,6 +1193,42 @@ export class ContextTab extends RpcMixin(LitElement) {
             `
           : ''}
         <span class="tier-item-tokens">${_fmtTokens(item.tokens || 0)}</span>
+      </div>
+    `;
+  }
+
+  _renderMapModal() {
+    if (!this._mapModal) return '';
+    const m = this._mapModal;
+    return html`
+      <div
+        class="modal-backdrop"
+        @click=${(e) => {
+          if (e.target.classList.contains('modal-backdrop')) {
+            this._closeMapModal();
+          }
+        }}
+      >
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <span class="modal-title" title=${m.name}>${m.name}</span>
+            ${m.mode
+              ? html`<span class="modal-mode-badge">${m.mode}</span>`
+              : ''}
+            <button
+              class="modal-close"
+              @click=${() => this._closeMapModal()}
+              title="Close (Esc)"
+            >×</button>
+          </div>
+          <div class="modal-body">
+            ${m.loading
+              ? html`<div class="modal-loading">Loading…</div>`
+              : m.error
+                ? html`<div class="modal-error">${m.error}</div>`
+                : html`<pre>${m.content}</pre>`}
+          </div>
+        </div>
       </div>
     `;
   }

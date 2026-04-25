@@ -652,19 +652,31 @@ class LLMService:
         at construction. Safe to call multiple times; subsequent
         calls are no-ops.
 
-        After wiring the symbol index, attempts eager stability
-        initialization — if it succeeds, the cache tab shows
-        populated tiers from the first page load, not only after
-        the first chat message. If it fails, lazy initialization
-        on the first chat request catches it.
+        Attempts eager stability initialization — if it succeeds,
+        the cache tab shows populated tiers from the first page
+        load, not only after the first chat message. If it fails,
+        lazy initialization on the first chat request catches it.
 
-        Kicks off the doc index background build as a separate
-        task. Build runs in the aux executor (CPU-bound enough
-        to deserve its own thread) and emits startupProgress
-        events per file. The shell's "Doc Index Stage Filtering"
-        routes these to the dialog header progress bar rather
-        than the startup overlay (which has already dismissed
-        by this point).
+        Attempts to schedule the doc index background build
+        when a running event loop is reachable from the caller's
+        thread. Production callers (main.py) run this method via
+        ``run_in_executor`` — no loop is running on the worker
+        thread, so the scheduling attempt fails and the caller
+        must invoke :meth:`schedule_doc_index_build` explicitly
+        from the event loop thread afterwards. Test callers
+        (pytest-asyncio) run this method directly on the event
+        loop thread, so the scheduling attempt succeeds inline
+        and no extra call is needed.
+
+        The distinction matters because ``asyncio.get_event_loop``
+        on a worker thread (Python 3.10+) returns a fresh dead
+        loop rather than raising, and tasks scheduled on it
+        never run — producing the confusing "no progress
+        events, no error" failure mode. Using
+        ``asyncio.get_running_loop`` here rather than
+        ``get_event_loop`` makes the worker-thread case raise
+        cleanly (surfaced by schedule_doc_index_build's return
+        value).
         """
         if self._init_complete and self._symbol_index is not None:
             return
@@ -677,33 +689,47 @@ class LLMService:
         # first chat request.
         self._try_initialize_stability()
 
-        # Kick off the doc index background build. Uses
-        # ensure_future so we don't block complete_deferred_init
-        # — callers typically await the return here to advance
-        # the startup overlay past the ready stage. The
-        # background task handles its own error surfacing.
-        #
-        # Capture the event loop via _main_loop so the task is
-        # scheduled on the correct loop. complete_deferred_init
-        # may run on the event loop thread (main.py's startup
-        # sequence) or may be called from a test fixture on a
-        # different thread; capturing here matches the pattern
-        # used by chat_streaming and commit_all.
+        # Best-effort inline doc-index scheduling. Works when
+        # called from the event loop thread (test path); fails
+        # silently when called from a worker thread (production
+        # path via run_in_executor). Production callers must
+        # invoke schedule_doc_index_build() separately.
+        self.schedule_doc_index_build()
+
+    def schedule_doc_index_build(self) -> bool:
+        """Schedule the doc index background build on the current loop.
+
+        Must be called from the event loop thread — invokes
+        ``asyncio.ensure_future`` against the currently-running
+        loop. When called from a worker thread,
+        ``asyncio.get_running_loop()`` raises and this method
+        returns False without scheduling (the caller can retry
+        from the correct thread).
+
+        Returns True when the build was scheduled or was
+        already running / complete. Returns False when no
+        running loop was found on the calling thread (build
+        skipped; doc index stays empty and
+        ``_doc_index_ready`` stays False).
+
+        Idempotent — calling when the build is already running
+        or already complete is a no-op that returns True (so
+        the caller doesn't retry).
+        """
+        if self._doc_index_ready or self._doc_index_building:
+            return True
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop — skip the background build. The
-            # doc index stays empty; `_doc_index_ready` stays
-            # False; cross-reference toggle stays disabled.
-            # Tests that don't care about doc indexing hit this
-            # path cleanly.
             logger.debug(
-                "No event loop available; skipping doc index "
-                "background build"
+                "schedule_doc_index_build called without a "
+                "running event loop; build not scheduled"
             )
-            return
+            return False
         self._main_loop = loop
         asyncio.ensure_future(self._build_doc_index_background())
+        logger.info("Doc index background build scheduled")
+        return True
 
     async def _build_doc_index_background(self) -> None:
         """Structurally extract every doc-index-eligible file.
@@ -2004,36 +2030,86 @@ class LLMService:
            other index (handles cross-reference mode).
         4. Error if neither has data.
         """
-        # Special key: system prompt.
+        # Special key: system prompt. Pick the mode-
+        # appropriate prompt + legend so the cache viewer
+        # shows whatever is actually going to the LLM this
+        # turn. In doc mode, that's the doc system prompt
+        # plus the doc index's legend; otherwise the code
+        # system prompt plus the symbol index's legend.
         if path == "system:prompt":
             if self._context.mode == Mode.DOC:
                 prompt = self._config.get_doc_system_prompt()
+                legend = self._doc_index.get_legend()
             else:
                 prompt = self._config.get_system_prompt()
-            legend = ""
-            if self._symbol_index is not None:
-                try:
-                    legend = self._symbol_index.get_legend()
-                except Exception:
-                    pass
+                legend = ""
+                if self._symbol_index is not None:
+                    try:
+                        legend = self._symbol_index.get_legend()
+                    except Exception:
+                        pass
             return {
                 "path": "system:prompt",
-                "content": prompt + ("\n\n" + legend if legend else ""),
+                "content": prompt + (
+                    "\n\n" + legend if legend else ""
+                ),
                 "mode": self._context.mode.value,
             }
 
-        # Try the current mode's index first.
-        if self._symbol_index is not None:
-            block = self._symbol_index.get_file_symbol_block(path)
-            if block:
+        # Strip a known prefix so callers can pass either the
+        # raw tracker key (``doc:README.md``) or the bare
+        # file path (``README.md``). The cache viewer sends
+        # the full key; other callers may send the path.
+        for prefix in ("file:", "symbol:", "doc:"):
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+                break
+
+        # Dispatch by current mode. In code mode, symbol
+        # index is primary; doc index is a fallback for
+        # cross-reference items that landed in the tracker.
+        # In doc mode, the order flips.
+        if self._context.mode == Mode.DOC:
+            primary = self._doc_index.get_file_doc_block(path)
+            if primary:
                 return {
                     "path": path,
-                    "content": block,
-                    "mode": "code",
+                    "content": primary,
+                    "mode": "doc",
+                }
+            # Cross-reference fallback — a symbol: entry may
+            # be in the tracker while in doc mode.
+            if self._symbol_index is not None:
+                secondary = self._symbol_index.get_file_symbol_block(
+                    path
+                )
+                if secondary:
+                    return {
+                        "path": path,
+                        "content": secondary,
+                        "mode": "code",
+                    }
+        else:
+            if self._symbol_index is not None:
+                primary = self._symbol_index.get_file_symbol_block(
+                    path
+                )
+                if primary:
+                    return {
+                        "path": path,
+                        "content": primary,
+                        "mode": "code",
+                    }
+            # Cross-reference fallback — a doc: entry may
+            # be in the tracker while in code mode.
+            secondary = self._doc_index.get_file_doc_block(path)
+            if secondary:
+                return {
+                    "path": path,
+                    "content": secondary,
+                    "mode": "doc",
                 }
 
-        # Doc index fallback would go here when Layer 2 doc-index
-        # lands. For now, return error.
         return {
             "error": f"No index data found for {path}",
             "path": path,
@@ -2596,6 +2672,48 @@ class LLMService:
             files=indexed_files,
             l0_target_tokens=cache_target,
         )
+
+        # Step 5b: if cross-reference is enabled, also place
+        # items from the OPPOSITE index so the cache holds
+        # both structural views spread across L1-L3. Without
+        # this, rebuild wipes everything in step 1-2 and then
+        # only re-seeds the primary — losing the cross-ref
+        # items the user just enabled.
+        #
+        # Pass l0_target_tokens=0 so the secondary doesn't
+        # compete with the primary for L0 slots. L0 is earned
+        # by the primary mode's most-connected files;
+        # cross-ref enhances L1-L3 but shouldn't dilute L0.
+        # Secondary items distribute across L1/L2/L3 via the
+        # same clustering algorithm as the primary.
+        if self._cross_ref_enabled:
+            if mode == Mode.DOC:
+                # Doc mode primary + cross-ref → also place
+                # symbol: entries.
+                secondary_prefix = "symbol:"
+                secondary_files = [
+                    p for p in file_list
+                    if p in self._symbol_index._all_symbols
+                ]
+                secondary_ref = self._symbol_index._ref_index
+            else:
+                # Code mode primary + cross-ref → also place
+                # doc: entries.
+                secondary_prefix = "doc:"
+                secondary_files = list(
+                    self._doc_index._all_outlines.keys()
+                )
+                secondary_ref = self._doc_index._ref_index
+            secondary_keys = [
+                f"{secondary_prefix}{p}" for p in secondary_files
+            ]
+            if secondary_keys:
+                tracker.initialize_with_keys(
+                    secondary_ref,
+                    keys=secondary_keys,
+                    files=secondary_files,
+                    l0_target_tokens=0,
+                )
 
         # Step 6: measure real token counts for the just-placed
         # index entries. _measure_tracker_tokens already handles
