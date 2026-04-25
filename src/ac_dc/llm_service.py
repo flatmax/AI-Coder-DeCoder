@@ -828,6 +828,17 @@ class LLMService:
         # complete_deferred_init fires.
         self._init_complete = not deferred_init
 
+        # Whether the most recent _restore_last_session call
+        # actually loaded messages. complete_deferred_init reads
+        # this to decide whether to broadcast a sessionChanged
+        # event — the event cannot fire from __init__ because no
+        # event loop is running yet, but by the time deferred
+        # init completes the loop is up and subscribers
+        # (Context tab, TokenHUD, ChatPanel) are mounted. False
+        # when no history store is attached, or when no prior
+        # session existed.
+        self._restored_on_startup = False
+
         # Auto-restore the last session. This happens
         # UNCONDITIONALLY at construction (not deferred) so the
         # first get_current_state call returns previous messages
@@ -887,6 +898,26 @@ class LLMService:
         # failure is logged and the lazy path catches it on the
         # first chat request.
         self._try_initialize_stability()
+
+        # If __init__ restored a prior session, broadcast
+        # sessionChanged now so the frontend's Context tab and
+        # TokenHUD refresh their token-budget displays from the
+        # restored history. This cannot happen from __init__
+        # itself (no event loop yet); by the time deferred init
+        # completes the loop is up and broadcast targets are
+        # mounted. ChatPanel already gets messages via
+        # get_current_state on reconnect, but the other tabs
+        # have no equivalent path and would otherwise show
+        # stale empty-budget displays until the user sends a
+        # message.
+        if self._restored_on_startup:
+            self._broadcast_event(
+                "sessionChanged",
+                {
+                    "session_id": self._session_id,
+                    "messages": self._context.get_history(),
+                },
+            )
 
         # Best-effort inline doc-index scheduling. Works when
         # called from the event loop thread (test path); fails
@@ -1244,6 +1275,7 @@ class LLMService:
         # set_history copies each entry so caller mutations don't
         # leak.
         self._context.set_history(messages)
+        self._restored_on_startup = True
         logger.info(
             "Restored session %s with %d messages",
             target.session_id, len(messages),

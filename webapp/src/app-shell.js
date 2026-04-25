@@ -233,6 +233,17 @@ export class AppShell extends JRPCClient {
      * stream-complete (flips false).
      */
     _streaming: { type: Boolean, state: true },
+    /**
+     * Compaction capacity — history token usage vs. the
+     * configured trigger threshold. Shape matches
+     * LLMService.get_history_status:
+     *   { history_tokens, compaction_trigger,
+     *     compaction_percent, compaction_enabled, ... }
+     * Null before the first fetch. Refreshed on
+     * stream-complete, session-changed, and successful
+     * compaction events.
+     */
+    _historyStatus: { type: Object, state: true },
   };
 
   static styles = css`
@@ -330,7 +341,8 @@ export class AppShell extends JRPCClient {
       bottom: auto;
     }
     .dialog.minimized .dialog-body,
-    .dialog.minimized .reconnect-banner {
+    .dialog.minimized .reconnect-banner,
+    .dialog.minimized .compaction-bar {
       display: none;
     }
     .dialog.dragging,
@@ -549,6 +561,43 @@ export class AppShell extends JRPCClient {
       flex: 1;
       min-height: 0;
     }
+
+    /* Compaction-capacity bar — a thin strip at the bottom
+     * of the dialog showing the ratio of current history
+     * tokens to the compaction trigger threshold. Colour
+     * mirrors the budget-bar convention used by the Context
+     * tab and Token HUD: green below 75%, amber 75-90%, red
+     * above 90%.
+     *
+     * Positioned inside .dialog as the last child before the
+     * resize handles. The bottom resize-handle sits at
+     * bottom: -4px with height: 8px, so its 8px hit zone
+     * overlays the bar's upper half without preventing pointer
+     * events on the bar itself (which takes no pointer
+     * events — it's informational only).
+     *
+     * Inner .compaction-bar-fill drives the width. Transition
+     * makes the shrink on a successful compaction visible —
+     * going from 100% to 5% is the moment this bar earns its
+     * screen space. Without the transition the change would
+     * be a jarring jump.
+     *
+     * Hidden in minimized state via the .minimized rule below
+     * so a collapsed dialog doesn't dedicate height to it.
+     */
+    .compaction-bar {
+      flex-shrink: 0;
+      position: relative;
+      height: 4px;
+      background: rgba(240, 246, 252, 0.06);
+      border-top: 1px solid rgba(240, 246, 252, 0.05);
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .compaction-bar-fill {
+      height: 100%;
+      transition: width 300ms ease, background 300ms ease;
+    }
     /* Tab panels — all mounted into the DOM, but only the
      * active one is visible. Matches specs3
      * app_shell_and_dialog.md "Lazy Loading and DOM
@@ -766,6 +815,13 @@ export class AppShell extends JRPCClient {
       this._onStreamChunkHeader.bind(this);
     this._onStreamCompleteHeader =
       this._onStreamCompleteHeader.bind(this);
+    // Compaction capacity refresh — bound so the three
+    // window event listeners share one callable and
+    // removeEventListener can match. Without the bind,
+    // `this` is undefined inside the handler and the
+    // _fetchHistoryStatus call throws.
+    this._onCompactionStatusRefresh =
+      this._onCompactionStatusRefresh.bind(this);
   }
 
   connectedCallback() {
@@ -838,6 +894,24 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'stream-complete', this._onStreamCompleteHeader,
     );
+    // Compaction capacity refresh triggers. Three
+    // disjoint events because they arrive on separate
+    // channels: stream-complete after an LLM turn,
+    // session-changed after a restore or history-browser
+    // load, and compaction-event when the compactor
+    // itself fires. All route through the single
+    // _onCompactionStatusRefresh handler so the fetch
+    // logic (debounced, in-flight guarded) lives in
+    // one place.
+    window.addEventListener(
+      'stream-complete', this._onCompactionStatusRefresh,
+    );
+    window.addEventListener(
+      'session-changed', this._onCompactionStatusRefresh,
+    );
+    window.addEventListener(
+      'compaction-event', this._onCompactionStatusRefresh,
+    );
   }
 
   disconnectedCallback() {
@@ -886,6 +960,15 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'stream-complete', this._onStreamCompleteHeader,
     );
+    window.removeEventListener(
+      'stream-complete', this._onCompactionStatusRefresh,
+    );
+    window.removeEventListener(
+      'session-changed', this._onCompactionStatusRefresh,
+    );
+    window.removeEventListener(
+      'compaction-event', this._onCompactionStatusRefresh,
+    );
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -918,6 +1001,11 @@ export class AppShell extends JRPCClient {
     // history (restored from the last session on the server),
     // selected files, streaming status, and init_complete.
     this._fetchCurrentState();
+
+    // Initial history-status fetch so the compaction bar
+    // reflects restored-session tokens from the first paint.
+    // Subsequent refreshes come through the event handlers.
+    this._fetchHistoryStatus();
   }
 
   /**
@@ -992,6 +1080,84 @@ export class AppShell extends JRPCClient {
       this._tryReopenLastFile();
     } catch (err) {
       console.warn('[app-shell] get_current_state failed', err);
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Compaction capacity bar — history-status fetch and refresh
+  // ---------------------------------------------------------------
+
+  /**
+   * Event handler bound to stream-complete, session-changed,
+   * and compaction-event. Fire-and-forget refresh — we don't
+   * need to await the fetch here, the reactive property update
+   * in _fetchHistoryStatus re-renders when the result lands.
+   */
+  _onCompactionStatusRefresh() {
+    this._fetchHistoryStatus();
+  }
+
+  /**
+   * Fetch the current history status from the backend and
+   * update the reactive property. Guarded against overlapping
+   * fetches — if one is in flight, new triggers are coalesced
+   * into the pending call rather than queueing a second one.
+   *
+   * Non-fatal on failure: missing backend, method not found
+   * on an older server, or transient network error all leave
+   * the prior snapshot in place. The bar keeps showing the
+   * last-known state; next event triggers a retry.
+   */
+  async _fetchHistoryStatus() {
+    if (!this.call) return;
+    if (this._historyStatusFetchInFlight) return;
+    this._historyStatusFetchInFlight = true;
+    try {
+      // Call in the same style as _fetchCurrentState — no
+      // typeof check on the method reference. The jrpc-oo
+      // call proxy exposes methods as Proxy-wrapped
+      // callables whose typeof is not necessarily
+      // 'function', so guarding on typeof was rejecting
+      // valid calls and silently leaving the bar empty.
+      const raw = await this.call['LLMService.get_history_status']();
+      // Unwrap single-key envelope the same way
+      // _fetchCurrentState does. jrpc-oo returns
+      // { ClassName: { ... } } for method calls.
+      let status = raw;
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const keys = Object.keys(raw);
+        if (keys.length === 1) {
+          const inner = raw[keys[0]];
+          if (
+            inner && typeof inner === 'object'
+            && !Array.isArray(inner)
+          ) {
+            status = inner;
+          }
+        }
+      }
+      if (status && typeof status === 'object') {
+        this._historyStatus = status;
+      }
+    } catch (err) {
+      // Surface failures with console.warn — debug-level
+      // messages are hidden by default in most browsers
+      // and we'd lose visibility on genuine RPC errors.
+      // method-not-found is still the only expected
+      // non-fatal case (older backend), so filter that
+      // to debug to avoid nagging.
+      const msg = err?.message || '';
+      if (msg.includes('method not found')) {
+        console.debug(
+          '[app-shell] get_history_status not available', err,
+        );
+      } else {
+        console.warn(
+          '[app-shell] get_history_status failed', err,
+        );
+      }
+    } finally {
+      this._historyStatusFetchInFlight = false;
     }
   }
 
@@ -2555,6 +2721,82 @@ export class AppShell extends JRPCClient {
     return '';
   }
 
+  /**
+   * Compaction-capacity bar — renders a thin strip at the
+   * dialog bottom showing how close current history tokens
+   * are to the compaction trigger threshold.
+   *
+   * Visibility rules:
+   *
+   *   - Returns empty when the backend status hasn't been
+   *     fetched yet (initial paint before the first
+   *     get_history_status response).
+   *   - Returns empty when the backend reports compaction
+   *     disabled — the ratio is meaningless if there's no
+   *     threshold to approach.
+   *   - Otherwise always rendered, including at 0% — the
+   *     constant placeholder makes the bar's reappearance
+   *     after a successful compaction (tokens drop to
+   *     near-zero) less surprising.
+   *
+   * Colour follows the same tri-state rule used by the
+   * Context tab and Token HUD: green ≤75%, amber 75-90%,
+   * red >90%. The red band is the "imminent compaction"
+   * warning — users can anticipate the pause.
+   */
+  _renderCompactionBar() {
+    const status = this._historyStatus;
+    if (!status) return null;
+    // Backend keys come from LLMService.get_history_status,
+    // which merges get_token_budget + get_compaction_status
+    // and re-prefixes the compaction fields to avoid name
+    // collisions. Field shape confirmed in the browser console:
+    //   history_tokens, compaction_enabled, compaction_trigger,
+    //   compaction_percent, max_history_tokens, remaining,
+    //   needs_compaction, session_id.
+    // An earlier draft of this component assumed the un-prefixed
+    // names (enabled, trigger_tokens, percent) — the gate rejected
+    // every snapshot and the bar never rendered.
+    if (!status.compaction_enabled) return null;
+    const trigger = Number(status.compaction_trigger) || 0;
+    if (trigger <= 0) return null;
+    const tokens = Number(status.history_tokens) || 0;
+    // Backend-computed percent is preferred when present;
+    // fall back to a local ratio if the snapshot is a
+    // subset shape. Capped at 100 for display — over-100
+    // is possible briefly before compaction kicks in, and
+    // rendering widths beyond 100% would trigger horizontal
+    // overflow on the bar container.
+    const rawPct = status.compaction_percent != null
+      ? Number(status.compaction_percent)
+      : (tokens / trigger) * 100;
+    const pct = Math.max(0, Math.min(100, rawPct || 0));
+    // Colour picker — same thresholds as _budgetColor
+    // in context-tab.js / token-hud.js. Keeping the logic
+    // inline here avoids an import just for three values.
+    let color;
+    if (pct > 90) {
+      color = '#f85149';
+    } else if (pct > 75) {
+      color = '#d29922';
+    } else {
+      color = '#7ee787';
+    }
+    const title = (
+      `History: ${tokens.toLocaleString()} / `
+      + `${trigger.toLocaleString()} tokens `
+      + `(${pct.toFixed(1)}% of compaction threshold)`
+    );
+    return html`
+      <div class="compaction-bar" title=${title}>
+        <div
+          class="compaction-bar-fill"
+          style="width: ${pct}%; background: ${color};"
+        ></div>
+      </div>
+    `;
+  }
+
   render() {
     return html`
       <div class="viewer-background">
@@ -2673,6 +2915,7 @@ export class AppShell extends JRPCClient {
             <ac-settings-tab></ac-settings-tab>
           </div>
         </div>
+        ${this._renderCompactionBar()}
         <div
           class="resize-handle right"
           @pointerdown=${(e) => this._onHandlePointerDown(e, _RESIZE_RIGHT)}

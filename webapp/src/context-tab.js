@@ -592,6 +592,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
+    this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onModalKeyDown = this._onModalKeyDown.bind(this);
   }
 
@@ -600,6 +601,14 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('mode-changed', this._onModeChanged);
+    // session-changed fires on startup after _restore_last_session
+    // loads a prior session's history, and whenever the user
+    // loads a historical session via the browser. The budget
+    // display depends on history token count, so either case
+    // requires a refresh. Mark stale when the tab isn't
+    // visible so the refresh runs when the user switches to
+    // it — matches the other listeners' behaviour.
+    window.addEventListener('session-changed', this._onSessionChanged);
     window.addEventListener('keydown', this._onModalKeyDown);
   }
 
@@ -607,6 +616,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener('mode-changed', this._onModeChanged);
+    window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener('keydown', this._onModalKeyDown);
     super.disconnectedCallback();
   }
@@ -655,6 +665,14 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   _onModeChanged() {
+    if (this._isTabActive()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
+  _onSessionChanged() {
     if (this._isTabActive()) {
       this._refresh();
     } else {

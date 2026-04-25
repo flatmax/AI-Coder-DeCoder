@@ -263,15 +263,24 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._fadeTimer = null;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
+    this._onSessionChanged = this._onSessionChanged.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
+    // session-changed fires on startup (after session restore)
+    // and when the user loads a historical session. We refresh
+    // the backing breakdown data — but don't make the HUD
+    // visible, because the HUD is per-request feedback, not a
+    // persistent display. Keeps the next streamComplete's HUD
+    // consistent with the restored session state.
+    window.addEventListener('session-changed', this._onSessionChanged);
   }
 
   disconnectedCallback() {
     window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener('session-changed', this._onSessionChanged);
     this._clearTimers();
     super.disconnectedCallback();
   }
@@ -315,6 +324,18 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._startAutoHide();
 
     // Fetch full breakdown asynchronously.
+    this._fetchBreakdown();
+  }
+
+  _onSessionChanged() {
+    // Refresh backing breakdown data but stay hidden. The next
+    // stream-complete will reveal the HUD with up-to-date
+    // tier/budget/session-totals numbers. No per-request usage
+    // to populate (session restore isn't a request), so
+    // _requestUsage stays at whatever it was — the HUD's
+    // "This Request" section renders the placeholder when
+    // _requestUsage is null, which is the correct state
+    // immediately after a restore.
     this._fetchBreakdown();
   }
 
