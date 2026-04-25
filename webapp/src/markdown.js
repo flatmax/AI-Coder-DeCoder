@@ -5,27 +5,70 @@
 //
 //   1. The chat panel doesn't need to know about marked's API
 //      directly.
-//   2. Later sub-phases can swap in a richer renderer (syntax
-//      highlighting via highlight.js, math via katex) without
-//      touching every call site.
+//   2. Syntax highlighting, math rendering, and code-block
+//      chrome (copy button, language label) live here once,
+//      not scattered through every call site.
 //   3. Tests can exercise the renderer in isolation.
 //
-// Phase 2b scope — basic markdown only:
-//   - Fenced code blocks (```lang ... ```)
+// Scope:
+//   - Fenced code blocks with syntax highlighting via
+//     highlight.js (js/ts/python/json/bash/css/html/yaml/c/cpp/
+//     diff/md), plus highlightAuto for unspecified language
+//   - Code blocks render as `<pre class="code-block">` with a
+//     language label and a copy button (the chat panel owns
+//     the delegated click handler)
 //   - Inline code (`x`)
-//   - Paragraphs, headings, bold, italic
-//   - Links (but the chat panel sandboxes them)
+//   - Paragraphs, headings, bold, italic, GFM tables/task lists
 //   - Line breaks within paragraphs (breaks: true)
+//   - KaTeX math — `$$...$$` display, `$...$` inline
 //
-// Deferred:
-//   - Syntax highlighting on code blocks (Phase 2d)
-//   - KaTeX math (later — when someone needs it)
-//   - Custom renderer for edit blocks (Phase 2d — uses a
-//     separate segmenter before marked sees the content)
-//   - Source-line attributes for preview scroll sync (Phase 3,
-//     only for the diff viewer's markdown preview)
+// Not here:
+//   - Source-line attributes for preview scroll sync (lives in
+//     markdown-preview.js — only used by the diff viewer's
+//     Markdown preview pane, needs a different Marked instance)
+//   - Custom renderer for edit blocks (the chat panel runs the
+//     segmenter before marked sees the content)
 
+import hljs from 'highlight.js/lib/core';
+import bash from 'highlight.js/lib/languages/bash';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
+import css from 'highlight.js/lib/languages/css';
+import diff from 'highlight.js/lib/languages/diff';
+import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import markdown from 'highlight.js/lib/languages/markdown';
+import python from 'highlight.js/lib/languages/python';
+import typescript from 'highlight.js/lib/languages/typescript';
+import xml from 'highlight.js/lib/languages/xml';
+import yaml from 'highlight.js/lib/languages/yaml';
+import katex from 'katex';
 import { Marked } from 'marked';
+
+// Register the language set specs call out. hljs.registerLanguage
+// overwrites on repeat calls so hot-module reload during
+// development is safe. Aliases (sh/shell, js, ts, py, md, yml,
+// html) share an implementation with their canonical name.
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('sh', bash);
+hljs.registerLanguage('shell', bash);
+hljs.registerLanguage('c', c);
+hljs.registerLanguage('cpp', cpp);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('diff', diff);
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('md', markdown);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('py', python);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('ts', typescript);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('yml', yaml);
 
 // Configure a shared Marked instance. The `breaks` option makes
 // single newlines render as <br>, which matches how users

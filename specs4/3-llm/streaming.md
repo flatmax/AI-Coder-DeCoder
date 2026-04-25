@@ -105,11 +105,32 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 ## LLM Streaming (Worker Thread)
 
 - Runs in a thread pool to avoid blocking the async event loop
-- Call provider with streaming and usage reporting enabled
+- Call provider with streaming, usage reporting, and an explicit `max_tokens` ceiling
 - For each chunk — accumulate text, fire chunk callback
 - Check cancellation flag each iteration
 - Track token usage from the final chunk
-- Return accumulated content and cancelled flag
+- Capture `finish_reason` from whichever chunk first reports a non-null value (typically the final chunk)
+- Return accumulated content, cancelled flag, and finish reason
+
+### Max-Tokens Resolution
+
+Every `litellm.completion()` call — streaming chat, commit message generation, topic detection — passes an explicit `max_tokens` argument. Resolution is a two-level fallback chain:
+
+1. `config.max_output_tokens` — user override in `llm.json` (optional)
+2. `counter.max_output_tokens` — per-model ceiling from `TokenCounter`
+
+The user override is clamped against the counter ceiling — a config value larger than the provider supports is capped rather than passed through (which would produce a 400). Without the explicit argument, providers apply their own default (commonly 4096), silently truncating long responses — edit-heavy assistant turns routinely exceed 4096 tokens and would be cut mid-edit-block.
+
+### Finish Reason
+
+The provider reports `finish_reason` on the final chunk (earlier chunks report None). Normalized values via litellm:
+
+- `stop`, `end_turn` — natural end of generation
+- `length` — hit `max_tokens`; response truncated
+- `content_filter` — safety filter triggered
+- `tool_calls`, `function_call` — model requesting a tool
+
+The worker captures whichever chunk first reports a non-null value and propagates it through the stream-complete result. Natural stops log at INFO; non-natural stops log at WARNING so operators can diagnose truncation without trawling debug logs.
 
 ## Chunk Delivery Semantics
 
@@ -150,6 +171,7 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 
 - Full assistant response text
 - Token usage (prompt, completion, cache read, cache write)
+- Finish reason from the provider's final chunk (may be None if the stream raised or no chunk reported one)
 - Parsed edit blocks with create flags
 - Detected shell command suggestions
 - Aggregate edit status counts (passed, already-applied, failed, skipped, not-in-context)

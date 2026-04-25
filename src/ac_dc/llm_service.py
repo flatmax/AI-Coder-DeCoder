@@ -176,6 +176,77 @@ _DETECTOR_MAX_MESSAGES = 50
 _URL_PER_MESSAGE_LIMIT = 3
 
 
+def _resolve_max_output_tokens(
+    config: "ConfigManager",
+    counter: TokenCounter,
+) -> int:
+    """Resolve the effective ``max_tokens`` for an LLM call.
+
+    Two-level fallback chain per specs3/3-llm-engine/
+    streaming_lifecycle.md § Max-Tokens Source:
+
+    1. ``config.max_output_tokens`` — user override in ``llm.json``
+    2. ``counter.max_output_tokens`` — per-model ceiling
+
+    The config value may lower the ceiling but cannot raise it —
+    a user configuring 200K on a model that only supports 64K
+    would produce a provider 400. We clamp against the counter
+    ceiling as a safety net.
+
+    Returned value is always a positive int. Used by every
+    :func:`litellm.completion` call site so no path can silently
+    inherit the provider default (which varies across providers
+    and led to 4096-token truncation before this was wired up).
+    """
+    ceiling = counter.max_output_tokens
+    override = config.max_output_tokens
+    if override is None:
+        return ceiling
+    return min(override, ceiling)
+
+
+def _extract_finish_reason(chunk: Any) -> str | None:
+    """Extract the ``finish_reason`` from a streaming chunk.
+
+    Provider chunks use the OpenAI-compatible shape via litellm:
+    ``chunk.choices[0].finish_reason`` — non-null on the final
+    chunk, None on intermediates. Dict-form chunks come from some
+    providers; we accept both attribute and key access.
+
+    Returns None on any extraction failure (malformed chunk,
+    empty choices array, missing attribute). Non-None means the
+    stream is terminating — the worker should capture the value
+    and propagate it into the completion result.
+
+    Values we see in the wild, documented in
+    specs3/3-llm-engine/streaming_lifecycle.md § Finish Reason:
+
+    - ``"stop"`` — natural end of generation
+    - ``"end_turn"`` — Anthropic passthrough (also natural)
+    - ``"length"`` — hit ``max_tokens``; response truncated
+    - ``"content_filter"`` — safety filter triggered
+    - ``"tool_calls"`` / ``"function_call"`` — model wants a tool
+
+    The UI treats ``stop``/``end_turn`` as natural (muted badge)
+    and everything else as abnormal (red badge + toast).
+    """
+    try:
+        choices = getattr(chunk, "choices", None)
+        if choices is None and isinstance(chunk, dict):
+            choices = chunk.get("choices")
+        if not choices:
+            return None
+        first = choices[0]
+        reason = getattr(first, "finish_reason", None)
+        if reason is None and isinstance(first, dict):
+            reason = first.get("finish_reason")
+        if reason is None:
+            return None
+        return str(reason)
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Request ID generation
 # ---------------------------------------------------------------------------
@@ -315,6 +386,15 @@ def _build_topic_detector(
             return TopicBoundary(None, "no messages", 0.0, "")
 
         model = config.smaller_model
+        # Topic-detector responses are small (short JSON), but we
+        # still pass max_tokens so the call is consistent with
+        # the rest of the LLM surface and so a provider that
+        # defaults to a tiny ceiling (e.g. 512) doesn't truncate
+        # mid-JSON and produce an unparseable reply.
+        detector_counter = TokenCounter(model)
+        max_output = _resolve_max_output_tokens(
+            config, detector_counter
+        )
         try:
             # Non-streaming call — we want the full JSON response
             # before parsing.
@@ -325,6 +405,7 @@ def _build_topic_detector(
                     {"role": "user", "content": user_prompt},
                 ],
                 stream=False,
+                max_tokens=max_output,
             )
         except Exception as exc:
             logger.warning(
@@ -3121,6 +3202,7 @@ class LLMService:
         error: str | None = None
         full_content = ""
         cancelled = False
+        finish_reason: str | None = None
         try:
             # File context sync — remove deselected files, load
             # selected ones. Defensive: skip files that don't exist
@@ -3234,7 +3316,7 @@ class LLMService:
             # Run the LLM call in the stream executor.
             assert self._main_loop is not None
             loop = self._main_loop
-            full_content, cancelled = await loop.run_in_executor(
+            full_content, cancelled, finish_reason = await loop.run_in_executor(
                 self._stream_executor,
                 self._run_completion_sync,
                 request_id, messages, loop,
@@ -3266,11 +3348,18 @@ class LLMService:
         # assistant output doesn't silently touch the filesystem.
         # Review mode is read-only (specs4/4-features/code-review.md);
         # we parse for UI display but skip application.
+        #
+        # finish_reason is set when the stream completed (even if
+        # cancelled mid-way — the provider may have reported a
+        # reason on the last chunk before our cancel took
+        # effect). Left None when the try-block raised before
+        # _run_completion_sync returned.
         result = await self._build_completion_result(
             full_content=full_content,
             user_message=message,
             cancelled=cancelled,
             error=error,
+            finish_reason=finish_reason if error is None else None,
         )
 
         # Fire completion event.
@@ -3433,6 +3522,7 @@ class LLMService:
         user_message: str,
         cancelled: bool,
         error: str | None,
+        finish_reason: str | None = None,
     ) -> dict[str, Any]:
         """Parse the response, apply edits, build the result dict.
 
@@ -3441,6 +3531,12 @@ class LLMService:
         cancelled streams (so partial assistant output renders
         pending cards for the user), but apply is gated on
         ``error is None and not cancelled and not _review_active``.
+
+        ``finish_reason`` is the provider's stop reason from the
+        stream's final chunk. Passed through to the frontend so
+        it can badge truncated responses (``length``) distinctly
+        from natural stops. None when the stream raised before
+        completion or when the provider didn't report one.
 
         Order of operations:
 
@@ -3491,6 +3587,7 @@ class LLMService:
             "edit_results": [],
             "files_auto_added": [],
             "user_message": user_message,
+            "finish_reason": finish_reason,
         }
         if cancelled:
             result["cancelled"] = True
@@ -3615,18 +3712,29 @@ class LLMService:
         full_content = ""
         was_cancelled = False
 
+        # Resolve effective max_tokens. Specs3 calls this out
+        # explicitly — without it providers apply their own
+        # default (4096 for many), which silently truncates
+        # long edit responses. The counter's per-model ceiling
+        # is the safe upper bound; user config can lower it.
+        max_output = _resolve_max_output_tokens(
+            self._config, self._counter
+        )
+
         try:
             stream = litellm.completion(
                 model=self._config.model,
                 messages=messages,
                 stream=True,
                 stream_options={"include_usage": True},
+                max_tokens=max_output,
             )
         except Exception as exc:
             logger.exception("litellm.completion raised")
-            return (f"LLM call failed: {exc}", False)
+            return (f"LLM call failed: {exc}", False, None)
 
         usage: dict[str, Any] | None = None
+        finish_reason: str | None = None
 
         for chunk in stream:
             if request_id in self._cancelled_requests:
@@ -3653,6 +3761,13 @@ class LLMService:
             except (AttributeError, IndexError):
                 pass  # malformed chunk — skip
 
+            # Capture finish_reason from whichever chunk first
+            # reports a non-null value (typically the final
+            # chunk). Earlier chunks report None and fall through.
+            reason = _extract_finish_reason(chunk)
+            if reason is not None and finish_reason is None:
+                finish_reason = reason
+
             # Usage is typically on the final chunk.
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
@@ -3662,7 +3777,24 @@ class LLMService:
         if usage is not None:
             self._accumulate_usage(usage)
 
-        return full_content, was_cancelled
+        # Log non-natural finish reasons at WARNING so operators
+        # can diagnose truncation without grep-spelunking through
+        # debug logs. Natural stops (``stop``/``end_turn``) log
+        # at INFO — still visible in verbose mode but not
+        # alarming.
+        if finish_reason is not None:
+            if finish_reason in ("stop", "end_turn"):
+                logger.info(
+                    "LLM finish_reason=%r", finish_reason
+                )
+            else:
+                logger.warning(
+                    "LLM finish_reason=%r "
+                    "(non-natural stop — response may be incomplete)",
+                    finish_reason,
+                )
+
+        return full_content, was_cancelled, finish_reason
 
     def _accumulate_usage(self, usage: Any) -> None:
         """Fold a per-request usage record into session totals."""
@@ -5083,6 +5215,17 @@ class LLMService:
         assert self._main_loop is not None
         loop = self._main_loop
 
+        # Smaller model gets its own counter for ceiling lookup —
+        # its max_output_tokens differs from the primary model's
+        # (smaller Claude family members have the same 64K
+        # ceiling as larger ones, but older auxiliary models
+        # could have smaller ceilings in future). The config
+        # override applies across all calls.
+        aux_counter = TokenCounter(self._config.smaller_model)
+        max_output = _resolve_max_output_tokens(
+            self._config, aux_counter
+        )
+
         def _call() -> str:
             try:
                 response = litellm.completion(
@@ -5092,6 +5235,7 @@ class LLMService:
                         {"role": "user", "content": diff},
                     ],
                     stream=False,
+                    max_tokens=max_output,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:

@@ -623,10 +623,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
       text-transform: none;
       letter-spacing: normal;
       border-radius: 3px;
+      /* Default (amber) — used for uncategorised non-natural
+       * stops. Specific reasons override via the modifier
+       * classes below. */
       background: rgba(210, 153, 34, 0.15);
       color: #d29922;
       border: 1px solid rgba(210, 153, 34, 0.3);
       opacity: 1;
+    }
+    /* Red variants for the two most disruptive stop reasons —
+     * truncation (hit max_tokens) and content-filter blocks.
+     * Specs3 §Finish Reason calls these out as "red badge +
+     * error toast"; the amber default is for everything else
+     * non-natural (tool_calls, function_call, unknown).
+     * Override both background and border so the pill
+     * visually pops against the amber variant. */
+    .finish-reason-badge.severity-error {
+      background: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border-color: rgba(248, 81, 73, 0.4);
     }
 
     /* Message action toolbars — hover-only copy and paste
@@ -1748,6 +1763,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
                 : {}),
             },
       ];
+      // Surface non-natural stops as a toast in addition to
+      // the in-message badge. The badge is easy to miss if
+      // the user has scrolled elsewhere; the toast catches
+      // attention even when the assistant card is out of
+      // view. Cancelled streams and errors are already
+      // surfaced through their own channels (the `[stopped]`
+      // marker, the error toast above) — skip the finish-
+      // reason toast so we don't double up.
+      if (!error && finishReason) {
+        this._maybeShowFinishReasonToast(finishReason);
+      }
       this._streaming = false;
       this._streamingContent = '';
       this._currentRequestId = null;
@@ -1771,6 +1797,51 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (wasOwnRequest && result && !result.error) {
       this._maybePopulateRetryPrompt(result);
     }
+  }
+
+  /**
+   * Emit a toast for non-natural finish reasons. Natural
+   * stops (`stop`, `end_turn`) produce nothing — the
+   * caller has already filtered them out before calling
+   * us, but we double-check defensively.
+   *
+   * Per specs3/3-llm-engine/streaming_lifecycle.md § Finish
+   * Reason — `length` and `content_filter` are `error`
+   * severity ("response incomplete"); `tool_calls` /
+   * `function_call` are `warning` (the provider wanted
+   * something we don't support yet, but the response
+   * itself isn't broken); anything else is `warning` with
+   * the raw reason surfaced.
+   *
+   * The `ac-toast` event is the shell's toast channel —
+   * see app-shell.js for the listener. Dispatching here
+   * rather than via a direct method call keeps the chat
+   * panel decoupled from the shell.
+   */
+  _maybeShowFinishReasonToast(reason) {
+    if (!reason || reason === 'stop' || reason === 'end_turn') {
+      return;
+    }
+    let message;
+    let type = 'warning';
+    switch (reason) {
+      case 'length':
+        message = '⚠️ Response truncated — hit max_tokens';
+        type = 'error';
+        break;
+      case 'content_filter':
+        message = '⚠️ Response blocked by content filter';
+        type = 'error';
+        break;
+      case 'tool_calls':
+      case 'function_call':
+        message = `⚠️ Model requested a ${reason} (not supported)`;
+        break;
+      default:
+        message = `⚠️ Stopped: ${reason}`;
+        break;
+    }
+    this._emitToast(message, type);
   }
 
   _onUserMessage(event) {
@@ -4247,12 +4318,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const highlightClass = isHighlighted ? ' search-highlight' : '';
     // Finish-reason badge — only shown for non-normal stop
     // reasons (length, content_filter, etc.). Normal
-    // completions (stop, end_turn) don't carry the field.
+    // completions (stop, end_turn) don't carry the field
+    // (the sender strips them in _onStreamComplete).
+    //
+    // Per specs3/3-llm-engine/streaming_lifecycle.md § Finish
+    // Reason:
+    //   - length → red "✂️ truncated (max_tokens)"
+    //   - content_filter → red "🚫 content filter"
+    //   - tool_calls / function_call → amber "🔧 {reason}"
+    //   - anything else → amber "{reason}"
+    //
+    // Icon + severity class chosen together so the badge
+    // reads at a glance. Title attribute carries the raw
+    // reason for screen readers and hover disclosure.
     const finishBadge =
       msg.finishReason
-        ? html`<span class="finish-reason-badge"
-            title="LLM finish reason: ${msg.finishReason}"
-            >${msg.finishReason}</span>`
+        ? this._renderFinishBadge(msg.finishReason)
         : '';
     // File summary section — settled assistant messages
     // only. Per specs4/5-webapp/chat.md: "Section only
@@ -4280,6 +4361,64 @@ export class ChatPanel extends RpcMixin(LitElement) {
         <div class="message-toolbar bottom">${toolbar}</div>
       </div>
     `;
+  }
+
+  /**
+   * Render the finish-reason badge for a message. Picks a
+   * severity class (red for max_tokens truncation and
+   * content-filter blocks; amber default for everything
+   * else non-natural) and a user-readable label with icon.
+   *
+   * Called only when `msg.finishReason` is set, which only
+   * happens for non-natural stop reasons (the
+   * `_onStreamComplete` handler strips `stop`/`end_turn`
+   * before assigning to the message). So this never
+   * renders on a successful completion.
+   *
+   * @param {string} reason — the raw finish_reason string
+   *   from the provider (via litellm normalization)
+   * @returns {import('lit').TemplateResult}
+   */
+  _renderFinishBadge(reason) {
+    // Icon + label + severity, picked per reason. Severity
+    // `error` produces the red CSS variant; absent severity
+    // uses the amber default.
+    let icon = '⚠️';
+    let label = reason;
+    let severity = '';
+    switch (reason) {
+      case 'length':
+        icon = '✂️';
+        label = 'truncated (max_tokens)';
+        severity = 'severity-error';
+        break;
+      case 'content_filter':
+        icon = '🚫';
+        label = 'content filter';
+        severity = 'severity-error';
+        break;
+      case 'tool_calls':
+        icon = '🔧';
+        label = 'tool call requested';
+        break;
+      case 'function_call':
+        icon = '🔧';
+        label = 'function call requested';
+        break;
+      default:
+        // Unknown reason — surface verbatim so
+        // unexpected provider values stay diagnosable.
+        icon = '⚠️';
+        label = reason;
+        break;
+    }
+    const classes = severity
+      ? `finish-reason-badge ${severity}`
+      : 'finish-reason-badge';
+    return html`<span
+      class=${classes}
+      title="LLM finish reason: ${reason}"
+    >${icon} ${label}</span>`;
   }
 
   /**

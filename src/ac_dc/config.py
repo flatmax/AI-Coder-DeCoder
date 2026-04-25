@@ -494,6 +494,48 @@ class ConfigManager:
         )
 
     @property
+    def max_output_tokens(self) -> int | None:
+        """User-configured ceiling for model output tokens.
+
+        Per specs3/3-llm-engine/streaming_lifecycle.md § Max-Tokens
+        Source: when set, overrides the per-model default from
+        :class:`TokenCounter`. When absent (the default), callers
+        fall back to ``counter.max_output_tokens``.
+
+        Returning ``None`` rather than a sentinel integer lets
+        callers distinguish "user set no preference" from "user
+        explicitly set this low number". The two interpretations
+        diverge if a future model ships with a smaller default
+        than a previous user config — we want the per-model
+        default to apply, not a stale override.
+
+        Non-integer or non-positive values are ignored with a
+        warning (treated as unset). A zero or negative max
+        tokens is never what the user meant and would cause
+        providers to reject the request outright.
+        """
+        raw = self.llm_config.get("max_output_tokens")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "llm.json 'max_output_tokens' is not an integer "
+                "(got %r); ignoring",
+                raw,
+            )
+            return None
+        if value <= 0:
+            logger.warning(
+                "llm.json 'max_output_tokens' must be positive "
+                "(got %d); ignoring",
+                value,
+            )
+            return None
+        return value
+
+    @property
     def cache_min_tokens(self) -> int:
         """User-configured minimum cacheable tokens.
 

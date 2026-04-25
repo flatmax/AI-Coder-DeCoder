@@ -59,11 +59,40 @@ _DEFAULT_MAX_INPUT_TOKENS = 1_000_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 4096
 _DEFAULT_MIN_CACHEABLE_TOKENS = 1024
 
-# Claude families get 8192 output tokens. Match by lowercase
-# substring — resilient to provider prefixes like ``anthropic/`` or
-# ``bedrock/anthropic.``. Both dash-separated and dot-separated
-# version styles appear in the wild.
+# Match by lowercase substring — resilient to provider prefixes like
+# ``anthropic/`` or ``bedrock/anthropic.``. Both dash-separated and
+# dot-separated version styles appear in the wild.
 _CLAUDE_FAMILY_MARKERS = ("claude", "anthropic")
+
+# Per-model output token ceilings. Matched by lowercase substring
+# against the model name, first match wins. The ordering of the
+# tuple matters — more-specific patterns must come before less-
+# specific ones (e.g. ``opus-4-5`` before ``claude``). These are
+# the hard ceilings the provider accepts; user configuration can
+# lower this via ``config.max_output_tokens`` but cannot raise it.
+#
+# Values from provider documentation as of 2025-01 —
+# Anthropic publishes these under "Output length" per model.
+# When a new model ships with a different ceiling, add it here
+# rather than relying on runtime provider queries (which the
+# spec forbids — silently changing ceilings would mask bugs
+# like the 4096-token truncation we had before this table).
+_OUTPUT_TOKEN_CEILINGS: tuple[tuple[tuple[str, ...], int], ...] = (
+    # Opus 4.5+ — 128K output window
+    (("opus-4-5", "opus-4.5", "opus-4-6", "opus-4.6",
+      "opus-4-7", "opus-4.7"), 128_000),
+    # Sonnet 4.5+ — 64K output window
+    (("sonnet-4-5", "sonnet-4.5", "sonnet-4-6", "sonnet-4.6",
+      "sonnet-4-7", "sonnet-4.7"), 64_000),
+    # Haiku 4.5+ — 64K output window
+    (("haiku-4-5", "haiku-4.5", "haiku-4-6", "haiku-4.6"), 64_000),
+    # GPT-4 family — 16K output window
+    (("gpt-4",), 16_384),
+    # Older Claude (3.x, 2.x, pre-4.5 4.x) — 8K output window.
+    # Catch-all for any ``claude``/``anthropic`` model that didn't
+    # match a more specific pattern above.
+    (("claude", "anthropic"), 8_192),
+)
 
 # Models with a 4096 min-cacheable-tokens floor. Same family markers
 # as ``ConfigManager._model_min_cacheable_tokens`` — duplicated here
@@ -237,10 +266,27 @@ class TokenCounter:
     def max_output_tokens(self) -> int:
         """Maximum output tokens per request.
 
-        Claude family gets 8192; everything else 4096.
+        Walks :data:`_OUTPUT_TOKEN_CEILINGS` in declaration order
+        and returns the first matching ceiling. Order is load-
+        bearing — more-specific patterns (``opus-4-5``) must
+        appear before the catch-all (``claude``).
+
+        A user-configured ``max_output_tokens`` in ``llm.json``
+        can LOWER this ceiling but cannot raise it — see
+        :meth:`ConfigManager.max_output_tokens`. The counter
+        exposes the provider's hard ceiling; the config layer
+        clamps the user's preference against it.
+
+        Falls back to :data:`_DEFAULT_MAX_OUTPUT_TOKENS` (4096)
+        for unrecognized models. Conservative default — better
+        to get a shorter-than-possible response than a 400
+        from the provider because we asked for too much.
         """
-        if _is_claude(self._model):
-            return 8192
+        lowered = self._model.lower()
+        for markers, ceiling in _OUTPUT_TOKEN_CEILINGS:
+            for marker in markers:
+                if marker in lowered:
+                    return ceiling
         return _DEFAULT_MAX_OUTPUT_TOKENS
 
     @property

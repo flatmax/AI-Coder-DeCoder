@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@flatmax/jrpc-oo": "^1.2.2",
+    "diff": "^5.2.0",
+    "highlight.js": "^11.10.0",
     "katex": "^0.16.11",
     "lit": "^3.2.0",
     "marked": "^14.1.0",
