@@ -69,6 +69,27 @@ function rootOf(children) {
   };
 }
 
+/**
+ * Build a statusData object with the given membership
+ * sets. Defaults to empty — callers override only the
+ * fields they're testing.
+ */
+function statusDataOf({
+  modified = [],
+  staged = [],
+  untracked = [],
+  deleted = [],
+  diffStats = {},
+} = {}) {
+  return {
+    modified: new Set(modified),
+    staged: new Set(staged),
+    untracked: new Set(untracked),
+    deleted: new Set(deleted),
+    diffStats,
+  };
+}
+
 /** Create, mount, and track a picker instance for cleanup. */
 const _mounted = [];
 function mountPicker(props = {}) {

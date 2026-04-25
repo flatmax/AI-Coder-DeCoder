@@ -578,6 +578,17 @@ export class FilePicker extends LitElement {
       repoName: '',
     };
     this.selectedFiles = new Set();
+    // Empty-but-shaped default so `_renderFile`'s Set.has()
+    // calls don't need guard clauses before the first tree
+    // load. Orchestrator replaces this whole object on each
+    // load; per-field mutation isn't used.
+    this.statusData = {
+      modified: new Set(),
+      staged: new Set(),
+      untracked: new Set(),
+      deleted: new Set(),
+      diffStats: {},
+    };
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
