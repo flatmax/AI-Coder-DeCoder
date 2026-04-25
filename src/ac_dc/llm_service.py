@@ -497,13 +497,20 @@ class LLMService:
         # tracker with items from the opposite index.
         self._cross_ref_enabled = False
 
-        # Stability initialization flag. Set to True after
-        # _try_initialize_stability() succeeds. Prevents
-        # re-initialization on subsequent requests. The
-        # streaming handler checks this to decide whether
-        # to attempt lazy initialization on the first chat
-        # request (when eager init during startup failed).
-        self._stability_initialized = False
+        # Per-mode stability initialization flags. Each mode's
+        # tracker needs its own init pass — the first time we
+        # switch INTO a mode, that tracker's tier assignments
+        # have to be seeded from the appropriate reference
+        # graph. Shared state with a single flag would either
+        # (a) re-initialize the current tracker every switch
+        # (expensive and wrong — its state should persist
+        # across switches) or (b) leave the new tracker empty
+        # until the user clicks Rebuild (bug observed 2025).
+        #
+        # Keyed by Mode. Missing key == not yet initialized.
+        # switch_mode checks the target mode and calls
+        # _try_initialize_stability when the flag is missing.
+        self._stability_initialized: dict[Mode, bool] = {}
 
         # Edit pipeline — validates and applies edit blocks parsed
         # from the LLM response. Constructed only when a repo is
@@ -2289,6 +2296,19 @@ class LLMService:
         # Update the context manager's mode flag.
         self._context.set_mode(target)
 
+        # Initialize the target mode's tracker if this is the
+        # first time we've switched into it. Without this, the
+        # new mode's tracker starts empty — the cache viewer
+        # shows nothing until the user clicks Rebuild (which
+        # bypasses the flag via _rebuild_cache_impl). Running
+        # init here produces the expected behaviour: switching
+        # modes immediately surfaces that mode's index entries
+        # in the tracker. _try_initialize_stability checks its
+        # own readiness gates (symbol index attached for code
+        # mode, doc index ready for doc mode) and is a no-op
+        # when the per-mode flag is already set.
+        self._try_initialize_stability()
+
         # Record a system event so the LLM sees the transition
         # in its next request. The streaming handler will
         # persist this to JSONL on the next append cycle via
@@ -2805,9 +2825,12 @@ class LLMService:
         # window; everything older graduates to L3.
         self._rebuild_graduate_history(cache_target)
 
-        # Step 12: mark initialized so subsequent chat requests
-        # skip the lazy-init path.
-        self._stability_initialized = True
+        # Step 12: mark initialized for the current mode so
+        # subsequent chat requests skip the lazy-init path.
+        # Per-mode flag — rebuild in code mode doesn't mark doc
+        # mode as initialized (and vice versa), so a subsequent
+        # switch into the other mode runs its own init pass.
+        self._stability_initialized[mode] = True
 
         # Assemble the result dict.
         items_after = len(tracker.get_all_items())
@@ -3146,10 +3169,13 @@ class LLMService:
                 self._context.clear_review_context()
 
             # Lazy stability initialization — if eager init
-            # during startup failed (or was skipped), try now
-            # on the first chat request. Once initialized, the
-            # flag prevents re-runs.
-            if not self._stability_initialized:
+            # during startup (or mode-switch init) failed, try
+            # again on the first chat request. The per-mode
+            # flag prevents re-runs once the current mode's
+            # tracker is populated.
+            if not self._stability_initialized.get(
+                self._context.mode, False
+            ):
                 self._try_initialize_stability()
 
             # Assemble the message array. Tiered assembly is the
@@ -3660,11 +3686,14 @@ class LLMService:
         who switch to code mode in the interim get normal code-
         mode init on the switch.
 
-        Safe to call multiple times — sets _stability_initialized
-        to True on the first successful run. Subsequent calls are
-        no-ops.
+        Safe to call multiple times — sets the per-mode
+        initialized flag on the first successful run.
+        Subsequent calls for the same mode are no-ops;
+        subsequent calls for a DIFFERENT mode (after a
+        switch_mode) initialize that mode's tracker fresh.
         """
-        if getattr(self, "_stability_initialized", False):
+        mode = self._context.mode
+        if self._stability_initialized.get(mode, False):
             return
         if self._repo is None:
             return
@@ -3776,7 +3805,7 @@ class LLMService:
             # replacing placeholders from initialization.
             self._measure_tracker_tokens()
 
-            self._stability_initialized = True
+            self._stability_initialized[mode] = True
             logger.info(
                 "Stability tracker initialized (%s mode): %d items",
                 mode.value,

@@ -81,6 +81,7 @@ UI toggle state:
 - Swap system prompt
 - Swap snippets — snippet RPC returns the mode-appropriate array
 - Switch to the mode-specific stability tracker instance
+- Initialize the target tracker if it hasn't been initialized yet (first switch into a mode seeds tier assignments from that mode's reference graph; subsequent switches preserve the existing state)
 - Update stability with current context
 - Rebuild tier content from the target mode's index
 - Insert mode-switch system event message in conversation history
@@ -134,7 +135,8 @@ UI toggle state:
 - Two independent tracker instances held — one for code mode, one for document mode
 - Each tracks its own tier state, graduation history, and content hashes
 - Mode switching activates the appropriate tracker; the inactive instance retains its state so switching back is instant
-- Both trackers initialized lazily — the document tracker is created on first switch to document mode
+- Both trackers are constructed and initialized lazily — the document tracker is created AND seeded from the doc index on first switch to document mode; the code tracker likewise if the session starts in doc mode
+- Initialization is per-tracker — a tracker whose init ran once preserves its tier state across mode-switch round-trips and does not re-initialize
 
 ## Mode Switch Race Prevention
 

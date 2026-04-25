@@ -20,6 +20,16 @@ Tracker instances are never singletons. A future parallel-agent mode (see [paral
 
 This spec describes the behavior of a single tracker. Everything below applies independently to each tracker instance.
 
+## Per-Tracker Initialization
+
+Each tracker instance is initialized independently against the index that feeds it — the code-mode tracker initializes from the symbol index's reference graph; the document-mode tracker initializes from the doc index's reference graph. Initialization state is per-tracker, not per-session.
+
+First-time switching INTO a mode runs the initialization pass for that mode's tracker. Without this, a fresh tracker stays empty until the user clicks Rebuild — the cache viewer would show nothing after a mode switch, matching no visible content in the prompt either.
+
+Switching BACK to a previously-initialized mode is a no-op for initialization — the preserved tracker's tier state is correct. Init is idempotent per tracker; re-running after state preservation would be wasteful but not incorrect.
+
+When the target mode's index isn't ready (doc index still building on first switch to doc mode), initialization skips cleanly. The next request's lazy-init retry catches it once readiness flips. Users who hit this race see an empty doc tracker briefly before the next chat populates it.
+
 ## Tier Structure
 
 - L0 — most stable — entry N high, terminal (no further promotion)
