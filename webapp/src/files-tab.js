@@ -335,6 +335,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     // in the viewer. Non-reactive; read inside event
     // handlers only.
     this._fileSearchActive = false;
+    // First-load auto-selection flag. The files-tab auto-
+    // selects every file with pending changes (modified,
+    // staged, untracked, deleted) on the FIRST successful
+    // tree load so the user doesn't have to re-tick what
+    // they were clearly just working on. Unions with any
+    // existing selection (server may have echoed a prior
+    // session's state during startup). Flag flips to false
+    // after the first load runs and never resets —
+    // subsequent reloads (files-modified after commit,
+    // explicit refresh) do not re-trigger auto-select.
+    this._initialAutoSelect = true;
 
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
@@ -474,6 +485,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     // chat panel's `repoFiles` prop short-circuits on empty
     // input, so before the first load the cost is zero.
     this._repoFiles = flattenTreePaths(this._latestTree);
+    // First-load auto-select — picks up every file with
+    // pending changes so the user doesn't have to re-tick
+    // what they were just working on. Runs exactly once
+    // per component lifetime; subsequent reloads do
+    // nothing here. The flag flip happens synchronously
+    // so a re-entrant reload during the RPC that got us
+    // here can't trigger double-auto-select.
+    if (this._initialAutoSelect) {
+      this._initialAutoSelect = false;
+      this._applyInitialAutoSelect();
+    }
     // Reset the push flag — a fresh tree load means the
     // children need fresh props, even if a previous load
     // already pushed once. `updated()` will retry if the
@@ -481,6 +503,109 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._childPropsPushed = false;
     this._pushChildProps();
     this._treeLoaded = true;
+  }
+
+  /**
+   * Apply the first-load auto-selection rule: union every
+   * changed file (modified ∪ staged ∪ untracked ∪ deleted)
+   * with the existing selection, then expand the ancestor
+   * directories of every selected file so the user can
+   * see them in the tree.
+   *
+   * Union semantics (not replace) preserve any selection
+   * the server broadcast during startup — e.g., a prior
+   * session's state restored by `_restore_last_session`
+   * on the backend, or a collab host's selection received
+   * via `files-changed` before our first tree load.
+   *
+   * Called exactly once per component lifetime, by
+   * `_loadFileTree` after status data is built. The
+   * subsequent `_pushChildProps` call picks up the
+   * mutations and pushes them to the picker in a single
+   * render cycle.
+   */
+  _applyInitialAutoSelect() {
+    const changed = new Set();
+    const sd = this._latestStatusData;
+    if (sd) {
+      if (sd.modified instanceof Set) {
+        for (const p of sd.modified) changed.add(p);
+      }
+      if (sd.staged instanceof Set) {
+        for (const p of sd.staged) changed.add(p);
+      }
+      if (sd.untracked instanceof Set) {
+        for (const p of sd.untracked) changed.add(p);
+      }
+      if (sd.deleted instanceof Set) {
+        for (const p of sd.deleted) changed.add(p);
+      }
+    }
+    if (changed.size === 0) {
+      // Nothing changed — no selection to union, no
+      // ancestors to expand. Skip entirely so the
+      // `_applySelection` short-circuit path isn't
+      // involved in the common "clean working tree"
+      // case.
+      return;
+    }
+    // Union with existing selection. If the union is
+    // strictly a superset of what we already have,
+    // _applySelection sends the new selection to the
+    // server; if it's equal (every changed file was
+    // already selected), the set-equality short-circuit
+    // inside _applySelection makes this a no-op.
+    const union = new Set(this._selectedFiles);
+    for (const p of changed) union.add(p);
+    this._applySelection(union, /* notifyServer */ true);
+    // Expand ancestor directories of every selected
+    // file so they're visible in the tree. The picker
+    // doesn't auto-expand on selection normally —
+    // selection state is independent of expansion — so
+    // we have to do it here.
+    this._expandAncestorsOf(union);
+  }
+
+  /**
+   * Mark every ancestor directory of every path in
+   * `paths` as expanded in the picker. Mutates the
+   * picker's `_expanded` Set directly (same pattern as
+   * the file-search scroll handler). Called from
+   * `_applyInitialAutoSelect`; safe to call before the
+   * first `_pushChildProps` because it updates an
+   * internal-state Set that the picker consults on its
+   * next render.
+   */
+  _expandAncestorsOf(paths) {
+    const picker = this._picker();
+    if (!picker) {
+      // Picker not mounted yet — defer. The first
+      // `_pushChildProps` retry through `updated()`
+      // will bring the picker into view, but the
+      // expansion state won't be re-derived there.
+      // Fall through to directly mutating the set we
+      // track pre-mount. The picker's default
+      // `_expanded` starts empty; we can't reach
+      // into it until it mounts, so in the rare
+      // mount-order case (picker not yet visible
+      // when auto-select runs) we just skip the
+      // expansion — the user can still reach the
+      // auto-selected files manually.
+      return;
+    }
+    const next = new Set(picker._expanded);
+    for (const path of paths) {
+      if (typeof path !== 'string' || !path) continue;
+      const parts = path.split('/');
+      let acc = '';
+      // Stop before the last part — that's the file
+      // itself, not a directory to expand.
+      for (let i = 0; i < parts.length - 1; i += 1) {
+        acc = acc ? `${acc}/${parts[i]}` : parts[i];
+        next.add(acc);
+      }
+    }
+    picker._expanded = next;
   }
 
   /**
