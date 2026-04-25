@@ -447,12 +447,22 @@ class LLMService:
         # model should restart; matches specs3 behaviour.
         self._counter = TokenCounter(config.model)
 
-        # File context — tracks which files are in full-content
-        # context. Uses the Repo for reading file content.
-        self._file_context = FileContext(repo=repo)
-
         # Context manager — owns conversation history, system prompt,
-        # URL context, review context, mode.
+        # URL context, review context, mode. It constructs its own
+        # FileContext internally; we alias `self._file_context` to
+        # that instance so both `LLMService._file_context` and
+        # `ContextManager._file_context` are the same object.
+        #
+        # Why aliasing, not two instances: `ContextManager` reads
+        # its own `_file_context` in `_format_active_files` (the
+        # "Working Files" section of tiered assembly) and in
+        # `estimate_request_tokens` / `shed_files_if_needed`.
+        # `LLMService._sync_file_context` writes to `self._file_context`
+        # on every request. Two separate instances meant the writes
+        # went to one copy and the reads came from the empty copy,
+        # silently dropping every selected file from tiered prompts.
+        # Flat assembly (which reads `self._file_context` on
+        # `LLMService`) happened to work, masking the bug.
         self._context = ContextManager(
             model_name=config.model,
             repo=repo,
@@ -460,6 +470,10 @@ class LLMService:
             compaction_config=config.compaction_config,
             system_prompt=config.get_system_prompt(),
         )
+
+        # File context — alias to the ContextManager's instance.
+        # Single source of truth; see the comment block above.
+        self._file_context = self._context.file_context
 
         # Per-mode stability trackers. Each mode keeps its own
         # tier state so switching between code and doc mode is
@@ -3185,6 +3199,30 @@ class LLMService:
             # case so early requests still work.
             tiered_content = self._build_tiered_content()
             if tiered_content is None:
+                # Diagnose why we're falling back. A persistent
+                # fall-back-to-flat condition usually means the
+                # symbol index never attached or stability init
+                # silently failed — neither is visible to the
+                # user otherwise.
+                mode = self._context.mode
+                initialised = self._stability_initialized.get(
+                    mode, False
+                )
+                tracker_items = len(
+                    self._stability_tracker.get_all_items()
+                )
+                logger.warning(
+                    "Using flat assembly (tracker empty). "
+                    "mode=%s init_flag=%s tracker_items=%d "
+                    "symbol_index=%s doc_index_ready=%s "
+                    "init_complete=%s",
+                    mode.value,
+                    initialised,
+                    tracker_items,
+                    self._symbol_index is not None,
+                    self._doc_index_ready,
+                    self._init_complete,
+                )
                 messages = self._assemble_messages_flat(
                     message, images
                 )
@@ -4304,6 +4342,24 @@ class LLMService:
                 path = key[len("file:"):]
                 content = self._file_context.get_content(path)
                 if content is None:
+                    # Tracker has an entry for this file but the
+                    # file context doesn't. Most common cause:
+                    # a stale entry from a previous request
+                    # where content WAS loaded, but the file
+                    # now fails to read (deleted, turned binary,
+                    # permissions changed). The stale entry
+                    # will clear on the next tracker update
+                    # pass (Phase 1 drops file: entries not in
+                    # active_items). Skip silently for this
+                    # request — the WARNING from
+                    # _sync_file_context already told the user
+                    # the underlying reason.
+                    logger.debug(
+                        "Tier content for %s skipped: no "
+                        "content in file context (stale "
+                        "tracker entry, cleanup on next cycle)",
+                        key,
+                    )
                     continue
                 tier_file_fragments[tier_name].append(
                     f"{path}\n```\n{content}\n```"
@@ -4459,18 +4515,96 @@ class LLMService:
     ) -> list[dict[str, Any]]:
         """Build a flat message array for the LLM call.
 
-        Fallback path used only when the stability tracker
-        hasn't been initialised yet (narrow startup window
-        before :meth:`_try_initialize_stability` completes).
-        Produces a system prompt + history + user prompt
-        sequence with no cache-control markers.
+        Fallback path used when the stability tracker hasn't
+        been initialised yet. Produces a system prompt + repo
+        context + history + user prompt sequence with no
+        cache-control markers.
+
+        This path must still include the user's selected-file
+        content, the symbol map, the file tree, and URL/review
+        context — otherwise an uninitialised tracker (no symbol
+        index attached, or init failed silently) produces a
+        context-free prompt and the LLM has no view of the repo.
+        Without this the user's selection is silently dropped
+        on every flat-mode request.
         """
         system_prompt = self._context.get_system_prompt()
         reminder = self._config.get_system_reminder()
         augmented_prompt = user_prompt + (reminder or "")
 
+        # Assemble a repo-context block: system prompt followed
+        # by map/legend, file tree, URL/review context, and
+        # active-file contents. All uncached (flat path has no
+        # tier structure) and concatenated into a single system-
+        # message body.
+        system_parts: list[str] = [system_prompt]
+
+        # Symbol map + legend (mode-aware header).
+        if self._symbol_index is not None:
+            try:
+                legend = self._symbol_index.get_legend()
+                symbol_map = self._symbol_index.get_symbol_map(
+                    exclude_files=set(self._selected_files)
+                )
+                if legend or symbol_map:
+                    from ac_dc.context_manager import (
+                        DOC_MAP_HEADER,
+                        REPO_MAP_HEADER,
+                    )
+                    header = (
+                        DOC_MAP_HEADER
+                        if self._context.mode == Mode.DOC
+                        else REPO_MAP_HEADER
+                    )
+                    system_parts.append(header + legend)
+                    if symbol_map:
+                        system_parts.append(symbol_map)
+            except Exception as exc:
+                logger.warning(
+                    "Flat assembly: symbol map fetch failed: %s",
+                    exc,
+                )
+
+        # File tree.
+        if self._repo is not None:
+            try:
+                file_tree = self._repo.get_flat_file_list()
+                if file_tree:
+                    from ac_dc.context_manager import FILE_TREE_HEADER
+                    system_parts.append(FILE_TREE_HEADER + file_tree)
+            except Exception as exc:
+                logger.warning(
+                    "Flat assembly: file tree fetch failed: %s",
+                    exc,
+                )
+
+        # URL context.
+        url_parts = self._context.get_url_context()
+        if url_parts:
+            from ac_dc.context_manager import URL_CONTEXT_HEADER
+            system_parts.append(
+                URL_CONTEXT_HEADER + "\n---\n".join(url_parts)
+            )
+
+        # Review context.
+        review = self._context.get_review_context()
+        if review:
+            from ac_dc.context_manager import REVIEW_CONTEXT_HEADER
+            system_parts.append(REVIEW_CONTEXT_HEADER + review)
+
+        # Active files — full content of everything the user
+        # selected. This is the load-bearing piece that was
+        # missing. Without it, flat mode silently forgets the
+        # selection every request.
+        file_body = self._file_context.format_for_prompt()
+        if file_body:
+            from ac_dc.context_manager import FILES_ACTIVE_HEADER
+            system_parts.append(FILES_ACTIVE_HEADER + file_body)
+
+        combined_system = "\n\n".join(p for p in system_parts if p)
+
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": combined_system},
         ]
 
         # Active history — already includes the user message we
@@ -4511,9 +4645,19 @@ class LLMService:
         """Reconcile file context with the current selection.
 
         Adds newly-selected files, removes deselected ones. Binary
-        and missing files are skipped silently (matches specs4
-        limitation note — streaming will produce warnings downstream
-        when 3.9 lands).
+        and missing files are skipped — but NOT silently. Each
+        failure logs at WARNING so the user can see which files
+        their selection isn't actually getting.
+
+        Historical note: failures here used to log at DEBUG,
+        which hid a common class of bug where a file appeared
+        in the file picker AND in the cache viewer (because an
+        earlier request's stale `file:` tracker entry lingered)
+        but never reached the LLM's prompt because its content
+        couldn't be read. The silent-debug behaviour made the
+        divergence invisible — user sees "file is in context"
+        everywhere in the UI, LLM sees nothing. Surface the
+        reason at WARNING so the log tells the true story.
         """
         current = set(self._file_context.get_files())
         selected = set(self._selected_files)
@@ -4522,16 +4666,21 @@ class LLMService:
         for path in current - selected:
             self._file_context.remove_file(path)
 
-        # Add newly-selected files. Use the Repo to read; errors
-        # (binary, missing) are swallowed per the specs4 limitation.
+        # Add newly-selected files. Use the Repo to read. Errors
+        # are logged at WARNING rather than silently swallowed —
+        # a user whose selected file isn't reaching the LLM
+        # deserves to see why in the terminal.
         for path in selected - current:
             if self._repo is None:
                 continue
             try:
                 self._file_context.add_file(path)
             except Exception as exc:
-                logger.debug(
-                    "Skipping file %s during context sync: %s",
+                logger.warning(
+                    "Selected file %s could not be loaded "
+                    "into context: %s. The LLM will NOT see "
+                    "this file's content until the error is "
+                    "resolved.",
                     path, exc,
                 )
 
