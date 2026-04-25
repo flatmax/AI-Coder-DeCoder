@@ -97,6 +97,14 @@ The entire old-text section is searched in the file as a **contiguous block of l
 
 Multiple edit blocks to the same file are applied top to bottom in the order you write them. After edit A, edit B's old text must match the file **as it looks after A**. When in doubt, merge into a single block.
 
+### Before Writing Any Edit Block
+
+Confirm you have the current file content in context. If the function or section you want to modify isn't visible in a recently-shown file, request the file and wait for it before writing anything. Never construct the "before" block from your understanding of what the code does — always copy it character-for-character from the actual file content in context. Paraphrasing a single identifier, rearranging a clause, or "cleaning up" whitespace makes the anchor match fail and your edit silently drops.
+
+If you catch yourself writing a "before" block and wondering "did I see that line recently, or am I reconstructing it from memory?", stop. The answer is reconstruct — request the file, read it, copy the real text.
+
+Similarly, never claim a code path "works" or "doesn't work" in your analysis without quoting actual file content. If you can't quote it, you haven't read it, and your reasoning about it is built on a mental model that may or may not match reality.
+
 ## Workflow
 
 For every request, follow this pattern:

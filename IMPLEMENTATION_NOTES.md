@@ -2702,6 +2702,29 @@ After 2.8.2 ships, doc mode actually works and cross-reference toggle has materi
 
 All nine sub-commits delivered: DocIndex construction, background build, readiness flags, tier-builder dispatch, legend dispatch, stability-update dispatch, cross-reference lifecycle, rebuild-cache dispatch, lazy-init dispatch. Doc mode produces content via the doc index. Cross-reference toggle has material effect — enabling seeds items into the active tracker with the opposite prefix; disabling cleans them up.
 
+### Layer 2.8.3 — complete
+
+Delivered across two commits (`1ec1677`, `255f1e1`). SVG extractor lands with:
+
+- **Containment tree from geometry** — shapes (rect, circle, ellipse, polygon, path) produce bounding boxes in root-canvas coordinates via transform composition. Text elements attach to their smallest containing box. Three-level labeling rule (aria-label → single-text inference → neutral `(box)`). Auto-id filtering for Inkscape / Illustrator patterns (`Group_42`, `g123`). Multi-line label joining via y-proximity. Reading order y-then-x at each level.
+- **Shape-less fallback** — spatial clustering by vertical gap when the SVG has no shapes (text-only diagrams, ungrouped AI-generated layouts).
+- **Prose blocks (2.8.3e)** — `<text>` elements over 80 chars become `DocProseBlock` entries with `container_heading_id` set to the enclosing box's label (or None for root-level prose). Shape-less path uses the cluster's first short label, or the root title as fallback. 2.8.4's keyword enricher will populate the `keywords` field post-hoc; 2.8.3e leaves it empty so the compact formatter renders `[prose]` bare.
+- **Pure-function geometry module** (`svg_geometry.py`) — number parsing, transform parsing, matrix composition, point transformation, shape bbox computation, containment checks. Tested independently of the extractor.
+- **Link extraction** — `<a xlink:href>` and SVG2 `<a href>` produce `DocLink` entries. External URLs and fragment-only refs are filtered.
+
+Deliberately scope-trimmed per specs4:
+- No font-size heuristics (fonts are unreliable semantic signals in SVG).
+- No title detection inside ambiguous multi-text boxes — uses neutral `(box)` identifier and lets the LLM read via containment.
+- No visual rendering (no playwright / resvg / Chromium).
+
+### Post-layer bug fixes
+
+**`8a49df8` — doc index scheduling on worker threads.** `complete_deferred_init` was called from `main.py`'s `_heavy_init` via `run_in_executor`, so `asyncio.get_event_loop()` inside it returned a fresh dead loop (Python 3.10+ behaviour on worker threads) rather than raising. `ensure_future(_build_doc_index_background())` scheduled the task on the dead loop and the task never ran — no error surfaced, just silence. Fix: split scheduling into `schedule_doc_index_build()` that uses `asyncio.get_running_loop()` (raises on worker threads rather than returning a dead loop), called separately from `main.py` on the event loop thread after the executor call returns. `complete_deferred_init` still attempts inline scheduling so the test path (pytest-asyncio on the event loop thread) doesn't need an extra call.
+
+**`8e782db` — per-mode tracker initialization.** The stability-initialized flag was service-wide, so switching from code to doc mode swapped to a fresh empty tracker that `_try_initialize_stability` refused to populate (the flag was already True from code-mode init). Cache viewer showed an empty tier list in doc mode until the user clicked Rebuild. Fix: replaced `_stability_initialized: bool` with `_stability_initialized: dict[Mode, bool]`. `switch_mode` calls `_try_initialize_stability` after the tracker swap — the new mode's tracker runs full init against its reference graph; subsequent switches back to an initialized mode are no-ops. Rebuild and lazy-init retry paths updated to use the per-mode dict.
+
+Spec updates for the init contract landed in the same commit (`8e782db`): `specs4/3-llm/cache-tiering.md` added a "Per-Tracker Initialization" section; `specs4/3-llm/modes.md` updated "Mode Switching Mechanics" and "Stability Tracker Lifecycle" to call out that init runs on first switch-into-mode.
+
 **Notes from delivery:**
 
 - **The readiness gate is structural-only.** `doc_index_ready` flips when structure extraction completes; `doc_index_enriched` is wired but always False in 2.8.2. Cross-reference gates on structure only, per specs4 — enrichment improves quality but isn't a prerequisite. When 2.8.4 lands, enrichment completion will re-hash affected outlines and the tracker will demote-and-restabilize them naturally across a few cycles.
