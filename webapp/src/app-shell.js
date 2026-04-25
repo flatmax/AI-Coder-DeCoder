@@ -37,6 +37,7 @@ import './settings-tab.js';
 import './context-tab.js';
 import './file-nav.js';
 import './token-hud.js';
+import './compaction-progress.js';
 import { viewerForPath } from './viewer-routing.js';
 
 // ---------------------------------------------------------------
@@ -2708,6 +2709,8 @@ export class AppShell extends JRPCClient {
           </div>
         `)}
       </div>
+
+      <ac-compaction-progress></ac-compaction-progress>
 
       <ac-token-hud></ac-token-hud>
     `;

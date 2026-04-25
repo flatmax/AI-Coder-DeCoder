@@ -2814,7 +2814,15 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 - **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
 
-## Compaction UI completion plan
+## Compaction UI completion plan — **delivered**
+
+Both increments shipped.
+
+- **Increment A — Progress overlay** (delivered). New `webapp/src/compaction-progress.js` LitElement floats top-center during compaction with a spinner + elapsed-seconds counter. Shows "Done — {case}" for 800ms on success, "Compaction failed: {reason}" for 3s on error, then fades. Filters out `url_fetch` / `url_ready` events from the shared channel. Mounted by the app shell alongside the toast layer. 30 tests pinning state transitions, timing, event routing, cleanup.
+
+- **Increment B — System-event messages in chat** (delivered). `_post_response` now appends a `system_event: true` message after successful compaction and before the `compacted` broadcast. The message carries the case name, boundary info (reason + confidence for truncate, fallback line for summarize-without-boundary), and before/after token/message stats. Summarize cases embed the detector's summary text in a collapsible `<details>` block. The event persists to both the context manager (for LLM visibility on the next turn) and the JSONL history store (for session reload and history-browser search). The broadcast's `messages` field is re-read from context after the append so the frontend gets the event in the first paint, avoiding a flicker. 11 tests covering both happy paths, both stores, error-path suppression, ordering guarantees, and direct helper-function formatting.
+
+### Original plan (for reference)
 
 History compaction is fully implemented end-to-end (backend compactor, detector closure, streaming-handler invocation, frontend event handling, config). Two small UI enhancements remain: a progress overlay during the blocking detector call, and compaction events visible in the chat scrollback.
 

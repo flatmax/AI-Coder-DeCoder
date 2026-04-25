@@ -271,6 +271,103 @@ def _generate_request_id() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _build_compaction_event_text(
+    result: Any,
+    tokens_before: int,
+    tokens_after: int,
+    messages_before_count: int,
+    messages_after_count: int,
+) -> str:
+    """Build the system-event message text for a successful compaction.
+
+    Three-part format per IMPLEMENTATION_NOTES.md's compaction UI
+    plan:
+
+      **History compacted** — {case}
+
+      {boundary reason or fallback}
+
+      Removed N messages • Mtokens → Ntokens
+
+    For summarize cases, appends a ``<details>/<summary>`` block
+    carrying the detector's summary text so the LLM can see what
+    was summarized on session reload, and users can expand it in
+    the chat panel (marked.js passes through HTML tags with gfm
+    enabled).
+
+    Returns the raw markdown string. The caller wraps it in an
+    ``add_message`` / ``append_message`` pair with
+    ``system_event=True`` so the chat panel renders it with the
+    system-event styling.
+
+    ``result`` is typed Any rather than CompactionResult to avoid
+    a circular dependency concern at the top of this module; the
+    caller always passes a CompactionResult instance.
+    """
+    case_name = result.case
+    # Boundary line — truncate uses the detected reason, summarize
+    # falls back to a generic "no clear boundary" line when the
+    # detector couldn't find one. result.boundary is always
+    # populated for truncate, and often for summarize; defensive
+    # getattr keeps us safe if a future code path produces None.
+    boundary = getattr(result, "boundary", None)
+    if case_name == "truncate" and boundary:
+        reason = getattr(boundary, "boundary_reason", "") or "topic boundary"
+        confidence = getattr(boundary, "confidence", 0.0) or 0.0
+        boundary_line = (
+            f"Boundary: {reason} (confidence {confidence:.2f})"
+        )
+    elif case_name == "summarize":
+        if boundary and getattr(boundary, "boundary_reason", ""):
+            boundary_line = (
+                f"Boundary reason: {boundary.boundary_reason}"
+            )
+        else:
+            boundary_line = (
+                "No clear topic boundary detected; summarized "
+                "earlier context."
+            )
+    else:
+        # "none" case shouldn't reach here (caller only runs this
+        # on truncate/summarize) but handle defensively so a future
+        # code path doesn't produce a malformed message.
+        boundary_line = "History compacted"
+
+    messages_removed = max(
+        0, messages_before_count - messages_after_count
+    )
+    stats_line = (
+        f"Removed {messages_removed} messages • "
+        f"{tokens_before} → {tokens_after} tokens"
+    )
+
+    parts = [
+        f"**History compacted** — {case_name}",
+        "",
+        boundary_line,
+        "",
+        stats_line,
+    ]
+
+    # Summarize case gets an expandable details block with the
+    # actual summary text. Truncate doesn't — the reason line
+    # already explains what happened, and there's no separate
+    # summary body to show (truncate keeps full text).
+    summary_text = getattr(result, "summary", "") or ""
+    if case_name == "summarize" and summary_text.strip():
+        parts.extend([
+            "",
+            "<details>",
+            "<summary>Summary</summary>",
+            "",
+            summary_text.strip(),
+            "",
+            "</details>",
+        ])
+
+    return "\n".join(parts)
+
+
 def _build_topic_detector(
     config: "ConfigManager",
     aux_executor: ThreadPoolExecutor,
@@ -4854,18 +4951,65 @@ class LLMService:
                 return
 
             if result is not None and result.case != "none":
+                # Capture pre-compaction message count BEFORE
+                # set_history replaces the list so the system
+                # event can report "removed N messages". The
+                # pre-compaction token count is `tokens` from
+                # the top of this method.
+                messages_before_count = len(
+                    self._context.get_history()
+                )
                 # Replace history + purge tracker history entries
                 # (compacted messages re-enter as fresh active
                 # items on the next request).
                 self._context.set_history(result.messages)
                 self._stability_tracker.purge_history()
+                # Append a system-event message so users see the
+                # compaction in their chat scrollback, and the
+                # history browser can search + display past
+                # compactions. Mirrors the commit_all / reset flow
+                # — context first (so the LLM's next request sees
+                # it as part of history), then history store
+                # (JSONL persistence), then broadcast (frontend
+                # gets the compacted list with the event already
+                # attached).
+                try:
+                    tokens_after = (
+                        self._context.history_token_count()
+                    )
+                    event_text = _build_compaction_event_text(
+                        result,
+                        tokens_before=tokens,
+                        tokens_after=tokens_after,
+                        messages_before_count=messages_before_count,
+                        messages_after_count=len(result.messages),
+                    )
+                    self._context.add_message(
+                        "user", event_text, system_event=True
+                    )
+                    if self._history_store is not None:
+                        self._history_store.append_message(
+                            session_id=self._session_id,
+                            role="user",
+                            content=event_text,
+                            system_event=True,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to append compaction system event"
+                    )
+                # Re-read the final message list from context so
+                # the broadcast includes the system event we just
+                # appended. Without this, the frontend would
+                # receive the pre-event list and the event would
+                # only appear on next session reload.
                 await self._broadcast_event_async(
                     "compactionEvent",
                     request_id,
                     {
                         "stage": "compacted",
                         "case": result.case,
-                        "messages": result.messages,
+                        "messages": self._context.get_history(),
                     },
                 )
 
