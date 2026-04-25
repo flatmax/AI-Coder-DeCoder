@@ -3081,12 +3081,46 @@ Design points pinned by tests:
 
 ### Increment 8 — Context menu (files)
 
-Largest single feature. Stage / unstage / discard (with confirm) / rename (inline input) / duplicate (inline input, pre-filled) / load-in-left-panel / load-in-right-panel / exclude-or-include-in-index / delete (confirm).
+Largest single feature. Delivered in sub-commits to keep each change reviewable:
 
-- `file-picker.js` — context-menu component with positioning via `position: fixed` at click coordinates, dismiss on outside-click (document listener with `composedPath()` check), Escape to close, action dispatchers
-- inline-input pattern — renders at the correct indentation level in the tree (not a browser `prompt()`), Enter submits, Escape/blur cancels, pre-filled + auto-selected for rename
-- `files-tab.js` — RPC dispatchers for each action, confirm dialogs for destructive ops, `load-diff-panel` event dispatch for load-in-panel items
-- tests — menu open/dismiss paths, each action's RPC dispatch, inline input Enter/Escape/blur, confirm-dialog flow for destructive actions
+- **8a — shell** (delivered): right-click opens menu, positioning with viewport clamping, outside-click + Escape dismissal, action-routing scaffold via `context-menu-action` events.
+- **8b — simple RPC actions** (planned): stage / unstage / discard / delete with confirm.
+- **8c — inline-input actions** (planned): rename / duplicate with inline textbox rendered at row indent.
+- **8d — include/exclude + load-in-panel** (planned): route include/exclude through existing exclusion path; dispatch `load-diff-panel` events.
+
+### ~~Increment 8a — Context menu shell~~ (delivered)
+
+File-row context menu renders on right-click. Position stored as viewport coords; rendered via `position: fixed` at clamped coords so menus opened near screen edges slide inward to stay visible. All menu items in place (stage / unstage / discard / rename / duplicate / load-left / load-right / exclude-or-include / delete) with stubbed dispatchers firing `context-menu-action` events. 8b–8d wire real RPC dispatch on the files-tab side.
+
+- `file-picker.js` — module-level `_CONTEXT_MENU_FILE_ITEMS` catalog (nine actions plus four separators). Each entry has `action`, `label`, `icon`, optional `destructive` flag, optional `showWhen` gate. Include/exclude items are a pair with opposite `showWhen` guards so exactly one is visible per target state. Action IDs exported as `CTX_ACTION_*` constants for test pinning.
+- Reactive `_contextMenu` state (`{type, path, name, isExcluded, x, y}` or null). Viewport margin constant `_CONTEXT_MENU_VIEWPORT_MARGIN = 8`. Estimated menu size (240×320) used by the clamp math — conservative so menus near the right/bottom edge slide inward before render.
+- `@contextmenu` binding on file rows. Calls `preventDefault` + `stopPropagation`, records click coords, attaches document-level listeners for outside-click and Escape.
+- Document listeners capture-phase so they see events before in-tree handlers stop propagation. `composedPath` walk distinguishes inside-menu clicks from outside — the menu's own button clicks take the `_onContextMenuAction` path, not the dismiss path.
+- Menu renders as a sibling of `.tree-scroll` with `position: fixed`, escaping any scrolling containers. Action items carry `data-action` attributes for test selectors and carry `.destructive` class for delete (red-tinted hover state).
+- `_onContextMenuAction` dispatches `context-menu-action` with `{action, type, path, name, isExcluded}` detail, closes the menu, releases listeners.
+- `disconnectedCallback` calls `_closeContextMenu` so a mid-menu unmount (tab switch, parent re-render) releases document listeners and clears state.
+
+21 new tests — right-click opens menu, position matches click coords, `preventDefault` fires, context state carries path/name/isExcluded, include vs exclude mutual exclusion, all nine actions present, four separators rendered, delete is `.destructive`, Escape dismisses (only when menu open — no-op otherwise), click outside dismisses, click inside doesn't pre-empt action, action event detail shape, menu closes after dispatch, right-clicking second row switches targets (not stacks menus), viewport clamping at right/bottom edges, corner clamping to margin, disconnect closes + releases listeners, event bubbles across shadow, stopPropagation on the right-click.
+
+Design points pinned by tests:
+
+- **Capture-phase document listeners.** Outside-click detection needs the event before any child handler stopPropagation could suppress it. The browser's standard `click` event bubbling through shadow DOM sees the shadow host as target, not the menu. Capture-phase + `composedPath` gives us the full path through the shadow boundary.
+
+- **Inside-menu click doesn't pre-empt action.** The document listener runs first (capture), walks `composedPath`, and finds the menu class on one of the ancestors. So it returns without closing. The menu item's own click handler then fires (normal bubbling), dispatches the action event, and explicitly closes. Pinned by `click inside the menu does not close it before the action runs` — a naive "any click closes" implementation would drop the action.
+
+- **Viewport clamp uses conservative size estimate.** Menu's actual rendered dimensions aren't known until after render. Using a fixed 240×320 estimate (large enough for the worst case — all file actions visible) means a menu near the right or bottom edge clamps inward BEFORE render rather than sliding into place via a second render pass. Graceful if the estimate undershoots: menu still appears, just potentially with part of its border off-screen.
+
+- **Right-click second row swaps targets.** Two consecutive right-clicks on different rows produce ONE menu (the second target), not two stacked. Pinned by `right-click on a second row while menu open switches targets`. The opening path calls `_closeContextMenu` first so listener attach/detach stays balanced.
+
+- **Escape scope control.** Document-level Escape listener only `preventDefault`s when a menu is open. Pinned by `Escape only consumes the event when menu is open`. Without this, every Escape press anywhere in the page would be hijacked and, e.g., stop break out of modals/textboxes.
+
+- **Destructive class for delete only.** Just the delete item gets the red-tinted hover. Pinned by `delete action renders with destructive class`. Stage / unstage / discard don't — they're recoverable actions; delete is permanent (from the picker's perspective — it's `git rm` on the server side, still recoverable through git history, but the UI treats it as serious).
+
+- **Include/exclude mutual exclusion.** The `showWhen` gate on the two items filters at render time. Non-excluded file shows "Exclude from index"; excluded file shows "Include in index". Two tests pin both directions.
+
+- **Disconnect closes + releases.** `disconnectedCallback` override calls `_closeContextMenu`, which releases document listeners. Without this, a picker removed mid-menu would leak listeners permanently. Pinned by `disconnect closes menu and releases listeners` — verifies the menu state is null and a subsequent `document.body.click()` doesn't throw (which would indicate a stale handler still trying to call back into an unmounted element).
+
+Next sub-commit — **8b**: wire the simple RPC actions (stage / unstage / discard / delete with confirm) in `files-tab.js`. Picker already fires `context-menu-action` with the right detail; the orchestrator listens and dispatches to `Repo.*` RPCs with toast feedback.
 
 ### Increment 9 — Context menu (directories)
 

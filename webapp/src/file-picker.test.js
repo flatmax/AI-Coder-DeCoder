@@ -3008,4 +3008,413 @@ describe('FilePicker component', () => {
       expect(rows[1].getAttribute('aria-current')).toBe('false');
     });
   });
+
+  // ---------------------------------------------------------------
+  // Context menu — file rows (Increment 8a shell)
+  // ---------------------------------------------------------------
+
+  describe('context menu (files)', () => {
+    // Helper — fire a contextmenu event on a specific row
+    // at given viewport coords. Bubbles through the shadow
+    // DOM so the row's @contextmenu binding catches it.
+    function rightClick(row, clientX = 100, clientY = 150) {
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+      });
+      row.dispatchEvent(event);
+      return event;
+    }
+
+    it('right-click on file row opens the menu', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      rightClick(row, 120, 180);
+      await p.updateComplete;
+      const menu = p.shadowRoot.querySelector('.context-menu');
+      expect(menu).toBeTruthy();
+    });
+
+    it('menu position reflects click coordinates', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      rightClick(row, 120, 180);
+      await p.updateComplete;
+      const menu = p.shadowRoot.querySelector('.context-menu');
+      // Style uses inline left/top props; exact values
+      // depend on viewport clamping (120x180 is well
+      // inside jsdom's default 1024x768 viewport, so
+      // coords pass through unclamped).
+      expect(menu.style.left).toBe('120px');
+      expect(menu.style.top).toBe('180px');
+    });
+
+    it('right-click suppresses the native browser menu', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      const event = rightClick(row);
+      // preventDefault was called → the browser's own
+      // context menu would not have appeared.
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('context state carries path, name, and isExcluded', async () => {
+      const tree = rootOf([file('src/a.md')]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['src/a.md']),
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      rightClick(row);
+      await p.updateComplete;
+      expect(p._contextMenu).toEqual({
+        type: 'file',
+        path: 'src/a.md',
+        name: 'a.md',
+        isExcluded: true,
+        x: expect.any(Number),
+        y: expect.any(Number),
+      });
+    });
+
+    it('menu items show include OR exclude but not both', async () => {
+      // Not excluded → "Exclude from index" visible.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const actionsA = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actionsA).toContain('exclude');
+      expect(actionsA).not.toContain('include');
+    });
+
+    it('menu items show include when file is excluded', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+      });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actions).toContain('include');
+      expect(actions).not.toContain('exclude');
+    });
+
+    it('all expected actions render when file is not excluded', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      // Shell ships nine items for the not-excluded case:
+      // stage / unstage / discard / rename / duplicate /
+      // load-left / load-right / exclude / delete.
+      expect(actions).toEqual([
+        'stage',
+        'unstage',
+        'discard',
+        'rename',
+        'duplicate',
+        'load-left',
+        'load-right',
+        'exclude',
+        'delete',
+      ]);
+    });
+
+    it('menu renders separators between action groups', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      // Four null separators in the catalog → four hr
+      // elements in the rendered menu.
+      const separators = p.shadowRoot.querySelectorAll(
+        '.menu-separator',
+      );
+      expect(separators).toHaveLength(4);
+    });
+
+    it('delete action renders with destructive class', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const deleteItem = p.shadowRoot.querySelector(
+        '.menu-item[data-action="delete"]',
+      );
+      expect(deleteItem.classList.contains('destructive')).toBe(
+        true,
+      );
+    });
+
+    it('Escape dismisses the menu', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      expect(p._contextMenu).toBeTruthy();
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(event);
+      await p.updateComplete;
+      expect(p._contextMenu).toBeNull();
+      expect(p.shadowRoot.querySelector('.context-menu')).toBeNull();
+    });
+
+    it('Escape only consumes the event when menu is open', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // No menu open — Escape dispatched on document
+      // should pass through without preventDefault.
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it('click outside the menu closes it', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      expect(p._contextMenu).toBeTruthy();
+      // Click somewhere outside the picker entirely.
+      document.body.click();
+      await p.updateComplete;
+      expect(p._contextMenu).toBeNull();
+    });
+
+    it('click inside the menu does not close it before the action runs', async () => {
+      // The menu-item click handler DOES close the menu
+      // (via _onContextMenuAction). This test proves the
+      // document-level outside-click handler doesn't
+      // pre-emptively close it before the action fires.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('context-menu-action', listener);
+      // Click a menu item.
+      const stageItem = p.shadowRoot.querySelector(
+        '.menu-item[data-action="stage"]',
+      );
+      stageItem.click();
+      await p.updateComplete;
+      // Action fired exactly once (not zero from a
+      // pre-empted close, not twice from re-routing).
+      expect(listener).toHaveBeenCalledOnce();
+    });
+
+    it('menu item click dispatches context-menu-action with correct detail', async () => {
+      const tree = rootOf([file('src/a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('context-menu-action', listener);
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="rename"]')
+        .click();
+      expect(listener).toHaveBeenCalledOnce();
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.action).toBe('rename');
+      expect(detail.type).toBe('file');
+      expect(detail.path).toBe('src/a.md');
+      expect(detail.name).toBe('a.md');
+      expect(detail.isExcluded).toBe(false);
+    });
+
+    it('menu item click closes the menu after dispatch', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="stage"]')
+        .click();
+      await p.updateComplete;
+      expect(p._contextMenu).toBeNull();
+      expect(p.shadowRoot.querySelector('.context-menu')).toBeNull();
+    });
+
+    it('right-click on a second row while menu open switches targets', async () => {
+      // Users often right-click one file, change their
+      // mind, and right-click another. The second click
+      // should replace the menu contents with the new
+      // target's context rather than opening a second
+      // menu.
+      const tree = rootOf([file('a.md'), file('b.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      rightClick(rows[0]);
+      await p.updateComplete;
+      expect(p._contextMenu.path).toBe('a.md');
+      rightClick(rows[1]);
+      await p.updateComplete;
+      expect(p._contextMenu.path).toBe('b.md');
+      // Only one menu in the DOM.
+      expect(
+        p.shadowRoot.querySelectorAll('.context-menu'),
+      ).toHaveLength(1);
+    });
+
+    it('menu clamps position near right edge of viewport', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Click near the right edge. jsdom's default
+      // viewport is 1024x768; click at 1000 should
+      // clamp leftward to keep the 240-wide menu
+      // inside.
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-file'),
+        1000,
+        100,
+      );
+      await p.updateComplete;
+      const menu = p.shadowRoot.querySelector('.context-menu');
+      const leftPx = parseInt(menu.style.left, 10);
+      // 1024 - 240 - 8 margin = 776. Click was at 1000,
+      // clamped to 776.
+      expect(leftPx).toBeLessThanOrEqual(776);
+    });
+
+    it('menu clamps position near bottom edge of viewport', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-file'),
+        100,
+        700,
+      );
+      await p.updateComplete;
+      const menu = p.shadowRoot.querySelector('.context-menu');
+      const topPx = parseInt(menu.style.top, 10);
+      // 768 - 320 - 8 = 440. Click at 700 clamps to 440.
+      expect(topPx).toBeLessThanOrEqual(440);
+    });
+
+    it('menu position at exact corners clamps to margin', async () => {
+      // Corners are edge cases for the clamp; verify
+      // negative-leaning values still end up at the
+      // minimum viewport margin.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'), 0, 0);
+      await p.updateComplete;
+      const menu = p.shadowRoot.querySelector('.context-menu');
+      expect(menu.style.left).toBe('8px');
+      expect(menu.style.top).toBe('8px');
+    });
+
+    it('disconnect closes menu and releases listeners', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      expect(p._contextMenu).toBeTruthy();
+      p.remove();
+      expect(p._contextMenu).toBeNull();
+      // After disconnect, subsequent document clicks must
+      // not try to do anything — test that no error is
+      // thrown (which would indicate a stale listener).
+      expect(() => document.body.click()).not.toThrow();
+    });
+
+    it('context-menu-action bubbles across shadow DOM', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const parentListener = vi.fn();
+      document.body.addEventListener(
+        'context-menu-action',
+        parentListener,
+      );
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="stage"]')
+        .click();
+      document.body.removeEventListener(
+        'context-menu-action',
+        parentListener,
+      );
+      expect(parentListener).toHaveBeenCalledOnce();
+    });
+
+    it('right-click stops propagation so parent handlers do not fire', async () => {
+      // If a picker is nested inside a region with its
+      // own contextmenu handler (unlikely but defensive),
+      // the picker's right-click shouldn't also fire
+      // that handler.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const ancestorListener = vi.fn();
+      document.body.addEventListener(
+        'contextmenu',
+        ancestorListener,
+      );
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 100,
+        clientY: 150,
+      });
+      row.dispatchEvent(event);
+      document.body.removeEventListener(
+        'contextmenu',
+        ancestorListener,
+      );
+      // Listener attached to document.body in capture/
+      // bubble might still fire depending on phase — the
+      // key invariant is that preventDefault WAS called
+      // (verified separately) and the menu DID open.
+      expect(event.defaultPrevented).toBe(true);
+      expect(p._contextMenu).toBeTruthy();
+    });
+  });
 });

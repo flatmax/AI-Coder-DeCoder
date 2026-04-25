@@ -167,6 +167,86 @@ const SORT_MODE_MTIME = 'mtime';
 const SORT_MODE_SIZE = 'size';
 const SORT_MODES = [SORT_MODE_NAME, SORT_MODE_MTIME, SORT_MODE_SIZE];
 
+// Context-menu action identifiers. Reuses the action-id
+// string on both the menu-item definition and the
+// dispatched `context-menu-action` event detail so tests
+// can pin the routing without needing to know menu
+// position or item labels.
+//
+// 8a covers file-row context menus. Directory-row menus
+// land with a later sub-commit (different item set:
+// stage-all / rename / new-file / new-dir / exclude).
+// Separating the two lets us ship the feature in smaller
+// slices without prematurely designing a two-mode menu
+// renderer.
+const CTX_ACTION_STAGE = 'stage';
+const CTX_ACTION_UNSTAGE = 'unstage';
+const CTX_ACTION_DISCARD = 'discard';
+const CTX_ACTION_RENAME = 'rename';
+const CTX_ACTION_DUPLICATE = 'duplicate';
+const CTX_ACTION_LOAD_LEFT = 'load-left';
+const CTX_ACTION_LOAD_RIGHT = 'load-right';
+const CTX_ACTION_EXCLUDE = 'exclude';
+const CTX_ACTION_INCLUDE = 'include';
+const CTX_ACTION_DELETE = 'delete';
+
+// Menu items for file rows. Rendered in declaration
+// order; groups separated by null entries which render
+// as horizontal rules. The `showWhen` function gates
+// conditional items (include vs exclude shown based on
+// current state).
+//
+// 8a wires the shell with stubbed handlers; 8b–8d
+// replace the stubs with real RPC dispatches.
+const _CONTEXT_MENU_FILE_ITEMS = [
+  { action: CTX_ACTION_STAGE, label: 'Stage', icon: '➕' },
+  { action: CTX_ACTION_UNSTAGE, label: 'Unstage', icon: '➖' },
+  {
+    action: CTX_ACTION_DISCARD,
+    label: 'Discard changes…',
+    icon: '↻',
+  },
+  null,
+  { action: CTX_ACTION_RENAME, label: 'Rename…', icon: '✎' },
+  { action: CTX_ACTION_DUPLICATE, label: 'Duplicate…', icon: '⎘' },
+  null,
+  {
+    action: CTX_ACTION_LOAD_LEFT,
+    label: 'Load in left panel',
+    icon: '◧',
+  },
+  {
+    action: CTX_ACTION_LOAD_RIGHT,
+    label: 'Load in right panel',
+    icon: '◨',
+  },
+  null,
+  {
+    action: CTX_ACTION_EXCLUDE,
+    label: 'Exclude from index',
+    icon: '✕',
+    showWhen: (ctx) => !ctx.isExcluded,
+  },
+  {
+    action: CTX_ACTION_INCLUDE,
+    label: 'Include in index',
+    icon: '✓',
+    showWhen: (ctx) => ctx.isExcluded,
+  },
+  null,
+  {
+    action: CTX_ACTION_DELETE,
+    label: 'Delete…',
+    icon: '🗑',
+    destructive: true,
+  },
+];
+
+// Viewport margin — the menu is kept this many pixels
+// from every window edge. Enough to show the box-shadow
+// glow without clipping on high-DPI displays.
+const _CONTEXT_MENU_VIEWPORT_MARGIN = 8;
+
 // localStorage keys for persisting sort preferences.
 const _SORT_MODE_KEY = 'ac-dc-sort-mode';
 const _SORT_ASC_KEY = 'ac-dc-sort-asc';
@@ -311,6 +391,19 @@ export class FilePicker extends LitElement {
      * ascending means smallest first.
      */
     _sortAsc: { type: Boolean, state: true },
+    /**
+     * Context menu state. When non-null, a menu is open at
+     * the recorded viewport coordinates and targets the
+     * given file row. Shape:
+     *   {path, name, isExcluded, x, y}
+     * Always null when no menu is visible. State is reset
+     * on any action click, outside click, Escape key, or
+     * host disconnect.
+     *
+     * 8a covers file-row menus only. Directory menus will
+     * add a `type: 'dir'` discriminator when they ship.
+     */
+    _contextMenu: { type: Object, state: true },
   };
 
   static styles = css`
@@ -635,6 +728,61 @@ export class FilePicker extends LitElement {
     .branch-pill .glyph {
       opacity: 0.7;
     }
+
+    /* Context menu — position: fixed so it escapes the
+     * picker's scroll containers. z-index above the
+     * tree but below any app-shell modal that might
+     * float over it (toasts, history browser). The
+     * dialog-surface design language (backdrop-blur,
+     * muted panel background) matches the app's other
+     * floating surfaces. */
+    .context-menu {
+      position: fixed;
+      z-index: 1000;
+      min-width: 200px;
+      padding: 0.25rem 0;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+    }
+    .context-menu .menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .context-menu .menu-item:hover {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .context-menu .menu-item.destructive {
+      color: #f85149;
+    }
+    .context-menu .menu-item.destructive:hover {
+      background: rgba(248, 81, 73, 0.15);
+      color: #ff6b6b;
+    }
+    .context-menu .menu-item .icon {
+      display: inline-flex;
+      width: 1rem;
+      justify-content: center;
+      opacity: 0.85;
+      font-size: 0.85rem;
+    }
+    .context-menu .menu-item .label {
+      flex: 1;
+    }
+    .context-menu .menu-separator {
+      height: 1px;
+      margin: 0.25rem 0.4rem;
+      background: rgba(240, 246, 252, 0.1);
+    }
   `;
 
   constructor() {
@@ -689,6 +837,22 @@ export class FilePicker extends LitElement {
     // exits so the user's full-tree expansion state returns.
     // Non-reactive — purely a restore buffer.
     this._expandedSnapshot = null;
+    // Context menu state — null when closed, populated
+    // shape when open. See reactive properties above for
+    // the field list. Reset on disconnect so a picker
+    // that's unmounted mid-menu doesn't leak document
+    // listeners or leave a stale menu in the DOM after
+    // reinsertion.
+    this._contextMenu = null;
+    // Bound handlers for document-level listeners —
+    // identical references for addEventListener and
+    // removeEventListener so the teardown path matches
+    // the setup path. Document listeners only attach
+    // while a menu is open so background click/key
+    // handling stays cheap in the common case.
+    this._onDocumentClickForMenu = this._onDocumentClickForMenu.bind(this);
+    this._onDocumentKeyDownForMenu =
+      this._onDocumentKeyDownForMenu.bind(this);
     // Sort preferences — read persisted values with safe
     // defaults. A malformed localStorage entry (unknown mode,
     // non-'0'/'1' direction) falls back to defaults rather
@@ -696,6 +860,14 @@ export class FilePicker extends LitElement {
     const [loadedMode, loadedAsc] = this._loadSortPrefs();
     this._sortMode = loadedMode;
     this._sortAsc = loadedAsc;
+  }
+
+  // Tear down any open menu when the host detaches. Catches
+  // mid-menu unmounts from tab switches and parent re-renders
+  // so document listeners don't leak.
+  disconnectedCallback() {
+    this._closeContextMenu();
+    super.disconnectedCallback();
   }
 
   /**
@@ -858,6 +1030,7 @@ export class FilePicker extends LitElement {
         ${this._renderRoot()}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
       </div>
+      ${this._renderContextMenu()}
     `;
   }
 
@@ -1051,6 +1224,7 @@ export class FilePicker extends LitElement {
         style="padding-left: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
+        @contextmenu=${(e) => this._onFileContextMenu(e, node)}
         role="treeitem"
         aria-current=${isFocused ? 'true' : 'false'}
         title=${tooltip}
@@ -1475,6 +1649,224 @@ export class FilePicker extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Context menu (Increment 8a — shell, file rows only)
+  // ---------------------------------------------------------------
+
+  /**
+   * Open the file-row context menu at the click coordinates.
+   * Native `contextmenu` browser handler is suppressed so
+   * users never see two menus stacked.
+   *
+   * Position stored as viewport coordinates (clientX/Y
+   * from the MouseEvent). Viewport-edge clamping happens
+   * at render time via `_clampMenuPosition` rather than
+   * here, so a window resize while the menu is open would
+   * self-correct on next render — though in practice the
+   * outside-click dismiss covers that case too.
+   */
+  _onFileContextMenu(event, node) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Close any stale menu first so the document
+    // listener attach/detach stays balanced.
+    if (this._contextMenu !== null) {
+      this._closeContextMenu();
+    }
+    this._contextMenu = {
+      type: 'file',
+      path: node.path,
+      name: node.name,
+      isExcluded: this.excludedFiles.has(node.path),
+      x: event.clientX,
+      y: event.clientY,
+    };
+    // Attach document listeners for outside-click and
+    // Escape dismissal. Only active while a menu is
+    // open — keeps the idle cost zero.
+    document.addEventListener('click', this._onDocumentClickForMenu, true);
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForMenu,
+      true,
+    );
+  }
+
+  /**
+   * Close the menu and release document listeners. Safe
+   * to call when no menu is open (idempotent). Called
+   * from every action dispatch path, from outside-click,
+   * from Escape-key, and from `disconnectedCallback`.
+   */
+  _closeContextMenu() {
+    if (this._contextMenu === null) return;
+    this._contextMenu = null;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForMenu,
+      true,
+    );
+  }
+
+  /**
+   * Document-level click handler. Fires in capture phase
+   * so we see the click before any downstream handler
+   * that might call stopPropagation. Walks `composedPath`
+   * to see whether the click landed inside the menu — if
+   * so, let the menu's own click handlers run. Otherwise
+   * close.
+   *
+   * Capture-phase + composedPath is needed because the
+   * menu lives in our shadow DOM; a bubbling-phase
+   * document listener sees the shadow host as the event
+   * target, not the menu contents.
+   */
+  _onDocumentClickForMenu(event) {
+    if (this._contextMenu === null) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const insideMenu = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        el.classList.contains('context-menu'),
+    );
+    if (!insideMenu) {
+      this._closeContextMenu();
+    }
+  }
+
+  /**
+   * Document-level keydown handler — Escape dismisses.
+   * Capture phase so we beat any other Escape handler
+   * that might be up the tree (app shell's overlay
+   * dismiss, modal close, etc.). We only consume the
+   * event when a menu is actually open.
+   */
+  _onDocumentKeyDownForMenu(event) {
+    if (this._contextMenu === null) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeContextMenu();
+    }
+  }
+
+  /**
+   * Render the context menu when state is non-null.
+   * Returns empty string otherwise so the menu simply
+   * doesn't appear in the DOM.
+   *
+   * Position clamped inside the viewport margins —
+   * menus opened near a screen edge slide inward to
+   * stay fully visible.
+   */
+  _renderContextMenu() {
+    if (this._contextMenu === null) return '';
+    const ctx = this._contextMenu;
+    const { x, y } = this._clampMenuPosition(ctx);
+    return html`
+      <div
+        class="context-menu"
+        style="left: ${x}px; top: ${y}px"
+        role="menu"
+        aria-label="File actions"
+      >
+        ${this._renderMenuItems(ctx)}
+      </div>
+    `;
+  }
+
+  _renderMenuItems(ctx) {
+    const items = [];
+    for (const entry of _CONTEXT_MENU_FILE_ITEMS) {
+      if (entry === null) {
+        items.push(html`<div class="menu-separator"></div>`);
+        continue;
+      }
+      if (typeof entry.showWhen === 'function' && !entry.showWhen(ctx)) {
+        continue;
+      }
+      const classes = ['menu-item'];
+      if (entry.destructive) classes.push('destructive');
+      items.push(html`
+        <div
+          class=${classes.join(' ')}
+          role="menuitem"
+          data-action=${entry.action}
+          @click=${(e) => this._onContextMenuAction(e, entry.action)}
+        >
+          <span class="icon">${entry.icon}</span>
+          <span class="label">${entry.label}</span>
+        </div>
+      `);
+    }
+    return items;
+  }
+
+  /**
+   * Clamp a click-coord position so the rendered menu
+   * stays inside the viewport. We can't know the menu's
+   * rendered size before it's drawn, so we use a generous
+   * conservative estimate (240×320) that covers the
+   * worst case (all file-menu items visible). If the
+   * estimate undershoots, the menu still renders —
+   * just potentially with part of a border off-screen,
+   * which is a graceful failure mode.
+   */
+  _clampMenuPosition({ x, y }) {
+    const margin = _CONTEXT_MENU_VIEWPORT_MARGIN;
+    const estimatedWidth = 240;
+    const estimatedHeight = 320;
+    const maxX = window.innerWidth - estimatedWidth - margin;
+    const maxY = window.innerHeight - estimatedHeight - margin;
+    return {
+      x: Math.max(margin, Math.min(x, maxX)),
+      y: Math.max(margin, Math.min(y, maxY)),
+    };
+  }
+
+  /**
+   * Handle a menu item click. Dispatches a
+   * `context-menu-action` event carrying the action ID
+   * and the target context (path, name, etc.) so the
+   * files-tab orchestrator can route to the appropriate
+   * RPC. Always closes the menu after dispatch — even
+   * for actions that open a follow-up prompt (rename),
+   * since the prompt is handled at the orchestrator
+   * layer and has its own lifecycle.
+   *
+   * 8a scope: every action dispatches the event. The
+   * orchestrator-side handlers for stage / unstage /
+   * discard / rename / etc. land in 8b–8d.
+   */
+  _onContextMenuAction(event, action) {
+    event.preventDefault();
+    event.stopPropagation();
+    const ctx = this._contextMenu;
+    if (ctx === null) return;
+    this.dispatchEvent(
+      new CustomEvent('context-menu-action', {
+        detail: {
+          action,
+          type: ctx.type,
+          path: ctx.path,
+          name: ctx.name,
+          isExcluded: ctx.isExcluded,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this._closeContextMenu();
+  }
+
+  // ---------------------------------------------------------------
   // Keyboard navigation (Increment 7)
   // ---------------------------------------------------------------
 
@@ -1728,4 +2120,14 @@ export {
   SORT_MODE_NAME,
   SORT_MODE_MTIME,
   SORT_MODE_SIZE,
+  CTX_ACTION_STAGE,
+  CTX_ACTION_UNSTAGE,
+  CTX_ACTION_DISCARD,
+  CTX_ACTION_RENAME,
+  CTX_ACTION_DUPLICATE,
+  CTX_ACTION_LOAD_LEFT,
+  CTX_ACTION_LOAD_RIGHT,
+  CTX_ACTION_EXCLUDE,
+  CTX_ACTION_INCLUDE,
+  CTX_ACTION_DELETE,
 };
