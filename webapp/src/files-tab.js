@@ -292,6 +292,21 @@ export class FilesTab extends RpcMixin(LitElement) {
     // carries the most recent value across re-renders rather
     // than clobbering back to EMPTY_TREE.
     this._latestTree = EMPTY_TREE;
+    // Latest status data from the file tree RPC. Shape:
+    // `{modified: Set<string>, staged: Set<string>,
+    //   untracked: Set<string>, deleted: Set<string>,
+    //   diffStats: Map<string, {added: number, removed: number}>}`.
+    // Pushed to the picker via direct property assignment
+    // so it can render M/S/U/D badges and `+N -N` diff
+    // stats next to file rows. Sets / Maps for O(1) lookup
+    // during render (the picker iterates over many files).
+    this._latestStatusData = {
+      modified: new Set(),
+      staged: new Set(),
+      untracked: new Set(),
+      deleted: new Set(),
+      diffStats: new Map(),
+    };
     // Flat list of repo-relative file paths — derived from
     // the loaded tree and pushed to the chat panel so it can
     // detect file mentions in assistant output. Non-reactive
@@ -372,6 +387,34 @@ export class FilesTab extends RpcMixin(LitElement) {
     // template below binds `.tree` via a getter that reads
     // from `_latestTree`, which we update here.
     this._latestTree = tree?.tree || EMPTY_TREE;
+    // Build status data from the RPC's sibling arrays.
+    // Repo.get_file_tree returns `modified`, `staged`,
+    // `untracked`, `deleted` as path-string arrays and
+    // `diff_stats` as `{path: {added, removed}}`. We
+    // convert to Sets / Map here so the picker's per-row
+    // render stays O(1) per lookup rather than O(N) scans.
+    // Defensive — any missing / malformed field falls back
+    // to an empty collection so a partial response doesn't
+    // crash the picker.
+    this._latestStatusData = {
+      modified: new Set(
+        Array.isArray(tree?.modified) ? tree.modified : [],
+      ),
+      staged: new Set(
+        Array.isArray(tree?.staged) ? tree.staged : [],
+      ),
+      untracked: new Set(
+        Array.isArray(tree?.untracked) ? tree.untracked : [],
+      ),
+      deleted: new Set(
+        Array.isArray(tree?.deleted) ? tree.deleted : [],
+      ),
+      diffStats: new Map(
+        tree?.diff_stats && typeof tree.diff_stats === 'object'
+          ? Object.entries(tree.diff_stats)
+          : [],
+      ),
+    };
     // Derive the flat file list and push to the chat panel
     // so file mentions in assistant output get wrapped. The
     // chat panel's `repoFiles` prop short-circuits on empty
@@ -409,6 +452,7 @@ export class FilesTab extends RpcMixin(LitElement) {
       return false;
     }
     picker.tree = this._latestTree;
+    picker.statusData = this._latestStatusData;
     picker.requestUpdate();
     chat.repoFiles = this._repoFiles;
     chat.requestUpdate();
@@ -787,6 +831,7 @@ export class FilesTab extends RpcMixin(LitElement) {
       >
         <ac-file-picker
           .tree=${this._latestTree}
+          .statusData=${this._latestStatusData}
           .selectedFiles=${this._selectedFiles}
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}

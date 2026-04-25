@@ -168,6 +168,20 @@ export class FilePicker extends LitElement {
      */
     tree: { type: Object },
     /**
+     * Git status data for the current tree. Shape:
+     * `{modified: Set, staged: Set, untracked: Set, deleted: Set,
+     *   diffStats: Map<path, {added, removed}>}`.
+     *
+     * Drives M/S/U/D badges and `+N -N` diff stats on file
+     * rows. Sets / Map for O(1) lookup inside render loops —
+     * large repos can have thousands of files per pass.
+     *
+     * Optional — the picker degrades gracefully if undefined
+     * or missing fields (no badges, no diff stats). Defaults
+     * to empty collections so renders never NPE.
+     */
+    statusData: { type: Object },
+    /**
      * Selected file paths. Using a Set means membership checks
      * are O(1) during render; the parent maintains it as a Set
      * and assigns it through. Lit deep-compares with `===` so we
@@ -296,6 +310,76 @@ export class FilePicker extends LitElement {
       margin-left: 0.5rem;
       font-variant-numeric: tabular-nums;
     }
+    /* Line-count color thresholds: files over ~170 lines are
+     * painful to review / fit in a prompt, 130-170 is getting
+     * long. Green means comfortable, orange is a warning,
+     * red is "consider splitting". */
+    .lines-badge.lines-green {
+      color: #3fb950;
+      opacity: 0.8;
+    }
+    .lines-badge.lines-orange {
+      color: #d29922;
+      opacity: 0.9;
+    }
+    .lines-badge.lines-red {
+      color: #f85149;
+      opacity: 0.95;
+    }
+
+    /* Git status badge — single letter M/S/U/D per file.
+     * Only the highest-priority state shows (deleted wins
+     * over staged wins over modified wins over untracked),
+     * so each file gets at most one. */
+    .status-badge {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1rem;
+      height: 1rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+      border-radius: 2px;
+      margin-left: 0.25rem;
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+    }
+    .status-badge.status-modified {
+      color: #d29922;
+      background: rgba(210, 153, 34, 0.15);
+    }
+    .status-badge.status-staged {
+      color: #3fb950;
+      background: rgba(63, 185, 80, 0.15);
+    }
+    .status-badge.status-untracked {
+      color: #58a6ff;
+      background: rgba(88, 166, 255, 0.15);
+    }
+    .status-badge.status-deleted {
+      color: #f85149;
+      background: rgba(248, 81, 73, 0.15);
+      text-decoration: line-through;
+    }
+
+    /* Diff stats (+N -N) shown between the status badge and
+     * the line-count badge. Only rendered when a file has a
+     * non-zero diff. */
+    .diff-stats {
+      flex-shrink: 0;
+      font-size: 0.7rem;
+      font-variant-numeric: tabular-nums;
+      margin-left: 0.35rem;
+      display: inline-flex;
+      gap: 0.25rem;
+    }
+    .diff-stats .added {
+      color: #3fb950;
+    }
+    .diff-stats .removed {
+      color: #f85149;
+    }
   `;
 
   constructor() {
@@ -308,6 +392,13 @@ export class FilePicker extends LitElement {
       type: 'dir',
       lines: 0,
       children: [],
+    };
+    this.statusData = {
+      modified: new Set(),
+      staged: new Set(),
+      untracked: new Set(),
+      deleted: new Set(),
+      diffStats: new Map(),
     };
     this.selectedFiles = new Set();
     this.filterQuery = '';
@@ -493,6 +584,8 @@ export class FilePicker extends LitElement {
     const isSelected = this.selectedFiles.has(node.path);
     const indentPx = depth * 16;
     const isFocused = node.path === this._focusedPath;
+    const status = this._statusFor(node.path);
+    const diff = this._diffStatsFor(node.path);
     return html`
       <div
         class="row is-file ${isFocused ? 'focused' : ''}"
@@ -511,11 +604,99 @@ export class FilePicker extends LitElement {
           aria-label="Select ${node.name}"
         />
         <span class="name">${node.name}</span>
+        ${status
+          ? html`<span
+              class="status-badge status-${status.kind}"
+              title=${status.tooltip}
+              aria-label=${status.tooltip}
+              >${status.letter}</span
+            >`
+          : ''}
+        ${diff
+          ? html`<span class="diff-stats" title="Lines changed">
+              ${diff.added > 0
+                ? html`<span class="added">+${diff.added}</span>`
+                : ''}
+              ${diff.removed > 0
+                ? html`<span class="removed">-${diff.removed}</span>`
+                : ''}
+            </span>`
+          : ''}
         ${typeof node.lines === 'number' && node.lines > 0
-          ? html`<span class="lines-badge">${node.lines}</span>`
+          ? html`<span
+              class="lines-badge ${this._linesColorClass(node.lines)}"
+              >${node.lines}</span
+            >`
           : ''}
       </div>
     `;
+  }
+
+  /**
+   * Resolve the git status for a file path. Returns null when
+   * the file has no tracked state, otherwise an object with
+   * the badge letter, semantic kind (for CSS), and a tooltip.
+   *
+   * Priority order (when a file appears in multiple arrays):
+   * deleted > staged > modified > untracked. Matches `git
+   * status` short-form behaviour — a file that's both staged
+   * and modified in the working tree shows `S` (the staged
+   * action is the more recent user intent).
+   */
+  _statusFor(path) {
+    const sd = this.statusData;
+    if (!sd || !path) return null;
+    if (sd.deleted?.has?.(path)) {
+      return { letter: 'D', kind: 'deleted', tooltip: 'Deleted' };
+    }
+    if (sd.staged?.has?.(path)) {
+      return { letter: 'S', kind: 'staged', tooltip: 'Staged' };
+    }
+    if (sd.modified?.has?.(path)) {
+      return {
+        letter: 'M',
+        kind: 'modified',
+        tooltip: 'Modified',
+      };
+    }
+    if (sd.untracked?.has?.(path)) {
+      return {
+        letter: 'U',
+        kind: 'untracked',
+        tooltip: 'Untracked',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Look up diff stats for a file. Returns null when there
+   * are no stats OR the entry has zero added + zero removed
+   * (nothing worth rendering). Shape: `{added, removed}`.
+   */
+  _diffStatsFor(path) {
+    const map = this.statusData?.diffStats;
+    if (!map || typeof map.get !== 'function' || !path) return null;
+    const entry = map.get(path);
+    if (!entry || typeof entry !== 'object') return null;
+    const added = typeof entry.added === 'number' ? entry.added : 0;
+    const removed =
+      typeof entry.removed === 'number' ? entry.removed : 0;
+    if (added === 0 && removed === 0) return null;
+    return { added, removed };
+  }
+
+  /**
+   * Classify a line count into a color bucket. Thresholds
+   * picked for readability / prompt-fitting rather than any
+   * hard language rule — green files are comfortable, orange
+   * is getting long, red is "consider splitting". Defined as
+   * constants rather than inline so future tuning is local.
+   */
+  _linesColorClass(lines) {
+    if (lines > 170) return 'lines-red';
+    if (lines >= 130) return 'lines-orange';
+    return 'lines-green';
   }
 
   // ---------------------------------------------------------------

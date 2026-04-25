@@ -909,6 +909,181 @@ describe('FilesTab files-modified reload', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Status data plumbing
+// ---------------------------------------------------------------------------
+
+describe('FilesTab status data plumbing', () => {
+  it('passes status arrays through to the picker as Sets', async () => {
+    // The RPC returns path-arrays; the tab converts to
+    // Sets so the picker's per-row lookup stays O(1).
+    const getTree = vi.fn().mockResolvedValue({
+      tree: {
+        name: 'repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [
+          { name: 'm.md', path: 'm.md', type: 'file', lines: 1 },
+          { name: 's.md', path: 's.md', type: 'file', lines: 1 },
+          { name: 'u.md', path: 'u.md', type: 'file', lines: 1 },
+          { name: 'd.md', path: 'd.md', type: 'file', lines: 1 },
+        ],
+      },
+      modified: ['m.md'],
+      staged: ['s.md'],
+      untracked: ['u.md'],
+      deleted: ['d.md'],
+      diff_stats: {},
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.statusData).toBeDefined();
+    expect(picker.statusData.modified).toBeInstanceOf(Set);
+    expect(picker.statusData.modified.has('m.md')).toBe(true);
+    expect(picker.statusData.staged.has('s.md')).toBe(true);
+    expect(picker.statusData.untracked.has('u.md')).toBe(true);
+    expect(picker.statusData.deleted.has('d.md')).toBe(true);
+  });
+
+  it('converts diff_stats object into a Map', async () => {
+    const getTree = vi.fn().mockResolvedValue({
+      tree: {
+        name: 'repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [
+          { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        ],
+      },
+      modified: [],
+      staged: [],
+      untracked: [],
+      deleted: [],
+      diff_stats: {
+        'a.md': { added: 7, removed: 2 },
+      },
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.statusData.diffStats).toBeInstanceOf(Map);
+    const entry = picker.statusData.diffStats.get('a.md');
+    expect(entry).toEqual({ added: 7, removed: 2 });
+  });
+
+  it('tolerates missing sibling fields in the RPC response', async () => {
+    // A partial / older-server response shouldn't crash the
+    // tab — every missing field degrades to an empty
+    // collection.
+    const getTree = vi.fn().mockResolvedValue({
+      tree: {
+        name: 'repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [],
+      },
+      // No modified/staged/untracked/deleted/diff_stats.
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.statusData.modified.size).toBe(0);
+    expect(picker.statusData.staged.size).toBe(0);
+    expect(picker.statusData.untracked.size).toBe(0);
+    expect(picker.statusData.deleted.size).toBe(0);
+    expect(picker.statusData.diffStats.size).toBe(0);
+  });
+
+  it('tolerates malformed field types (non-arrays)', async () => {
+    // Defensive — if the RPC returns something unexpected
+    // (string instead of array, etc.), we fall back to
+    // empty collections rather than throwing.
+    const getTree = vi.fn().mockResolvedValue({
+      tree: {
+        name: 'repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [],
+      },
+      modified: 'not an array',
+      staged: null,
+      untracked: undefined,
+      deleted: 42,
+      diff_stats: 'not an object',
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.statusData.modified.size).toBe(0);
+    expect(picker.statusData.staged.size).toBe(0);
+    expect(picker.statusData.untracked.size).toBe(0);
+    expect(picker.statusData.deleted.size).toBe(0);
+    expect(picker.statusData.diffStats.size).toBe(0);
+  });
+
+  it('refreshes status data on files-modified', async () => {
+    // After a commit, the status arrays should reflect the
+    // new working-tree state. Simulate two sequential
+    // responses and verify the picker sees the second.
+    let callCount = 0;
+    const getTree = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          tree: {
+            name: 'repo',
+            path: '',
+            type: 'dir',
+            lines: 0,
+            children: [
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+            ],
+          },
+          modified: ['a.md'],
+          staged: [],
+          untracked: [],
+          deleted: [],
+          diff_stats: {},
+        });
+      }
+      return Promise.resolve({
+        tree: {
+          name: 'repo',
+          path: '',
+          type: 'dir',
+          lines: 0,
+          children: [
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          ],
+        },
+        // After commit: clean.
+        modified: [],
+        staged: [],
+        untracked: [],
+        deleted: [],
+        diff_stats: {},
+      });
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.statusData.modified.has('a.md')).toBe(true);
+    pushEvent('files-modified', {});
+    await settle(t);
+    expect(picker.statusData.modified.has('a.md')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 
