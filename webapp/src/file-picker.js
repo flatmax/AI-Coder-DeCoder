@@ -159,6 +159,63 @@ function sortChildren(children) {
   });
 }
 
+// Sort mode identifiers. Module-level constants match the
+// convention used elsewhere in the webapp — minimal shape,
+// tree-shake-friendly.
+const SORT_MODE_NAME = 'name';
+const SORT_MODE_MTIME = 'mtime';
+const SORT_MODE_SIZE = 'size';
+const SORT_MODES = [SORT_MODE_NAME, SORT_MODE_MTIME, SORT_MODE_SIZE];
+
+// localStorage keys for persisting sort preferences.
+const _SORT_MODE_KEY = 'ac-dc-sort-mode';
+const _SORT_ASC_KEY = 'ac-dc-sort-asc';
+
+/**
+ * Sort a list of children with explicit mode and direction.
+ *
+ * Directories always sort alphabetically ascending regardless of
+ * the requested mode or direction — users expect a stable directory
+ * layout, and mtime/size are rarely meaningful for directory nodes
+ * (directories don't carry mtime in the file-tree schema, and their
+ * `lines` field is always 0).
+ *
+ * Files sort by the chosen key (name / mtime / size) with direction
+ * applied. Missing values fall back to 0 for numeric keys and empty
+ * string for name — malformed tree nodes don't crash the sort.
+ *
+ * Directories precede files in the final order. Returns a new array.
+ */
+function sortChildrenWithMode(children, mode, asc) {
+  const safeMode = SORT_MODES.includes(mode) ? mode : SORT_MODE_NAME;
+  const dirs = [];
+  const files = [];
+  for (const child of children || []) {
+    if (!child) continue;
+    if (child.type === 'dir') dirs.push(child);
+    else files.push(child);
+  }
+  // Dirs always alphabetical ascending.
+  dirs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  // Files sort by selected key, flip on descending.
+  files.sort((a, b) => {
+    let result;
+    if (safeMode === SORT_MODE_MTIME) {
+      const am = typeof a.mtime === 'number' ? a.mtime : 0;
+      const bm = typeof b.mtime === 'number' ? b.mtime : 0;
+      result = am - bm;
+    } else if (safeMode === SORT_MODE_SIZE) {
+      const al = typeof a.lines === 'number' ? a.lines : 0;
+      const bl = typeof b.lines === 'number' ? b.lines : 0;
+      result = al - bl;
+    } else {
+      result = (a.name || '').localeCompare(b.name || '');
+    }
+    return asc ? result : -result;
+  });
+  return [...dirs, ...files];
+}
+
 export class FilePicker extends LitElement {
   static properties = {
     /**
@@ -215,6 +272,19 @@ export class FilePicker extends LitElement {
      * the match overlay scrolls. Null when not in use.
      */
     _focusedPath: { type: String, state: true },
+    /**
+     * Current sort mode for file rows. One of 'name', 'mtime',
+     * 'size'. Directories always sort alphabetically ascending
+     * regardless. Persisted to localStorage.
+     */
+    _sortMode: { type: String, state: true },
+    /**
+     * Sort direction — true for ascending, false for descending.
+     * Persisted to localStorage as '1' / '0'. Name mode ascending
+     * means A → Z; mtime ascending means oldest first; size
+     * ascending means smallest first.
+     */
+    _sortAsc: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -232,6 +302,9 @@ export class FilePicker extends LitElement {
       flex-shrink: 0;
       padding: 0.5rem;
       border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
     }
     .filter-input {
       width: 100%;
@@ -246,6 +319,46 @@ export class FilePicker extends LitElement {
     .filter-input:focus {
       outline: none;
       border-color: var(--accent-primary, #58a6ff);
+    }
+
+    .sort-buttons {
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
+    }
+    .sort-buttons .label {
+      font-size: 0.6875rem;
+      opacity: 0.55;
+      margin-right: 0.15rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sort-btn {
+      flex: 0 0 auto;
+      padding: 0.2rem 0.45rem;
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      border-radius: 3px;
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      font-family: inherit;
+      cursor: pointer;
+      user-select: none;
+      line-height: 1;
+    }
+    .sort-btn:hover {
+      background: rgba(240, 246, 252, 0.05);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .sort-btn.active {
+      background: rgba(88, 166, 255, 0.12);
+      border-color: var(--accent-primary, #58a6ff);
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+    }
+    .sort-btn .dir {
+      margin-left: 0.15rem;
+      opacity: 0.8;
     }
 
     .tree-scroll {
@@ -474,6 +587,53 @@ export class FilePicker extends LitElement {
     // exits so the user's full-tree expansion state returns.
     // Non-reactive — purely a restore buffer.
     this._expandedSnapshot = null;
+    // Sort preferences — read persisted values with safe
+    // defaults. A malformed localStorage entry (unknown mode,
+    // non-'0'/'1' direction) falls back to defaults rather
+    // than propagating into the sort comparator.
+    const [loadedMode, loadedAsc] = this._loadSortPrefs();
+    this._sortMode = loadedMode;
+    this._sortAsc = loadedAsc;
+  }
+
+  /**
+   * Read sort mode and direction from localStorage with safe
+   * defaults. Returns [mode, asc] tuple.
+   *
+   * Defaults: name, ascending. Unknown mode values (including
+   * null from missing key) fall back to name. Direction is
+   * stored as '1' / '0' string; anything else falls back to
+   * ascending. Wrapped in try/catch because localStorage can
+   * throw in private-browsing or disabled-storage contexts.
+   */
+  _loadSortPrefs() {
+    let mode = SORT_MODE_NAME;
+    let asc = true;
+    try {
+      const savedMode = localStorage.getItem(_SORT_MODE_KEY);
+      if (SORT_MODES.includes(savedMode)) mode = savedMode;
+      const savedAsc = localStorage.getItem(_SORT_ASC_KEY);
+      if (savedAsc === '0') asc = false;
+      else if (savedAsc === '1') asc = true;
+    } catch (_err) {
+      // Ignore — defaults stay in place.
+    }
+    return [mode, asc];
+  }
+
+  /**
+   * Persist current sort preferences to localStorage. Called
+   * on every toggle. Wrapped in try/catch for the same reason
+   * as the load path — a disabled-storage context shouldn't
+   * break sort behaviour, just silently skip persistence.
+   */
+  _saveSortPrefs() {
+    try {
+      localStorage.setItem(_SORT_MODE_KEY, this._sortMode);
+      localStorage.setItem(_SORT_ASC_KEY, this._sortAsc ? '1' : '0');
+    } catch (_err) {
+      // Ignore.
+    }
   }
 
   // ---------------------------------------------------------------
@@ -585,6 +745,7 @@ export class FilePicker extends LitElement {
           @input=${this._onFilterInput}
           aria-label="Filter files"
         />
+        ${this._renderSortButtons()}
       </div>
       <div class="tree-scroll" role="tree">
         ${this._renderRoot()}
@@ -662,8 +823,53 @@ export class FilePicker extends LitElement {
     return '';
   }
 
+  _renderSortButtons() {
+    const dir = this._sortAsc ? '↑' : '↓';
+    const button = (mode, glyph, tooltip) => {
+      const isActive = this._sortMode === mode;
+      return html`
+        <button
+          type="button"
+          class="sort-btn ${isActive ? 'active' : ''}"
+          data-sort-mode=${mode}
+          title=${tooltip}
+          aria-pressed=${isActive}
+          @click=${() => this._onSortButtonClick(mode)}
+        >
+          ${glyph}${isActive
+            ? html`<span class="dir">${dir}</span>`
+            : ''}
+        </button>
+      `;
+    };
+    return html`
+      <div class="sort-buttons">
+        <span class="label">Sort</span>
+        ${button(
+          SORT_MODE_NAME,
+          'A',
+          'Sort by name (click again to reverse)',
+        )}
+        ${button(
+          SORT_MODE_MTIME,
+          '🕐',
+          'Sort by modification time (click again to reverse)',
+        )}
+        ${button(
+          SORT_MODE_SIZE,
+          '#',
+          'Sort by size (click again to reverse)',
+        )}
+      </div>
+    `;
+  }
+
   _renderChildren(node, depth, expanded) {
-    const children = sortChildren(node.children);
+    const children = sortChildrenWithMode(
+      node.children,
+      this._sortMode,
+      this._sortAsc,
+    );
     if (children.length === 0 && depth === 0) {
       // Root with no visible children — only happens on an
       // empty tree or a filter query with zero matches.
@@ -906,6 +1112,26 @@ export class FilePicker extends LitElement {
     this.filterQuery = e.target.value;
   }
 
+  /**
+   * Handle a click on one of the three sort buttons.
+   *
+   * Clicking the currently-active mode toggles direction.
+   * Clicking a different mode switches to it and resets to
+   * ascending — users expect a fresh sort to start at a
+   * familiar anchor (A-Z, oldest-first, smallest-first).
+   * Persisted on every change.
+   */
+  _onSortButtonClick(mode) {
+    if (!SORT_MODES.includes(mode)) return;
+    if (this._sortMode === mode) {
+      this._sortAsc = !this._sortAsc;
+    } else {
+      this._sortMode = mode;
+      this._sortAsc = true;
+    }
+    this._saveSortPrefs();
+  }
+
   _onDirClick(event, node) {
     // Clicking anywhere on a directory row (outside the checkbox)
     // toggles its expansion.
@@ -987,4 +1213,13 @@ export class FilePicker extends LitElement {
 customElements.define('ac-file-picker', FilePicker);
 
 // Exported for unit tests.
-export { fuzzyMatch, filterTree, sortChildren, computeFilterExpansions };
+export {
+  fuzzyMatch,
+  filterTree,
+  sortChildren,
+  sortChildrenWithMode,
+  computeFilterExpansions,
+  SORT_MODE_NAME,
+  SORT_MODE_MTIME,
+  SORT_MODE_SIZE,
+};

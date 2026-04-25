@@ -20,10 +20,14 @@ import {
 import './file-picker.js';
 import {
   FilePicker,
+  SORT_MODE_MTIME,
+  SORT_MODE_NAME,
+  SORT_MODE_SIZE,
   computeFilterExpansions,
   filterTree,
   fuzzyMatch,
   sortChildren,
+  sortChildrenWithMode,
 } from './file-picker.js';
 
 // ---------------------------------------------------------------------------
@@ -33,14 +37,14 @@ import {
 /**
  * Build a minimal tree-node literal for tests.
  */
-function file(path, lines = 0) {
+function file(path, lines = 0, mtime = 0) {
   const parts = path.split('/');
   return {
     name: parts[parts.length - 1],
     path,
     type: 'file',
     lines,
-    mtime: 0,
+    mtime,
   };
 }
 
@@ -79,6 +83,15 @@ afterEach(() => {
   while (_mounted.length) {
     const p = _mounted.pop();
     if (p.isConnected) p.remove();
+  }
+  // Clear sort preferences so each test starts from defaults.
+  // Tests that need to exercise the persistence path set the
+  // keys explicitly before mounting.
+  try {
+    localStorage.removeItem('ac-dc-sort-mode');
+    localStorage.removeItem('ac-dc-sort-asc');
+  } catch (_err) {
+    // ignore
   }
 });
 
