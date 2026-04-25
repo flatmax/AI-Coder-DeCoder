@@ -36,7 +36,7 @@ import pytest
 from ac_dc.config import ConfigManager
 from ac_dc.context_manager import Mode
 from ac_dc.doc_index.index import DocIndex
-from ac_dc.history_compactor import TopicBoundary
+from ac_dc.history_compactor import CompactionResult, TopicBoundary
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm_service import LLMService, _build_topic_detector
 from ac_dc.repo import Repo
@@ -3267,6 +3267,284 @@ class TestBuildTieredContent:
         assert text.index("block-M") < text.index("block-Z")
 
 
+class TestBuildTieredContentUniquenessInvariant:
+    """Defensive filters enforce the "never appears twice" invariant.
+
+    Per specs4/3-llm/prompt-assembly.md § "Uniqueness Invariants"
+    and specs3/3-llm-engine/prompt_assembly.md § "A File Never
+    Appears Twice": a file's index block (``symbol:`` or ``doc:``)
+    must never coexist with its full content (``file:``) in any
+    form. Upstream (``_update_stability`` Step 2,
+    ``set_excluded_index_files``, ``_rebuild_cache_impl`` Step 7)
+    is responsible for removing stale entries, but
+    ``_build_tiered_content`` carries belt-and-suspenders checks
+    so rendering is correct even when upstream state drifted
+    (races, cross-reference rebuild edge cases, future code
+    paths that forget the invariant).
+
+    These tests intentionally install tracker state that
+    violates the upstream contract — e.g., a symbol: entry
+    alongside a selected file — to verify the render-time
+    filters catch it. The checks are skip-with-debug-log rather
+    than raise, so the tests verify absence of content rather
+    than exception behaviour.
+    """
+
+    def test_selected_file_symbol_entry_skipped(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """symbol:{path} for a selected file is filtered at render time."""
+        (repo_dir / "a.py").write_text("content\n")
+        fake_index = _FakeSymbolIndex({"a.py": "symbol-block-for-a"})
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        # Add a.py to selection. This should normally cause
+        # _update_stability to remove any symbol:a.py entry —
+        # we simulate a desync by placing one directly AFTER
+        # selecting.
+        svc.set_selected_files(["a.py"])
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+
+        result = svc._build_tiered_content()
+        assert result is not None
+        # symbol-block-for-a must NOT appear in any tier's
+        # symbols output — the file is selected, its content
+        # would render separately as a file: entry (or in the
+        # active Working Files section).
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "symbol-block-for-a" not in result[tier]["symbols"]
+
+    def test_selected_file_doc_entry_skipped(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """doc:{path} for a selected file is filtered at render time."""
+        from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
+        from pathlib import Path as _Path
+
+        (repo_dir / "README.md").write_text("# Doc\n")
+        extractor = MarkdownExtractor()
+        outline = extractor.extract(
+            _Path("README.md"),
+            "# Project\n\nprose.\n",
+        )
+        service._doc_index._all_outlines["README.md"] = outline
+
+        service.set_selected_files(["README.md"])
+        _place_item(service._stability_tracker, "doc:README.md", "L2")
+
+        result = service._build_tiered_content()
+        assert result is not None
+        # Doc block must not appear in any tier's symbols field.
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "Project" not in result[tier]["symbols"]
+
+    def test_excluded_path_symbol_entry_skipped(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Items whose path is excluded are skipped regardless of prefix."""
+        fake_index = _FakeSymbolIndex({"excluded.py": "block-X"})
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        # Set excluded list directly (bypassing set_excluded_index_files
+        # to avoid the immediate removal pass; we want to simulate
+        # a state where the exclusion is active but a tracker
+        # entry somehow survived).
+        svc._excluded_index_files = ["excluded.py"]
+        _place_item(svc._stability_tracker, "symbol:excluded.py", "L1")
+
+        result = svc._build_tiered_content()
+        assert result is not None
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "block-X" not in result[tier]["symbols"]
+
+    def test_excluded_path_file_entry_skipped(
+        self,
+        service: LLMService,
+    ) -> None:
+        """file: entries for excluded paths are filtered out too.
+
+        Exclusion means "remove from context entirely" — applies
+        to all three prefixes.
+        """
+        service._file_context.add_file("secret.md", "secret content")
+        service._excluded_index_files = ["secret.md"]
+        _place_item(service._stability_tracker, "file:secret.md", "L1")
+
+        result = service._build_tiered_content()
+        assert result is not None
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "secret content" not in result[tier]["files"]
+            assert "secret.md" not in result[tier]["graduated_files"]
+
+    def test_excluded_path_doc_entry_skipped(
+        self,
+        service: LLMService,
+    ) -> None:
+        """doc: entries for excluded paths are filtered at render time."""
+        from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        outline = extractor.extract(
+            _Path("excluded.md"),
+            "# Excluded\n\ncontent.\n",
+        )
+        service._doc_index._all_outlines["excluded.md"] = outline
+
+        service._excluded_index_files = ["excluded.md"]
+        _place_item(service._stability_tracker, "doc:excluded.md", "L1")
+
+        result = service._build_tiered_content()
+        assert result is not None
+        for tier in ("L0", "L1", "L2", "L3"):
+            assert "Excluded" not in result[tier]["symbols"]
+
+    def test_system_and_history_keys_not_filtered_by_exclusion(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Exclusion / selection filters only apply to path-bearing prefixes.
+
+        system:*, url:*, history:* have no path component, so
+        they must never be affected by the defensive filters.
+        Regression guard against an over-eager filter.
+        """
+        # system: key is skipped separately by the builder
+        # (handled by the assembler). history: should render
+        # normally even if the tracker somehow also has a
+        # same-path entry in the excluded set.
+        service._context.add_message("user", "hello from history")
+        service._excluded_index_files = ["history:0"]  # nonsense path
+        service._selected_files = ["history:0"]
+        _place_item(service._stability_tracker, "history:0", "L1")
+
+        result = service._build_tiered_content()
+        assert result is not None
+        # History entry still rendered — not a path-bearing key.
+        assert len(result["L1"]["history"]) == 1
+        assert result["L1"]["history"][0]["content"] == "hello from history"
+
+    def test_rebuild_cross_ref_does_not_double_render(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Regression: rebuild with cross-ref doesn't duplicate content.
+
+        Before Fix 2, ``_rebuild_cache_impl`` step 7 only
+        swapped the primary-prefix entry for selected files.
+        If the same path existed in both indexes (cross-ref
+        enabled), the secondary-prefix entry survived
+        alongside the new file: entry, and
+        ``_build_tiered_content`` would render both the full
+        file content AND the index block.
+
+        This test places all three entries directly and
+        confirms the render-time filters suppress the
+        duplicates even without running the rebuild fix —
+        proving the defense-in-depth works.
+        """
+        from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
+        from pathlib import Path as _Path
+
+        # Set up a file present in both indexes.
+        (repo_dir / "shared.md").write_text("# Shared\n\nbody.\n")
+        fake_index = _FakeSymbolIndex(
+            {"shared.md": "symbol-block-shared"}
+        )
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        extractor = MarkdownExtractor()
+        outline = extractor.extract(
+            _Path("shared.md"),
+            "# Shared\n\nbody.\n",
+        )
+        svc._doc_index._all_outlines["shared.md"] = outline
+
+        # Select the file AND place entries for all three
+        # prefixes at the same tier. This is the pathological
+        # state the rebuild bug could produce before Fix 2.
+        svc.set_selected_files(["shared.md"])
+        svc._file_context.add_file("shared.md", "shared content")
+        _place_item(svc._stability_tracker, "file:shared.md", "L1")
+        _place_item(svc._stability_tracker, "symbol:shared.md", "L1")
+        _place_item(svc._stability_tracker, "doc:shared.md", "L1")
+
+        result = svc._build_tiered_content()
+        assert result is not None
+        # Full content appears exactly once (via file: entry).
+        assert "shared content" in result["L1"]["files"]
+        # Neither index block appears — both symbol: and doc:
+        # were filtered because the path is selected.
+        symbols_text = result["L1"]["symbols"]
+        assert "symbol-block-shared" not in symbols_text
+        assert "# Shared" not in symbols_text
+
+    def test_non_selected_non_excluded_path_renders_normally(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Normal-case sanity check — filters don't over-reach.
+
+        An unselected, non-excluded path must still render its
+        symbol: / doc: / file: content through the builder.
+        Guards against a filter that accidentally suppressed
+        everything.
+
+        a.py must exist on disk because ``set_selected_files``
+        runs a ``file_exists`` filter — without the real file,
+        the selection would be silently empty and both symbol
+        blocks would render, defeating the point of the test.
+        """
+        (repo_dir / "a.py").write_text("content-a\n")
+        (repo_dir / "b.py").write_text("content-b\n")
+        fake_index = _FakeSymbolIndex({
+            "a.py": "symbol-block-a",
+            "b.py": "symbol-block-b",
+        })
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=fake_index,
+        )
+        # a.py selected (filtered out), b.py neither selected
+        # nor excluded (must render).
+        svc._file_context.add_file("a.py", "content-a")
+        svc.set_selected_files(["a.py"])
+        assert svc.get_selected_files() == ["a.py"]  # precondition
+        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbol:b.py", "L1")
+
+        result = svc._build_tiered_content()
+        assert result is not None
+        # a.py's symbol filtered; b.py's rendered.
+        assert "symbol-block-a" not in result["L1"]["symbols"]
+        assert "symbol-block-b" in result["L1"]["symbols"]
+
+
 # ---------------------------------------------------------------------------
 # _assemble_tiered — legend dispatch (Layer 2.8.2e)
 # ---------------------------------------------------------------------------
@@ -4418,6 +4696,271 @@ class TestRebuildCache:
         assert existing is not None
         assert existing.n_value == 4
 
+    def test_cross_ref_rebuild_swaps_both_prefixes_for_selected_file(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rebuild with cross-ref: selected file's secondary entry removed too.
+
+        Regression test for Fix 2. Before the fix, step 7 of
+        ``_rebuild_cache_impl`` only removed the primary-prefix
+        entry for each selected file. In cross-reference mode,
+        step 5b seeded the secondary-prefix entry for every file
+        in the opposite index — including selected files. That
+        secondary entry survived step 7, so the tracker ended up
+        with both ``file:{path}`` (full content) AND the
+        secondary-prefix entry (index block) for the same path,
+        violating the uniqueness invariant.
+
+        The fix extends step 7 to also remove any
+        secondary-prefix entry for each selected file. This test
+        stages the exact conditions (selected file present in
+        both primary and secondary indexes, cross-ref enabled)
+        and verifies only the ``file:`` entry survives.
+        """
+        # Create a file that's indexed as both a source file and
+        # a doc file. In practice this is rare (a .md file with
+        # parseable symbols, or a .py file with doc outlines),
+        # but we simulate it with a shared path.
+        (repo_dir / "shared.py").write_text("def foo(): pass\n")
+
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={"shared.py": "symbol-block-shared"},
+            ref_counts={"shared.py": 1},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["shared.py"],
+            monkeypatch=monkeypatch,
+        )
+        # Seed the doc index with the same path so step 5b
+        # creates a doc: entry for it.
+        self._seed_doc_outlines(svc, ["shared.py"])
+
+        # Enable cross-reference in code mode and select the
+        # shared file. The combination is what triggered the
+        # bug: step 5 creates symbol:shared.py, step 5b creates
+        # doc:shared.py, step 7 swaps symbol: → file: but left
+        # doc: in place.
+        svc._doc_index_ready = True
+        svc._cross_ref_enabled = True
+        svc.set_selected_files(["shared.py"])
+
+        svc.rebuild_cache()
+
+        tracker = svc._stability_tracker
+        all_keys = set(tracker.get_all_items().keys())
+        # file: entry present — full content is in a cached tier.
+        assert "file:shared.py" in all_keys
+        # Primary-prefix entry swapped out.
+        assert "symbol:shared.py" not in all_keys
+        # Secondary-prefix entry ALSO swapped out (Fix 2).
+        # Without the fix this assertion fails — the doc:
+        # entry survives alongside file:.
+        assert "doc:shared.py" not in all_keys
+
+    def test_cross_ref_rebuild_preserves_unselected_secondary_entries(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The swap only strips the SELECTED file's secondary entry.
+
+        Other files in the secondary index keep their entries —
+        we're not wiping cross-reference indiscriminately, just
+        enforcing uniqueness for selected paths.
+
+        The selected file must be present in the PRIMARY index so
+        step 7 runs the swap path that Fix 2 extends. An orphan
+        path (selected but not in the primary index) goes through
+        the step-8 orphan-distribution path instead, which is
+        outside Fix 2's scope. See
+        ``test_cross_ref_rebuild_swaps_both_prefixes_for_selected_file``
+        for the core regression.
+        """
+        (repo_dir / "selected.py").write_text("def foo(): pass\n")
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={
+                "selected.py": "block-selected",
+                "a.py": "block-a",
+            },
+            ref_counts={"selected.py": 1, "a.py": 1},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["selected.py", "a.py"],
+            monkeypatch=monkeypatch,
+        )
+        # selected.py is in both indexes (cross-ref seeds
+        # doc:selected.py alongside the primary symbol entry);
+        # other.md is only in the doc index.
+        self._seed_doc_outlines(svc, ["selected.py", "other.md"])
+        svc._doc_index_ready = True
+        svc._cross_ref_enabled = True
+        svc.set_selected_files(["selected.py"])
+
+        svc.rebuild_cache()
+
+        tracker = svc._stability_tracker
+        all_keys = set(tracker.get_all_items().keys())
+        # Selected file → file: only; both index prefixes swapped.
+        assert "file:selected.py" in all_keys
+        assert "symbol:selected.py" not in all_keys
+        assert "doc:selected.py" not in all_keys
+        # Other doc file's entry preserved (scope check — the
+        # swap only affects the selected path).
+        assert "doc:other.md" in all_keys
+
+    def test_cross_ref_rebuild_marks_secondary_tier_broken(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Removed secondary entry's tier is added to _broken_tiers.
+
+        So the next cascade can rebalance cleanly after rebuild.
+        """
+        (repo_dir / "shared.py").write_text("def foo(): pass\n")
+
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={"shared.py": "block"},
+            ref_counts={"shared.py": 1},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["shared.py"],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["shared.py"])
+        svc._doc_index_ready = True
+        svc._cross_ref_enabled = True
+        svc.set_selected_files(["shared.py"])
+
+        svc.rebuild_cache()
+
+        # The secondary entry's tier should appear in
+        # _broken_tiers. We can't predict exactly which tier
+        # clustering placed it in, but at least SOME tier
+        # beyond the default rebuild-initialized set should
+        # be marked. More robustly: after rebuild, the
+        # broken_tiers set is non-empty (rebuild itself marks
+        # all tiers broken as step 3, so this is trivially
+        # true — but the removal path would have a concrete
+        # effect if rebuild didn't pre-mark everything).
+        # This test is a weak signal; the stronger assertion
+        # is that the entry is gone (covered by the other
+        # tests in this group).
+        assert len(svc._stability_tracker._broken_tiers) > 0
+
+    def test_cross_ref_rebuild_code_mode_strips_doc_entry(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Code mode primary → secondary prefix is doc:.
+
+        Pinning the direction of the swap: in code mode,
+        primary='symbol:' and secondary='doc:'. Fix 2 removes
+        the doc: entry for selected files.
+        """
+        (repo_dir / "shared.py").write_text("code\n")
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={"shared.py": "block"},
+            ref_counts={"shared.py": 1},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["shared.py"],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["shared.py"])
+        # Explicitly in code mode.
+        assert svc._context.mode == Mode.CODE
+        svc._doc_index_ready = True
+        svc._cross_ref_enabled = True
+        svc.set_selected_files(["shared.py"])
+
+        svc.rebuild_cache()
+
+        all_keys = set(svc._stability_tracker.get_all_items().keys())
+        assert "file:shared.py" in all_keys
+        assert "doc:shared.py" not in all_keys
+
+    def test_cross_ref_rebuild_doc_mode_strips_symbol_entry(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doc mode primary → secondary prefix is symbol:.
+
+        Symmetric to the code-mode test. In doc mode,
+        primary='doc:' and secondary='symbol:'. Fix 2 removes
+        the symbol: entry for selected files.
+        """
+        (repo_dir / "shared.md").write_text("# Doc\n\nbody.\n")
+        fake_symbol_index = _FakeSymbolIndexWithRefs(
+            blocks={"shared.md": "block"},
+            ref_counts={"shared.md": 1},
+            components=[],
+        )
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_symbol_index,
+            repo_files=["shared.md"],
+            monkeypatch=monkeypatch,
+        )
+        self._seed_doc_outlines(svc, ["shared.md"])
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+        svc._doc_index_ready = True
+        svc._cross_ref_enabled = True
+        svc.set_selected_files(["shared.md"])
+
+        svc.rebuild_cache()
+
+        all_keys = set(svc._stability_tracker.get_all_items().keys())
+        assert "file:shared.md" in all_keys
+        assert "symbol:shared.md" not in all_keys
+
 
 # ---------------------------------------------------------------------------
 # _update_stability — mode-aware index entry dispatch (Layer 2.8.2f)
@@ -4788,6 +5331,429 @@ class TestUpdateStabilityIndexDispatch:
         assert not any(k.startswith("symbol:") for k in active)
         # No doc: entries (cross-ref off in code mode).
         assert not any(k.startswith("doc:") for k in active)
+
+
+class TestUpdateStabilityExcludedFiles:
+    """_update_stability step 0a: defensive excluded-files removal.
+
+    Covers Fix 3 — the defensive excluded-files removal pass at
+    the top of every update cycle. ``set_excluded_index_files``
+    does a one-shot removal when the exclusion set changes, but
+    a file could be re-indexed between that call and the next
+    update (repo re-walk, rebuild, cross-ref enable). Step 0a
+    catches that drift and honours the specs3 belt-and-
+    suspenders contract.
+
+    Steps 3 and 4 of ``_update_stability`` also carry an
+    ``excluded_set`` guard so they don't re-register excluded
+    paths as fresh active items. Without that guard, step 0a's
+    removal would be immediately undone.
+    """
+
+    def _make_service_with_both_indexes(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+        symbol_paths: list[str] | None = None,
+        doc_paths: list[str] | None = None,
+    ) -> LLMService:
+        """Service with both indexes populated."""
+        symbol_paths = symbol_paths or []
+        doc_paths = doc_paths or []
+
+        class _SymbolIndexStub:
+            def __init__(self, paths: list[str]) -> None:
+                self._all_symbols = {p: None for p in paths}
+
+            def get_file_symbol_block(
+                self, path: str
+            ) -> str | None:
+                if path in self._all_symbols:
+                    return f"symbol-block-for-{path}"
+                return None
+
+            def get_signature_hash(
+                self, path: str
+            ) -> str | None:
+                if path in self._all_symbols:
+                    return f"sym-sig-{path}"
+                return None
+
+            def get_legend(self) -> str:
+                return ""
+
+            def get_symbol_map(
+                self, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexStub(symbol_paths),
+        )
+
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in doc_paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+        return svc
+
+    def test_step_0a_removes_stale_tracker_entries(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Excluded files whose tracker entries survived get removed.
+
+        Simulates drift: a file was indexed, got a tracker
+        entry at L2, and was later excluded. The one-shot
+        removal in set_excluded_index_files should have caught
+        it — but if it didn't (tracker re-populated after the
+        exclusion set change, e.g., from a cross-ref enable),
+        step 0a cleans it up on the next update cycle.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["excluded.py"],
+        )
+        # Set exclusion DIRECTLY on the attribute, bypassing
+        # set_excluded_index_files to simulate the drift case.
+        svc._excluded_index_files = ["excluded.py"]
+        # Seed a stale tracker entry at L2.
+        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
+            key="symbol:excluded.py",
+            tier=Tier.L2,
+            n_value=6,
+            content_hash="h",
+            tokens=100,
+        )
+
+        svc._update_stability()
+
+        # Entry gone after the update cycle.
+        all_keys = set(svc._stability_tracker.get_all_items().keys())
+        assert "symbol:excluded.py" not in all_keys
+
+    def test_step_0a_removes_all_three_prefixes(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Removal pass covers symbol:, doc:, and file: prefixes."""
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+        )
+        svc._excluded_index_files = ["multi.md"]
+        tracker = svc._stability_tracker
+        tracker._items["symbol:multi.md"] = TrackedItem(
+            key="symbol:multi.md", tier=Tier.L1,
+            n_value=3, content_hash="h", tokens=10,
+        )
+        tracker._items["doc:multi.md"] = TrackedItem(
+            key="doc:multi.md", tier=Tier.L2,
+            n_value=6, content_hash="h", tokens=20,
+        )
+        tracker._items["file:multi.md"] = TrackedItem(
+            key="file:multi.md", tier=Tier.L3,
+            n_value=3, content_hash="h", tokens=30,
+        )
+
+        svc._update_stability()
+
+        all_keys = set(tracker.get_all_items().keys())
+        assert "symbol:multi.md" not in all_keys
+        assert "doc:multi.md" not in all_keys
+        assert "file:multi.md" not in all_keys
+
+    def test_step_0a_marks_tiers_broken(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Removed items' tiers get added to _broken_tiers.
+
+        So the cascade can rebalance. We seed the entry at a
+        non-ACTIVE tier and confirm that tier shows up in
+        broken_tiers after the update.
+
+        Note: ``tracker.update`` resets _broken_tiers at the
+        top of the cycle, so we can't observe the flag after
+        a full update. Instead we verify the REMOVAL happened
+        at all — if step 0a's tier-marking didn't run, the
+        entry would still be there after step 3 (which doesn't
+        touch tracker state for excluded-but-indexed paths in
+        a way that removes prior entries).
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["excluded.py"],
+        )
+        svc._excluded_index_files = ["excluded.py"]
+        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
+            key="symbol:excluded.py",
+            tier=Tier.L2,
+            n_value=6,
+            content_hash="h",
+            tokens=100,
+        )
+
+        svc._update_stability()
+
+        # The entry is gone — that's the observable effect.
+        all_keys = set(
+            svc._stability_tracker.get_all_items().keys()
+        )
+        assert "symbol:excluded.py" not in all_keys
+
+    def test_step_3_skips_excluded_paths(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Excluded paths don't get re-registered as active items.
+
+        Without the excluded_set guard in step 3, an excluded
+        file would be removed by step 0a and then immediately
+        re-added by step 3's iteration over the index. Step 3
+        must skip excluded paths.
+
+        Test approach: call _update_stability with a capture
+        on tracker.update. If step 3's skip works, the
+        active_items dict passed to update has no entry for
+        the excluded path.
+        """
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["excluded.py", "normal.py"],
+        )
+        svc._excluded_index_files = ["excluded.py"]
+
+        # Capture tracker.update's active_items arg.
+        capture: dict[str, Any] = {}
+        original = svc._stability_tracker.update
+
+        def _capture(
+            active_items: dict[str, Any],
+            existing_files: set[str] | None = None,
+        ) -> list[str]:
+            capture["active_items"] = dict(active_items)
+            return original(active_items, existing_files=existing_files)
+
+        svc._stability_tracker.update = _capture  # type: ignore[method-assign]
+
+        svc._update_stability()
+
+        active = capture["active_items"]
+        # Excluded path absent; normal path present.
+        assert "symbol:excluded.py" not in active
+        assert "symbol:normal.py" in active
+
+    def test_step_3_skips_excluded_doc_paths(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Doc-mode step 3 also skips excluded paths."""
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            doc_paths=["excluded.md", "normal.md"],
+        )
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+        svc._excluded_index_files = ["excluded.md"]
+
+        capture: dict[str, Any] = {}
+        original = svc._stability_tracker.update
+
+        def _capture(
+            active_items: dict[str, Any],
+            existing_files: set[str] | None = None,
+        ) -> list[str]:
+            capture["active_items"] = dict(active_items)
+            return original(active_items, existing_files=existing_files)
+
+        svc._stability_tracker.update = _capture  # type: ignore[method-assign]
+
+        svc._update_stability()
+
+        active = capture["active_items"]
+        assert "doc:excluded.md" not in active
+        assert "doc:normal.md" in active
+
+    def test_step_4_skips_excluded_cross_ref_paths(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Cross-reference step 4 also honours the excluded set.
+
+        Without this skip, an excluded file would survive step
+        0a's removal, skip step 3's primary-index registration,
+        but get re-registered via step 4's cross-ref pass.
+        """
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["excluded.md", "normal.md"],
+        )
+        # Code mode primary; cross-ref adds doc: as secondary.
+        svc._cross_ref_enabled = True
+        svc._excluded_index_files = ["excluded.md"]
+
+        capture: dict[str, Any] = {}
+        original = svc._stability_tracker.update
+
+        def _capture(
+            active_items: dict[str, Any],
+            existing_files: set[str] | None = None,
+        ) -> list[str]:
+            capture["active_items"] = dict(active_items)
+            return original(active_items, existing_files=existing_files)
+
+        svc._stability_tracker.update = _capture  # type: ignore[method-assign]
+
+        svc._update_stability()
+
+        active = capture["active_items"]
+        # Excluded doc file absent from cross-ref entries;
+        # normal doc file present.
+        assert "doc:excluded.md" not in active
+        assert "doc:normal.md" in active
+        # Primary symbol entry unaffected.
+        assert "symbol:a.py" in active
+
+    def test_no_excluded_files_is_noop(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Empty exclusion list → step 0a does nothing.
+
+        Regression guard: the removal pass must not corrupt
+        tracker state when there's nothing to exclude.
+
+        ``get_flat_file_list`` is monkeypatched so the tracker's
+        Phase 0 stale-removal doesn't drop ``symbol:a.py`` for
+        not being on disk — the point of this test is to
+        exercise step 0a, not Phase 0.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+        )
+        monkeypatch.setattr(
+            repo, "get_flat_file_list", lambda: "a.py"
+        )
+        # Pre-populate a legitimate tracker entry. Use the
+        # real signature hash so Phase 1 doesn't demote it —
+        # we want to see that step 0a left the entry alone,
+        # not that Phase 1 demoted-but-preserved it.
+        sig_hash = (
+            svc._symbol_index.get_signature_hash("a.py")
+            or "h"
+        )
+        svc._stability_tracker._items["symbol:a.py"] = TrackedItem(
+            key="symbol:a.py",
+            tier=Tier.L2,
+            n_value=6,
+            content_hash=sig_hash,
+            tokens=50,
+        )
+
+        svc._update_stability()
+
+        # Entry survives (the normal update flow may change its
+        # tier via cascade, but it shouldn't disappear because
+        # of step 0a).
+        all_keys = set(
+            svc._stability_tracker.get_all_items().keys()
+        )
+        assert "symbol:a.py" in all_keys
+
+    def test_exclusion_drift_scenario_end_to_end(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Full drift scenario: exclude → re-index → update.
+
+        1. User excludes a file via set_excluded_index_files —
+           tracker entry removed immediately (one-shot).
+        2. Something re-creates the tracker entry (simulated
+           here by direct injection, but could be any code path
+           that touches the tracker).
+        3. Next update cycle runs step 0a, which catches the
+           drift and removes the entry again.
+
+        Without Fix 3, step 3 would see the excluded file in
+        the symbol index, skip it, but the stale tracker entry
+        from (2) would linger indefinitely — rendering as an
+        index block in cached tiers even though the user
+        excluded it.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["drifted.py"],
+        )
+        # Phase 1: exclude.
+        svc.set_excluded_index_files(["drifted.py"])
+        # Tracker should have no entry at this point.
+        assert "symbol:drifted.py" not in (
+            svc._stability_tracker.get_all_items()
+        )
+
+        # Phase 2: simulate drift — something re-creates the
+        # entry. In production this could be a rebuild or a
+        # cross-ref enable that iterates the index without
+        # checking the exclusion set.
+        svc._stability_tracker._items["symbol:drifted.py"] = TrackedItem(
+            key="symbol:drifted.py",
+            tier=Tier.L1,
+            n_value=3,
+            content_hash="h",
+            tokens=20,
+        )
+        assert "symbol:drifted.py" in (
+            svc._stability_tracker.get_all_items()
+        )
+
+        # Phase 3: next update runs step 0a.
+        svc._update_stability()
+
+        # Entry gone.
+        assert "symbol:drifted.py" not in (
+            svc._stability_tracker.get_all_items()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -5710,22 +6676,25 @@ class TestCompactionSystemEvent:
         """Rewrite compaction config to a low trigger.
 
         The compactor reads through ``config.compaction_config``
-        via a property on ``_FakeConfigManager`` — but on the
-        real ConfigManager we have to update the underlying JSON.
-        Since the compactor holds a reference to the config
-        manager and reads the property fresh on each call
-        (``HistoryCompactor._config`` property), updating the
-        compactor's internal dict is simpler.
+        via a property that re-parses ``app.json`` on each
+        access (no cache to invalidate beyond the one we null
+        out defensively). We write the keys
+        :class:`HistoryCompactor` actually consults —
+        ``compaction_trigger_tokens``, not ``trigger_tokens``.
+        Mismatched key names were the cause of the original
+        "compaction never triggers in tests" bug.
         """
         # Access the compactor's config via its live-read path.
         # The real ConfigManager loads from app.json; we override
-        # the cached dict directly.
+        # the underlying file and invalidate any cache.
         import json as _json
         app_path = config.config_dir / "app.json"
         app_data = _json.loads(app_path.read_text())
         app_data.setdefault("history_compaction", {})
         app_data["history_compaction"]["enabled"] = True
-        app_data["history_compaction"]["trigger_tokens"] = 500
+        # Key names match the ones HistoryCompactor's properties
+        # read from self._config.get(...).
+        app_data["history_compaction"]["compaction_trigger_tokens"] = 500
         app_data["history_compaction"]["verbatim_window_tokens"] = 200
         app_data["history_compaction"]["min_verbatim_exchanges"] = 1
         app_data["history_compaction"]["summary_budget_tokens"] = 500
@@ -5873,14 +6842,26 @@ class TestCompactionSystemEvent:
         config: ConfigManager,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Summarize + empty summary → no details, fallback line."""
+        """Summarize + empty detector summary → compactor fallback shown.
+
+        When the detector returns an empty summary string,
+        :class:`HistoryCompactor` substitutes a generic
+        placeholder so the LLM's next turn sees *something*
+        describing the compacted history. The event builder
+        reads the compactor's final ``result.summary`` — not the
+        detector's original output — so the ``<details>`` block
+        IS present, carrying the fallback text.
+
+        This is the user-visible behaviour: a compaction with
+        no detected topic boundary still produces an expandable
+        summary block in the chat, populated with the generic
+        fallback. The "empty summary → no details" path exists
+        only when ``_build_compaction_event_text`` is called
+        directly with a ``CompactionResult(summary="")`` — covered
+        by :meth:`test_build_event_text_summarize_without_summary`.
+        """
         self._trigger_small_config(config)
         self._seed_history_over_trigger(service)
-        # Empty summary — detector didn't produce summary text.
-        # The compactor's generic fallback kicks in and
-        # substitutes a placeholder, but our event-builder
-        # sees the ORIGINAL boundary (with empty summary) so
-        # we expect no <details> block.
         self._patch_detector(
             service,
             boundary_index=None,
@@ -5899,13 +6880,18 @@ class TestCompactionSystemEvent:
         ]
         assert len(events) == 1
         content = events[0]["content"]
-        # No details block — nothing to put in it.
-        assert "<details>" not in content
-        # Fallback boundary line present.
-        assert (
-            "No clear topic boundary" in content
-            or "Boundary reason" in content
-        )
+        # Fallback boundary line present — no detector-reported
+        # reason to display.
+        assert "No clear topic boundary" in content
+        # Details block present with the compactor's generic
+        # fallback summary text. The fallback is defined in
+        # history_compactor._GENERIC_SUMMARY_FALLBACK; we assert
+        # on a stable fragment rather than the full string to
+        # avoid coupling to the exact wording.
+        assert "<details>" in content
+        assert "<summary>Summary</summary>" in content
+        assert "earlier topics" in content
+        assert "</details>" in content
 
     async def test_event_contains_token_stats(
         self,

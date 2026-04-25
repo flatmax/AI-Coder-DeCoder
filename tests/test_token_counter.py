@@ -60,26 +60,65 @@ class TestModelLimits:
         assert TokenCounter("unknown/model").max_input_tokens == 1_000_000
 
     def test_claude_max_output_tokens(self) -> None:
-        """Claude family gets 8192 output tokens.
+        """Claude family ceilings — model-aware per provider docs.
 
-        Matched by substring — both ``anthropic/`` prefixes and
-        ``bedrock/anthropic.`` prefixes resolve the same way.
+        The ``_OUTPUT_TOKEN_CEILINGS`` table in
+        :mod:`ac_dc.token_counter` pins specific ceilings per
+        model generation. Pattern match is lowercase substring
+        so both ``anthropic/claude-*`` and
+        ``bedrock/anthropic.claude-*`` resolve the same way.
+        Each test case documents the provider-reported value
+        for that generation.
         """
+        # Opus 4.5+ — 128K output window.
+        for model in (
+            "anthropic/claude-opus-4-5",
+            "anthropic/claude-opus-4.5",
+            "anthropic/claude-opus-4-6",
+            "anthropic/claude-opus-4.6",
+            "bedrock/anthropic.claude-opus-4-6-v1:0",
+        ):
+            assert TokenCounter(model).max_output_tokens == 128_000, model
+        # Sonnet 4.5+ — 64K output window.
         for model in (
             "anthropic/claude-sonnet-4-5",
-            "anthropic/claude-opus-4-6",
-            "anthropic/claude-haiku-4-5",
+            "anthropic/claude-sonnet-4.5",
+            "anthropic/claude-sonnet-4-6",
             "bedrock/anthropic.claude-sonnet-4-5-v1:0",
-            "claude-sonnet-4",
         ):
-            assert TokenCounter(model).max_output_tokens == 8192, model
+            assert TokenCounter(model).max_output_tokens == 64_000, model
+        # Haiku 4.5+ — 64K output window.
+        for model in (
+            "anthropic/claude-haiku-4-5",
+            "anthropic/claude-haiku-4.5",
+            "anthropic/claude-haiku-4-6",
+        ):
+            assert TokenCounter(model).max_output_tokens == 64_000, model
+        # Older Claude (pre-4.5 and unversioned) — 8K catch-all.
+        for model in (
+            "claude-sonnet-4",
+            "anthropic/claude-opus-4",
+            "anthropic/claude-3-5-sonnet",
+        ):
+            assert TokenCounter(model).max_output_tokens == 8_192, model
 
     def test_non_claude_max_output_tokens(self) -> None:
-        """Non-Claude models fall back to 4096 output tokens."""
+        """Non-Claude ceilings per the ``_OUTPUT_TOKEN_CEILINGS`` table.
+
+        GPT-4 family matches the ``gpt-4`` marker and gets
+        16_384. Models with no matching marker fall through to
+        the conservative 4096-token default.
+        """
+        # GPT-4 family — 16K output window.
         for model in (
             "openai/gpt-4",
             "openai/gpt-4-turbo",
+        ):
+            assert TokenCounter(model).max_output_tokens == 16_384, model
+        # Unrecognised models — 4096 default.
+        for model in (
             "unknown/model",
+            "openai/gpt-3.5-turbo",
         ):
             assert TokenCounter(model).max_output_tokens == 4096, model
 
@@ -130,11 +169,12 @@ class TestModelLimits:
         """Family detection lowercases the input.
 
         Guards against config files that capitalise model names
-        inconsistently (``Anthropic/Claude-Sonnet-4-5``). Matching
-        must still work.
+        inconsistently (``Anthropic/Claude-Opus-4-6``). Matching
+        must still work — Opus 4.6 is in the 128K-ceiling
+        bucket regardless of case.
         """
         tc = TokenCounter("ANTHROPIC/CLAUDE-OPUS-4-6")
-        assert tc.max_output_tokens == 8192
+        assert tc.max_output_tokens == 128_000
         assert tc.min_cacheable_tokens == 4096
 
 
@@ -580,14 +620,14 @@ class TestInstanceIndependence:
         """
         claude = TokenCounter("anthropic/claude-opus-4-6")
         gpt = TokenCounter("openai/gpt-4")
-        # Claude: 8192 output, 4096 min-cacheable.
-        assert claude.max_output_tokens == 8192
+        # Opus 4.6: 128K output, 4096 min-cacheable.
+        assert claude.max_output_tokens == 128_000
         assert claude.min_cacheable_tokens == 4096
-        # GPT-4: 4096 output, 1024 min-cacheable.
-        assert gpt.max_output_tokens == 4096
+        # GPT-4: 16K output, 1024 min-cacheable.
+        assert gpt.max_output_tokens == 16_384
         assert gpt.min_cacheable_tokens == 1024
         # Re-check Claude — unchanged.
-        assert claude.max_output_tokens == 8192
+        assert claude.max_output_tokens == 128_000
 
     def test_counts_are_deterministic_across_calls(self) -> None:
         """Same input to the same counter always returns same count.

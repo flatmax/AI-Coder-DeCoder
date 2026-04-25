@@ -2972,6 +2972,20 @@ class LLMService:
         # invariant — selected files get full-content file:
         # entries in cached tiers rather than both symbol: and
         # as full content in ACTIVE.
+        #
+        # Cross-reference awareness: when step 5b seeded the
+        # opposite-prefix entry for a selected file (e.g., a
+        # file present in both symbol and doc indexes while
+        # cross-ref is enabled), that secondary entry must
+        # also be removed. Without this, the tracker holds
+        # both file:{path} AND the secondary-prefix entry,
+        # and _build_tiered_content would render both the full
+        # file content AND the cross-reference index block —
+        # violating the uniqueness invariant.
+        if prefix == "symbol:":
+            secondary_prefix = "doc:"
+        else:
+            secondary_prefix = "symbol:"
         selected_set = set(self._selected_files)
         swapped_paths: set[str] = set()
         for path in list(selected_set):
@@ -2995,6 +3009,14 @@ class LLMService:
             # is transient per-cascade and doesn't need
             # preservation.
             tracker._items.pop(index_key, None)
+            # Also remove any cross-reference entry for the
+            # same path. Mark its tier broken so the next
+            # cascade (on the first real chat request) can
+            # rebalance — rebuild itself doesn't run a cascade.
+            secondary_key = f"{secondary_prefix}{path}"
+            secondary_existing = tracker._items.pop(secondary_key, None)
+            if secondary_existing is not None:
+                tracker._broken_tiers.add(secondary_existing.tier)
             tracker._items[f"file:{path}"] = TrackedItem(
                 key=f"file:{path}",
                 tier=existing.tier,
@@ -4565,6 +4587,19 @@ class LLMService:
             t: [] for t in ("L0", "L1", "L2", "L3")
         }
 
+        # Defensive filter sets per specs3/3-llm-engine/
+        # prompt_assembly.md § "Step 2: Build Content for Each
+        # Tier" and § "Step 3: Determine Exclusions". A file's
+        # index block must never coexist with its full content
+        # in any form — upstream (Step 2 of _update_stability,
+        # set_excluded_index_files, _rebuild_cache_impl) is
+        # responsible for removing stale entries, but belt-and-
+        # suspenders checks here catch any leakage from races,
+        # cross-reference rebuild edge cases, or future code
+        # paths that forget the invariant.
+        selected_set = set(self._selected_files)
+        excluded_set = set(getattr(self, "_excluded_index_files", []))
+
         for key in sorted(all_items.keys()):
             item = all_items[key]
             # The tracker's Tier enum subclasses str — its value
@@ -4573,6 +4608,44 @@ class LLMService:
             # tiers.
             tier_name = getattr(item.tier, "value", str(item.tier))
             if tier_name not in ("L0", "L1", "L2", "L3"):
+                continue
+
+            # Extract the path once for defensive filters below.
+            # None for system:/history:/url: keys (no path
+            # component); those are never filtered by these sets.
+            path_suffix: str | None = None
+            for prefix in ("symbol:", "doc:", "file:"):
+                if key.startswith(prefix):
+                    path_suffix = key[len(prefix):]
+                    break
+
+            # Defensive: skip user-excluded paths regardless of
+            # prefix. Applies to symbol:, doc:, and file: keys.
+            if path_suffix is not None and path_suffix in excluded_set:
+                logger.debug(
+                    "Tier content: skipping %s (excluded from "
+                    "index by user); tracker entry will be "
+                    "cleaned up on next update cycle",
+                    key,
+                )
+                continue
+
+            # Defensive: skip symbol:/doc: for selected files.
+            # Their full content renders via the file: entry
+            # (cached tier) or the active Working Files section,
+            # so the index block would be a duplicate of the
+            # same file's content in another slot.
+            if (
+                key.startswith(("symbol:", "doc:"))
+                and path_suffix is not None
+                and path_suffix in selected_set
+            ):
+                logger.debug(
+                    "Tier content: skipping %s (full content "
+                    "present via selection); tracker entry "
+                    "will be cleaned up on next update cycle",
+                    key,
+                )
                 continue
 
             if key.startswith("symbol:"):
@@ -5059,7 +5132,15 @@ class LLMService:
         Order of operations (from specs3/3-llm-engine/
         streaming_lifecycle.md — Post-Response Processing):
 
-        0. System prompt + legend — always present, should
+        0a. Defensive removal of user-excluded files from the
+            tracker. set_excluded_index_files does a one-shot
+            removal when the exclusion set changes, but the
+            file could be re-indexed in the interim (index
+            repo walk, rebuild, cross-ref enable). Running
+            the removal at the top of every cycle catches
+            that drift and honours the specs3 belt-and-
+            suspenders contract.
+        0b. System prompt + legend — always present, should
            stabilize to L0. Hash only the prompt text (not legend)
            for stability — the legend includes path aliases that
            change with exclude_files. Token count includes both.
@@ -5071,9 +5152,20 @@ class LLMService:
            symbol map or in cached tiers).
         4. Cross-reference items when cross-ref mode is enabled.
         5. History messages.
-        6. Remove excluded items from tracker.
-        7. Run tracker.update().
+        6. Run tracker.update().
         """
+        # Step 0a — defensive excluded-files removal. Runs
+        # BEFORE active_items construction so an excluded file
+        # can't be re-registered as a fresh active entry below.
+        excluded = getattr(self, "_excluded_index_files", None) or ()
+        for path in excluded:
+            for prefix in ("symbol:", "doc:", "file:"):
+                entry_key = prefix + path
+                existing = self._stability_tracker._items.get(entry_key)
+                if existing is not None:
+                    self._stability_tracker._broken_tiers.add(existing.tier)
+                    self._stability_tracker._items.pop(entry_key, None)
+
         active_items: dict[str, dict[str, Any]] = {}
 
         # Step 0 — System prompt + legend.
@@ -5136,10 +5228,11 @@ class LLMService:
                         self._stability_tracker._broken_tiers.add(tier)
 
         # Step 3 — Primary index entries for ALL indexed files
-        # NOT in selected files. These are symbol/doc blocks for
-        # the structural map. They are tracked for stability but
-        # NOT rendered separately — they appear in the main
-        # symbol map or are in cached tiers.
+        # NOT in selected files AND NOT in excluded files. These
+        # are symbol/doc blocks for the structural map. They are
+        # tracked for stability but NOT rendered separately —
+        # they appear in the main symbol map or are in cached
+        # tiers.
         #
         # Mode dispatch: code mode → symbol: entries, doc mode →
         # doc: entries. Both modes use the same tracker slot for
@@ -5151,10 +5244,11 @@ class LLMService:
         # path aliases or exclude_files change, causing spurious
         # hash mismatches.
         selected_set = set(self._selected_files)
+        excluded_set = set(excluded)
         if self._context.mode == Mode.DOC:
             # Doc mode primary: iterate doc index outlines.
             for path in list(self._doc_index._all_outlines.keys()):
-                if path in selected_set:
+                if path in selected_set or path in excluded_set:
                     continue
                 block = self._doc_index.get_file_doc_block(path)
                 if not block:
@@ -5170,7 +5264,7 @@ class LLMService:
             # Code mode primary: iterate symbol index.
             if self._symbol_index is not None:
                 for path in list(self._symbol_index._all_symbols.keys()):
-                    if path in selected_set:
+                    if path in selected_set or path in excluded_set:
                         continue
                     block = self._symbol_index.get_file_symbol_block(path)
                     if not block:
@@ -5204,7 +5298,7 @@ class LLMService:
                 for path in list(
                     self._doc_index._all_outlines.keys()
                 ):
-                    if path in selected_set:
+                    if path in selected_set or path in excluded_set:
                         continue
                     block = self._doc_index.get_file_doc_block(path)
                     if not block:
@@ -5222,7 +5316,7 @@ class LLMService:
                     for path in list(
                         self._symbol_index._all_symbols.keys()
                     ):
-                        if path in selected_set:
+                        if path in selected_set or path in excluded_set:
                             continue
                         block = self._symbol_index.get_file_symbol_block(
                             path
@@ -5255,16 +5349,10 @@ class LLMService:
                 "tokens": self._counter.count(msg),
             }
 
-        # Step 6 — Remove excluded items from tracker before the
-        # update cycle. They exist on disk so remove_stale won't
-        # catch them, but they must not occupy tier slots or
-        # appear in context.
-        # (excluded_index_files not yet implemented — when it
-        # lands, iterate the excluded set and remove symbol:/doc:
-        # /file: entries from the tracker here.)
-
-        # Step 7 — Run tracker update. Pass existing_files so
-        # Phase 0 stale removal works.
+        # Step 6 — Run tracker update. Pass existing_files so
+        # Phase 0 stale removal works. (Defensive excluded-
+        # files removal now happens in step 0a above; nothing
+        # further needed here.)
         existing_files: set[str] | None = None
         if self._repo is not None:
             try:
