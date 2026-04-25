@@ -307,6 +307,18 @@ export class FilesTab extends RpcMixin(LitElement) {
       deleted: new Set(),
       diffStats: new Map(),
     };
+    // Latest branch info from `Repo.get_current_branch`.
+    // Shape: `{branch: string|null, detached: bool,
+    //         sha: string|null, repoName: string}`.
+    // Pushed to the picker so the root row can render a
+    // branch pill. Empty / unfetched state — picker's
+    // render degrades gracefully when `branch` is null.
+    this._latestBranchInfo = {
+      branch: null,
+      detached: false,
+      sha: null,
+      repoName: '',
+    };
     // Flat list of repo-relative file paths — derived from
     // the loaded tree and pushed to the chat panel so it can
     // detect file mentions in assistant output. Non-reactive
@@ -362,11 +374,30 @@ export class FilesTab extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
 
   async _loadFileTree() {
-    // The real RPC lives on Repo, not LLMService. Using
-    // rpcExtract to unwrap the single-key envelope.
+    // Two RPCs in parallel — tree and branch info. Both
+    // live on Repo. A branch-info failure doesn't block
+    // the tree from rendering (the picker degrades to no
+    // branch pill); a tree failure is fatal for this load
+    // because nothing useful is left to display.
     let tree;
+    let branchResult;
     try {
-      tree = await this.rpcExtract('Repo.get_file_tree');
+      const [treeValue, branchValue] = await Promise.allSettled([
+        this.rpcExtract('Repo.get_file_tree'),
+        this.rpcExtract('Repo.get_current_branch'),
+      ]);
+      if (treeValue.status === 'rejected') throw treeValue.reason;
+      tree = treeValue.value;
+      branchResult =
+        branchValue.status === 'fulfilled' ? branchValue.value : null;
+      if (branchValue.status === 'rejected') {
+        // Log but don't toast — a missing branch pill is
+        // a minor regression compared to a broken tree.
+        console.warn(
+          '[files-tab] get_current_branch failed',
+          branchValue.reason,
+        );
+      }
     } catch (err) {
       console.error('[files-tab] get_file_tree failed', err);
       this._showToast(
@@ -415,6 +446,29 @@ export class FilesTab extends RpcMixin(LitElement) {
           : [],
       ),
     };
+    // Build branch info from the second RPC. Defensive —
+    // a null `branchResult` (RPC rejected or returned
+    // nothing) degrades to the "no branch pill" state.
+    // The tree's root node carries the repo name as
+    // `name`, so we thread that through for the root
+    // row's tooltip even when branch info isn't
+    // available.
+    const repoName =
+      typeof this._latestTree?.name === 'string'
+        ? this._latestTree.name
+        : '';
+    this._latestBranchInfo = {
+      branch:
+        typeof branchResult?.branch === 'string'
+          ? branchResult.branch
+          : null,
+      detached: branchResult?.detached === true,
+      sha:
+        typeof branchResult?.sha === 'string'
+          ? branchResult.sha
+          : null,
+      repoName,
+    };
     // Derive the flat file list and push to the chat panel
     // so file mentions in assistant output get wrapped. The
     // chat panel's `repoFiles` prop short-circuits on empty
@@ -453,6 +507,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     }
     picker.tree = this._latestTree;
     picker.statusData = this._latestStatusData;
+    picker.branchInfo = this._latestBranchInfo;
     picker.requestUpdate();
     chat.repoFiles = this._repoFiles;
     chat.requestUpdate();
@@ -832,6 +887,7 @@ export class FilesTab extends RpcMixin(LitElement) {
         <ac-file-picker
           .tree=${this._latestTree}
           .statusData=${this._latestStatusData}
+          .branchInfo=${this._latestBranchInfo}
           .selectedFiles=${this._selectedFiles}
           @selection-changed=${this._onSelectionChanged}
           @file-clicked=${this._onFileClicked}

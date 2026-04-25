@@ -182,6 +182,17 @@ export class FilePicker extends LitElement {
      */
     statusData: { type: Object },
     /**
+     * Branch info for the current repo. Shape:
+     * `{branch: string|null, detached: bool, sha: string|null,
+     *   repoName: string}`.
+     *
+     * Drives the `⎇ name` pill on the root row. Detached HEAD
+     * renders the short SHA in orange to signal the non-branch
+     * state. Empty / unset → no pill (renders as an empty repo
+     * or pre-first-load state).
+     */
+    branchInfo: { type: Object },
+    /**
      * Selected file paths. Using a Set means membership checks
      * are O(1) during render; the parent maintains it as a Set
      * and assigns it through. Lit deep-compares with `===` so we
@@ -380,6 +391,53 @@ export class FilePicker extends LitElement {
     .diff-stats .removed {
       color: #f85149;
     }
+
+    /* Root row — repo name + branch pill. Non-interactive
+     * (no click handler, no checkbox, no twisty), sits
+     * above the rest of the tree as a stable header. */
+    .row.is-root {
+      cursor: default;
+      font-weight: 600;
+      padding: 0.25rem 0.5rem 0.25rem 0.25rem;
+    }
+    .row.is-root:hover {
+      background: transparent;
+    }
+    .row.is-root .name {
+      font-weight: 600;
+      color: var(--text-primary, #c9d1d9);
+    }
+
+    /* Branch pill on the root row. The ⎇ glyph is U+26A7
+     * (male with stroke) — not a standard git glyph but
+     * visually suggests a branching fork at text sizes.
+     * The more obvious alternative (⤴) renders poorly in
+     * many monospace fonts; ⎇ has good coverage. */
+    .branch-pill {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      padding: 0.05rem 0.4rem;
+      border-radius: 3px;
+      margin-left: 0.5rem;
+      background: rgba(110, 118, 129, 0.2);
+      color: var(--text-secondary, #8b949e);
+      font-variant-numeric: tabular-nums;
+    }
+    .branch-pill.detached {
+      /* Orange background + text signals the non-branch
+       * state. Users see "oh right, I'm on a SHA" at a
+       * glance rather than thinking the short SHA is a
+       * branch named "abc1234". */
+      background: rgba(210, 153, 34, 0.2);
+      color: #d29922;
+    }
+    .branch-pill .glyph {
+      opacity: 0.7;
+    }
   `;
 
   constructor() {
@@ -399,6 +457,12 @@ export class FilePicker extends LitElement {
       untracked: new Set(),
       deleted: new Set(),
       diffStats: new Map(),
+    };
+    this.branchInfo = {
+      branch: null,
+      detached: false,
+      sha: null,
+      repoName: '',
     };
     this.selectedFiles = new Set();
     this.filterQuery = '';
@@ -523,9 +587,79 @@ export class FilePicker extends LitElement {
         />
       </div>
       <div class="tree-scroll" role="tree">
+        ${this._renderRoot()}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
       </div>
     `;
+  }
+
+  /**
+   * Render the repo-root row at the top of the tree. Shows
+   * the repo name and an optional branch pill. Non-
+   * interactive — this isn't a directory the user can
+   * collapse, and selecting "all files" via a checkbox at
+   * the root is too broad to be useful. Hidden when both
+   * `tree.name` and `branchInfo.repoName` are empty (pre-
+   * first-load state).
+   */
+  _renderRoot() {
+    const repoName =
+      (this.tree && this.tree.name) ||
+      (this.branchInfo && this.branchInfo.repoName) ||
+      '';
+    const pill = this._renderBranchPill();
+    if (!repoName && !pill) return '';
+    return html`
+      <div
+        class="row is-root"
+        role="treeitem"
+        title=${repoName || 'repository'}
+      >
+        <span class="name">${repoName || 'repository'}</span>
+        ${pill}
+      </div>
+    `;
+  }
+
+  /**
+   * Render the branch pill segment of the root row.
+   * Returns an empty string when no branch info is
+   * available — detached with no SHA, empty repo, or
+   * pre-load state.
+   */
+  _renderBranchPill() {
+    const info = this.branchInfo;
+    if (!info) return '';
+    if (info.detached) {
+      const short =
+        typeof info.sha === 'string' && info.sha
+          ? info.sha.slice(0, 7)
+          : '';
+      if (!short) return '';
+      return html`
+        <span
+          class="branch-pill detached"
+          title="Detached HEAD at ${info.sha}"
+          aria-label="Detached HEAD at ${info.sha}"
+        >
+          <span class="glyph">⎇</span>
+          <span class="ref">${short}</span>
+        </span>
+      `;
+    }
+    if (typeof info.branch === 'string' && info.branch) {
+      return html`
+        <span
+          class="branch-pill"
+          title="On branch ${info.branch}"
+          aria-label="On branch ${info.branch}"
+        >
+          <span class="glyph">⎇</span>
+          <span class="ref">${info.branch}</span>
+        </span>
+      `;
+    }
+    return '';
   }
 
   _renderChildren(node, depth, expanded) {
@@ -552,6 +686,7 @@ export class FilePicker extends LitElement {
     const isOpen = expanded.has(node.path);
     const hasChildren = (node.children || []).length > 0;
     const indentPx = depth * 16;
+    const tooltip = this._tooltipFor(node);
     return html`
       <div
         class="row is-dir"
@@ -559,6 +694,7 @@ export class FilePicker extends LitElement {
         @click=${(e) => this._onDirClick(e, node)}
         role="treeitem"
         aria-expanded=${isOpen}
+        title=${tooltip}
       >
         <span class="indent"></span>
         <span class="twisty ${hasChildren ? '' : 'empty'}">
@@ -586,6 +722,7 @@ export class FilePicker extends LitElement {
     const isFocused = node.path === this._focusedPath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
+    const tooltip = this._tooltipFor(node);
     return html`
       <div
         class="row is-file ${isFocused ? 'focused' : ''}"
@@ -593,6 +730,7 @@ export class FilePicker extends LitElement {
         @click=${(e) => this._onFileClick(e, node)}
         role="treeitem"
         aria-current=${isFocused ? 'true' : 'false'}
+        title=${tooltip}
       >
         <span class="indent"></span>
         <span class="twisty empty"></span>
@@ -697,6 +835,30 @@ export class FilePicker extends LitElement {
     if (lines > 170) return 'lines-red';
     if (lines >= 130) return 'lines-orange';
     return 'lines-green';
+  }
+
+  /**
+   * Build the hover tooltip for a file / directory row.
+   * Shape: `"{full/path} — {name}"` when the path differs
+   * from the name (i.e. the file is not at the repo root).
+   * Root-level files and directories show just the name
+   * since the path is identical to it.
+   *
+   * The full path is what the user came for when they
+   * hover; the trailing name repeats what's visible in
+   * the row as a readability anchor — useful when the
+   * name column is truncated by ellipsis on narrow
+   * layouts. Em-dash rather than a colon since a
+   * Windows-style path `C:/…` with a colon separator
+   * reads ambiguously.
+   */
+  _tooltipFor(node) {
+    if (!node || typeof node !== 'object') return '';
+    const name = typeof node.name === 'string' ? node.name : '';
+    const path = typeof node.path === 'string' ? node.path : '';
+    if (!name && !path) return '';
+    if (!path || path === name) return name;
+    return `${path} — ${name}`;
   }
 
   // ---------------------------------------------------------------

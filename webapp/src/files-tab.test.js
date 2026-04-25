@@ -1084,6 +1084,220 @@ describe('FilesTab status data plumbing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Branch info plumbing
+// ---------------------------------------------------------------------------
+
+describe('FilesTab branch info plumbing', () => {
+  it('fetches branch info alongside the file tree', async () => {
+    const getTree = vi
+      .fn()
+      .mockResolvedValue(fakeTreeResponse([]));
+    const getBranch = vi.fn().mockResolvedValue({
+      branch: 'main',
+      detached: false,
+      sha: 'abc1234',
+    });
+    publishFakeRpc({
+      'Repo.get_file_tree': getTree,
+      'Repo.get_current_branch': getBranch,
+    });
+    const t = mountTab();
+    await settle(t);
+    expect(getBranch).toHaveBeenCalledOnce();
+  });
+
+  it('passes branch info through to the picker', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'Repo.get_current_branch': vi.fn().mockResolvedValue({
+        branch: 'feature/x',
+        detached: false,
+        sha: 'deadbee',
+      }),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.branchInfo).toBeDefined();
+    expect(picker.branchInfo.branch).toBe('feature/x');
+    expect(picker.branchInfo.detached).toBe(false);
+    expect(picker.branchInfo.sha).toBe('deadbee');
+  });
+
+  it('threads tree.name into branchInfo.repoName', async () => {
+    // The picker's root-row render falls back to
+    // branchInfo.repoName when the tree itself has no
+    // name. fakeTreeResponse sets tree.name to "repo".
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'Repo.get_current_branch': vi
+        .fn()
+        .mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.branchInfo.repoName).toBe('repo');
+  });
+
+  it('detached HEAD response is reflected', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'Repo.get_current_branch': vi.fn().mockResolvedValue({
+        branch: null,
+        detached: true,
+        sha: 'abc1234deadbeef',
+      }),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.branchInfo.detached).toBe(true);
+    expect(picker.branchInfo.branch).toBeNull();
+    expect(picker.branchInfo.sha).toBe('abc1234deadbeef');
+  });
+
+  it('branch fetch failure does not block tree render', async () => {
+    // Defensive — if the branch RPC rejects but the tree
+    // RPC succeeds, the tree still renders (minus the
+    // branch pill). Matches specs4's "graceful
+    // degradation" contract for optional metadata.
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            {
+              name: 'a.md',
+              path: 'a.md',
+              type: 'file',
+              lines: 1,
+            },
+          ]),
+        ),
+      'Repo.get_current_branch': vi
+        .fn()
+        .mockRejectedValue(new Error('branch fetch failed')),
+    });
+    const consoleSpy = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => {});
+    try {
+      const t = mountTab();
+      await settle(t);
+      expect(t._treeLoaded).toBe(true);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      // Branch info degrades to the default empty state.
+      expect(picker.branchInfo.branch).toBeNull();
+      expect(picker.branchInfo.detached).toBe(false);
+      // But the tree rendered anyway.
+      const rows = picker.shadowRoot.querySelectorAll(
+        '.row.is-file',
+      );
+      expect(rows.length).toBe(1);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('tree fetch failure is fatal (no picker state update)', async () => {
+    // Symmetric check — if the tree RPC fails, we bail
+    // before updating either state. Branch info stays
+    // at its defaults.
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockRejectedValue(new Error('tree boom')),
+      'Repo.get_current_branch': vi.fn().mockResolvedValue({
+        branch: 'main',
+        detached: false,
+        sha: null,
+      }),
+    });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      const t = mountTab();
+      await settle(t);
+      expect(t._treeLoaded).toBe(false);
+      // Branch info stayed at the initial empty state.
+      expect(t._latestBranchInfo.branch).toBeNull();
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('refreshes branch info on files-modified', async () => {
+    // A branch switch between commits should reflect in
+    // the pill without a full page reload. Simulate two
+    // sequential branch responses.
+    let branchCallCount = 0;
+    const getBranch = vi.fn().mockImplementation(() => {
+      branchCallCount += 1;
+      if (branchCallCount === 1) {
+        return Promise.resolve({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        });
+      }
+      return Promise.resolve({
+        branch: 'feature/x',
+        detached: false,
+        sha: null,
+      });
+    });
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'Repo.get_current_branch': getBranch,
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.branchInfo.branch).toBe('main');
+    pushEvent('files-modified', {});
+    await settle(t);
+    expect(picker.branchInfo.branch).toBe('feature/x');
+  });
+
+  it('tolerates malformed branch response', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'Repo.get_current_branch': vi
+        .fn()
+        .mockResolvedValue({
+          // No branch, no sha, wrong detached type.
+          detached: 'yes',
+        }),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.branchInfo.branch).toBeNull();
+    expect(picker.branchInfo.detached).toBe(false);
+    expect(picker.branchInfo.sha).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 

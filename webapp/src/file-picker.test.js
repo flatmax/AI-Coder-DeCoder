@@ -309,9 +309,13 @@ describe('FilePicker component', () => {
       ]);
       const p = mountPicker({ tree });
       await p.updateComplete;
-      // Two top-level rows rendered.
+      // Two top-level rows rendered. Scope to tree rows —
+      // the root header also emits a `.name` span with
+      // the repo name.
       const names = Array.from(
-        p.shadowRoot.querySelectorAll('.name'),
+        p.shadowRoot.querySelectorAll(
+          '.row.is-dir:not(.is-root) .name, .row.is-file .name',
+        ),
       ).map((el) => el.textContent);
       // Directories first, then files.
       expect(names).toEqual(['src', 'README.md']);
@@ -334,8 +338,11 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree });
       await p.updateComplete;
       // src is visible; src/main.py is NOT (directory collapsed).
+      // Scope to tree rows — root header also has a .name span.
       const names = Array.from(
-        p.shadowRoot.querySelectorAll('.name'),
+        p.shadowRoot.querySelectorAll(
+          '.row.is-dir:not(.is-root) .name, .row.is-file .name',
+        ),
       ).map((el) => el.textContent);
       expect(names).toEqual(['src']);
     });
@@ -344,19 +351,26 @@ describe('FilePicker component', () => {
       const tree = rootOf([dir('src', [file('src/main.py')])]);
       const p = mountPicker({ tree });
       await p.updateComplete;
-      const dirRow = p.shadowRoot.querySelector('.row.is-dir');
+      // Scope to non-root rows — the root header is also
+      // `.row.is-dir` and its click handler would collide
+      // with the test target.
+      const dirRow = p.shadowRoot.querySelector(
+        '.row.is-dir:not(.is-root)',
+      );
       dirRow.click();
       await p.updateComplete;
       // Now main.py is visible.
+      const treeRowSelector =
+        '.row.is-dir:not(.is-root) .name, .row.is-file .name';
       const names = Array.from(
-        p.shadowRoot.querySelectorAll('.name'),
+        p.shadowRoot.querySelectorAll(treeRowSelector),
       ).map((el) => el.textContent);
       expect(names).toEqual(['src', 'main.py']);
       // Click again — collapses.
       dirRow.click();
       await p.updateComplete;
       const namesAfter = Array.from(
-        p.shadowRoot.querySelectorAll('.name'),
+        p.shadowRoot.querySelectorAll(treeRowSelector),
       ).map((el) => el.textContent);
       expect(namesAfter).toEqual(['src']);
     });
@@ -617,9 +631,13 @@ describe('FilePicker component', () => {
       ]);
       const p = mountPicker({ tree });
       await p.updateComplete;
-      // Initially fully collapsed.
+      // Initially fully collapsed — one tree row visible
+      // (the top-level `a` dir). Scope to non-root rows;
+      // the root header is not counted.
+      const treeRowSelector =
+        '.row.is-dir:not(.is-root) .name, .row.is-file .name';
       expect(
-        p.shadowRoot.querySelectorAll('.name').length,
+        p.shadowRoot.querySelectorAll(treeRowSelector).length,
       ).toBe(1);
       // Type a filter — the matching file should be reachable
       // without the user manually expanding.
@@ -628,7 +646,7 @@ describe('FilePicker component', () => {
       input.dispatchEvent(new Event('input'));
       await p.updateComplete;
       const names = Array.from(
-        p.shadowRoot.querySelectorAll('.name'),
+        p.shadowRoot.querySelectorAll(treeRowSelector),
       ).map((el) => el.textContent);
       // All three levels now visible.
       expect(names).toEqual(['a', 'b', 'deep.md']);
@@ -715,13 +733,15 @@ describe('FilePicker component', () => {
     it('replaces the current tree and re-renders', async () => {
       const p = mountPicker({ tree: rootOf([file('old.md')]) });
       await p.updateComplete;
+      // Scope to file row — the root header also emits a
+      // `.name` span for the repo name.
       expect(
-        p.shadowRoot.querySelector('.name').textContent,
+        p.shadowRoot.querySelector('.row.is-file .name').textContent,
       ).toBe('old.md');
       p.setTree(rootOf([file('new.md')]));
       await p.updateComplete;
       expect(
-        p.shadowRoot.querySelector('.name').textContent,
+        p.shadowRoot.querySelector('.row.is-file .name').textContent,
       ).toBe('new.md');
     });
   });
@@ -1249,6 +1269,325 @@ describe('FilePicker component', () => {
       await p.updateComplete;
       // Treated as zero-zero → no render.
       expect(p.shadowRoot.querySelector('.diff-stats')).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Root row and branch pill
+  // ---------------------------------------------------------------
+
+  describe('root row', () => {
+    it('renders the repo name from tree.name', async () => {
+      const tree = {
+        name: 'my-repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [],
+      };
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const root = p.shadowRoot.querySelector('.row.is-root');
+      expect(root).toBeTruthy();
+      expect(root.textContent).toContain('my-repo');
+    });
+
+    it('omits the root row when no repo name is available', async () => {
+      // Empty tree.name AND empty branchInfo.repoName →
+      // skip rendering the root header altogether.
+      const tree = rootOf([]); // tree.name is "repo" from rootOf.
+      const p = mountPicker({
+        tree: { ...tree, name: '' },
+        branchInfo: {
+          branch: null,
+          detached: false,
+          sha: null,
+          repoName: '',
+        },
+      });
+      await p.updateComplete;
+      expect(
+        p.shadowRoot.querySelector('.row.is-root'),
+      ).toBeNull();
+    });
+
+    it('falls back to branchInfo.repoName when tree.name is empty', async () => {
+      const tree = rootOf([]);
+      const p = mountPicker({
+        tree: { ...tree, name: '' },
+        branchInfo: {
+          branch: 'main',
+          detached: false,
+          sha: null,
+          repoName: 'fallback-name',
+        },
+      });
+      await p.updateComplete;
+      const root = p.shadowRoot.querySelector('.row.is-root');
+      expect(root.textContent).toContain('fallback-name');
+    });
+
+    it('root row has a tooltip of the repo name', async () => {
+      const tree = {
+        name: 'my-repo',
+        path: '',
+        type: 'dir',
+        lines: 0,
+        children: [],
+      };
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const root = p.shadowRoot.querySelector('.row.is-root');
+      expect(root.getAttribute('title')).toBe('my-repo');
+    });
+  });
+
+  describe('branch pill', () => {
+    it('renders normal branch name', async () => {
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: 'main',
+          detached: false,
+          sha: null,
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      const pill = p.shadowRoot.querySelector('.branch-pill');
+      expect(pill).toBeTruthy();
+      expect(pill.textContent).toContain('main');
+      expect(pill.classList.contains('detached')).toBe(false);
+    });
+
+    it('renders branch name in a muted pill by default', async () => {
+      // The pill exists without the detached class —
+      // which selects the default muted styling.
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: 'feature/my-work',
+          detached: false,
+          sha: null,
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      const pill = p.shadowRoot.querySelector('.branch-pill');
+      expect(pill.classList.contains('detached')).toBe(false);
+      expect(pill.textContent).toContain('feature/my-work');
+    });
+
+    it('renders short SHA in orange when detached', async () => {
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: null,
+          detached: true,
+          sha: 'abc1234deadbeef',
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      const pill = p.shadowRoot.querySelector('.branch-pill');
+      expect(pill).toBeTruthy();
+      expect(pill.classList.contains('detached')).toBe(true);
+      // Short SHA is 7 chars.
+      expect(pill.textContent).toContain('abc1234');
+      expect(pill.textContent).not.toContain('deadbeef');
+    });
+
+    it('detached with no SHA renders no pill', async () => {
+      // Defensive — detached state with missing SHA
+      // produces nothing rather than an empty orange box.
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: null,
+          detached: true,
+          sha: null,
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      expect(
+        p.shadowRoot.querySelector('.branch-pill'),
+      ).toBeNull();
+    });
+
+    it('empty repo (no branch, not detached) renders no pill', async () => {
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: null,
+          detached: false,
+          sha: null,
+          repoName: 'new-repo',
+        },
+      });
+      await p.updateComplete;
+      expect(
+        p.shadowRoot.querySelector('.branch-pill'),
+      ).toBeNull();
+      // But the root row still renders (repo name present).
+      expect(
+        p.shadowRoot.querySelector('.row.is-root'),
+      ).toBeTruthy();
+    });
+
+    it('pill has a tooltip describing the branch', async () => {
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: 'main',
+          detached: false,
+          sha: null,
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      const pill = p.shadowRoot.querySelector('.branch-pill');
+      expect(pill.getAttribute('title')).toContain('main');
+    });
+
+    it('detached pill tooltip shows full SHA', async () => {
+      // Short SHA in the pill, full SHA in the tooltip —
+      // the tooltip is the user's escape hatch for
+      // verification / copy-paste.
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: {
+          branch: null,
+          detached: true,
+          sha: 'abc1234deadbeef',
+          repoName: 'repo',
+        },
+      });
+      await p.updateComplete;
+      const pill = p.shadowRoot.querySelector('.branch-pill');
+      expect(pill.getAttribute('title')).toContain(
+        'abc1234deadbeef',
+      );
+    });
+
+    it('null branchInfo produces no pill without crashing', async () => {
+      // Defensive — prop set to null rather than the
+      // defaulted shape. The picker has to tolerate this
+      // because a parent might pass null during RPC error
+      // cleanup.
+      const p = mountPicker({
+        tree: rootOf([]),
+        branchInfo: null,
+      });
+      await p.updateComplete;
+      expect(
+        p.shadowRoot.querySelector('.branch-pill'),
+      ).toBeNull();
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Tooltips
+  // ---------------------------------------------------------------
+
+  describe('tooltips', () => {
+    it('file row has title of "path — name"', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/deep/main.py')]),
+      ]);
+      // Expand src so the nested file becomes visible.
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      p.shadowRoot.querySelector('.row.is-dir').click();
+      await p.updateComplete;
+      const fileRow = p.shadowRoot.querySelector('.row.is-file');
+      expect(fileRow.getAttribute('title')).toBe(
+        'src/deep/main.py — main.py',
+      );
+    });
+
+    it('directory row has title of "path — name"', async () => {
+      const tree = rootOf([
+        dir('src', [
+          dir('src/utils', [file('src/utils/x.py')]),
+        ]),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Scope to non-root rows — the root row is also
+      // `.row.is-dir`, and its click would toggle nothing
+      // (not a directory we want to expand in this test).
+      const topLevelSrc = p.shadowRoot.querySelector(
+        '.row.is-dir:not(.is-root)',
+      );
+      topLevelSrc.click();
+      await p.updateComplete;
+      // Now src and src/utils are both visible as
+      // non-root dir rows.
+      const treeDirRows = p.shadowRoot.querySelectorAll(
+        '.row.is-dir:not(.is-root)',
+      );
+      // Top-level src has path === name, so the tooltip
+      // is just the name (no "src — src" redundancy).
+      expect(treeDirRows[0].getAttribute('title')).toBe('src');
+      // Nested row's path differs from its name, so it
+      // gets the full `path — name` form.
+      const utilsRow = Array.from(treeDirRows).find((r) =>
+        r.textContent.includes('utils'),
+      );
+      expect(utilsRow.getAttribute('title')).toBe(
+        'src/utils — utils',
+      );
+    });
+
+    it('directory row has title of "path — name" when they differ', async () => {
+      const tree = rootOf([
+        dir('src', [
+          dir('src/utils', [file('src/utils/x.py')]),
+        ]),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Scope to non-root rows — the root header is also
+      // `.row.is-dir`, and a click on it wouldn't expand
+      // anything useful for this test.
+      const topLevelSrc = p.shadowRoot.querySelector(
+        '.row.is-dir:not(.is-root)',
+      );
+      topLevelSrc.click();
+      await p.updateComplete;
+      // Now src and src/utils are both visible.
+      const treeDirRows = p.shadowRoot.querySelectorAll(
+        '.row.is-dir:not(.is-root)',
+      );
+      // Top-level src has path === name, so the tooltip is
+      // just the name (no redundant "src — src").
+      expect(treeDirRows[0].getAttribute('title')).toBe('src');
+      // Nested row's path differs from its name, so it gets
+      // the full `path — name` form.
+      const utilsRow = Array.from(treeDirRows).find((r) =>
+        r.textContent.includes('utils'),
+      );
+      expect(utilsRow.getAttribute('title')).toBe(
+        'src/utils — utils',
+      );
+    });
+    it('top-level file has title of just the name', async () => {
+      // path equals name → only the name shows (no
+      // redundant "a.md — a.md").
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.getAttribute('title')).toBe('a.md');
+    });
+
+    it('top-level directory has title of just the name', async () => {
+      const tree = rootOf([dir('src', [])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-dir');
+      expect(row.getAttribute('title')).toBe('src');
     });
   });
 
