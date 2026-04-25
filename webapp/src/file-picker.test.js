@@ -213,6 +213,208 @@ describe('sortChildren', () => {
 });
 
 // ---------------------------------------------------------------------------
+// sortChildrenWithMode
+// ---------------------------------------------------------------------------
+
+describe('sortChildrenWithMode', () => {
+  // The mode-aware variant is what the component actually uses
+  // at render time. Directories always sort alphabetically
+  // ascending regardless of mode or direction; files sort by
+  // the selected key with direction applied; directories
+  // precede files in the final order.
+
+  it('puts directories before files regardless of mode', () => {
+    const input = [
+      file('z.md', 100, 1000),
+      dir('a_dir', []),
+      file('a.md', 10, 2000),
+      dir('z_dir', []),
+    ];
+    // Try every mode — dirs stay first, alphabetical.
+    for (const mode of [
+      SORT_MODE_NAME,
+      SORT_MODE_MTIME,
+      SORT_MODE_SIZE,
+    ]) {
+      const sorted = sortChildrenWithMode(input, mode, true);
+      const types = sorted.map((n) => n.type);
+      // First two are dirs, last two are files.
+      expect(types).toEqual(['dir', 'dir', 'file', 'file']);
+      // Dirs alphabetical.
+      expect(sorted[0].name).toBe('a_dir');
+      expect(sorted[1].name).toBe('z_dir');
+    }
+  });
+
+  it('name mode ascending sorts files A to Z', () => {
+    const input = [file('c.md'), file('a.md'), file('b.md')];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_NAME, true);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'a.md',
+      'b.md',
+      'c.md',
+    ]);
+  });
+
+  it('name mode descending sorts files Z to A', () => {
+    const input = [file('c.md'), file('a.md'), file('b.md')];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_NAME, false);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'c.md',
+      'b.md',
+      'a.md',
+    ]);
+  });
+
+  it('mtime mode ascending sorts files oldest first', () => {
+    const input = [
+      file('new.md', 0, 3000),
+      file('old.md', 0, 1000),
+      file('mid.md', 0, 2000),
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_MTIME, true);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'old.md',
+      'mid.md',
+      'new.md',
+    ]);
+  });
+
+  it('mtime mode descending sorts files newest first', () => {
+    const input = [
+      file('new.md', 0, 3000),
+      file('old.md', 0, 1000),
+      file('mid.md', 0, 2000),
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_MTIME, false);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'new.md',
+      'mid.md',
+      'old.md',
+    ]);
+  });
+
+  it('size mode ascending sorts files smallest first', () => {
+    const input = [
+      file('big.md', 500),
+      file('small.md', 10),
+      file('mid.md', 100),
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_SIZE, true);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'small.md',
+      'mid.md',
+      'big.md',
+    ]);
+  });
+
+  it('size mode descending sorts files largest first', () => {
+    const input = [
+      file('big.md', 500),
+      file('small.md', 10),
+      file('mid.md', 100),
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_SIZE, false);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'big.md',
+      'mid.md',
+      'small.md',
+    ]);
+  });
+
+  it('directories ignore the direction parameter', () => {
+    // Dirs are always alphabetical ascending — descending
+    // mode applies only to the files portion.
+    const input = [dir('z_dir', []), dir('a_dir', [])];
+    const sortedAsc = sortChildrenWithMode(
+      input,
+      SORT_MODE_NAME,
+      true,
+    );
+    const sortedDesc = sortChildrenWithMode(
+      input,
+      SORT_MODE_NAME,
+      false,
+    );
+    expect(sortedAsc.map((n) => n.name)).toEqual([
+      'a_dir',
+      'z_dir',
+    ]);
+    expect(sortedDesc.map((n) => n.name)).toEqual([
+      'a_dir',
+      'z_dir',
+    ]);
+  });
+
+  it('unknown mode falls back to name', () => {
+    // Defensive — a corrupted localStorage entry or a
+    // future mode not yet handled shouldn't crash the
+    // sort. Graceful fallback to the default.
+    const input = [file('b.md'), file('a.md'), file('c.md')];
+    const sorted = sortChildrenWithMode(input, 'bogus', true);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'a.md',
+      'b.md',
+      'c.md',
+    ]);
+  });
+
+  it('missing mtime falls back to 0', () => {
+    // A file without an mtime field should sort as the
+    // oldest (value 0), not crash.
+    const input = [
+      file('has-mtime.md', 0, 5000),
+      { name: 'no-mtime.md', path: 'no-mtime.md', type: 'file' },
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_MTIME, true);
+    // 'no-mtime.md' (value 0) comes before 'has-mtime.md' (5000).
+    expect(sorted.map((n) => n.name)).toEqual([
+      'no-mtime.md',
+      'has-mtime.md',
+    ]);
+  });
+
+  it('missing lines falls back to 0 in size mode', () => {
+    const input = [
+      file('has-size.md', 50),
+      { name: 'no-size.md', path: 'no-size.md', type: 'file' },
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_SIZE, true);
+    expect(sorted.map((n) => n.name)).toEqual([
+      'no-size.md',
+      'has-size.md',
+    ]);
+  });
+
+  it('missing name falls back to empty string', () => {
+    // Defensive — a malformed node shouldn't crash localeCompare.
+    const input = [
+      file('a.md'),
+      { type: 'file', path: 'x' }, // no name
+    ];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_NAME, true);
+    // Empty-name file sorts before 'a.md'.
+    expect(sorted.map((n) => n.name)).toEqual([undefined, 'a.md']);
+  });
+
+  it('filters out falsy entries', () => {
+    // null / undefined children are skipped rather than
+    // propagating into the sort comparator.
+    const input = [file('a.md'), null, file('b.md'), undefined];
+    const sorted = sortChildrenWithMode(input, SORT_MODE_NAME, true);
+    expect(sorted).toHaveLength(2);
+    expect(sorted.map((n) => n.name)).toEqual(['a.md', 'b.md']);
+  });
+
+  it('returns a new array — does not mutate input', () => {
+    const input = [file('b.md'), file('a.md')];
+    const original = [...input];
+    sortChildrenWithMode(input, SORT_MODE_NAME, true);
+    expect(input).toEqual(original);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // filterTree
 // ---------------------------------------------------------------------------
 
@@ -760,6 +962,252 @@ describe('FilePicker component', () => {
       ).map((el) => el.textContent);
       expect(names).toContain('a.md');
       expect(names).toContain('b.md');
+    });
+  });
+
+  // ---------------------------------------------------------------
+  // Sort buttons (Increment 3)
+  // ---------------------------------------------------------------
+
+  describe('sort buttons', () => {
+    it('renders three sort-mode buttons in the filter bar', async () => {
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      const btns = p.shadowRoot.querySelectorAll('.sort-btn');
+      expect(btns).toHaveLength(3);
+      const modes = Array.from(btns).map((b) =>
+        b.getAttribute('data-sort-mode'),
+      );
+      expect(modes).toEqual(['name', 'mtime', 'size']);
+    });
+
+    it('defaults to name mode ascending on first mount', async () => {
+      // Fresh localStorage → name mode, ascending. The active
+      // button has .active and aria-pressed=true, and shows
+      // the ↑ direction glyph.
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      const nameBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="name"]',
+      );
+      expect(nameBtn.classList.contains('active')).toBe(true);
+      expect(nameBtn.getAttribute('aria-pressed')).toBe('true');
+      expect(nameBtn.textContent).toContain('↑');
+    });
+
+    it('only one button is active at a time', async () => {
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      const actives = p.shadowRoot.querySelectorAll(
+        '.sort-btn.active',
+      );
+      expect(actives).toHaveLength(1);
+    });
+
+    it('clicking a different mode switches and resets to ascending', async () => {
+      // Name → mtime: mtime becomes active, asc=true (fresh
+      // sort starts at the familiar anchor — oldest-first
+      // for mtime).
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      const mtimeBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="mtime"]',
+      );
+      mtimeBtn.click();
+      await p.updateComplete;
+      expect(p._sortMode).toBe('mtime');
+      expect(p._sortAsc).toBe(true);
+      // Name button no longer active.
+      const nameBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="name"]',
+      );
+      expect(nameBtn.classList.contains('active')).toBe(false);
+      expect(mtimeBtn.classList.contains('active')).toBe(true);
+    });
+
+    it('clicking the active mode toggles direction', async () => {
+      // Click name twice (starting as default active+asc):
+      // first click toggles to descending.
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      const nameBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="name"]',
+      );
+      nameBtn.click();
+      await p.updateComplete;
+      expect(p._sortMode).toBe('name');
+      expect(p._sortAsc).toBe(false);
+      expect(nameBtn.textContent).toContain('↓');
+      // Click again — back to ascending.
+      nameBtn.click();
+      await p.updateComplete;
+      expect(p._sortAsc).toBe(true);
+      expect(nameBtn.textContent).toContain('↑');
+    });
+
+    it('files render in the selected sort order', async () => {
+      const tree = rootOf([
+        file('c.md', 10, 1000),
+        file('a.md', 500, 3000),
+        file('b.md', 100, 2000),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Default: name ascending.
+      const namesFor = () =>
+        Array.from(
+          p.shadowRoot.querySelectorAll('.row.is-file .name'),
+        ).map((el) => el.textContent);
+      expect(namesFor()).toEqual(['a.md', 'b.md', 'c.md']);
+      // Switch to size ascending: smallest first.
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="size"]')
+        .click();
+      await p.updateComplete;
+      expect(namesFor()).toEqual(['c.md', 'b.md', 'a.md']);
+      // Click size again — descending (largest first).
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="size"]')
+        .click();
+      await p.updateComplete;
+      expect(namesFor()).toEqual(['a.md', 'b.md', 'c.md']);
+      // Switch to mtime ascending: oldest first.
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="mtime"]')
+        .click();
+      await p.updateComplete;
+      expect(namesFor()).toEqual(['c.md', 'b.md', 'a.md']);
+    });
+
+    it('directories stay alphabetical regardless of mode', async () => {
+      // The sort mode and direction only apply to files.
+      // Dirs always sort A-Z ascending.
+      const tree = rootOf([
+        dir('z_dir', []),
+        dir('a_dir', []),
+        dir('m_dir', []),
+        file('a.md', 100),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Check every mode and both directions.
+      const modes = ['name', 'mtime', 'size'];
+      for (const mode of modes) {
+        // Activate the mode. If already active, this toggles
+        // direction; click it twice to get a known state.
+        const btn = p.shadowRoot.querySelector(
+          `.sort-btn[data-sort-mode="${mode}"]`,
+        );
+        btn.click();
+        await p.updateComplete;
+        if (!p._sortAsc) {
+          btn.click();
+          await p.updateComplete;
+        }
+        // Ascending — dirs must be alphabetical.
+        const dirNames = Array.from(
+          p.shadowRoot.querySelectorAll('.row.is-dir:not(.is-root) .name'),
+        ).map((el) => el.textContent);
+        expect(dirNames).toEqual(['a_dir', 'm_dir', 'z_dir']);
+        // Toggle to descending — still alphabetical.
+        btn.click();
+        await p.updateComplete;
+        const dirNamesDesc = Array.from(
+          p.shadowRoot.querySelectorAll('.row.is-dir:not(.is-root) .name'),
+        ).map((el) => el.textContent);
+        expect(dirNamesDesc).toEqual(['a_dir', 'm_dir', 'z_dir']);
+      }
+    });
+
+    it('persists mode to localStorage on change', async () => {
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="mtime"]')
+        .click();
+      await p.updateComplete;
+      expect(localStorage.getItem('ac-dc-sort-mode')).toBe('mtime');
+      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
+    });
+
+    it('persists direction to localStorage on toggle', async () => {
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      // Toggle name to descending.
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="name"]')
+        .click();
+      await p.updateComplete;
+      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('0');
+      // Back to ascending.
+      p.shadowRoot
+        .querySelector('.sort-btn[data-sort-mode="name"]')
+        .click();
+      await p.updateComplete;
+      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
+    });
+
+    it('restores mode and direction from localStorage on mount', async () => {
+      // Seed storage before mounting — the constructor
+      // reads these and applies them immediately.
+      localStorage.setItem('ac-dc-sort-mode', 'size');
+      localStorage.setItem('ac-dc-sort-asc', '0');
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      expect(p._sortMode).toBe('size');
+      expect(p._sortAsc).toBe(false);
+      const sizeBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="size"]',
+      );
+      expect(sizeBtn.classList.contains('active')).toBe(true);
+      expect(sizeBtn.textContent).toContain('↓');
+    });
+
+    it('ignores unknown mode in localStorage', async () => {
+      localStorage.setItem('ac-dc-sort-mode', 'bogus');
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      // Falls back to name.
+      expect(p._sortMode).toBe('name');
+    });
+
+    it('ignores malformed direction in localStorage', async () => {
+      localStorage.setItem('ac-dc-sort-mode', 'name');
+      localStorage.setItem('ac-dc-sort-asc', 'maybe');
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      // Falls back to ascending.
+      expect(p._sortAsc).toBe(true);
+    });
+
+    it('active button shows direction glyph; inactive buttons do not', async () => {
+      const p = mountPicker({ tree: rootOf([]) });
+      await p.updateComplete;
+      // Default: name is active, shows ↑; mtime and size have
+      // no direction glyph.
+      const nameBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="name"]',
+      );
+      const mtimeBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="mtime"]',
+      );
+      const sizeBtn = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="size"]',
+      );
+      expect(nameBtn.querySelector('.dir')).toBeTruthy();
+      expect(mtimeBtn.querySelector('.dir')).toBeNull();
+      expect(sizeBtn.querySelector('.dir')).toBeNull();
+      // Switch to mtime — only mtime shows the glyph now.
+      mtimeBtn.click();
+      await p.updateComplete;
+      const nameBtnAfter = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="name"]',
+      );
+      const mtimeBtnAfter = p.shadowRoot.querySelector(
+        '.sort-btn[data-sort-mode="mtime"]',
+      );
+      expect(nameBtnAfter.querySelector('.dir')).toBeNull();
+      expect(mtimeBtnAfter.querySelector('.dir')).toBeTruthy();
     });
   });
 
