@@ -2234,6 +2234,214 @@ describe('FilesTab exclusion sync', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Active-file highlight (Increment 6)
+// ---------------------------------------------------------------------------
+
+describe('FilesTab active-file handling', () => {
+  it('pushes activePath to picker when active-file-changed fires', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          ]),
+        ),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    // Default — no active file yet.
+    expect(picker.activePath).toBeNull();
+    // Fire the viewer's event at the window level (same
+    // path the real bubbling event reaches).
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    expect(t._activePath).toBe('a.md');
+    expect(picker.activePath).toBe('a.md');
+  });
+
+  it('updates picker when activePath changes between files', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+            { name: 'b.md', path: 'b.md', type: 'file', lines: 1 },
+          ]),
+        ),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    expect(picker.activePath).toBe('a.md');
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'b.md' },
+      }),
+    );
+    await settle(t);
+    expect(picker.activePath).toBe('b.md');
+  });
+
+  it('clears activePath when viewer closes all files', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          ]),
+        ),
+    });
+    const t = mountTab();
+    await settle(t);
+    // Open a file.
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.activePath).toBe('a.md');
+    // Close it — viewer sends null.
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: null },
+      }),
+    );
+    await settle(t);
+    expect(t._activePath).toBeNull();
+    expect(picker.activePath).toBeNull();
+  });
+
+  it('ignores duplicate active-file events (short-circuit)', async () => {
+    // Re-dispatching the same active path shouldn't cause
+    // extra picker re-renders. Mirrors the selection /
+    // exclusion short-circuit.
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+          ]),
+        ),
+    });
+    const t = mountTab();
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const requestUpdateSpy = vi.spyOn(picker, 'requestUpdate');
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    const firstCallCount = requestUpdateSpy.mock.calls.length;
+    // Same path again — no new requestUpdate.
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    expect(requestUpdateSpy.mock.calls.length).toBe(firstCallCount);
+  });
+
+  it('tolerates missing detail (defensive)', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+    });
+    const t = mountTab();
+    await settle(t);
+    // No detail at all.
+    window.dispatchEvent(new CustomEvent('active-file-changed'));
+    // Detail without path.
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', { detail: {} }),
+    );
+    // Path is not a string.
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 42 },
+      }),
+    );
+    await settle(t);
+    // No crashes, state stays null.
+    expect(t._activePath).toBeNull();
+  });
+
+  it('activePath survives tree reload', async () => {
+    // Same principle as exclusion state — viewer-active
+    // file shouldn't be cleared by a files-modified
+    // reload.
+    let callCount = 0;
+    const getTree = vi.fn().mockImplementation(() => {
+      callCount += 1;
+      return Promise.resolve(
+        fakeTreeResponse([
+          { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        ]),
+      );
+    });
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    window.dispatchEvent(
+      new CustomEvent('active-file-changed', {
+        detail: { path: 'a.md' },
+      }),
+    );
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.activePath).toBe('a.md');
+    // Reload.
+    pushEvent('files-modified', {});
+    await settle(t);
+    expect(callCount).toBe(2);
+    expect(picker.activePath).toBe('a.md');
+    expect(t._activePath).toBe('a.md');
+  });
+
+  it('removes window listener on disconnect', async () => {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+    });
+    const t = mountTab();
+    await settle(t);
+    t.remove();
+    // After disconnect, active-file-changed events must
+    // not reach the (now detached) handler. No easy way
+    // to assert absence directly, so we just dispatch
+    // and verify nothing throws.
+    expect(() => {
+      window.dispatchEvent(
+        new CustomEvent('active-file-changed', {
+          detail: { path: 'a.md' },
+        }),
+      );
+    }).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 

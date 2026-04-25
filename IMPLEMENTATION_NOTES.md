@@ -3020,12 +3020,34 @@ Open carried over for later increments:
 - **Collab broadcast of excluded state.** Layer 4.4's CollabServer doesn't currently emit a broadcast when `set_excluded_index_files` is called; only `set_selected_files` has that plumbing. Adding the broadcast would let a collab host's exclusion changes reach participants without a full reload. Not blocking any current flow (single-user operation works fully; participants can't call the RPC anyway per 4.4's restrictions).
 - **Context menu items for include / exclude.** Specs4 calls for these as an alternative to the shift+click gesture. Lands with Increment 8 (context menu) — the exclusion backend + event path is already in place, so the menu items just dispatch `exclusion-changed` with the appropriate set.
 
-### Increment 6 — Active-file highlight
+### ~~Increment 6 — Active-file highlight~~ (delivered)
 
-- `app-shell.js` — relay `active-file-changed` events from viewer to files-tab (likely already present; confirm)
-- `files-tab.js` — listen, pass `activePath` string prop to picker
-- `file-picker.js` — `.active-in-viewer` class when `node.path === activePath`
-- tests — prop propagation, class toggling on change, no class when active-path is null
+Picker row matching the viewer's active file gets an accent-blue background + left-border stripe. The viewer (diff or SVG) already dispatches `active-file-changed` events on open / close / tab switch; the shell catches them in its own `_onActiveFileChanged` (for viewer visibility toggling) but doesn't call `stopPropagation`, so the event continues bubbling to the window. Files-tab listens there rather than waiting for the shell to re-dispatch.
+
+- `file-picker.js` — new `activePath` string prop (defaults null). `_renderFile` computes `isActive = node.path === this.activePath` and adds the `active-in-viewer` class to the file row alongside `focused` and `is-excluded`. CSS applies an accent background + `box-shadow: inset 3px 0 0` for the left stripe + accent text colour on the name. The three visual states (focused, excluded, active-in-viewer) coexist cleanly — they each contribute distinct styling without colliding.
+
+- `files-tab.js` — new `_activePath` field, bound `_onActiveFileChanged` handler registered on `window` in `connectedCallback` and removed in `disconnectedCallback`. Handler extracts `detail.path`, validates it's a non-empty string (or null for the close-all case), short-circuits when unchanged, and pushes to the picker via direct-update. `_pushChildProps` pushes `activePath` on every tree load so the highlight survives reloads.
+
+- Tests — 7 new picker tests (`active-in-viewer` class on matching row, null produces no highlight, non-existent path is silent no-op, reactive update on path change, coexists with selection, coexists with exclusion, default is null). 7 new files-tab tests (push on first event, switch between files, clear when viewer closes all, short-circuit on duplicate events via requestUpdate spy, tolerates malformed detail, survives tree reload, unregisters on disconnect).
+
+Design points pinned by tests:
+
+- **Event reaches files-tab via window bubbling, not via shell relay.** The viewer dispatches `active-file-changed` with `bubbles: true, composed: true`, the shell's `@active-file-changed` binding fires during the bubble (shell flips `_activeViewer`) but doesn't `stopPropagation`, so the event continues to `window`. Files-tab's window listener catches it. No new event name, no shell code change. Simpler than adding a relay — shell doesn't need to know about picker-side highlighting.
+
+- **Null path is a valid state.** Viewer fires with `path: null` when the last file closes. The handler treats this as "clear the highlight" rather than ignoring it. Without this, closing the final file would leave the picker showing a stale highlight indefinitely. Pinned by `clears activePath when viewer closes all files`.
+
+- **Defensive path validation.** `typeof detail.path === 'string' && detail.path` — numbers, objects, empty string, and missing detail all collapse to null. A corrupt viewer event shouldn't either throw or apply a highlight to a row matching the stringified junk. Pinned by `tolerates missing detail (defensive)`.
+
+- **Short-circuit via `nextPath === this._activePath`.** Re-dispatching the same path (which happens legitimately — opening the already-active file from the picker fires the event again) must not trigger another picker re-render. Pinned by spying on `picker.requestUpdate` and counting calls across two events.
+
+- **`activePath` is independent of `_focusedPath`.** Focused-path is file-search-overlay state (match scrolled to that file); active-path is viewer state (file open in a tab). They CAN collide — user searches for a file that's already open — and when they do, both classes apply. CSS styling is distinct enough that both readings are legible.
+
+- **Visual state orthogonality.** Three row states (selected via checkbox, excluded via `is-excluded`, active via `active-in-viewer`) compose without mutual exclusion. A file can be selected + active + excluded all at once — specs4 calls this out: "a user can have an excluded file open in the viewer; they might be reading it without wanting it in the LLM's context." Both `coexists with selection` and `coexists with exclusion` pin this.
+
+Not included (explicit scope boundaries):
+
+- **Scroll-into-view on active change.** The spec doesn't call for auto-scrolling the picker to keep the active row visible. If the user manually scrolls past the active row and then switches files in the viewer, the highlight moves but the picker's scroll position doesn't follow. Users scanning code in the viewer typically aren't looking at the picker simultaneously, so the absence of auto-scroll isn't a regression. If usage shows otherwise, it's a one-line addition to the handler.
+- **Highlight for directory containing active file.** Would be visually noisy — the picker already expands parent dirs for various reasons, and adding a highlight cascade would compete with selection and exclusion styling. File-level only keeps the signal clean.
 
 ### Increment 7 — Keyboard navigation
 

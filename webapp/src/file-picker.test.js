@@ -1232,6 +1232,98 @@ describe('FilePicker component', () => {
     });
   });
 
+  // ---------------------------------------------------------------
+  // Active-file highlight (Increment 6)
+  // ---------------------------------------------------------------
+
+  describe('active-file highlight', () => {
+    it('active file gets the active-in-viewer class', async () => {
+      const tree = rootOf([file('a.md', 5), file('b.md', 5)]);
+      const p = mountPicker({ tree, activePath: 'a.md' });
+      await p.updateComplete;
+      const rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      expect(rows[0].classList.contains('active-in-viewer')).toBe(true);
+      expect(rows[1].classList.contains('active-in-viewer')).toBe(false);
+    });
+
+    it('activePath null produces no highlight', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({ tree, activePath: null });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('active-in-viewer')).toBe(false);
+    });
+
+    it('activePath for a non-existent file silently produces no highlight', async () => {
+      // Defensive — a stale activePath (file deleted from
+      // the tree but viewer still holds it) shouldn't throw
+      // or highlight a wrong row.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        activePath: 'does-not-exist.md',
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('active-in-viewer')).toBe(false);
+    });
+
+    it('changing activePath re-renders with new highlight', async () => {
+      const tree = rootOf([file('a.md', 5), file('b.md', 5)]);
+      const p = mountPicker({ tree, activePath: 'a.md' });
+      await p.updateComplete;
+      let rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      expect(rows[0].classList.contains('active-in-viewer')).toBe(true);
+      expect(rows[1].classList.contains('active-in-viewer')).toBe(false);
+      p.activePath = 'b.md';
+      await p.updateComplete;
+      rows = p.shadowRoot.querySelectorAll('.row.is-file');
+      expect(rows[0].classList.contains('active-in-viewer')).toBe(false);
+      expect(rows[1].classList.contains('active-in-viewer')).toBe(true);
+    });
+
+    it('active highlight coexists with selection', async () => {
+      // The three visual states (selected, excluded,
+      // active-in-viewer) are orthogonal. A selected +
+      // active file gets the checkbox ticked AND the
+      // accent highlight.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        selectedFiles: new Set(['a.md']),
+        activePath: 'a.md',
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      const cb = row.querySelector('.checkbox');
+      expect(row.classList.contains('active-in-viewer')).toBe(true);
+      expect(cb.checked).toBe(true);
+    });
+
+    it('active highlight coexists with exclusion', async () => {
+      // User can have an excluded file open in the viewer —
+      // they might be reading it without wanting it in the
+      // LLM's context. Both styles apply.
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['a.md']),
+        activePath: 'a.md',
+      });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      expect(row.classList.contains('active-in-viewer')).toBe(true);
+      expect(row.classList.contains('is-excluded')).toBe(true);
+    });
+
+    it('activePath default is null', async () => {
+      const tree = rootOf([file('a.md', 5)]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      expect(p.activePath).toBeNull();
+    });
+  });
+
   describe('filter', () => {
     it('filters the tree as the user types', async () => {
       const tree = rootOf([

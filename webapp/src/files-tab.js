@@ -283,6 +283,12 @@ export class FilesTab extends RpcMixin(LitElement) {
     // notified via `LLMService.set_excluded_index_files` on
     // every change.
     this._excludedFiles = new Set();
+    // Path of the file currently active in a viewer, or
+    // null. Updated from viewer `active-file-changed`
+    // events (they bubble + compose out to the window),
+    // pushed to the picker via direct-update so the
+    // matching row gets the `.active-in-viewer` highlight.
+    this._activePath = null;
     // Default picker width. Phase 3 wires a draggable handle
     // and localStorage persistence.
     this._pickerWidthPx = 280;
@@ -359,6 +365,8 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
+    this._onActiveFileChanged =
+      this._onActiveFileChanged.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -369,6 +377,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     super.connectedCallback();
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('files-modified', this._onFilesModified);
+    // Viewer-dispatched `active-file-changed` bubbles and
+    // composes out to the window naturally — the event
+    // fires from inside the viewer's shadow root, passes
+    // through the app-shell's own handler (which flips
+    // _activeViewer), then continues bubbling to the
+    // window because the shell doesn't call
+    // stopPropagation. We listen here so the picker
+    // highlight updates without the shell needing to
+    // explicitly re-dispatch.
+    window.addEventListener(
+      'active-file-changed',
+      this._onActiveFileChanged,
+    );
   }
 
   disconnectedCallback() {
@@ -376,6 +397,10 @@ export class FilesTab extends RpcMixin(LitElement) {
     window.removeEventListener(
       'files-modified',
       this._onFilesModified,
+    );
+    window.removeEventListener(
+      'active-file-changed',
+      this._onActiveFileChanged,
     );
     super.disconnectedCallback();
   }
@@ -641,6 +666,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.statusData = this._latestStatusData;
     picker.branchInfo = this._latestBranchInfo;
     picker.excludedFiles = new Set(this._excludedFiles);
+    picker.activePath = this._activePath;
     picker.requestUpdate();
     chat.repoFiles = this._repoFiles;
     chat.requestUpdate();
@@ -710,6 +736,25 @@ export class FilesTab extends RpcMixin(LitElement) {
     // invalidation when edit blocks land; for Phase 2c a full
     // reload is fine.
     this._loadFileTree();
+  }
+
+  _onActiveFileChanged(event) {
+    // Viewer event — `{path: string | null}`. When a file
+    // opens or becomes the active tab, this fires with the
+    // path. When the last file closes, it fires with null.
+    // Either way, push the update to the picker so the
+    // `.active-in-viewer` highlight follows.
+    const detail = event.detail || {};
+    const nextPath = typeof detail.path === 'string' && detail.path
+      ? detail.path
+      : null;
+    if (nextPath === this._activePath) return;
+    this._activePath = nextPath;
+    const picker = this._picker();
+    if (picker) {
+      picker.activePath = nextPath;
+      picker.requestUpdate();
+    }
   }
 
   _applySelection(newSelection, notifyServer) {

@@ -268,6 +268,21 @@ export class FilePicker extends LitElement {
      */
     excludedFiles: { type: Object },
     /**
+     * Path of the file currently open in a viewer, or null
+     * when no file is open. The row matching this path gets
+     * a distinct background and left-border accent — an
+     * "active in viewer" highlight — independent of selection
+     * or exclusion state. Updated from the viewer's
+     * `active-file-changed` event via the files-tab
+     * orchestrator (direct-update pattern).
+     *
+     * Distinct from `_focusedPath` (file-search match focus)
+     * so a viewer-active file and a search-focused file can
+     * coexist without visual collision. The CSS overrides
+     * both states with distinct styling.
+     */
+    activePath: { type: String },
+    /**
      * Current filter query (fuzzy substring matching).
      */
     filterQuery: { type: String, state: true },
@@ -546,6 +561,26 @@ export class FilePicker extends LitElement {
        * out of place. */
     }
 
+    /* Active-in-viewer highlight — the row matching
+     * activePath gets a distinct accented background and
+     * a left-border stripe so the user can find it at a
+     * glance. Distinct from .focused (file-search match
+     * focus) and from the selection checkbox — a file can
+     * be selected, excluded, focused, AND active; each
+     * state contributes its own styling without collision.
+     *
+     * The border-left absorbs some of the row's left
+     * padding via a transparent outer margin — not pretty,
+     * but using box-shadow inset keeps the handle from
+     * shifting other content. */
+    .row.is-file.active-in-viewer {
+      background: rgba(88, 166, 255, 0.08);
+      box-shadow: inset 3px 0 0 var(--accent-primary, #58a6ff);
+    }
+    .row.is-file.active-in-viewer .name {
+      color: var(--accent-primary, #58a6ff);
+    }
+
     /* Root row — repo name + branch pill. Non-interactive
      * (no click handler, no checkbox, no twisty), sits
      * above the rest of the tree as a stable header. */
@@ -634,6 +669,9 @@ export class FilePicker extends LitElement {
     // `Set.has()` during render works before the first server
     // response. Parent assigns via direct-update pattern.
     this.excludedFiles = new Set();
+    // No file open in a viewer yet. Remains null until the
+    // orchestrator pushes the first viewer event.
+    this.activePath = null;
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
@@ -983,6 +1021,7 @@ export class FilePicker extends LitElement {
     const isExcluded = this.excludedFiles.has(node.path);
     const indentPx = depth * 16;
     const isFocused = node.path === this._focusedPath;
+    const isActive = node.path === this.activePath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
     const tooltip = this._tooltipFor(node, isExcluded);
@@ -994,7 +1033,7 @@ export class FilePicker extends LitElement {
       : 'Click to select, shift+click to exclude from index.';
     return html`
       <div
-        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''}"
+        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isActive ? 'active-in-viewer' : ''}"
         style="padding-left: ${indentPx}px"
         @click=${(e) => this._onFileClick(e, node)}
         role="treeitem"
