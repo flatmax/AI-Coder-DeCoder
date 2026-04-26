@@ -320,12 +320,11 @@ class DocIndex:
             # whole index pass. Log and return None so the
             # file is simply absent from the index.
             logger.warning(
-                "Doc extractor for %s failed on %s: %s",
-                extension_of := extractor.__class__.__name__,
+                "Doc extractor %s failed on %s: %s",
+                extractor.__class__.__name__,
                 rel,
                 exc,
             )
-            del extension_of
             return None
         # Repo-file validation for link targets happens in the
         # extractor when it needs the set. For markdown, the
