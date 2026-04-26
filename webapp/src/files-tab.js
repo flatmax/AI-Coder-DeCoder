@@ -2383,6 +2383,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @insert-path=${this._onInsertPath}
           @new-file-committed=${this._onNewFileCommitted}
           @new-directory-committed=${this._onNewDirectoryCommitted}
+          @exit-review=${this._onExitReview}
         ></ac-file-picker>
       </div>
       <div class="chat-pane">
