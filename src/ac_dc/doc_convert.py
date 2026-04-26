@@ -442,6 +442,7 @@ class DocConvert:
         self,
         config: "ConfigManager",
         repo: Any = None,
+        event_callback: Any = None,
     ) -> None:
         """Construct the service.
 
@@ -456,9 +457,18 @@ class DocConvert:
             resolve against the repo root; when None, scans resolve
             against CWD. Kept as `Any` to avoid the circular import
             between Layer 1 (Repo) and Layer 4 (DocConvert).
+        event_callback:
+            Optional async callable ``(event_name, *args) ->
+            awaitable`` for pushing progress events to the browser.
+            Wired by `main.py` to the shared event dispatcher so
+            `docConvertProgress` events reach the webapp. When None
+            (tests, standalone CLI use), events are silently dropped
+            and `convert_files` falls back to fully synchronous
+            operation returning inline results.
         """
         self._config = config
         self._repo = repo
+        self._event_callback = event_callback
         # Collab reference, set by main.py when collab mode is active.
         # None in single-user mode, which means every caller is
         # treated as localhost. Matches the pattern on Repo,
@@ -879,20 +889,37 @@ class DocConvert:
     ) -> dict[str, Any]:
         """Convert the named source files to markdown.
 
-        Pass A2 dispatches by extension. `.docx`, `.rtf`, `.odt`
-        route through markitdown with provenance-header writing
-        and image extraction. Other supported extensions
-        (`.pdf`, `.pptx`, `.xlsx`, `.csv`, `.odp`) return
-        per-file "not yet supported" entries — the caller sees
-        specific failures instead of a blanket NotImplementedError.
+        Dispatches by extension. Pass A2 (`.docx`/`.rtf`/`.odt`/
+        `.csv`) uses markitdown; A3 (`.xlsx`) uses openpyxl;
+        A4 (`.pptx` fallback) uses python-pptx; A5 (`.pdf`,
+        `.pptx`, `.odp`) uses PyMuPDF with LibreOffice for
+        presentations.
 
-        Runs the clean-tree gate first (specs4/4-features/doc-convert.md):
-        refuses if the repo has uncommitted changes. Without a git
-        working tree to diff against, the converted output wouldn't
-        be reviewable before commit. The gate requires a repo with
-        an `is_clean()` method; when the service was constructed
-        without a repo (tests, standalone CLI use), the gate is
-        skipped — caller accepts the risk.
+        Runs the clean-tree gate first: refuses if the repo has
+        uncommitted changes. Without a git working tree to diff
+        against, the converted output wouldn't be reviewable
+        before commit. The gate requires a repo with an
+        `is_clean()` method; when constructed without a repo
+        (tests, standalone CLI use), the gate is skipped —
+        caller accepts the risk.
+
+        Two execution modes:
+
+        - **Background (async)** — when an asyncio event loop is
+          running AND an event callback is wired, launches
+          per-file conversion as a background task and returns
+          ``{"status": "started", "count": N}`` immediately.
+          Per-file progress and the final summary arrive via
+          ``docConvertProgress`` server-push events.
+        - **Inline (sync)** — when no event loop is running
+          (tests, CLI use without websocket) or no event
+          callback is wired, runs conversions inline and
+          returns ``{"status": "ok", "results": [...]}``
+          directly. Matches the pre-async contract so tests
+          don't need event-loop setup.
+
+        The guard and gate run identically in both modes, so
+        restricted/dirty-tree errors surface the same way.
 
         Parameters
         ----------
@@ -902,12 +929,11 @@ class DocConvert:
         Returns
         -------
         dict
-            On non-localhost callers, the specs4 restricted-error
-            shape. On dirty working tree, ``{"error": ...}``. On
-            successful dispatch, ``{"status": "ok", "results":
-            [per_file_result, ...]}`` — each entry has ``path``,
-            ``status`` (one of ``"ok"``, ``"skipped"``, ``"error"``),
-            and optional ``message``, ``output_path``, ``images``.
+            Restricted-error on non-localhost callers, dirty-tree
+            error on dirty working tree, ``{"status": "started",
+            "count": N}`` when running in background mode, or
+            ``{"status": "ok", "results": [...]}`` when running
+            inline.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -927,12 +953,137 @@ class DocConvert:
                     )
                 }
 
+        # Decide execution mode. Background requires both a
+        # running loop AND a wired callback — if either is
+        # missing, fall back to inline so tests and CLI callers
+        # get results directly.
+        import asyncio
+        loop: asyncio.AbstractEventLoop | None = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and self._event_callback is not None:
+            asyncio.ensure_future(
+                self._convert_files_background(paths)
+            )
+            return {
+                "status": "started",
+                "count": len(paths),
+            }
+
+        # Inline fallback — synchronous execution.
+        return self._convert_files_sync(paths)
+
+    def _convert_files_sync(
+        self,
+        paths: list[str],
+    ) -> dict[str, Any]:
+        """Synchronous per-file conversion. Returns results inline.
+
+        Used by tests and by the CLI-without-websocket path. The
+        background path uses the same per-file loop but emits
+        progress events between files.
+        """
         root = self._root()
         results: list[dict[str, Any]] = []
         for rel_path in paths:
             result = self._convert_one(root, rel_path)
             results.append(result)
         return {"status": "ok", "results": results}
+
+    async def _convert_files_background(
+        self,
+        paths: list[str],
+    ) -> None:
+        """Background conversion task with progress events.
+
+        Runs in the main event loop (not an executor) because
+        per-file conversion dispatches to blocking library calls
+        inside each `_convert_one`. For Layer 4.6 we accept the
+        event-loop blocking during each file — conversions
+        typically take 200ms-8s per file, and the progress
+        events between files give the UI enough liveness. If
+        this becomes a problem, a later pass can move the
+        actual conversion work into a dedicated executor and
+        keep the event dispatch on the loop.
+
+        Emits three event stages:
+
+        - ``start`` — before the first file, carrying the total
+          count so the UI can size its progress display
+        - ``file`` — per-file, after conversion completes,
+          carrying the result dict and the running index
+        - ``complete`` — after all files, carrying the full
+          results list so the UI has the final summary even
+          if it missed some per-file events
+
+        Event failures are swallowed so a broken frontend
+        subscriber can't abort an in-flight conversion batch.
+        """
+        root = self._root()
+        total = len(paths)
+        await self._send_convert_event({
+            "stage": "start",
+            "count": total,
+        })
+
+        results: list[dict[str, Any]] = []
+        for index, rel_path in enumerate(paths):
+            try:
+                result = self._convert_one(root, rel_path)
+            except Exception as exc:
+                # Defensive — a bug in a per-file conversion
+                # shouldn't abort the whole batch. Surface as an
+                # error result so the UI shows the specific file
+                # that failed, not a silent drop.
+                logger.exception(
+                    "DocConvert: unhandled error converting %s",
+                    rel_path,
+                )
+                result = self._fail(
+                    rel_path,
+                    f"Internal error: {exc}",
+                )
+            results.append(result)
+            await self._send_convert_event({
+                "stage": "file",
+                "index": index,
+                "total": total,
+                "result": result,
+            })
+
+        await self._send_convert_event({
+            "stage": "complete",
+            "results": results,
+        })
+
+    async def _send_convert_event(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+        """Dispatch a docConvertProgress event. Swallows failures.
+
+        Wrapped so a throwing callback (unmounted frontend,
+        websocket error) doesn't abort the conversion loop.
+        The event is lost for that frontend client; the batch
+        continues and the final `complete` event carries the
+        full results list so a reconnecting client can recover
+        the state.
+        """
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(
+                "docConvertProgress",
+                data,
+            )
+        except Exception as exc:
+            logger.debug(
+                "DocConvertProgress event dispatch failed: %s",
+                exc,
+            )
 
     def _convert_one(
         self,

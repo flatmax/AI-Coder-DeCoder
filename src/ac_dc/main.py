@@ -321,7 +321,8 @@ async def run(
     # Step 3: Initialize lightweight services
     config = ConfigManager(repo_root=repo_path)
     settings = Settings(config)
-    doc_convert = DocConvert(config, repo=repo)
+    # DocConvert is constructed later (after event_callback is
+    # defined) so progress events can flow to the browser.
 
     # Step 4: Start webapp server (bundled or dev)
     bind_host = "0.0.0.0" if collab else "127.0.0.1"
@@ -447,6 +448,14 @@ async def run(
                 await cb(event_name, *args)
             except Exception:
                 pass
+
+    # DocConvert wired with the same event callback so
+    # docConvertProgress events reach the browser. The
+    # callback is a closure over event_callback_ref which
+    # the real dispatcher replaces once the RPC server is up.
+    doc_convert = DocConvert(
+        config, repo=repo, event_callback=event_callback,
+    )
 
     llm_service = LLMService(
         config=config,
