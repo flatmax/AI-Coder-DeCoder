@@ -682,6 +682,36 @@ export class FilePicker extends LitElement {
       color: var(--accent-primary, #58a6ff);
     }
 
+    /* Inline-input rows — for rename and duplicate.
+     * Match the file-row layout so the input lines up
+     * with the filename column. The textbox uses the
+     * same minimal dark styling as the filter input
+     * but sized to fit tightly alongside the twisty
+     * and checkbox placeholders. */
+    .row.is-inline {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.1rem 0.5rem 0.1rem 0;
+      background: rgba(88, 166, 255, 0.06);
+    }
+    .row.is-inline .inline-input {
+      flex: 1;
+      min-width: 0;
+      padding: 0.2rem 0.35rem;
+      background: rgba(13, 17, 23, 0.9);
+      border: 1px solid var(--accent-primary, #58a6ff);
+      border-radius: 3px;
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.8125rem;
+    }
+    .row.is-inline .inline-input:focus {
+      outline: none;
+      border-color: var(--accent-primary, #58a6ff);
+      box-shadow: 0 0 0 1px var(--accent-primary, #58a6ff);
+    }
+
     /* Root row — repo name + branch pill. Non-interactive
      * (no click handler, no checkbox, no twisty), sits
      * above the rest of the tree as a stable header. */
@@ -831,6 +861,12 @@ export class FilePicker extends LitElement {
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
+    // Inline-input state — null when no rename or
+    // duplicate is active. Mutually exclusive (only one
+    // can be active at a time); the orchestrator enforces
+    // this by clearing the other when setting one.
+    this._renaming = null;
+    this._duplicating = null;
     // Snapshot of the expanded set before the most recent
     // `setTree` call that replaced a real tree with a pruned
     // one. Used by `restoreExpandedState` when file search
@@ -983,6 +1019,74 @@ export class FilePicker extends LitElement {
     }
     walk(this.tree);
     this._expanded = all;
+  }
+
+  /**
+   * Begin renaming a file. Public API for the orchestrator
+   * to call after the user picks "Rename" from the context
+   * menu. Clears any active duplicate state — only one
+   * inline input can be active at a time.
+   *
+   * No-op when path is empty or the file doesn't exist in
+   * the tree. Callers should validate upstream; this is
+   * defensive against stale menu state.
+   */
+  beginRename(path) {
+    if (typeof path !== 'string' || !path) return;
+    this._duplicating = null;
+    this._renaming = path;
+  }
+
+  /**
+   * Begin duplicating a file. Inline input appears as a
+   * new row below the source, pre-filled with the source
+   * path so the user can edit the target location.
+   */
+  beginDuplicate(path) {
+    if (typeof path !== 'string' || !path) return;
+    this._renaming = null;
+    this._duplicating = path;
+  }
+
+  /**
+   * Lifecycle — fires after every render. Auto-focus and
+   * pre-select the stem (part before the final dot) of
+   * any newly-mounted inline input so the user can start
+   * typing immediately.
+   */
+  updated(changedProps) {
+    super.updated?.(changedProps);
+    if (
+      !changedProps.has('_renaming')
+      && !changedProps.has('_duplicating')
+    ) {
+      return;
+    }
+    const input = this.shadowRoot?.querySelector('.inline-input');
+    if (!input) return;
+    // Only focus if we're not already focused there —
+    // avoids re-selecting text every time an unrelated
+    // property changes while the input is open.
+    if (this.shadowRoot.activeElement === input) return;
+    input.focus();
+    const value = input.value || '';
+    // Select the stem (portion before the last '.') so
+    // users typing replace the name but keep the
+    // extension. For paths, the "stem" is everything
+    // before the final '.' in the final segment.
+    const lastSlash = value.lastIndexOf('/');
+    const finalSeg = lastSlash >= 0 ? value.slice(lastSlash + 1) : value;
+    const lastDot = finalSeg.lastIndexOf('.');
+    if (lastDot > 0) {
+      // Select from the start up to the start of the
+      // extension. For paths, that's lastSlash + 1 up to
+      // lastSlash + 1 + lastDot.
+      const selStart = lastSlash + 1;
+      const selEnd = selStart + lastDot;
+      input.setSelectionRange(selStart, selEnd);
+    } else {
+      input.select();
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1204,6 +1308,22 @@ export class FilePicker extends LitElement {
   }
 
   _renderFile(node, depth) {
+    // Inline-input branches — rename replaces the row,
+    // duplicate appends a new input row below the
+    // source. Rendering the source row while renaming
+    // would confuse the user (two text affordances
+    // showing the same thing); rendering it for
+    // duplicate is correct because the source file
+    // still exists and the input is specifying the
+    // target.
+    if (this._renaming === node.path) {
+      return this._renderInlineInput({
+        mode: 'rename',
+        sourcePath: node.path,
+        sourceName: node.name,
+        depth,
+      });
+    }
     const isSelected = this.selectedFiles.has(node.path);
     const isExcluded = this.excludedFiles.has(node.path);
     const indentPx = depth * 16;
@@ -1272,6 +1392,59 @@ export class FilePicker extends LitElement {
               >${node.lines}</span
             >`
           : ''}
+      </div>
+      ${this._duplicating === node.path
+        ? this._renderInlineInput({
+            mode: 'duplicate',
+            sourcePath: node.path,
+            sourceName: node.name,
+            depth,
+          })
+        : ''}
+    `;
+  }
+
+  /**
+   * Render the inline text input row for rename or
+   * duplicate. Same indentation pattern as file rows so
+   * the input lines up visually with the filename
+   * column. Pre-fill:
+   *
+   *   - rename: current filename (what the user would
+   *     edit to change the name in place).
+   *   - duplicate: source path (lets the user edit the
+   *     directory or filename to target the copy).
+   *
+   * Focus and selection happen in `updated()` after the
+   * input lands in the DOM. We select only the stem
+   * (everything before the last `.`) so typing
+   * immediately overwrites the filename but leaves the
+   * extension intact. Users explicitly wanting a
+   * different extension just type past the selection.
+   */
+  _renderInlineInput({ mode, sourcePath, sourceName, depth }) {
+    const indentPx = depth * 16;
+    const initial = mode === 'rename' ? sourceName : sourcePath;
+    return html`
+      <div
+        class="row is-inline"
+        style="padding-left: ${indentPx}px"
+        role="treeitem"
+      >
+        <span class="indent"></span>
+        <span class="twisty empty"></span>
+        <input
+          type="text"
+          class="inline-input"
+          data-inline-mode=${mode}
+          data-source-path=${sourcePath}
+          .value=${initial}
+          @keydown=${(e) => this._onInlineKeyDown(e, mode, sourcePath)}
+          @blur=${(e) => this._onInlineBlur(e, mode, sourcePath)}
+          aria-label=${mode === 'rename'
+            ? `Rename ${sourceName}`
+            : `Duplicate ${sourceName} — enter new path`}
+        />
       </div>
     `;
   }
@@ -1586,6 +1759,105 @@ export class FilePicker extends LitElement {
       next.add(node.path);
     }
     this._emitSelectionChanged(next);
+  }
+
+  /**
+   * Inline-input keydown handler for rename / duplicate.
+   * Enter commits (dispatches the corresponding event to
+   * the orchestrator), Escape cancels (clears picker
+   * state without dispatch).
+   *
+   * Other keys flow through to the default textbox
+   * behaviour — no interception.
+   */
+  _onInlineKeyDown(event, mode, sourcePath) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      this._commitInlineInput(event.target, mode, sourcePath);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._cancelInlineInput(mode);
+    }
+  }
+
+  /**
+   * Blur handler — treated as cancel. Users clicking
+   * elsewhere expect the pending edit to disappear;
+   * auto-committing on blur is surprising and hard to
+   * undo. Enter is the explicit commit path.
+   *
+   * A complication: if the user presses Enter to commit,
+   * the commit handler clears `_renaming` / `_duplicating`
+   * which triggers a re-render, which removes the input
+   * from the DOM, which fires a blur. We guard against
+   * double-cancel by only clearing state when the
+   * relevant field still matches the source path — after
+   * a commit, it's already been cleared.
+   */
+  _onInlineBlur(event, mode, sourcePath) {
+    this._cancelInlineInput(mode, sourcePath);
+  }
+
+  /**
+   * Commit an inline input. Reads the target value,
+   * dispatches the commit event if the value is non-empty
+   * and changed, and clears picker state. The orchestrator
+   * listens for these events and fires the corresponding
+   * RPC.
+   *
+   * When the user commits with an unchanged value (e.g.
+   * opened rename, pressed Enter immediately), the commit
+   * is treated as a no-op — no event dispatched, state
+   * cleared. Same for empty input.
+   */
+  _commitInlineInput(inputEl, mode, sourcePath) {
+    const raw = inputEl?.value || '';
+    const target = raw.trim();
+    // Clear state first so the blur firing after re-render
+    // doesn't re-enter this path via _onInlineBlur's
+    // guard.
+    if (mode === 'rename') {
+      this._renaming = null;
+    } else {
+      this._duplicating = null;
+    }
+    if (!target) return;
+    // Rename no-op: target equals current name.
+    if (mode === 'rename') {
+      const currentName = sourcePath.includes('/')
+        ? sourcePath.slice(sourcePath.lastIndexOf('/') + 1)
+        : sourcePath;
+      if (target === currentName) return;
+    }
+    // Duplicate no-op: target equals source path.
+    if (mode === 'duplicate' && target === sourcePath) return;
+    const eventName =
+      mode === 'rename' ? 'rename-committed' : 'duplicate-committed';
+    this.dispatchEvent(
+      new CustomEvent(eventName, {
+        detail: { sourcePath, targetName: target },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Cancel an inline input. If sourcePath is given, only
+   * cancel when the current state matches — this prevents
+   * a blur firing after a successful commit from
+   * triggering a second cancel on a different mode.
+   */
+  _cancelInlineInput(mode, sourcePath) {
+    if (mode === 'rename') {
+      if (sourcePath && this._renaming !== sourcePath) return;
+      this._renaming = null;
+    } else if (mode === 'duplicate') {
+      if (sourcePath && this._duplicating !== sourcePath) return;
+      this._duplicating = null;
+    }
   }
 
   /**
