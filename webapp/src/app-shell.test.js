@@ -165,12 +165,51 @@ function tick() {
 // ---------------------------------------------------------------------------
 
 describe('AppShell', () => {
-  beforeEach(() => {
+  // Prototype-level patch: setupDone and streamComplete
+  // both call _fetchHistoryStatus, which hits
+  // LLMService.get_history_status. No test in this file
+  // publishes a proxy that exposes the method, so every
+  // test that triggers either path emits a noisy stderr
+  // warning. Stubbing at the prototype level silences
+  // every test uniformly without changing the tested
+  // behaviour — the fetch is a side effect, not an
+  // assertion target.
+  let _origFetchHistoryStatus;
+  // Stubs for child-tab RPCs. All three tab panels
+  // (FilesTab, ContextTab, SettingsTab) are always
+  // mounted — only the `.active` class differs —
+  // so their onRpcReady hooks fire for every test
+  // that publishes a proxy. Patching at the
+  // prototype level silences their RPC calls without
+  // changing tested behaviour.
+  let _origFilesTabLoadTree;
+  let _origSettingsLoadInfo;
+  let _origContextRefresh;
+  beforeEach(async () => {
     SharedRpc.reset();
     vi.useRealTimers();
+    localStorage.clear();
+    _origFetchHistoryStatus = AppShell.prototype._fetchHistoryStatus;
+    AppShell.prototype._fetchHistoryStatus = function () {};
+    // Child tabs all live in separate modules. Import
+    // them lazily so the test file doesn't need an
+    // explicit import — they're already loaded
+    // transitively via app-shell.js.
+    const { FilesTab } =
+      await import('./files-tab.js');
+    const { SettingsTab } =
+      await import('./settings-tab.js');
+    const { ContextTab } =
+      await import('./context-tab.js');
+    _origFilesTabLoadTree = FilesTab.prototype._loadFileTree;
+    _origSettingsLoadInfo = SettingsTab.prototype._loadInfo;
+    _origContextRefresh = ContextTab.prototype._refresh;
+    FilesTab.prototype._loadFileTree = async function () {};
+    SettingsTab.prototype._loadInfo = async function () {};
+    ContextTab.prototype._refresh = async function () {};
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     while (_mountedShells.length) {
       const shell = _mountedShells.pop();
       if (shell.isConnected) {
@@ -178,6 +217,16 @@ describe('AppShell', () => {
       }
     }
     SharedRpc.reset();
+    AppShell.prototype._fetchHistoryStatus = _origFetchHistoryStatus;
+    const { FilesTab } =
+      await import('./files-tab.js');
+    const { SettingsTab } =
+      await import('./settings-tab.js');
+    const { ContextTab } =
+      await import('./context-tab.js');
+    FilesTab.prototype._loadFileTree = _origFilesTabLoadTree;
+    SettingsTab.prototype._loadInfo = _origSettingsLoadInfo;
+    ContextTab.prototype._refresh = _origContextRefresh;
   });
 
   describe('initial state', () => {
@@ -472,12 +521,6 @@ describe('AppShell', () => {
 
     it('callbacks return true for jrpc-oo ack', () => {
       const shell = mountShell();
-      // streamComplete also triggers a history-status fetch
-      // via _onCompactionStatusRefresh. The rpcCall path has
-      // no proxy published in this test, which produces a
-      // noisy stderr warning. Stub the method so the fetch
-      // silently no-ops.
-      shell._fetchHistoryStatus = () => {};
       expect(shell.streamChunk('r', 'c')).toBe(true);
       expect(shell.streamComplete('r', {})).toBe(true);
       expect(shell.filesChanged([])).toBe(true);
