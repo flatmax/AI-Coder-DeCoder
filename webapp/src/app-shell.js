@@ -88,6 +88,20 @@ const _DOC_INDEX_STAGES = new Set([
 const _ENRICHMENT_UNAVAILABLE_SHOWN_KEY =
   'ac-dc-enrichment-unavailable-shown';
 
+/**
+ * Alt+Arrow debounce window (ms). Rapid arrow sequences
+ * through the file-nav grid coalesce into a single viewer
+ * fetch at the end — holding Alt+Right through a 10-node
+ * path should produce one fetch for the final target, not
+ * ten. HUD updates remain immediate; only the viewer
+ * `navigate-file` dispatch is debounced.
+ *
+ * Alt release flushes the pending dispatch immediately so
+ * the user doesn't see the HUD disappear before the viewer
+ * has updated.
+ */
+const _ALT_ARROW_DEBOUNCE_MS = 200;
+
 // ---------------------------------------------------------------
 // Dialog persistence keys and sizing constants
 // ---------------------------------------------------------------
@@ -809,6 +823,17 @@ export class AppShell extends JRPCClient {
     // Whether a file reopen is pending (waiting for the
     // startup overlay to dismiss before issuing the RPC).
     this._pendingReopen = false;
+
+    // Alt+Arrow debounce state. Rapid arrow sequences
+    // through the file-nav grid would otherwise fire one
+    // viewer.openFile per press — 10 fetches for a 10-key
+    // sequence the user meant as "jump to the end". The
+    // debounce defers the dispatch by ~200ms; a subsequent
+    // arrow resets the timer, Alt release fires immediately.
+    // HUD updates on every keypress regardless — only the
+    // viewer fetch is debounced.
+    this._altArrowTimer = null;
+    this._altArrowPending = null;
 
     // Whether we've ever connected successfully. Controls
     // whether disconnects show the startup overlay (first
@@ -1633,26 +1658,27 @@ export class AppShell extends JRPCClient {
         // Visual → text diff.
         this._activeViewer = 'diff';
         if (diffViewer) {
-          diffViewer.closeFile(path);
-          diffViewer.openFile({
-            path,
-            virtualContent: undefined,
-          }).then(() => {
+          // No explicit closeFile — diffViewer.openFile
+          // replaces the active file (single-file model,
+          // D18). A closeFile would produce a one-frame
+          // empty-state flash between the two calls.
+          diffViewer.openFile({ path }).then(() => {
             // If we have modified content from the SVG
-            // editor, update the diff viewer's file so
-            // visual edits appear as dirty in text mode.
-            if (typeof modified === 'string') {
-              const file = diffViewer._files?.find(
-                (f) => f.path === path,
-              );
-              if (file) {
-                file.modified = modified;
-                if (typeof savedContent === 'string') {
-                  file.savedContent = savedContent;
-                }
-                diffViewer._recomputeDirtyCount();
-                diffViewer._showEditor?.();
-              }
+            // editor, update the diff viewer's active
+            // file so visual edits appear as dirty in
+            // text mode. _file is the single slot in the
+            // no-cache model; _files[] is gone.
+            if (typeof modified === 'string' && diffViewer._file?.path === path) {
+              diffViewer._file = {
+                ...diffViewer._file,
+                modified,
+                savedContent:
+                  typeof savedContent === 'string'
+                    ? savedContent
+                    : diffViewer._file.savedContent,
+              };
+              diffViewer._recomputeDirty?.();
+              diffViewer._showEditor?.();
             }
           });
         }
@@ -1660,12 +1686,20 @@ export class AppShell extends JRPCClient {
         // Text diff → visual.
         this._activeViewer = 'svg';
         if (svgViewer && diffViewer) {
-          // Read latest content from the diff viewer.
-          const diffFile = diffViewer._files?.find(
-            (f) => f.path === path,
-          );
+          // Read latest content from the diff viewer's
+          // single active-file slot (D18 — _files[] is
+          // gone).
+          const diffFile =
+            diffViewer._file?.path === path
+              ? diffViewer._file
+              : null;
           const latestModified = diffFile?.modified;
           const latestSaved = diffFile?.savedContent;
+          // Diff viewer's closeFile is still called because
+          // the user is leaving the text diff entirely;
+          // that returns the viewer to its empty state.
+          // The SVG viewer still uses the multi-file model,
+          // so closeFile+openFile there is the normal swap.
           diffViewer.closeFile(path);
           svgViewer.closeFile(path);
           svgViewer.openFile({
@@ -1937,27 +1971,60 @@ export class AppShell extends JRPCClient {
     nav.requestUpdate();
 
     if (targetPath) {
-      // Route to the appropriate viewer.
-      const target = viewerForPath(targetPath);
-      if (target) {
-        this.updateComplete.then(() => {
-          const viewer =
-            target === 'svg'
-              ? this.shadowRoot?.querySelector('ac-svg-viewer')
-              : this.shadowRoot?.querySelector('ac-diff-viewer');
-          if (viewer) {
-            viewer.openFile({ path: targetPath });
-          }
-        });
+      // Debounce the viewer fetch. HUD already updated via
+      // navigateDirection + show above. The dispatch defers
+      // so rapid sequences coalesce to one fetch for the
+      // final target — matches the no-cache contract's
+      // intent ("one click, one fetch" at the user-gesture
+      // level, not the keystroke level).
+      this._altArrowPending = targetPath;
+      if (this._altArrowTimer) {
+        clearTimeout(this._altArrowTimer);
       }
+      this._altArrowTimer = setTimeout(() => {
+        this._altArrowTimer = null;
+        this._flushAltArrowPending();
+      }, _ALT_ARROW_DEBOUNCE_MS);
     }
   }
 
   /**
-   * Alt keyup — hide the HUD when Alt is released.
+   * Fire the pending Alt+Arrow navigation. Called from the
+   * debounce timer and from Alt release (`_onGridKeyUp`).
+   * No-op when nothing is pending.
+   */
+  _flushAltArrowPending() {
+    const targetPath = this._altArrowPending;
+    this._altArrowPending = null;
+    if (!targetPath) return;
+    const target = viewerForPath(targetPath);
+    if (!target) return;
+    this.updateComplete.then(() => {
+      const viewer =
+        target === 'svg'
+          ? this.shadowRoot?.querySelector('ac-svg-viewer')
+          : this.shadowRoot?.querySelector('ac-diff-viewer');
+      if (viewer) {
+        viewer.openFile({ path: targetPath });
+      }
+    });
+  }
+
+  /**
+   * Alt keyup — hide the HUD when Alt is released and
+   * flush any pending viewer fetch immediately. Without
+   * the flush, the user would see the HUD fade out
+   * BEFORE the viewer updated — the fetch would still
+   * fire ~200ms later, but visually it'd look like the
+   * final keystroke got dropped.
    */
   _onGridKeyUp(event) {
     if (event.key !== 'Alt') return;
+    if (this._altArrowTimer) {
+      clearTimeout(this._altArrowTimer);
+      this._altArrowTimer = null;
+    }
+    this._flushAltArrowPending();
     const nav = this._getFileNav();
     if (nav && nav.visible) {
       nav.hide();
@@ -2743,12 +2810,26 @@ export class AppShell extends JRPCClient {
 
   /**
    * Follow review-started / review-ended window events to
-   * drive the commit button's disabled state. The detail
+   * drive the commit button's disabled state, and refresh
+   * the active viewer so any open file picks up the new
+   * HEAD/working-copy content produced by the backend's
+   * soft reset (or its undo on exit).
+   *
+   * Without the refresh, an open file's diff would show
+   * stale pre/post-reset content — the backend moved HEAD
+   * and the index, but the viewer's cached model pair
+   * still reflects the old state. The diff viewer's
+   * refreshOpenFiles re-fetches both sides; the SVG
+   * viewer does the same for any open SVG. The detail
    * shape isn't inspected — the event type alone tells us
    * the direction.
    */
   _onReviewStateChanged(event) {
     this._reviewActive = event.type === 'review-started';
+    // Reuse the existing refresh path. _onFilesReverted
+    // ignores detail.paths (refreshes all open viewers
+    // unconditionally) so passing no event detail is fine.
+    this._onFilesReverted({ detail: { paths: [] } });
   }
 
   /**
