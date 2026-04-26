@@ -52,6 +52,77 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 - **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
 
+## Keyword enrichment UX completion plan — in progress
+
+Layer 2.8.4 shipped the enrichment pipeline (scaffold, extraction, orchestrator integration) but left three cleanup items for a follow-up pass: tristate readiness signalling, frontend progress routing, and a one-shot unavailable-toast. This section tracks the follow-up work.
+
+Three sub-commits. Each lands with tests and an update to this plan marking it delivered.
+
+### Step 1 — Backend tristate `enrichment_status`
+
+The current `get_mode()` returns `doc_index_enriched: bool`, which can't distinguish "KeyBERT unavailable" from "still building". Both report False, so the frontend can't decide whether to wait or to show a warning toast.
+
+Replace the single boolean with a tristate string field `enrichment_status`:
+
+- `"unavailable"` — KeyBERT probe failed or model load failed. Frontend shows a one-time warning toast.
+- `"pending"` — background build hasn't started the enrichment phase yet. Frontend shows nothing.
+- `"building"` — enrichment loop is active. Frontend shows the header progress overlay.
+- `"complete"` — all queued files enriched. Frontend hides the overlay.
+
+Keep the existing `doc_index_enriched` boolean for backwards compatibility — it maps to `enrichment_status === "complete"`. The boolean stays until we can audit all RPC callers; today we only know about the webapp.
+
+Changes in `llm_service.py`:
+
+- New `_enrichment_status` state field, initialized to `"pending"` in `__init__`
+- `_run_enrichment_background` flips to `"unavailable"` in both early-return branches (KeyBERT probe failed, model load failed)
+- Flips to `"building"` at the top of the main enrichment loop
+- Flips to `"complete"` on successful completion (alongside the existing `_doc_index_enriched = True`)
+- `get_mode()` includes `enrichment_status` in its return dict
+
+Tests in `tests/test_llm_service.py`:
+
+- Pin all four states across the enrichment lifecycle
+- Confirm `doc_index_enriched` stays consistent with `enrichment_status === "complete"`
+
+### Step 2a — Frontend progress overlay (doc-index + enrichment)
+
+New LitElement `ac-doc-index-progress` modeled after `ac-compaction-progress`. Floats above the compaction progress bar (stacks vertically — compaction at the usual position, doc-index one row up) so users can see both kinds of progress simultaneously during a busy session.
+
+Listens for `startupProgress` events with the following stages and routes them to the overlay instead of the startup-overlay machinery:
+
+- `doc_index` — structural extraction in progress
+- `doc_index_error` — structural extraction failed
+- `doc_enrichment_queued` — enrichment starting (total count in message)
+- `doc_enrichment_file_done` — per-file enrichment complete
+- `doc_enrichment_complete` — all enrichment done; fade out after 800ms
+
+`app-shell.js` changes:
+
+- Intercept the doc-index-related stages in the `startupProgress` handler
+- Do NOT update `startupMessage` / `startupPercent` for these stages
+- Do NOT dismiss the startup overlay for these stages (the `ready` stage is still the only dismiss trigger)
+- Dispatch a new window event `doc-index-progress` that the overlay subscribes to
+- Import and mount `<ac-doc-index-progress>` alongside `<ac-compaction-progress>`
+
+### Step 2b — One-shot unavailable toast
+
+When the backend reports `enrichment_status === "unavailable"`, show a warning toast exactly once per browser session:
+
+> "Keyword enrichment disabled — install `ac-dc[docs]` for richer document outlines."
+
+Check a localStorage flag `ac-dc-enrichment-unavailable-shown` to suppress repeats across page reloads. Trigger from two places:
+
+- `_fetchCurrentState` when the initial state snapshot arrives with the unavailable status
+- `_onModeChanged` when a mode-changed broadcast carries the unavailable status (handles the rare case where the user's backend session came up without KeyBERT after a reboot)
+
+### Delivery order
+
+1. **Step 1** (backend tristate) — no frontend impact, lands alone with tests
+2. **Step 2a** (progress overlay component) — depends on Step 1 for the `enrichment_status` field; reads from `startupProgress` stages which already exist
+3. **Step 2b** (unavailable toast) — depends on Step 1's `enrichment_status` field
+
+After each lands, strike through the heading here, add a one-line delivery note with the commit hash, and update the matching section in `specs4/impl-history/layer-2.md`.
+
 ## Compaction UI completion plan — **delivered**
 
 Both increments shipped, plus a follow-up capacity bar (`0b571d9`).
