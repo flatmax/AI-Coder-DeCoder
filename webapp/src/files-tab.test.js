@@ -5369,6 +5369,165 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(stage).not.toHaveBeenCalled();
       });
 
+      // ---------------------------------------------------
+      // @-filter bridge (Increment 10b)
+      // ---------------------------------------------------
+      //
+      // Nested inside the context-menu dispatch describe
+      // because the test file's outermost `describe` blocks
+      // each cover a broad scope — bridging to this feature
+      // via a sibling `describe('@-filter bridge', ...)`
+      // wouldn't fit the file's existing structure. The
+      // bridge is its own conceptual unit but physically
+      // lives alongside the other files-tab event handlers.
+
+      describe('@-filter bridge', () => {
+        /**
+         * Fire a `filter-from-chat` event from the chat
+         * panel child. Uses the chat panel as source so
+         * the bubbles-through-shadow-DOM path matches
+         * production.
+         */
+        function fireFilterFromChat(tab, detail) {
+          const chat = tab.shadowRoot.querySelector('ac-chat-panel');
+          chat.dispatchEvent(
+            new CustomEvent('filter-from-chat', {
+              detail,
+              bubbles: true,
+              composed: true,
+            }),
+          );
+        }
+
+        async function setupBridgeTab() {
+          publishFakeRpc({
+            'Repo.get_file_tree': vi.fn().mockResolvedValue(
+              fakeTreeResponse([
+                { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+                { name: 'bar.md', path: 'bar.md', type: 'file', lines: 1 },
+                { name: 'baz.md', path: 'baz.md', type: 'file', lines: 1 },
+              ]),
+            ),
+          });
+          const t = mountTab();
+          await settle(t);
+          return t;
+        }
+
+        it('forwards a non-empty query to picker.setFilter', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          fireFilterFromChat(t, { query: 'bar' });
+          await settle(t);
+          expect(spy).toHaveBeenCalledOnce();
+          expect(spy.mock.calls[0][0]).toBe('bar');
+        });
+
+        it('empty string clears the filter', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          fireFilterFromChat(t, { query: 'bar' });
+          await settle(t);
+          fireFilterFromChat(t, { query: '' });
+          await settle(t);
+          expect(spy).toHaveBeenCalledTimes(2);
+          expect(spy.mock.calls[1][0]).toBe('');
+        });
+
+        it('filter changes propagate visually to the picker', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          fireFilterFromChat(t, { query: 'bar' });
+          await settle(t);
+          const rows = picker.shadowRoot.querySelectorAll('.row.is-file');
+          const names = Array.from(rows).map((r) => r.textContent);
+          expect(names.some((n) => n.includes('bar.md'))).toBe(true);
+          expect(names.some((n) => n.includes('baz.md'))).toBe(true);
+          expect(names.some((n) => n.includes('a.md'))).toBe(false);
+        });
+
+        it('non-string query is silently dropped', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          fireFilterFromChat(t, { query: 42 });
+          fireFilterFromChat(t, { query: null });
+          fireFilterFromChat(t, { query: { nested: 'obj' } });
+          fireFilterFromChat(t, { query: ['array'] });
+          await settle(t);
+          expect(spy).not.toHaveBeenCalled();
+        });
+
+        it('missing detail is silently dropped', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          const chat = t.shadowRoot.querySelector('ac-chat-panel');
+          chat.dispatchEvent(
+            new CustomEvent('filter-from-chat', {
+              bubbles: true,
+              composed: true,
+            }),
+          );
+          await settle(t);
+          expect(spy).not.toHaveBeenCalled();
+        });
+
+        it('detail without query field is silently dropped', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          fireFilterFromChat(t, {});
+          fireFilterFromChat(t, { other: 'field' });
+          await settle(t);
+          expect(spy).not.toHaveBeenCalled();
+        });
+
+        it('no crash when picker is not mounted', async () => {
+          const t = await setupBridgeTab();
+          const originalPicker = t._picker.bind(t);
+          t._picker = () => null;
+          try {
+            expect(() => {
+              fireFilterFromChat(t, { query: 'bar' });
+            }).not.toThrow();
+          } finally {
+            t._picker = originalPicker;
+          }
+        });
+
+        it('event bubbles across the shadow boundary (from textarea)', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          const chat = t.shadowRoot.querySelector('ac-chat-panel');
+          const textarea = chat.shadowRoot.querySelector('.input-textarea');
+          textarea.dispatchEvent(
+            new CustomEvent('filter-from-chat', {
+              detail: { query: 'bar' },
+              bubbles: true,
+              composed: true,
+            }),
+          );
+          await settle(t);
+          expect(spy).toHaveBeenCalledOnce();
+          expect(spy.mock.calls[0][0]).toBe('bar');
+        });
+
+        it('repeated identical queries forward (no bridge dedup)', async () => {
+          const t = await setupBridgeTab();
+          const picker = t.shadowRoot.querySelector('ac-file-picker');
+          const spy = vi.spyOn(picker, 'setFilter');
+          fireFilterFromChat(t, { query: 'bar' });
+          fireFilterFromChat(t, { query: 'bar' });
+          fireFilterFromChat(t, { query: 'bar' });
+          await settle(t);
+          expect(spy).toHaveBeenCalledTimes(3);
+        });
+      });
+
       it('surfaces restricted error as warning toast', async () => {
         publishFakeRpc({
           'Repo.get_file_tree': vi.fn().mockResolvedValue({
