@@ -141,7 +141,7 @@ class TestConstruction:
         self, cache: DocCache, repo_root: Path
     ) -> None:
         # Put triggers directory creation; we don't pre-create it.
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         assert not sidecar_dir.exists()
         cache.put("doc.md", 123.0, _make_outline())
         assert sidecar_dir.is_dir()
@@ -494,7 +494,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("doc.md", 1.0, _make_outline())
         sidecar = (
-            repo_root / ".ac-dc" / "doc_cache" / "doc.md.json"
+            repo_root / ".ac-dc4" / "doc_cache" / "doc.md.json"
         )
         assert sidecar.is_file()
 
@@ -503,7 +503,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("a/b/c.md", 1.0, _make_outline("a/b/c.md"))
         sidecar = (
-            repo_root / ".ac-dc" / "doc_cache" / "a__b__c.md.json"
+            repo_root / ".ac-dc4" / "doc_cache" / "a__b__c.md.json"
         )
         assert sidecar.is_file()
 
@@ -519,7 +519,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("doc.md", 1.0, _make_outline())
         raw = (
-            repo_root / ".ac-dc" / "doc_cache" / "doc.md.json"
+            repo_root / ".ac-dc4" / "doc_cache" / "doc.md.json"
         ).read_text()
         payload = json.loads(raw)
         assert payload["version"] == _SIDECAR_VERSION
@@ -532,7 +532,7 @@ class TestDiskPersistence:
             keyword_model="model-X",
         )
         payload = json.loads(
-            (repo_root / ".ac-dc" / "doc_cache" / "doc.md.json")
+            (repo_root / ".ac-dc4" / "doc_cache" / "doc.md.json")
             .read_text()
         )
         assert payload["path"] == "doc.md"
@@ -635,7 +635,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("doc.md", 1.0, _make_outline())
         sidecar = (
-            repo_root / ".ac-dc" / "doc_cache" / "doc.md.json"
+            repo_root / ".ac-dc4" / "doc_cache" / "doc.md.json"
         )
         assert sidecar.exists()
         cache.invalidate("doc.md")
@@ -652,7 +652,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("a.md", 1.0, _make_outline("a.md"))
         cache.put("b.md", 2.0, _make_outline("b.md"))
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         assert len(list(sidecar_dir.iterdir())) == 2
         cache.clear()
         assert list(sidecar_dir.iterdir()) == []
@@ -662,7 +662,7 @@ class TestDiskPersistence:
     ) -> None:
         cache.put("a.md", 1.0, _make_outline("a.md"))
         cache.clear()
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         # Directory still exists — ready for next put.
         assert sidecar_dir.is_dir()
 
@@ -675,7 +675,7 @@ class TestDiskPersistence:
         cache.put("doc.md", 1.0, first)
         cache.put("doc.md", 2.0, second)
         payload = json.loads(
-            (repo_root / ".ac-dc" / "doc_cache" / "doc.md.json")
+            (repo_root / ".ac-dc4" / "doc_cache" / "doc.md.json")
             .read_text()
         )
         assert payload["mtime"] == 2.0
@@ -691,7 +691,7 @@ class TestCrashRecovery:
     def test_corrupt_json_removed_on_load(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         bad = sidecar_dir / "broken.md.json"
         bad.write_text("{not valid json", encoding="utf-8")
@@ -703,7 +703,7 @@ class TestCrashRecovery:
     def test_non_dict_payload_removed(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         bad = sidecar_dir / "array.md.json"
         bad.write_text('["not a dict"]', encoding="utf-8")
@@ -713,7 +713,7 @@ class TestCrashRecovery:
     def test_wrong_version_removed(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         old = sidecar_dir / "stale.md.json"
         old.write_text(
@@ -733,7 +733,7 @@ class TestCrashRecovery:
     def test_missing_outline_field_removed(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         bad = sidecar_dir / "nooutline.md.json"
         bad.write_text(
@@ -751,7 +751,7 @@ class TestCrashRecovery:
     def test_missing_path_field_removed(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         bad = sidecar_dir / "nopath.md.json"
         bad.write_text(
@@ -773,7 +773,7 @@ class TestCrashRecovery:
         c1 = DocCache(repo_root)
         c1.put("good.md", 1.0, _make_outline("good.md"))
 
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         bad = sidecar_dir / "bad.md.json"
         bad.write_text("corrupted", encoding="utf-8")
 
@@ -789,7 +789,7 @@ class TestCrashRecovery:
         # doesn't have the .json suffix (it has .tmp) so the
         # loader skips it naturally. Should NOT be removed or
         # loaded.
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         tmp = sidecar_dir / "inprogress.md.json.tmp"
         tmp.write_text("partial", encoding="utf-8")
@@ -802,7 +802,7 @@ class TestCrashRecovery:
     def test_non_json_file_ignored(
         self, repo_root: Path
     ) -> None:
-        sidecar_dir = repo_root / ".ac-dc" / "doc_cache"
+        sidecar_dir = repo_root / ".ac-dc4" / "doc_cache"
         sidecar_dir.mkdir(parents=True)
         stray = sidecar_dir / "README"
         stray.write_text("documentation")
@@ -870,7 +870,7 @@ class TestNoRepoRoot:
     ) -> None:
         memory_cache.put("doc.md", 1.0, _make_outline())
         # Nothing at the default path.
-        assert not (tmp_path / ".ac-dc").exists()
+        assert not (tmp_path / ".ac-dc4").exists()
 
     def test_invalidate_is_pure_memory(
         self, memory_cache: DocCache

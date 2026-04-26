@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 from ac_dc.base_cache import BaseCache
+from ac_dc.config import _AC_DC_DIR
 from ac_dc.doc_index.models import (
     DocHeading,
     DocLink,
@@ -65,10 +66,16 @@ from ac_dc.doc_index.models import (
 logger = logging.getLogger(__name__)
 
 
-# Sidecar directory name under the per-repo ``.ac-dc/`` working
+# Sidecar directory name under the per-repo ``.ac-dc4/`` working
 # directory. Separate from ``symbol_cache/`` (which doesn't
 # exist — symbol cache is in-memory only) so a future migration
 # that wanted to add on-disk symbol persistence wouldn't collide.
+#
+# The parent directory name (``.ac-dc4``) is imported from the
+# config module rather than hardcoded here — ``.ac-dc`` belongs
+# to the previous AC-DC implementation that shares repositories
+# with this one during the transition, and colliding on that
+# name would corrupt both states. See config._AC_DC_DIR.
 _SIDECAR_DIR_NAME = "doc_cache"
 
 # Current sidecar schema version. Bumped when the on-disk
@@ -408,7 +415,7 @@ class DocCache(BaseCache[DocOutline]):
         """Return the sidecar directory, or None if disabled."""
         if self._repo_root is None:
             return None
-        return self._repo_root / ".ac-dc" / _SIDECAR_DIR_NAME
+        return self._repo_root / _AC_DC_DIR / _SIDECAR_DIR_NAME
 
     @staticmethod
     def _sidecar_filename(key: str) -> str:
