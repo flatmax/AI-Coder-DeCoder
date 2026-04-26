@@ -289,6 +289,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     // pushed to the picker via direct-update so the
     // matching row gets the `.active-in-viewer` highlight.
     this._activePath = null;
+    // Review state — populated when the LLM service
+    // broadcasts `review-started` and cleared on
+    // `review-ended`. Shape matches backend's
+    // `get_review_state()`: `{active, branch,
+    //   base_commit, branch_tip, original_branch,
+    //   commits, changed_files, stats}`. Null when
+    // no review is active. Pushed to the picker via
+    // direct-update so the review banner appears above
+    // the filter bar. The picker's `reviewState` prop
+    // renders the banner only when `active === true`.
+    this._reviewState = null;
     // Default picker width. Phase 3 wires a draggable handle
     // and localStorage persistence.
     this._pickerWidthPx = 280;
@@ -367,6 +378,9 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
     this._onActiveFileChanged =
       this._onActiveFileChanged.bind(this);
+    this._onReviewStarted = this._onReviewStarted.bind(this);
+    this._onReviewEnded = this._onReviewEnded.bind(this);
+    this._onExitReview = this._onExitReview.bind(this);
     // Context-menu action handler — bubbles up from the
     // picker via `bubbles: true, composed: true`. 8b
     // wires stage / unstage / discard / delete; 8c
@@ -416,6 +430,15 @@ export class FilesTab extends RpcMixin(LitElement) {
       'active-file-changed',
       this._onActiveFileChanged,
     );
+    // Review lifecycle — the LLM service broadcasts
+    // `review-started` when `start_review` succeeds and
+    // `review-ended` on `end_review`. The app-shell's
+    // own handlers for these events (driving the
+    // commit-button gate) bubble through to the window
+    // so we pick them up here too. Both events'
+    // detail carries the full review-state dict.
+    window.addEventListener('review-started', this._onReviewStarted);
+    window.addEventListener('review-ended', this._onReviewEnded);
   }
 
   disconnectedCallback() {
@@ -428,6 +451,11 @@ export class FilesTab extends RpcMixin(LitElement) {
       'active-file-changed',
       this._onActiveFileChanged,
     );
+    window.removeEventListener(
+      'review-started',
+      this._onReviewStarted,
+    );
+    window.removeEventListener('review-ended', this._onReviewEnded);
     super.disconnectedCallback();
   }
 
@@ -693,6 +721,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.branchInfo = this._latestBranchInfo;
     picker.excludedFiles = new Set(this._excludedFiles);
     picker.activePath = this._activePath;
+    picker.reviewState = this._reviewState;
     picker.requestUpdate();
     chat.repoFiles = this._repoFiles;
     chat.requestUpdate();
@@ -780,6 +809,111 @@ export class FilesTab extends RpcMixin(LitElement) {
     if (picker) {
       picker.activePath = nextPath;
       picker.requestUpdate();
+    }
+  }
+
+  _onReviewStarted(event) {
+    // Enter review mode. Store the full state dict and
+    // push to the picker so the banner appears. The
+    // backend's `start_review` has already cleared its
+    // own `_selected_files`, but we mirror the clear
+    // locally (defense-in-depth, per
+    // specs3/4-features/code_review.md) so the UI
+    // reflects the empty selection without waiting for
+    // the server's `filesChanged` broadcast.
+    //
+    // Detail shape matches backend's `get_review_state()`:
+    // `{active: true, branch, base_commit, branch_tip,
+    //   original_branch, commits, changed_files, stats}`.
+    const state = event.detail || {};
+    this._reviewState = state;
+    // Clear selection — review starts with a clean slate.
+    // Direct-update pattern (not `_applySelection` with
+    // `notifyServer=true`) because the server has
+    // already cleared on its side; round-tripping would
+    // be redundant.
+    this._selectedFiles = new Set();
+    const picker = this._picker();
+    if (picker) {
+      picker.reviewState = state;
+      picker.selectedFiles = new Set();
+      picker.requestUpdate();
+    }
+    const chat = this._chat();
+    if (chat) {
+      chat.selectedFiles = [];
+      chat.requestUpdate();
+    }
+    // Refresh file tree so the picker reflects the
+    // staged state produced by the soft reset. The
+    // tree reload pushes tree/status/branch props
+    // through `_pushChildProps` which also re-pushes
+    // reviewState — keeping the banner in sync.
+    this._loadFileTree();
+  }
+
+  _onReviewEnded() {
+    // Exit review mode. Clear local state and push
+    // null to the picker so the banner disappears.
+    // Selection is NOT cleared here — the server's
+    // `end_review` doesn't touch `_selected_files`,
+    // and the user may want to continue with the
+    // files they had in review context. If the
+    // server's selection broadcast fires later, the
+    // normal `files-changed` handler picks it up.
+    this._reviewState = null;
+    const picker = this._picker();
+    if (picker) {
+      picker.reviewState = null;
+      picker.requestUpdate();
+    }
+    // Refresh file tree to reflect the restored
+    // post-review state (HEAD reattached, staging
+    // cleared).
+    this._loadFileTree();
+  }
+
+  async _onExitReview() {
+    // User clicked the exit button on the review
+    // banner. Call the server's `end_review` RPC;
+    // the server broadcasts `reviewEnded` which
+    // comes back through our `_onReviewEnded`
+    // handler to do the UI cleanup. No optimistic
+    // local update — if the server rejects (e.g.
+    // non-localhost caller), the banner should stay
+    // visible so the user sees the error state.
+    if (!this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.end_review',
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      // Partial-exit case — server couldn't reattach
+      // the original branch. State was cleared on
+      // the server regardless; surface the error
+      // so the user knows git is in an unusual
+      // state.
+      if (result && result.status === 'partial' && result.error) {
+        this._showToast(
+          `Review exited with warning: ${result.error}`,
+          'warning',
+        );
+        return;
+      }
+      // Success — the server's `reviewEnded`
+      // broadcast will trigger `_onReviewEnded`.
+    } catch (err) {
+      console.error('[files-tab] end_review failed', err);
+      this._showToast(
+        `Failed to exit review: ${err?.message || err}`,
+        'error',
+      );
     }
   }
 
