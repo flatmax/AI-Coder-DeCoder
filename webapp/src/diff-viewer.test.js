@@ -541,6 +541,49 @@ describe('DiffViewer openFile', () => {
     await settle(el);
     expect(el._file?.path).toBe('b.py');
   });
+
+  it('generation counter discards a slow fetch that resolves late', async () => {
+    // A late-resolving fetch from a superseded openFile
+    // call must NOT clobber the active file. The
+    // generation counter is the guard: each openFile
+    // bumps it and captures its value; when the fetch
+    // resolves, the handler checks whether the counter
+    // has advanced past the captured value, and if so
+    // skips model-attach.
+    //
+    // This test exposes the race directly — manually
+    // holds the first fetch open, lets the second
+    // complete, then resolves the first. Without the
+    // generation guard, the stale fetch's model-attach
+    // would overwrite b.py with a.py's stale content.
+    let resolveFirst;
+    const firstPromise = new Promise((r) => {
+      resolveFirst = r;
+    });
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async (path) => {
+        if (path === 'slow.py') return firstPromise;
+        return `content of ${path}`;
+      }),
+    });
+    const el = mountViewer();
+    await settle(el);
+    // Start the slow fetch — don't await yet.
+    const slowFetch = el.openFile({ path: 'slow.py' });
+    // Second call for a different path. Its fetch
+    // resolves immediately.
+    await el.openFile({ path: 'fast.py' });
+    await settle(el);
+    expect(el._file?.path).toBe('fast.py');
+    // Now resolve the slow fetch. It's stale — the
+    // generation counter has advanced. The active file
+    // must stay as fast.py.
+    resolveFirst('stale content');
+    await slowFetch;
+    await settle(el);
+    expect(el._file?.path).toBe('fast.py');
+    expect(el._file?.modified).not.toBe('stale content');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -893,6 +936,31 @@ describe('DiffViewer refreshOpenFiles', () => {
     await el.refreshOpenFiles();
     await settle(el);
     expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('refreshActiveFile is a no-op when virtual comparison is active', async () => {
+    // loadPanel populates _virtualComparison, not _file.
+    // refreshActiveFile must recognise this and skip —
+    // there's no backing disk state to refetch, and
+    // re-entering the fetch path would either fail or
+    // clobber the ad-hoc comparison content.
+    const rpc = vi.fn(async () => 'should not be called');
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    await el.loadPanel('left side', 'left', 'A');
+    await el.loadPanel('right side', 'right', 'B');
+    await settle(el);
+    expect(el._virtualComparison).not.toBe(null);
+    expect(el._file).toBe(null);
+    // refreshActiveFile with only a virtual comparison
+    // should not hit the RPC and should leave both sides
+    // intact.
+    await el.refreshActiveFile();
+    await settle(el);
+    expect(rpc).not.toHaveBeenCalled();
+    expect(el._virtualComparison.leftContent).toBe('left side');
+    expect(el._virtualComparison.rightContent).toBe('right side');
   });
 });
 

@@ -747,6 +747,160 @@ describe('AppShell', () => {
     });
   });
 
+  describe('Alt+Arrow debounce', () => {
+    async function settle(shell) {
+      await shell.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await shell.updateComplete;
+    }
+
+    /**
+     * Dispatch an Alt+Arrow keydown on the document,
+     * simulating a user holding Alt and pressing the
+     * given arrow direction.
+     */
+    function fireAltArrow(direction) {
+      const keyMap = {
+        left: 'ArrowLeft',
+        right: 'ArrowRight',
+        up: 'ArrowUp',
+        down: 'ArrowDown',
+      };
+      const ev = new KeyboardEvent('keydown', {
+        key: keyMap[direction],
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(ev);
+    }
+
+    function fireAltRelease() {
+      const ev = new KeyboardEvent('keyup', {
+        key: 'Alt',
+        bubbles: true,
+      });
+      document.dispatchEvent(ev);
+    }
+
+    it('rapid arrow sequence produces one viewer fetch, not N', async () => {
+      // The core win of the debounce: holding Alt+Right
+      // through a 10-node path should produce ONE
+      // openFile call for the final target, not ten.
+      // Tests the _altArrowTimer + _flushAltArrowPending
+      // pair directly — bypasses the real timer by
+      // faking it.
+      //
+      // Fake timers are installed AFTER seeding the shell
+      // and grid, because `settle` awaits a setTimeout(0)
+      // that would otherwise never fire under fake timers.
+      const shell = mountShell();
+      await settle(shell);
+      // Seed the grid with a chain of nodes so arrow
+      // presses have targets. openFile on the grid is
+      // synchronous; each call creates a new node
+      // adjacent to the current.
+      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      nav.openFile('a.py');
+      nav.openFile('b.py');
+      nav.openFile('c.py');
+      nav.openFile('d.py');
+      await settle(shell);
+      // Spy on the diff viewer's openFile.
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const openSpy = vi.spyOn(diff, 'openFile');
+      // NOW install fake timers — only the debounce
+      // setTimeout needs to be controlled from here on.
+      vi.useFakeTimers();
+      try {
+        // Navigate back through the chain. After seeding,
+        // the current node is d.py; three left-arrows
+        // walk back to a.py.
+        fireAltArrow('left');
+        fireAltArrow('left');
+        fireAltArrow('left');
+        // Before the debounce window elapses, no viewer
+        // fetch has been dispatched.
+        expect(openSpy).not.toHaveBeenCalled();
+        // Flush the debounce timer, then drain any
+        // follow-up microtasks from the internal
+        // updateComplete.then chain.
+        await vi.advanceTimersByTimeAsync(250);
+      } finally {
+        vi.useRealTimers();
+      }
+      await settle(shell);
+      // Exactly one openFile dispatch, for the final
+      // position after the three lefts.
+      expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('Alt release flushes pending fetch immediately', async () => {
+      // Releasing Alt mid-debounce must fire the pending
+      // fetch right away, otherwise the HUD fades out
+      // before the viewer updates.
+      const shell = mountShell();
+      await settle(shell);
+      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      nav.openFile('a.py');
+      nav.openFile('b.py');
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const openSpy = vi.spyOn(diff, 'openFile');
+      vi.useFakeTimers();
+      try {
+        fireAltArrow('left');
+        expect(openSpy).not.toHaveBeenCalled();
+        fireAltRelease();
+        // Release cancels the debounce timer and flushes
+        // synchronously via _flushAltArrowPending, but
+        // the actual openFile call happens inside an
+        // updateComplete.then() microtask. Drain.
+        await vi.runAllTimersAsync();
+      } finally {
+        vi.useRealTimers();
+      }
+      await settle(shell);
+      expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('arrow within debounce window resets the timer', async () => {
+      // Subsequent arrow within the debounce window
+      // resets the timer (coalesces). Only the final
+      // keystroke's target gets dispatched.
+      const shell = mountShell();
+      await settle(shell);
+      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      nav.openFile('a.py');
+      nav.openFile('b.py');
+      nav.openFile('c.py');
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const openSpy = vi.spyOn(diff, 'openFile');
+      vi.useFakeTimers();
+      try {
+        // First arrow, wait 100ms (inside window).
+        fireAltArrow('left');
+        await vi.advanceTimersByTimeAsync(100);
+        expect(openSpy).not.toHaveBeenCalled();
+        // Second arrow resets the timer.
+        fireAltArrow('left');
+        // Another 150ms — would have fired the first
+        // arrow's debounce (total 250ms), but the second
+        // reset means we need a full 200ms from the
+        // second arrow.
+        await vi.advanceTimersByTimeAsync(150);
+        expect(openSpy).not.toHaveBeenCalled();
+        // Push past the second timer.
+        await vi.advanceTimersByTimeAsync(100);
+      } finally {
+        vi.useRealTimers();
+      }
+      await settle(shell);
+      expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // ---------------------------------------------------------------
   // Dialog polish — drag, resize, minimize, persistence
   // ---------------------------------------------------------------

@@ -71,63 +71,28 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 - **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
 
-## DiffViewer redesign plan — planned
+## DiffViewer redesign plan — **delivered**
 
-Single-file, no-cache, refetch-on-every-click. See D18 for rationale and specs impact. Six-pass delivery; each pass is an independently reviewable commit.
+Single-file, no-cache, refetch-on-every-click. See D18 for rationale and specs impact. Delivered across two commits:
 
-### Pass 1 — diff-viewer.js core rewrite
+- **Pass 1 (diff-viewer.js core rewrite)** — commit `788b90d`. Replaced `_files[]` / `_activeIndex` / `closeFile` / `saveAll` / `getDirtyFiles` / `_viewportStates` / `_panelLabels` / `_texPreviewStates` / `_openingPaths` with a single `_file` slot OR a single `_virtualComparison` slot (mutually exclusive), plus an `_openingGeneration` counter for fetch-superseding. Rewrote `openFile` (no same-file suppression, generation-counter check at resolve time, clears virtual slot), `loadPanel` (accumulates across calls in the virtual slot), `refreshActiveFile` (no-op when virtual active). Removed Ctrl+PageUp, Ctrl+PageDown, Ctrl+W. Kept Ctrl+S and Ctrl+F. Monaco Go-to-Def cross-file dispatch switched to window-level `navigate-file` events so the app shell's full pipeline runs.
 
-Strip `_files[]`, `_activeIndex`, `closeFile`, `saveAll`, `getDirtyFiles`, `_viewportStates`, `_panelLabels`, `_texPreviewStates`, `_openingPaths`. Replace with:
+- **Pass 2 (app-shell.js caller updates + Pass 3 tests)** — commit `d5b8d3c`. Removed redundant `closeFile` in the SVG-toggle visual→text branch. Updated the text→visual branch to read from `_file` (single slot) instead of `_files[]`. Added Alt+Arrow debounce (~200ms window) so rapid arrow sequences through the file-nav grid coalesce into a single viewer fetch at the end — HUD updates remain immediate, only the viewer dispatch defers. Alt release flushes pending dispatch immediately so the HUD doesn't fade before the viewer updates. Wired review-mode transitions (`review-started`, `review-ended`) to refresh open viewers via the existing `files-reverted` path so the backend's soft-reset changes to HEAD/working-copy propagate into already-open files. Test additions: same-file refetch, virtual slot accumulation, generation-counter discard of late stale fetches, `refreshActiveFile` no-op when virtual, three Alt+Arrow debounce tests (rapid sequence → one fetch, Alt release flushes, arrow within window resets timer).
 
-- `_file: {path, original, modified, savedContent, isNew, isVirtual, isReadOnly, isConfig, configType} | null` — the single active file slot
-- `_virtualComparison: {leftContent, leftLabel, rightContent, rightLabel} | null` — the loadPanel slot
-- `_openingGeneration: number` — monotonic counter; each `openFile` call bumps it and captures the current value. Async fetches that resolve after the counter has advanced skip their model-attach step.
+### Delivery deviations from the original plan
 
-Rewrite `openFile`:
-- No same-file suppression. Every call fetches.
-- No concurrent-path deduplication. A second call for any path supersedes the first via generation-counter check at resolve time.
-- Clear `_virtualComparison` when opening a real file.
-- Dispose old models, fetch new content, build new models, attach.
+- **Pass 4 consolidation.** The original plan had four passes (1 code, 2 callers, 3 tests, 4 notes). In practice tests landed with the relevant code changes rather than in a separate commit — Pass 1's commit included its own test updates (removing `_files[]`-style assertions, adding the no-cache invariants), and Pass 2's commit included the Alt+Arrow debounce tests alongside the feature. Pass 4 (this update) is the only separately-committed pass.
 
-Rewrite `loadPanel(content, panel, label)`:
-- Populate `_virtualComparison[panel]Content` and `[panel]Label`
-- If `_virtualComparison` was null, initialize with empty opposite side and clear `_file`
-- Dispose old models (if any), build new models from virtual contents, attach. Modified editor forced read-only.
+- **`refreshOpenFiles` kept as an alias, not removed.** App-shell callers (`stream-complete`, `commitResult`, `files-reverted`) still use the plural name; the single-file rewrite aliases it to `refreshActiveFile` so no caller site needed to change.
 
-Rewrite `refreshOpenFiles` as `refreshActiveFile`:
-- No-op when `_file` is null or `_virtualComparison` is active
-- Otherwise: refetch HEAD + working, rebuild models, clear dirty
-- Keep `refreshOpenFiles` as an alias so app-shell callers (`stream-complete`, `commitResult`, `files-reverted`) don't change
+- **No `file-nav.test.js` changes landed.** The plan noted grid history tracking was unchanged; inspection confirmed no same-file-reuse logic tied to viewer open-state existed, so the file didn't need adjustment.
 
-Remove keyboard shortcuts: Ctrl+PageUp, Ctrl+PageDown, Ctrl+W. Keep Ctrl+S (save active file), Ctrl+F (Monaco find widget).
+### Invariants preserved
 
-### Pass 2 — app-shell.js caller updates
-
-- Remove any `diffViewer.closeFile(path)` calls (SVG-toggle handler replaces the file entirely anyway)
-- Monaco Go-to-Def cross-file: change the `_codeEditorService.openCodeEditor` patch to dispatch `navigate-file` on the window instead of calling `this.openFile` directly. Include `{path, line}` in detail.
-- Add Alt+Arrow debounce: hold a timer in the grid keydown path. Arrow updates `fileNav.currentNodeId` and HUD visually on every press, but `navigate-file` dispatch is deferred by ~200ms. A subsequent arrow within the window resets the timer. Alt release dispatches immediately.
-- Wire review-mode transitions (`review-started`, `review-ended` events) to `files-reverted` so the active file refetches.
-
-### Pass 3 — tests
-
-- `diff-viewer.test.js`: drop multi-file tests (open two files, verify both tracked; Ctrl+PageUp cycles; closeFile keeps other open). Add: same-file click refetches; unsaved edits discarded on switch; virtual slot accumulates across two loadPanel calls; opening real file clears virtual slot; generation-counter discards superseded fetches; refreshActiveFile no-op when virtual active.
-- `app-shell.test.js`: add Alt+Arrow debounce test (rapid arrow sequence produces one navigate-file dispatch, not N).
-- `file-nav.test.js`: if the grid has any same-file-reuse logic tied to open-state, adjust. Grid history tracking itself is unchanged.
-
-### Pass 4 — IMPLEMENTATION_NOTES.md work tracking
-
-Strike completed passes; add delivery commits; document any deviations.
-
-### Notes
-
-- specs3/5-webapp/diff_viewer.md is **not** updated. It describes the previous implementation, not this one. The single-file policy is specs4-only.
-- The `file-saved` event shape is unchanged. Saves still route through the parent.
-- Markdown preview, TeX preview, LSP, markdown link provider, status LED, panel labels (for loadPanel), content-change dirty tracking are all preserved.
-- The diff editor's single-instance reuse pattern is preserved — the rewrite changes the contents that feed the models, not the editor lifecycle.
-
-## DiffViewer redesign plan — planned
-
-Single-file, no-cache, refetch-on-every-click. See D18 for rationale and specs impact. Six-pass delivery; each pass is an independently reviewable commit.
+- specs3/5-webapp/diff_viewer.md was NOT updated — it describes the previous implementation. The single-file policy is specs4-only (see D18).
+- `file-saved` event shape unchanged. Saves still route through the parent.
+- Markdown preview, TeX preview, LSP, markdown link provider, status LED, panel labels for `loadPanel`, content-change dirty tracking all preserved.
+- The diff editor's single-instance reuse pattern is preserved — the rewrite changes what feeds the models, not the editor lifecycle itself.
 
 ### Pass 1 — diff-viewer.js core rewrite
 
