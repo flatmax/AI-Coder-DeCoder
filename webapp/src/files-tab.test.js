@@ -5071,11 +5071,17 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(setExcluded).not.toHaveBeenCalled();
       });
 
-      it('silently drops new-file and new-directory (part 2 scope)', async () => {
-        // These lay the groundwork for part 2 of
-        // Increment 9. Reaching the default case
-        // without firing any implemented RPCs
-        // confirms the part-1 split is clean.
+      it('new-file and new-directory route to picker inline-input (no RPC yet)', async () => {
+        // Part 2 of Increment 9 wires these actions to
+        // the picker's `beginCreateFile` /
+        // `beginCreateDirectory` methods, which open an
+        // inline input. The RPC doesn't fire here; it
+        // fires on the commit event (tested in the
+        // new-file-committed / new-directory-committed
+        // describe blocks). This test just pins that
+        // the dir actions routed correctly without
+        // falling through to the catch-all default
+        // branch OR firing staging RPCs.
         const { t, stage } = await setupDirTab();
         fireDirAction(t, {
           action: 'new-file',
@@ -5089,6 +5095,17 @@ describe('FilesTab context-menu action dispatch', () => {
         });
         await settle(t);
         expect(stage).not.toHaveBeenCalled();
+        // Picker's inline-input state reflects the
+        // most recent routing call. The second
+        // fireDirAction (new-directory) wins because
+        // `beginCreateDirectory` was called after
+        // `beginCreateFile`, and the two states are
+        // mutually exclusive.
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        expect(picker._creating).toEqual({
+          mode: 'new-directory',
+          parentPath: 'src',
+        });
       });
     });
   });

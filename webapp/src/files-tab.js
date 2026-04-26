@@ -381,6 +381,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onRenameCommitted = this._onRenameCommitted.bind(this);
     this._onDuplicateCommitted =
       this._onDuplicateCommitted.bind(this);
+    // New-file and new-directory commit handlers —
+    // fired when the picker's inline input is
+    // confirmed with Enter. Same bind pattern as
+    // rename / duplicate.
+    this._onNewFileCommitted = this._onNewFileCommitted.bind(this);
+    this._onNewDirectoryCommitted =
+      this._onNewDirectoryCommitted.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -1180,10 +1187,11 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
-   * Route a directory-row context menu action. Part 1
-   * of Increment 9 wires five actions; part 2 adds
-   * new-file and new-directory via the inline-input
-   * flow.
+   * Route a directory-row context menu action. All
+   * seven dir-menu actions are wired here — the
+   * new-file / new-directory actions open an inline
+   * input via the picker rather than calling an RPC
+   * directly; the RPC fires on the commit event.
    */
   _dispatchDirAction(action, path, name) {
     switch (action) {
@@ -1196,6 +1204,12 @@ export class FilesTab extends RpcMixin(LitElement) {
       case 'rename-dir':
         this._dispatchRenameDir(path, name);
         return;
+      case 'new-file':
+        this._dispatchNewFile(path);
+        return;
+      case 'new-directory':
+        this._dispatchNewDirectory(path);
+        return;
       case 'exclude-all':
         this._dispatchExcludeAll(path);
         return;
@@ -1203,10 +1217,10 @@ export class FilesTab extends RpcMixin(LitElement) {
         this._dispatchIncludeAll(path);
         return;
       default:
-        // new-file / new-directory land in part 2.
-        // Silent drop until then — right-clicks on
-        // the menu items produce no error toast or
-        // console noise.
+        // Unknown actions silently drop. A future menu
+        // addition that forgets to wire a handler will
+        // end up here and produce a no-op rather than
+        // a crash.
         return;
     }
   }
@@ -1581,6 +1595,117 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
+   * Handle the picker's `new-file-committed` event.
+   * Event detail: `{parentPath, name}` where `name` is
+   * the basename typed by the user. Combine with
+   * `parentPath` to produce the full repo-relative path
+   * and call `Repo.create_file(path, '')`.
+   *
+   * Path separators in `name` are rejected — users who
+   * want to create a nested file path should create the
+   * directories separately. This matches the rename
+   * path's behaviour and keeps the interaction
+   * predictable.
+   *
+   * Empty `parentPath` (repo root) is valid — the
+   * resulting target path is just `name`.
+   */
+  async _onNewFileCommitted(event) {
+    const detail = event.detail || {};
+    const parentPath = detail.parentPath;
+    const name = detail.name;
+    if (typeof parentPath !== 'string') return;
+    if (typeof name !== 'string' || !name) return;
+    if (name.includes('/') || name.includes('\\')) {
+      this._showToast(
+        'File name cannot contain path separators.',
+        'warning',
+      );
+      return;
+    }
+    const targetPath = parentPath ? `${parentPath}/${name}` : name;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.create_file',
+        targetPath,
+        '',
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(`Created ${targetPath}`, 'success');
+    } catch (err) {
+      console.error('[files-tab] create_file failed', err);
+      this._showToast(
+        `Failed to create ${targetPath}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Handle the picker's `new-directory-committed`
+   * event. Event detail: `{parentPath, name}`. Git
+   * doesn't track directories directly — only files
+   * with content — so we create the new directory by
+   * writing a `.gitkeep` file inside it. `.gitkeep` is
+   * a community convention (not a git feature); the
+   * name self-documents the purpose and users who see
+   * it in diffs immediately know what it's for.
+   *
+   * After the user adds real files to the directory,
+   * they can delete `.gitkeep` or leave it.
+   *
+   * Same path-separator validation as new-file.
+   */
+  async _onNewDirectoryCommitted(event) {
+    const detail = event.detail || {};
+    const parentPath = detail.parentPath;
+    const name = detail.name;
+    if (typeof parentPath !== 'string') return;
+    if (typeof name !== 'string' || !name) return;
+    if (name.includes('/') || name.includes('\\')) {
+      this._showToast(
+        'Directory name cannot contain path separators.',
+        'warning',
+      );
+      return;
+    }
+    const dirPath = parentPath ? `${parentPath}/${name}` : name;
+    const keepPath = `${dirPath}/.gitkeep`;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.create_file',
+        keepPath,
+        '',
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(`Created directory ${dirPath}`, 'success');
+    } catch (err) {
+      console.error(
+        '[files-tab] create_file (gitkeep) failed',
+        err,
+      );
+      this._showToast(
+        `Failed to create ${dirPath}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
    * Add `path` to the excluded set via the standard
    * exclusion path. Idempotent — a file already
    * excluded produces a set-equality short-circuit
@@ -1857,6 +1982,38 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
+   * Open the new-file inline input inside `parentPath`.
+   * Picker renders an empty input at the top of that
+   * directory's children and auto-expands the parent
+   * so the input is visible. On Enter, the picker
+   * fires `new-file-committed` with `{parentPath, name}`
+   * which `_onNewFileCommitted` catches.
+   *
+   * parentPath may be the empty string (repo root).
+   */
+  _dispatchNewFile(parentPath) {
+    const picker = this._picker();
+    if (!picker) return;
+    picker.beginCreateFile(parentPath);
+  }
+
+  /**
+   * Open the new-directory inline input inside
+   * `parentPath`. Parallel to `_dispatchNewFile`.
+   * Commit fires `new-directory-committed`; the
+   * orchestrator creates the directory by writing a
+   * `.gitkeep` file inside it (git doesn't track
+   * empty directories, so a placeholder file is
+   * needed for the directory to exist in the next
+   * commit).
+   */
+  _dispatchNewDirectory(parentPath) {
+    const picker = this._picker();
+    if (!picker) return;
+    picker.beginCreateDirectory(parentPath);
+  }
+
+  /**
    * Add every descendant file to the excluded set.
    * Skips the server round-trip when the union is
    * already the current state (every descendant
@@ -1977,6 +2134,8 @@ export class FilesTab extends RpcMixin(LitElement) {
           @context-menu-action=${this._onContextMenuAction}
           @rename-committed=${this._onRenameCommitted}
           @duplicate-committed=${this._onDuplicateCommitted}
+          @new-file-committed=${this._onNewFileCommitted}
+          @new-directory-committed=${this._onNewDirectoryCommitted}
         ></ac-file-picker>
       </div>
       <div class="chat-pane">

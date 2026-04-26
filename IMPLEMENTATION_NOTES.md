@@ -3243,7 +3243,7 @@ Increment 8 complete. File context menu has nine working actions (stage / unstag
 Same mechanism as #8 with different actions. Split into two parts:
 
 - **Part 1** (delivered): stage-all / unstage-all / rename-dir / exclude-all / include-all
-- **Part 2** (planned): new-file / new-directory via inline-input flow
+- **Part 2** (delivered): new-file / new-directory via inline-input flow
 
 ### ~~Increment 9 part 1 — Directory batch actions~~ (delivered)
 
@@ -3293,10 +3293,45 @@ Design points pinned by tests:
 
 - **`someExcluded` uses an OR condition, not percentage.** Any non-zero count of excluded descendants makes `someExcluded=true`. A dir with 100 files where 1 is excluded still shows Include-all (the user might want to include that one). Alternative (e.g. only show when >50% excluded) would add UX complexity for no clear benefit.
 
-Open for Part 2:
+### ~~Increment 9 part 2 — New file / new directory inline inputs~~ (delivered)
 
-- **New file / new directory inline inputs.** Part 2 of Increment 9. The picker will need a new type of inline input — not replacing or appending to an existing row but inserting a new "create a new entry in this directory" row. Enter commits with `new-file-committed` or `new-directory-committed` events carrying `{parentPath, name}`. The orchestrator dispatches to `Repo.create_file(path, '')` for new files, or `Repo.create_file(path + '/.gitkeep', '')` for new directories (so git tracks the otherwise-empty dir). Reuses the same validation (path separators rejected). Same UX as rename/duplicate — stem selection, Enter commits, Escape cancels, blur cancels.
-- **Scoping consideration.** Part 2 can land independently because it only adds new inline-input types and new dispatcher branches; nothing in part 1 needs to change.
+New file and new directory creation via the same inline-input pattern used by rename and duplicate, with a third `_creating` state field carrying both a mode and a parent-directory path. New-entry input rows appear at the top of the target directory's children regardless of sort mode (sort-independent positioning — matches VS Code / IDE convention). Auto-expands the parent so the input is visible even when the user clicks "New file…" on a collapsed directory.
+
+- `webapp/src/file-picker.js` — additions:
+  - Four module-level `INLINE_MODE_*` constants (`RENAME`, `DUPLICATE`, `NEW_FILE`, `NEW_DIR`) replacing the previous ad-hoc string comparisons. The constants let a reader see all four modes in one place and make `_renderInlineInput` / `_commitInlineInput` / `_cancelInlineInput` dispatch branches grep-able.
+  - `_creating` reactive state field on the constructor. Shape when active: `{mode, parentPath}`. Null when no creation is in progress. Distinct from `_renaming` / `_duplicating` because the input is NOT operating on an existing file — it's creating a new one inside `parentPath`, so neither the source-path nor the current-name pattern applies.
+  - `beginCreateFile(parentPath)` and `beginCreateDirectory(parentPath)` public methods. Clear any active rename / duplicate state (mutual exclusion — one inline input at a time). Auto-expand the parent directory so the input lands visibly. Empty-string `parentPath` IS legal (that's the repo root); the auto-expand branch skips it because the root isn't a collapsible node.
+  - `beginRename` and `beginDuplicate` updated to clear `_creating` too, so the mutual-exclusion rule holds in all directions.
+  - `updated()` lifecycle hook's guard extended to watch `_creating` alongside `_renaming` / `_duplicating`. Same auto-focus + stem-selection path runs; since create-mode inputs start empty, the stem selection is a no-op and the user starts at a blank input (focus is the key affordance).
+  - `_renderInlineInput` extended — now handles all four modes. Pre-fill: rename uses basename, duplicate uses full path, create modes use empty string. Aria-label: rename/duplicate reference the source name, create modes reference the parent dir ("New file in src/" or "New file at repository root" for the empty-parent case). Placeholder text on create-mode inputs gives users a format hint ("filename.md" / "dirname") — rename / duplicate have pre-filled values so the placeholder wouldn't show.
+  - New-entry input rendering integrated into `_renderDir` and the top-level render path. When `_creating.parentPath` matches a directory that's currently expanded, the input row renders BEFORE that directory's children. When `_creating.parentPath === ''` (repo root), the input renders at the top of the tree, before `_renderChildren(filtered, ...)`. Sort-mode-independent — the input is a UI affordance, not a data row, so its position doesn't depend on how the user has sorted the tree. After commit, the new file appears in the tree at its sort-natural position on the next render.
+  - `_commitInlineInput` gained two new branches. Create-mode commits dispatch `new-file-committed` or `new-directory-committed` with `{parentPath, name}` shape (distinct from rename / duplicate's `{sourcePath, targetName}`) — the orchestrator needs to distinguish "operate on an existing path" from "create a new entry under a parent". Empty-name commits are no-ops (state cleared, no event dispatched).
+  - `_cancelInlineInput` extended — clears `_creating` when mode is `new-file` or `new-directory`. Guard against the blur-after-commit race matches the rename / duplicate pattern: sourcePath (the parent path for create modes) is checked against `_creating.parentPath` so a stale blur-cancel after a successful commit doesn't re-clear already-clean state.
+
+- `webapp/src/files-tab.js` — additions:
+  - `_dispatchNewFile(parentPath)` and `_dispatchNewDirectory(parentPath)` — thin delegators to `picker.beginCreateFile` / `picker.beginCreateDirectory`. Called by `_dispatchDirAction` when the user picks the corresponding menu item. The RPC doesn't fire here; it fires on commit.
+  - `_dispatchDirAction` switch updated — `new-file` and `new-directory` cases added alongside the existing five. No more silent-drop default for those actions. Unknown actions (future menu items without wired handlers) still fall through to the default branch.
+  - `_onNewFileCommitted(event)` — reads `{parentPath, name}` from detail, rejects path separators with a warning toast, joins into a target path (`parentPath/name` or just `name` for repo root), calls `Repo.create_file(targetPath, '')`. On success, reloads the tree and surfaces a success toast. On restricted caller: warning. On RPC rejection: error toast (common cause: target already exists).
+  - `_onNewDirectoryCommitted(event)` — same pattern, but the target path is `parentPath/name/.gitkeep` (with content `''`). Git doesn't track empty directories — only files with content — so writing a placeholder file is the standard technique for creating a directory that will be visible in the next commit. `.gitkeep` is the community convention; the name self-documents its purpose.
+  - Both handlers bound in the constructor alongside the existing rename / duplicate bindings. Template wires them via `@new-file-committed` / `@new-directory-committed` on the `<ac-file-picker>` element.
+
+Design points pinned by tests:
+
+- **`.gitkeep` is a community convention, not a git feature.** Git tracks files, not directories; an empty directory is invisible to git. To make a new directory appear in a commit, at least one file with content must exist inside it. `.gitkeep` is the de facto name: it's a dotfile (hidden in most listings), the name self-documents the purpose, and users seeing it in diffs immediately understand what it's for. The alternative (`.gitignore` inside the directory) exists but confuses newcomers who read it as "this directory is being ignored." The picker's create-directory RPC writes `.gitkeep` with empty content; once the user adds real files they can delete `.gitkeep` or leave it.
+
+- **New-entry input always renders at the top of the directory's children.** The alternative (insert at the sort-natural position) requires knowing the filename before the user types it — backwards. The top-of-directory position matches VS Code, Finder, and most IDE file-tree implementations. After commit, the new file enters the tree data and gets sorted naturally on the next render. The input row's position is UI affordance, not data position. Sort-independent.
+
+- **Auto-expand target directory on begin.** Clicking "New file…" on a collapsed directory would open an input the user can't see. `beginCreateFile` and `beginCreateDirectory` both add `parentPath` to the expanded set before setting `_creating`. Empty-string `parentPath` (repo root) skips the expand branch since the root isn't a collapsible node.
+
+- **Event detail shape `{parentPath, name}` distinct from rename / duplicate's `{sourcePath, targetName}`.** Create modes are semantically different — they operate on a directory parent to produce a new entry, not on an existing file to modify it. Using the same shape would require the orchestrator to disambiguate based on the event name, which is fragile. Separate shapes make the handlers self-documenting.
+
+- **Path separators rejected in create-mode names.** Users wanting to create a nested file (`src/new/file.md`) should create the directories first, then the file. Allowing separators in a single operation would silently create intermediate directories that git may or may not track, and would conflict with the `.gitkeep` pattern for directory creation. Pinned by warning toast + no-RPC on separator detection.
+
+- **Empty-string parent path is legal (repo root case).** `beginCreateFile('')` opens an input at the top of the root. Target path is just `name` (no leading slash). The `typeof parentPath !== 'string'` guard rejects undefined / null; the empty string passes through.
+
+- **Create state cleared on rename / duplicate and vice versa.** All three inline-input states are mutually exclusive — only one can be active at a time. `beginRename` clears `_duplicating` and `_creating`; `beginDuplicate` clears `_renaming` and `_creating`; `beginCreateFile` / `beginCreateDirectory` clear `_renaming` and `_duplicating`. Without this, clicking "New file…" while rename was active would leave two inputs visible.
+
+Increment 9 complete. Directory context menu has seven working actions. Next up — Increment 10: middle-click path insertion + @-filter bridge.
 
 ### Increment 10 — Middle-click path insertion + @-filter bridge
 
@@ -3323,11 +3358,11 @@ Per specs4 this is the architectural fix for stale-message overwrites on selecti
 
 ### File picker completion — progress summary
 
-Increments 1–8 delivered; increment 9 part 1 delivered. Remaining work: 9 part 2 (new-file / new-directory inline inputs), 10 (middle-click path insertion + @-filter bridge), 11 (review mode banner), 12 (_syncMessagesFromChat defensive pattern).
+Increments 1–9 delivered (both parts of 9). Remaining work: 10 (middle-click path insertion + @-filter bridge), 11 (review mode banner), 12 (_syncMessagesFromChat defensive pattern).
 
-The picker is now fully usable for the common operations: browsing, selecting, excluding, git staging/unstaging, discarding, deleting, renaming (files and directories), duplicating, ad-hoc panel comparisons, and sort-mode-and-direction control. Keyboard navigation works end-to-end. Status badges + branch pill give visual git context. Active-file highlight follows the viewer.
+The picker is now fully usable for the common operations: browsing, selecting, excluding, git staging/unstaging, discarding, deleting, renaming (files and directories), duplicating, creating (files and directories), ad-hoc panel comparisons, and sort-mode-and-direction control. Keyboard navigation works end-to-end. Status badges + branch pill give visual git context. Active-file highlight follows the viewer.
 
-The remaining increments add bridges and polish — the file-picker workflow itself is feature-complete for day-to-day use.
+The remaining increments add cross-component bridges (file-picker ↔ chat panel integration via @-filter and middle-click, review mode banner) plus a defensive architectural pattern for stale-message overwrites. The file-picker workflow itself is feature-complete for day-to-day use.
 
 ### Out of scope for this plan
 

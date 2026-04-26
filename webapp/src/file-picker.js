@@ -256,6 +256,18 @@ const CTX_ACTION_NEW_DIR = 'new-directory';
 const CTX_ACTION_EXCLUDE_ALL = 'exclude-all';
 const CTX_ACTION_INCLUDE_ALL = 'include-all';
 
+// Inline-input mode identifiers. Rename and duplicate
+// already use this mode discriminator via `_renaming` /
+// `_duplicating` path fields; new-file and new-directory
+// add a third state (`_creating`) that carries both the
+// mode string AND the parent-dir path because the input
+// is about creating a NEW entry inside a target directory
+// rather than operating on an existing file.
+const INLINE_MODE_RENAME = 'rename';
+const INLINE_MODE_DUPLICATE = 'duplicate';
+const INLINE_MODE_NEW_FILE = 'new-file';
+const INLINE_MODE_NEW_DIR = 'new-directory';
+
 // Menu items for directory rows. The exclude-all /
 // include-all gate via `showWhen` reading the context
 // object's `allExcluded` / `someExcluded` flags —
@@ -938,6 +950,36 @@ export class FilePicker extends LitElement {
     // this by clearing the other when setting one.
     this._renaming = null;
     this._duplicating = null;
+    // New-entry creation state. Shape when active:
+    //   {mode: 'new-file' | 'new-directory',
+    //    parentPath: string}
+    // Null when no creation is in progress. Distinct from
+    // `_renaming` / `_duplicating` because the input is
+    // not operating on an existing file — it's creating
+    // a new one inside `parentPath`. Mutually exclusive
+    // with rename and duplicate (only one inline input
+    // can be active at a time).
+    this._creating = null;
+    // New-entry creation state. Shape when active:
+    //   {mode: 'new-file' | 'new-directory',
+    //    parentPath: string}
+    // Null when no creation is in progress. Distinct from
+    // `_renaming` / `_duplicating` because the input is
+    // not operating on an existing file — it's creating
+    // a new one inside `parentPath`. Mutually exclusive
+    // with rename and duplicate (only one inline input
+    // can be active at a time).
+    this._creating = null;
+    // New-entry creation state. Shape when active:
+    //   {mode: 'new-file' | 'new-directory',
+    //    parentPath: string}
+    // Null when no creation is in progress. Distinct from
+    // `_renaming` / `_duplicating` because the input is
+    // not operating on an existing file — it's creating
+    // a new one inside `parentPath`. Mutually exclusive
+    // with rename and duplicate (only one inline input
+    // can be active at a time).
+    this._creating = null;
     // Snapshot of the expanded set before the most recent
     // `setTree` call that replaced a real tree with a pruned
     // one. Used by `restoreExpandedState` when file search
@@ -1095,8 +1137,8 @@ export class FilePicker extends LitElement {
   /**
    * Begin renaming a file. Public API for the orchestrator
    * to call after the user picks "Rename" from the context
-   * menu. Clears any active duplicate state — only one
-   * inline input can be active at a time.
+   * menu. Clears any active duplicate or creation state —
+   * only one inline input can be active at a time.
    *
    * No-op when path is empty or the file doesn't exist in
    * the tree. Callers should validate upstream; this is
@@ -1105,8 +1147,10 @@ export class FilePicker extends LitElement {
   beginRename(path) {
     if (typeof path !== 'string' || !path) return;
     this._duplicating = null;
+    this._creating = null;
     this._renaming = path;
   }
+
 
   /**
    * Begin duplicating a file. Inline input appears as a
@@ -1116,7 +1160,51 @@ export class FilePicker extends LitElement {
   beginDuplicate(path) {
     if (typeof path !== 'string' || !path) return;
     this._renaming = null;
+    this._creating = null;
     this._duplicating = path;
+  }
+
+  /**
+   * Begin creating a new file inside the given parent
+   * directory. Inline input appears as a new row at the
+   * top of that directory's children, pre-filled empty
+   * so the user types the filename from scratch. The
+   * parent directory is auto-expanded so the input is
+   * visible.
+   *
+   * Empty-string `parentPath` IS legal — that's the
+   * repo root. The auto-expand branch skips it because
+   * the root isn't a collapsible node.
+   */
+  beginCreateFile(parentPath) {
+    if (typeof parentPath !== 'string') return;
+    this._renaming = null;
+    this._duplicating = null;
+    this._creating = { mode: INLINE_MODE_NEW_FILE, parentPath };
+    if (parentPath && !this._expanded.has(parentPath)) {
+      const next = new Set(this._expanded);
+      next.add(parentPath);
+      this._expanded = next;
+    }
+  }
+
+  /**
+   * Begin creating a new directory inside the given
+   * parent. Same input pattern as new-file; on commit,
+   * the orchestrator creates the directory by writing
+   * a `.gitkeep` placeholder inside it (git doesn't
+   * track empty directories).
+   */
+  beginCreateDirectory(parentPath) {
+    if (typeof parentPath !== 'string') return;
+    this._renaming = null;
+    this._duplicating = null;
+    this._creating = { mode: INLINE_MODE_NEW_DIR, parentPath };
+    if (parentPath && !this._expanded.has(parentPath)) {
+      const next = new Set(this._expanded);
+      next.add(parentPath);
+      this._expanded = next;
+    }
   }
 
   /**
@@ -1130,6 +1218,7 @@ export class FilePicker extends LitElement {
     if (
       !changedProps.has('_renaming')
       && !changedProps.has('_duplicating')
+      && !changedProps.has('_creating')
     ) {
       return;
     }
@@ -1203,6 +1292,14 @@ export class FilePicker extends LitElement {
         @keydown=${this._onTreeKeyDown}
       >
         ${this._renderRoot()}
+        ${this._creating && this._creating.parentPath === ''
+          ? this._renderInlineInput({
+              mode: this._creating.mode,
+              sourcePath: '',
+              sourceName: '',
+              depth: 0,
+            })
+          : ''}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
       </div>
       ${this._renderContextMenu()}
@@ -1374,7 +1471,18 @@ export class FilePicker extends LitElement {
         <span class="name">${node.name || '(root)'}</span>
       </div>
       ${isOpen
-        ? this._renderChildren(node, depth + 1, expanded)
+        ? html`
+            ${this._creating &&
+            this._creating.parentPath === node.path
+              ? this._renderInlineInput({
+                  mode: this._creating.mode,
+                  sourcePath: node.path,
+                  sourceName: '',
+                  depth: depth + 1,
+                })
+              : ''}
+            ${this._renderChildren(node, depth + 1, expanded)}
+          `
         : ''}
     `;
   }
@@ -1477,26 +1585,64 @@ export class FilePicker extends LitElement {
   }
 
   /**
-   * Render the inline text input row for rename or
-   * duplicate. Same indentation pattern as file rows so
-   * the input lines up visually with the filename
-   * column. Pre-fill:
+   * Render the inline text input row for rename,
+   * duplicate, new-file, or new-directory. Same
+   * indentation pattern as file rows so the input lines
+   * up visually with the filename column. Pre-fill and
+   * aria-label are mode-specific:
    *
-   *   - rename: current filename (what the user would
-   *     edit to change the name in place).
-   *   - duplicate: source path (lets the user edit the
-   *     directory or filename to target the copy).
+   *   - rename: current filename (edit in place).
+   *   - duplicate: source path (edit directory and/or
+   *     filename for the target location).
+   *   - new-file / new-directory: empty (user types the
+   *     new name from scratch).
    *
    * Focus and selection happen in `updated()` after the
-   * input lands in the DOM. We select only the stem
-   * (everything before the last `.`) so typing
-   * immediately overwrites the filename but leaves the
-   * extension intact. Users explicitly wanting a
-   * different extension just type past the selection.
+   * input lands in the DOM. For rename and duplicate we
+   * select only the stem (everything before the last
+   * `.`) so typing replaces the filename but leaves the
+   * extension intact. For new-file and new-directory
+   * the initial value is empty, so selection is a no-op
+   * and the user starts at a blank input.
+   *
+   * For create modes, `sourcePath` is the PARENT directory
+   * path (not a source file path); it's passed through
+   * to the keydown / blur handlers so they can target
+   * the right state field on commit or cancel.
    */
   _renderInlineInput({ mode, sourcePath, sourceName, depth }) {
     const indentPx = depth * 16;
-    const initial = mode === 'rename' ? sourceName : sourcePath;
+    // Pre-fill by mode. Rename starts at the basename;
+    // duplicate starts at the full path; create modes
+    // start empty.
+    let initial = '';
+    if (mode === INLINE_MODE_RENAME) initial = sourceName;
+    else if (mode === INLINE_MODE_DUPLICATE) initial = sourcePath;
+    // Aria-label tuned for accessibility — screen readers
+    // announce what the input is for.
+    let ariaLabel;
+    if (mode === INLINE_MODE_RENAME) {
+      ariaLabel = `Rename ${sourceName}`;
+    } else if (mode === INLINE_MODE_DUPLICATE) {
+      ariaLabel = `Duplicate ${sourceName} — enter new path`;
+    } else if (mode === INLINE_MODE_NEW_FILE) {
+      ariaLabel = sourcePath
+        ? `New file in ${sourcePath}`
+        : 'New file at repository root';
+    } else if (mode === INLINE_MODE_NEW_DIR) {
+      ariaLabel = sourcePath
+        ? `New directory in ${sourcePath}`
+        : 'New directory at repository root';
+    } else {
+      ariaLabel = 'Inline input';
+    }
+    // Placeholder hint for empty inputs so the user sees
+    // what's expected. Rename / duplicate have pre-filled
+    // values so placeholder isn't shown; create modes
+    // surface the hint.
+    let placeholder = '';
+    if (mode === INLINE_MODE_NEW_FILE) placeholder = 'filename.md';
+    else if (mode === INLINE_MODE_NEW_DIR) placeholder = 'dirname';
     return html`
       <div
         class="row is-inline"
@@ -1510,12 +1656,11 @@ export class FilePicker extends LitElement {
           class="inline-input"
           data-inline-mode=${mode}
           data-source-path=${sourcePath}
+          placeholder=${placeholder}
           .value=${initial}
           @keydown=${(e) => this._onInlineKeyDown(e, mode, sourcePath)}
           @blur=${(e) => this._onInlineBlur(e, mode, sourcePath)}
-          aria-label=${mode === 'rename'
-            ? `Rename ${sourceName}`
-            : `Duplicate ${sourceName} — enter new path`}
+          aria-label=${ariaLabel}
         />
       </div>
     `;
@@ -1883,30 +2028,67 @@ export class FilePicker extends LitElement {
    * opened rename, pressed Enter immediately), the commit
    * is treated as a no-op — no event dispatched, state
    * cleared. Same for empty input.
+   *
+   * For create modes, `sourcePath` carries the parent
+   * directory path. The dispatched event's detail shape
+   * is `{parentPath, name}` rather than the rename /
+   * duplicate form (`{sourcePath, targetName}`) because
+   * the orchestrator needs to distinguish "operate on an
+   * existing path" from "create a new entry under a
+   * parent".
    */
   _commitInlineInput(inputEl, mode, sourcePath) {
     const raw = inputEl?.value || '';
     const target = raw.trim();
     // Clear state first so the blur firing after re-render
     // doesn't re-enter this path via _onInlineBlur's
-    // guard.
-    if (mode === 'rename') {
+    // guard. Dispatch on the correct field based on mode.
+    if (mode === INLINE_MODE_RENAME) {
       this._renaming = null;
-    } else {
+    } else if (mode === INLINE_MODE_DUPLICATE) {
       this._duplicating = null;
+    } else if (
+      mode === INLINE_MODE_NEW_FILE ||
+      mode === INLINE_MODE_NEW_DIR
+    ) {
+      this._creating = null;
     }
     if (!target) return;
     // Rename no-op: target equals current name.
-    if (mode === 'rename') {
+    if (mode === INLINE_MODE_RENAME) {
       const currentName = sourcePath.includes('/')
         ? sourcePath.slice(sourcePath.lastIndexOf('/') + 1)
         : sourcePath;
       if (target === currentName) return;
     }
     // Duplicate no-op: target equals source path.
-    if (mode === 'duplicate' && target === sourcePath) return;
+    if (mode === INLINE_MODE_DUPLICATE && target === sourcePath) {
+      return;
+    }
+    // Create modes: dispatch with {parentPath, name}.
+    if (
+      mode === INLINE_MODE_NEW_FILE ||
+      mode === INLINE_MODE_NEW_DIR
+    ) {
+      const eventName =
+        mode === INLINE_MODE_NEW_FILE
+          ? 'new-file-committed'
+          : 'new-directory-committed';
+      this.dispatchEvent(
+        new CustomEvent(eventName, {
+          detail: { parentPath: sourcePath, name: target },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
+    }
+    // Rename / duplicate: dispatch with {sourcePath,
+    // targetName}.
     const eventName =
-      mode === 'rename' ? 'rename-committed' : 'duplicate-committed';
+      mode === INLINE_MODE_RENAME
+        ? 'rename-committed'
+        : 'duplicate-committed';
     this.dispatchEvent(
       new CustomEvent(eventName, {
         detail: { sourcePath, targetName: target },
@@ -1921,14 +2103,31 @@ export class FilePicker extends LitElement {
    * cancel when the current state matches — this prevents
    * a blur firing after a successful commit from
    * triggering a second cancel on a different mode.
+   *
+   * For create modes, `sourcePath` is the parent-dir
+   * path. The guard checks `_creating.parentPath` against
+   * it to avoid double-cancel on the blur-after-commit
+   * race (commit clears `_creating` before re-render,
+   * blur fires, we arrive here with stale sourcePath).
    */
   _cancelInlineInput(mode, sourcePath) {
-    if (mode === 'rename') {
+    if (mode === INLINE_MODE_RENAME) {
       if (sourcePath && this._renaming !== sourcePath) return;
       this._renaming = null;
-    } else if (mode === 'duplicate') {
+    } else if (mode === INLINE_MODE_DUPLICATE) {
       if (sourcePath && this._duplicating !== sourcePath) return;
       this._duplicating = null;
+    } else if (
+      mode === INLINE_MODE_NEW_FILE ||
+      mode === INLINE_MODE_NEW_DIR
+    ) {
+      if (
+        sourcePath !== undefined &&
+        (!this._creating || this._creating.parentPath !== sourcePath)
+      ) {
+        return;
+      }
+      this._creating = null;
     }
   }
 
