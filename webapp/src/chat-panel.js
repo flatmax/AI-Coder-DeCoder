@@ -1796,7 +1796,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // semantics means we overwrite, not append — each chunk
     // carries a superset of prior content. Dropped chunks are
     // harmless.
-    this._pendingChunks.set(requestId, content ?? '');
+    const normalizedContent = content ?? '';
+    this._pendingChunks.set(requestId, normalizedContent);
+    // Apply synchronously for our own active stream, in
+    // addition to scheduling the rAF coalesce. The rAF path
+    // is the fast path for rapid-fire chunks (it caps
+    // re-render rate at ~60Hz); the sync path is insurance
+    // against rAF starvation — if the browser throttles rAF
+    // because the tab was briefly backgrounded, because the
+    // chat panel's containing element is display:none at
+    // the moment the chunk arrives (tab-panel lazy
+    // visibility), or because of any other scheduling
+    // oddity, the user still sees text appear. The sync
+    // assignment is idempotent with the subsequent rAF
+    // update: both read from the same `_pendingChunks`
+    // entry, so the rAF either finds it drained (no-op) or
+    // re-applies the same value (harmless).
+    if (requestId === this._currentRequestId && this._streaming) {
+      this._streamingContent = normalizedContent;
+    }
     this._scheduleFlush();
   }
 

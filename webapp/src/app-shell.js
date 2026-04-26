@@ -35,6 +35,7 @@ import './diff-viewer.js';
 import './svg-viewer.js';
 import './settings-tab.js';
 import './context-tab.js';
+import './doc-convert-tab.js';
 import './file-nav.js';
 import './token-hud.js';
 import './compaction-progress.js';
@@ -160,6 +161,16 @@ export class AppShell extends JRPCClient {
     _activeViewer: { type: String, state: true },
     _repoName: { type: String, state: true },
     _initComplete: { type: Boolean, state: true },
+    /**
+     * Whether the backend reports markitdown is installed.
+     * Hydrated from get_current_state's
+     * `doc_convert_available` field. Gates the Doc Convert
+     * tab button — when false, the tab is hidden entirely
+     * per specs4/4-features/doc-convert.md "Tab Visibility".
+     * Defaults false so first paint doesn't briefly flash
+     * the tab before the state snapshot arrives.
+     */
+    _docConvertAvailable: { type: Boolean, state: true },
     /** Dialog minimize state — persisted to localStorage. */
     _minimized: { type: Boolean, state: true },
     /**
@@ -742,6 +753,11 @@ export class AppShell extends JRPCClient {
     this._activeViewer = 'diff';
     this._repoName = '';
     this._initComplete = false;
+    // Doc Convert availability — flipped to true when the
+    // backend's get_current_state reports markitdown is
+    // installed. Stays false in stripped-down releases
+    // where the tab should never appear.
+    this._docConvertAvailable = false;
     // Mode toggle state. Hydrated from get_current_state
     // once the backend snapshot arrives, and kept in sync
     // via mode-changed window events.
@@ -1053,6 +1069,23 @@ export class AppShell extends JRPCClient {
         this._reviewActive = !!state.review.active;
       } else {
         this._reviewActive = false;
+      }
+      // Doc Convert availability — true when markitdown is
+      // importable on the server. Missing field (older
+      // backend) keeps the tab hidden, which is the safe
+      // degradation path.
+      this._docConvertAvailable = !!state.doc_convert_available;
+      // Fallback when the persisted active tab no longer
+      // applies. Happens when the user's last session was
+      // in a repo with doc-convert enabled and they've
+      // reconnected to one without markitdown. Without
+      // this, activeTab stays 'doc-convert' but the panel
+      // is excluded from the DOM — producing a blank body.
+      if (
+        this.activeTab === 'doc-convert'
+        && !this._docConvertAvailable
+      ) {
+        this._switchTab('files');
       }
       // If the backend reports init is already complete,
       // dismiss the startup overlay. Handles the common
@@ -1918,7 +1951,8 @@ export class AppShell extends JRPCClient {
       const stored = localStorage.getItem(_ACTIVE_TAB_KEY);
       if (stored === 'search') return 'files';
       if (stored === 'files' || stored === 'context'
-          || stored === 'settings') {
+          || stored === 'settings'
+          || stored === 'doc-convert') {
         return stored;
       }
     } catch (_) {}
@@ -2843,6 +2877,13 @@ export class AppShell extends JRPCClient {
             class="tab-button ${this.activeTab === 'settings' ? 'active' : ''}"
             @click=${() => this._switchTab('settings')}
           >⚙️ Settings</button>
+          ${this._docConvertAvailable ? html`
+            <button
+              class="tab-button ${this.activeTab === 'doc-convert' ? 'active' : ''}"
+              @click=${() => this._switchTab('doc-convert')}
+              title="Convert documents to markdown"
+            >📄 Convert</button>
+          ` : null}
           <div class="mode-toggle">
             <div class="mode-segmented" role="group"
               aria-label="Context mode">
@@ -2914,6 +2955,11 @@ export class AppShell extends JRPCClient {
           <div class="tab-panel ${this.activeTab === 'settings' ? 'active' : ''}">
             <ac-settings-tab></ac-settings-tab>
           </div>
+          ${this._docConvertAvailable ? html`
+            <div class="tab-panel ${this.activeTab === 'doc-convert' ? 'active' : ''}">
+              <ac-doc-convert-tab></ac-doc-convert-tab>
+            </div>
+          ` : null}
         </div>
         ${this._renderCompactionBar()}
         <div
