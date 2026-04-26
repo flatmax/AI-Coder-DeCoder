@@ -1617,6 +1617,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     if (typeof parentPath !== 'string') return;
     if (typeof name !== 'string' || !name) return;
     if (name.includes('/') || name.includes('\\')) {
+      // Path separators rejected — nested paths
+      // should be built step-by-step rather than
+      // sneaking in through a single create. Matches
+      // the rename-committed rejection rule.
+      this._showToast(
+        'File name cannot contain path separators.',
+        'warning',
+      );
+      return;
+    }
+    if (name.includes('/') || name.includes('\\')) {
       this._showToast(
         'File name cannot contain path separators.',
         'warning',
@@ -1669,6 +1680,15 @@ export class FilesTab extends RpcMixin(LitElement) {
     const name = detail.name;
     if (typeof parentPath !== 'string') return;
     if (typeof name !== 'string' || !name) return;
+    if (name.includes('/') || name.includes('\\')) {
+      // Path separators rejected — see the equivalent
+      // check in _onNewFileCommitted.
+      this._showToast(
+        'Directory name cannot contain path separators.',
+        'warning',
+      );
+      return;
+    }
     if (name.includes('/') || name.includes('\\')) {
       this._showToast(
         'Directory name cannot contain path separators.',

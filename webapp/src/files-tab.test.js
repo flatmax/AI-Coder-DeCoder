@@ -3943,6 +3943,255 @@ describe('FilesTab context-menu action dispatch', () => {
   // Include / Exclude (8d)
   // -------------------------------------------------------
 
+  describe('new-file action', () => {
+    async function setupNewFileTab() {
+      const getTree = vi.fn().mockResolvedValue(
+        fakeTreeResponse([
+          {
+            name: 'src',
+            path: 'src',
+            type: 'dir',
+            children: [],
+          },
+        ]),
+      );
+      const createFile = vi.fn().mockResolvedValue({});
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': createFile,
+      });
+      const t = mountTab();
+      await settle(t);
+      return { t, getTree, createFile };
+    }
+
+    it('new-file-committed creates the file with empty content', async () => {
+      const { t, createFile } = await setupNewFileTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { parentPath: 'src', name: 'README.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile).toHaveBeenCalledOnce();
+      expect(createFile.mock.calls[0][0]).toBe('src/README.md');
+      expect(createFile.mock.calls[0][1]).toBe('');
+    });
+
+    it('creates at repo root when parentPath is empty', async () => {
+      // parentPath is the empty string for the root
+      // directory — join should produce a bare name,
+      // not a leading slash.
+      const { t, createFile } = await setupNewFileTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { parentPath: '', name: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile.mock.calls[0][0]).toBe('a.md');
+    });
+
+    it('reloads the file tree after creation', async () => {
+      const { t, getTree } = await setupNewFileTab();
+      const initial = getTree.mock.calls.length;
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { parentPath: 'src', name: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(getTree.mock.calls.length).toBe(initial + 1);
+    });
+
+    it('shows a success toast with the target path', async () => {
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const { t } = await setupNewFileTab();
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-file-committed', {
+            detail: { parentPath: 'src', name: 'a.md' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const successes = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'success');
+        expect(successes.length).toBeGreaterThan(0);
+        expect(successes.at(-1).message).toContain('src/a.md');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('rejects names with path separators', async () => {
+      // Matches the rename-committed rule — nested
+      // paths must be created step-by-step.
+      const { t, createFile } = await setupNewFileTab();
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-file-committed', {
+            detail: { parentPath: 'src', name: 'foo/bar.md' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        expect(createFile).not.toHaveBeenCalled();
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message.toLowerCase()).toContain(
+          'separator',
+        );
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('ignores malformed new-file-committed events', async () => {
+      const { t, createFile } = await setupNewFileTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      // Missing parentPath.
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { name: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Missing name.
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { parentPath: 'src' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Empty name.
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: { parentPath: 'src', name: '' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Null detail.
+      picker.dispatchEvent(
+        new CustomEvent('new-file-committed', {
+          detail: null,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile).not.toHaveBeenCalled();
+    });
+
+    it('surfaces RPC rejection as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(fakeTreeResponse([])),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': vi
+          .fn()
+          .mockRejectedValue(new Error('already exists')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-file-committed', {
+            detail: { parentPath: '', name: 'a.md' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain('already exists');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('surfaces restricted error as warning toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(fakeTreeResponse([])),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': vi.fn().mockResolvedValue({
+          error: 'restricted',
+          reason: 'Participants cannot create files',
+        }),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-file-committed', {
+            detail: { parentPath: '', name: 'a.md' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message).toContain('Participants');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+  });
+
   describe('exclude action', () => {
     async function setupExcludeTab({ excludedFiles = [] } = {}) {
       const getTree = vi
