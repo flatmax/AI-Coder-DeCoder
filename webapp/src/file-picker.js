@@ -446,6 +446,30 @@ export class FilePicker extends LitElement {
      */
     activePath: { type: String },
     /**
+     * Review mode state object, or null when not in
+     * review. Shape matches the backend's
+     * `get_review_state()` response:
+     *   {
+     *     active: bool,
+     *     branch: string,
+     *     base_commit: string,
+     *     branch_tip: string,
+     *     original_branch: string,
+     *     commits: [{sha, short_sha, message, author, date}, ...],
+     *     changed_files: [{path, added, removed, status}, ...],
+     *     stats: {files_changed, insertions, deletions}
+     *   }
+     *
+     * When non-null and `active: true`, the picker renders
+     * a banner above the filter bar showing the review
+     * summary. Pushed via direct-update from the files-tab
+     * orchestrator in response to `review-started` /
+     * `review-ended` window events. Clicking the banner's
+     * exit button dispatches `exit-review` which bubbles
+     * to the files-tab.
+     */
+    reviewState: { type: Object },
+    /**
      * Current filter query (fuzzy substring matching).
      */
     filterQuery: { type: String, state: true },
@@ -576,6 +600,70 @@ export class FilePicker extends LitElement {
        * :focus outline is suppressed above because it
        * clips under the scrollbar on some platforms. */
       box-shadow: inset 0 0 0 2px var(--accent-primary, #58a6ff);
+    }
+
+    /* Review mode banner — sits above the filter bar when
+     * reviewState.active is true. Orange/amber colour
+     * scheme signals "not normal editing mode" — the
+     * same hue family the detached-HEAD branch pill
+     * uses, distinct from the default muted grey of the
+     * filter bar. Users browsing review-mode files see
+     * this persistent banner and know the working tree
+     * is pointed at a pre-change state. */
+    .review-banner {
+      flex-shrink: 0;
+      padding: 0.5rem 0.6rem;
+      background: rgba(210, 153, 34, 0.12);
+      border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      font-size: 0.8125rem;
+    }
+    .review-banner-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .review-banner-icon {
+      font-size: 1rem;
+    }
+    .review-banner-title {
+      font-weight: 600;
+      color: #d29922;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .review-banner-exit {
+      background: rgba(210, 153, 34, 0.2);
+      border: 1px solid rgba(210, 153, 34, 0.4);
+      color: #d29922;
+      padding: 0.2rem 0.5rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    .review-banner-exit:hover {
+      background: rgba(210, 153, 34, 0.3);
+      border-color: rgba(210, 153, 34, 0.6);
+    }
+    .review-banner-stats {
+      display: flex;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      font-variant-numeric: tabular-nums;
+    }
+    .review-banner-stats .stat-added {
+      color: #3fb950;
+    }
+    .review-banner-stats .stat-removed {
+      color: #f85149;
     }
 
     .empty-state {
@@ -941,6 +1029,9 @@ export class FilePicker extends LitElement {
     // No file open in a viewer yet. Remains null until the
     // orchestrator pushes the first viewer event.
     this.activePath = null;
+    // No review active yet. Pushed by the files-tab when
+    // the `review-started` window event fires.
+    this.reviewState = null;
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
@@ -1274,6 +1365,7 @@ export class FilePicker extends LitElement {
     const effectiveExpanded = this._effectiveExpanded();
 
     return html`
+      ${this._renderReviewBanner()}
       <div class="filter-bar">
         <input
           type="text"
@@ -1414,6 +1506,88 @@ export class FilePicker extends LitElement {
         )}
       </div>
     `;
+  }
+
+  /**
+   * Render the review banner when review mode is active.
+   * Shows the branch name, commit count, and file/line
+   * stats as a summary, with an exit button to end
+   * review and return to normal mode.
+   *
+   * Returns an empty result when `reviewState` is null or
+   * not active — the banner only appears during an active
+   * review. Defensive against malformed shapes (missing
+   * commits array, missing stats object) so a partial
+   * server response doesn't crash the render.
+   */
+  _renderReviewBanner() {
+    const state = this.reviewState;
+    if (!state || typeof state !== 'object') return '';
+    if (!state.active) return '';
+    const branch = typeof state.branch === 'string' ? state.branch : '';
+    const commits = Array.isArray(state.commits) ? state.commits : [];
+    const commitCount = commits.length;
+    const stats =
+      state.stats && typeof state.stats === 'object'
+        ? state.stats
+        : {};
+    const filesChanged = Number(stats.files_changed) || 0;
+    const added = Number(stats.additions) || 0;
+    const removed = Number(stats.deletions) || 0;
+    // Title — branch name plus commit count. Users see
+    // what's under review at a glance.
+    const title = branch
+      ? `Reviewing ${branch}`
+      : 'Reviewing branch';
+    const commitLabel =
+      commitCount === 1 ? '1 commit' : `${commitCount} commits`;
+    return html`
+      <div class="review-banner" role="status"
+        aria-label="Review mode active">
+        <div class="review-banner-header">
+          <span class="review-banner-icon" aria-hidden="true">🔍</span>
+          <span class="review-banner-title" title=${title}>
+            ${title}
+          </span>
+          <button
+            class="review-banner-exit"
+            @click=${this._onExitReviewClick}
+            title="Exit review mode and return to the working branch"
+            aria-label="Exit review mode"
+          >
+            Exit
+          </button>
+        </div>
+        <div class="review-banner-stats">
+          <span>${commitLabel}</span>
+          <span>${filesChanged} file${filesChanged === 1 ? '' : 's'}</span>
+          ${added > 0
+            ? html`<span class="stat-added">+${added}</span>`
+            : ''}
+          ${removed > 0
+            ? html`<span class="stat-removed">-${removed}</span>`
+            : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Handle the exit button click. Dispatches
+   * `exit-review` as a bubbling+composed event so the
+   * files-tab can catch it and fire the corresponding
+   * `LLMService.end_review` RPC. The picker doesn't
+   * know about the RPC directly — event-based
+   * coordination keeps the files-tab as the single
+   * place that owns review-state transitions.
+   */
+  _onExitReviewClick() {
+    this.dispatchEvent(
+      new CustomEvent('exit-review', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _renderChildren(node, depth, expanded) {
