@@ -6,7 +6,12 @@ __pycache__/
 dist/
 build/
 
-# AC-DC runtime state (per-repo working directory)
+# AC-DC runtime state (per-repo working directory).
+# Two entries intentional — `.ac-dc4/` is this reimplementation's
+# working directory; `.ac-dc/` is the previous implementation's.
+# During the transition both may coexist in a shared repository.
+# See src/ac_dc/config.py:_AC_DC_DIR for the rename rationale.
+.ac-dc4/
 .ac-dc/
 
 # Node / webapp build output
@@ -28,4 +33,3 @@ uv.lock
 # Editor / tooling scratch directories
 .aicoder/
 safeZone/
-.ac-dc4/

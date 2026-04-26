@@ -13,6 +13,20 @@ Completed layers and the decision log have been moved to [specs4/impl-history/](
 - [specs4/impl-history/decisions.md](specs4/impl-history/decisions.md) for D1–D16
 - [specs4/impl-history/layer-0.md](specs4/impl-history/layer-0.md) through `layer-4.md` for per-layer records
 
+## Decisions
+
+### D17 — Per-repo working directory renamed to `.ac-dc4/`
+
+The previous AC-DC implementation uses `.ac-dc/` at the repo root for its per-repo working state (conversation history, symbol map snapshot, image attachments, doc cache sidecars). This reimplementation shares repositories with that implementation during the transition — a developer might run one instance in the morning and the other in the afternoon against the same checkout. Colliding on the same directory name would corrupt both states: session JSONL schemas, cache sidecar formats, and image filename conventions all drift between the two.
+
+Resolution: this reimplementation uses `.ac-dc4/` exclusively. The name is chosen to parallel `specs4/` — both are "the four-numbered one" in the transition.
+
+Single source of truth: `src/ac_dc/config.py:_AC_DC_DIR`. Every module that needs the path imports the constant rather than hardcoding the string. `doc_index/cache.py` was the only module found to have hardcoded `.ac-dc` during audit; that's now fixed and uses `_AC_DC_DIR` via import.
+
+Both directory names are in `.gitignore` so a developer running both implementations sees neither directory tracked by git.
+
+Specs4 documents the per-repo directory abstractly ("the per-repo working directory") without pinning the name, which is the right altitude for a behavioral spec. Specs3 correctly documents `.ac-dc/` because it describes the previous implementation. Neither suite needs updating for this rename.
+
 ## Build order
 
 Per `specs4/0-overview/implementation-guide.md#build-order-suggestion`:
