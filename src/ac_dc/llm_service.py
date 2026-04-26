@@ -4081,6 +4081,58 @@ class LLMService:
                         path, exc,
                     )
 
+        # Refresh file-context content for EVERY modified file,
+        # not just auto-added ones. Without this, files that
+        # were already in context keep their pre-edit snapshot
+        # indefinitely — the pipeline writes the new content to
+        # disk, but _file_context is a write-once cache for
+        # already-present entries (see _sync_file_context: it
+        # only calls add_file for files in `selected - current`,
+        # so files already present are never re-read).
+        #
+        # Symptom when this is missing: the LLM keeps seeing the
+        # pre-edit version of every file it modifies, producing
+        # "phantom parallel version" edits that target code the
+        # user already changed. The stability tracker's
+        # content-hash check in _update_stability DOES notice
+        # the disk change (it hashes raw file content), but
+        # that only rebalances tier placement — it doesn't
+        # refresh the FileContext content the assembler reads
+        # from.
+        #
+        # Runs AFTER the auto-add loop above so auto-added
+        # files (also in files_modified) get loaded exactly
+        # once with the post-edit content rather than being
+        # loaded then immediately re-loaded.
+        for path in report.files_modified:
+            if not self._file_context.has_file(path):
+                # Auto-added files already loaded above, or
+                # the file was removed from selection between
+                # edit and here. Either way, nothing to
+                # refresh.
+                continue
+            try:
+                # add_file with no explicit content re-reads
+                # from the repo. Calling add_file on an
+                # already-present path updates its content
+                # in place and preserves insertion order
+                # (FileContext contract).
+                self._file_context.add_file(path)
+            except Exception as exc:
+                # File became unreadable post-edit (binary
+                # conversion? permission flip?). Log at
+                # WARNING — the next turn's assembler will
+                # use whatever stale content was there,
+                # which is still better than crashing the
+                # completion result build, but the user
+                # needs to see the problem.
+                logger.warning(
+                    "Failed to refresh file context for "
+                    "modified file %s: %s. LLM will see "
+                    "stale content on next turn.",
+                    path, exc,
+                )
+
         # Serialise the per-block results for the JSON
         # response. Each EditResult is a dataclass; we emit a
         # plain dict matching the frontend contract.
@@ -5265,6 +5317,23 @@ class LLMService:
         divergence invisible — user sees "file is in context"
         everywhere in the UI, LLM sees nothing. Surface the
         reason at WARNING so the log tells the true story.
+
+        Invalidation contract: this method only adds files in
+        ``selected - current`` and removes files in ``current -
+        selected``. It does NOT refresh content for files
+        already present. Refresh happens in two places:
+
+        - After our own edits: ``_build_completion_result``
+          re-reads every file in ``report.files_modified`` so
+          the next turn sees post-edit content.
+        - After external edits (user edits in another editor,
+          saves, then asks the model to continue): currently
+          NOT handled. The stability tracker's content-hash
+          check in ``_update_stability`` detects the disk
+          change and rebalances tiers, but the ``FileContext``
+          cache keeps the pre-edit snapshot. Known hole;
+          workaround is to deselect + reselect the file, which
+          forces a re-read via ``selected - current``.
         """
         current = set(self._file_context.get_files())
         selected = set(self._selected_files)

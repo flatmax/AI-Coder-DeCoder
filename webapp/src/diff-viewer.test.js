@@ -400,7 +400,7 @@ describe('DiffViewer openFile', () => {
     await settle(el);
     await el.openFile({ path: 'new.py' });
     await settle(el);
-    const file = el._files[0];
+    const file = el._file;
     expect(file.isNew).toBe(true);
     expect(file.original).toBe('');
     expect(file.modified).toBe('working content');
@@ -417,7 +417,7 @@ describe('DiffViewer openFile', () => {
     await settle(el);
     await el.openFile({ path: 'deleted.py' });
     await settle(el);
-    const file = el._files[0];
+    const file = el._file;
     expect(file.original).toBe('head content');
     expect(file.modified).toBe('');
   });
@@ -430,20 +430,30 @@ describe('DiffViewer openFile', () => {
     await el.openFile({ path: 'a.py' });
     await settle(el);
     expect(el.hasOpenFiles).toBe(true);
-    expect(el._files[0].original).toBe('');
-    expect(el._files[0].modified).toBe('');
+    expect(el._file.original).toBe('');
+    expect(el._file.modified).toBe('');
   });
 
-  it('same-file open is a no-op', async () => {
+  it('same-file open refetches (no-cache model)', async () => {
+    // D18 contract: every openFile fetches fresh. Clicking
+    // the same file twice hits the RPC twice, and
+    // active-file-changed fires on every open — the viewer
+    // rebuilt its models so listeners need to know.
     const el = mountViewer();
     await settle(el);
+    const rpc = globalThis.__sharedRpcOverride[
+      'Repo.get_file_content'
+    ];
     await el.openFile({ path: 'a.py' });
     await settle(el);
+    const callsAfterFirst = rpc.mock.calls.length;
     const listener = vi.fn();
     el.addEventListener('active-file-changed', listener);
     await el.openFile({ path: 'a.py' });
     await settle(el);
-    expect(listener).not.toHaveBeenCalled();
+    // Second open fetched HEAD + working again.
+    expect(rpc.mock.calls.length).toBe(callsAfterFirst + 2);
+    expect(listener).toHaveBeenCalledOnce();
   });
 
   it('opening a second file creates a new model pair', async () => {
@@ -505,28 +515,31 @@ describe('DiffViewer openFile', () => {
     expect(el.hasOpenFiles).toBe(false);
   });
 
-  it('concurrent openFile for same path drops the duplicate', async () => {
-    // Two rapid calls for the same path — only one model
-    // pair should be created.
+  it('concurrent openFile for same path supersedes', async () => {
+    // No-cache model: both calls fetch, but the
+    // generation counter ensures only the last resolving
+    // fetch attaches its models. End state has one file
+    // in the single-file slot.
     const el = mountViewer();
     await settle(el);
     const p1 = el.openFile({ path: 'a.py' });
     const p2 = el.openFile({ path: 'a.py' });
     await Promise.all([p1, p2]);
     await settle(el);
-    // 1 file entry, 1 pair of models.
-    expect(el._files).toHaveLength(1);
-    expect(monacoState.models.length).toBe(2);
+    expect(el._file?.path).toBe('a.py');
   });
 
-  it('concurrent openFile for different paths proceeds independently', async () => {
+  it('concurrent openFile for different paths supersedes to last', async () => {
+    // Single-file slot means only the last call's file
+    // survives. The first call's fetch resolves with a
+    // superseded generation and skips model-attach.
     const el = mountViewer();
     await settle(el);
     const p1 = el.openFile({ path: 'a.py' });
     const p2 = el.openFile({ path: 'b.py' });
     await Promise.all([p1, p2]);
     await settle(el);
-    expect(el._files).toHaveLength(2);
+    expect(el._file?.path).toBe('b.py');
   });
 });
 
@@ -553,33 +566,21 @@ describe('DiffViewer closeFile', () => {
     expect(editor.dispose).toHaveBeenCalled();
   });
 
-  it('closing one of multiple files keeps the editor alive', async () => {
+  it('closing the active file returns to empty state', async () => {
+    // Single-file model: closing replaces the active
+    // file with nothing. There's no "next file" to
+    // activate — specs4 dropped that concept.
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.py' });
-    await settle(el);
-    await el.openFile({ path: 'b.py' });
-    await settle(el);
-    const editor = monacoState.editors[0];
-    el.closeFile('b.py');
-    await settle(el);
-    expect(editor.dispose).not.toHaveBeenCalled();
-    expect(el.hasOpenFiles).toBe(true);
-  });
-
-  it('closing the active file activates the next', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.py' });
-    await settle(el);
-    await el.openFile({ path: 'b.py' });
     await settle(el);
     const listener = vi.fn();
     el.addEventListener('active-file-changed', listener);
-    el.closeFile('b.py');
+    el.closeFile('a.py');
     await settle(el);
     expect(listener).toHaveBeenCalledOnce();
-    expect(listener.mock.calls[0][0].detail.path).toBe('a.py');
+    expect(listener.mock.calls[0][0].detail.path).toBe(null);
+    expect(el.hasOpenFiles).toBe(false);
   });
 
   it('closing an unknown file is a no-op', async () => {
@@ -614,7 +615,7 @@ describe('DiffViewer dirty tracking', () => {
     await el.openFile({ path: 'a.py' });
     await settle(el);
     expect(el.getDirtyFiles()).toEqual([]);
-    expect(el._dirtyCount).toBe(0);
+    expect(el._dirty).toBe(false);
   });
 
   it('editing the content marks the file dirty', async () => {
@@ -626,7 +627,7 @@ describe('DiffViewer dirty tracking', () => {
     monacoState.editors[0]._simulateContentChange('edited');
     await settle(el);
     expect(el.getDirtyFiles()).toEqual(['a.py']);
-    expect(el._dirtyCount).toBe(1);
+    expect(el._dirty).toBe(true);
   });
 
   it('saving clears the dirty flag and fires file-saved', async () => {
@@ -646,27 +647,53 @@ describe('DiffViewer dirty tracking', () => {
     expect(el.getDirtyFiles()).toEqual([]);
   });
 
-  it('saveAll saves every dirty file', async () => {
+  it('saveAll saves the active file when dirty', async () => {
+    // Single-file model: saveAll is a one-file operation.
+    // Edits to a prior file were discarded on switch per
+    // the no-cache contract, so there's nothing to save
+    // across multiple files.
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.py' });
     await settle(el);
-    await el.openFile({ path: 'b.py' });
+    monacoState.editors[0]._simulateContentChange('a-edited');
     await settle(el);
-    // Dirty b (active).
-    monacoState.editors[0]._simulateContentChange('b-edited');
+    expect(el.getDirtyFiles()).toEqual(['a.py']);
+    const listener = vi.fn();
+    el.addEventListener('file-saved', listener);
+    await el.saveAll();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(el.getDirtyFiles()).toEqual([]);
+  });
+
+  it('saveAll no-op when active file is clean', async () => {
+    const el = mountViewer();
     await settle(el);
-    // Swap to a, dirty it.
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    const listener = vi.fn();
+    el.addEventListener('file-saved', listener);
+    await el.saveAll();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('switching away discards unsaved edits', async () => {
+    // The defining assertion of the no-cache contract.
+    // Edits to `a.py` are gone after opening `b.py` — no
+    // multi-file dirty set, no preserved buffer.
+    const el = mountViewer();
+    await settle(el);
     await el.openFile({ path: 'a.py' });
     await settle(el);
     monacoState.editors[0]._simulateContentChange('a-edited');
     await settle(el);
-    expect(el.getDirtyFiles().sort()).toEqual(['a.py', 'b.py']);
-    const listener = vi.fn();
-    el.addEventListener('file-saved', listener);
-    await el.saveAll();
-    expect(listener).toHaveBeenCalledTimes(2);
+    expect(el.getDirtyFiles()).toEqual(['a.py']);
+    await el.openFile({ path: 'b.py' });
+    await settle(el);
+    // Fresh fetch of b.py from the mock returns its HEAD
+    // content; the in-flight edit to a.py is discarded.
     expect(el.getDirtyFiles()).toEqual([]);
+    expect(el._file.path).toBe('b.py');
   });
 });
 
@@ -684,8 +711,8 @@ describe('DiffViewer virtual files', () => {
       virtualContent: 'hello world',
     });
     await settle(el);
-    expect(el._files[0].modified).toBe('hello world');
-    expect(el._files[0].isVirtual).toBe(true);
+    expect(el._file.modified).toBe('hello world');
+    expect(el._file.isVirtual).toBe(true);
   });
 
   it('virtual files are never dirty even after edit', async () => {
@@ -715,7 +742,10 @@ describe('DiffViewer virtual files', () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it('closing a virtual file removes it from the content map', async () => {
+  it('closing a virtual file clears the slot', async () => {
+    // No persistent content map in the single-file
+    // model — virtual content lives on _file.modified
+    // while the file is open and is discarded on close.
     const el = mountViewer();
     await settle(el);
     await el.openFile({
@@ -723,10 +753,11 @@ describe('DiffViewer virtual files', () => {
       virtualContent: 'x',
     });
     await settle(el);
-    expect(el._virtualContents.has('virtual://thing')).toBe(true);
+    expect(el._file?.modified).toBe('x');
     el.closeFile('virtual://thing');
     await settle(el);
-    expect(el._virtualContents.has('virtual://thing')).toBe(false);
+    expect(el._file).toBe(null);
+    expect(el.hasOpenFiles).toBe(false);
   });
 });
 
@@ -735,42 +766,51 @@ describe('DiffViewer virtual files', () => {
 // ---------------------------------------------------------------------------
 
 describe('DiffViewer loadPanel', () => {
-  it('creates a virtual://compare file when no files are open', async () => {
+  it('activates the virtual-comparison slot when no file is open', async () => {
+    // Single-file model: loadPanel populates the
+    // dedicated _virtualComparison slot, not a file
+    // entry in a list. The two slots are mutually
+    // exclusive.
     const el = mountViewer();
     await settle(el);
     await el.loadPanel('content for left', 'left', 'source A');
     await settle(el);
-    expect(el._files[0].path).toBe('virtual://compare');
-    expect(el._files[0].original).toBe('content for left');
-    expect(el._files[0].modified).toBe('');
+    expect(el._file).toBe(null);
+    expect(el._virtualComparison.leftContent).toBe('content for left');
+    expect(el._virtualComparison.rightContent).toBe('');
+    expect(el._virtualComparison.leftLabel).toBe('source A');
   });
 
-  it('accumulates both panels in a virtual://compare', async () => {
+  it('accumulates both panels in the virtual-comparison slot', async () => {
     const el = mountViewer();
     await settle(el);
     await el.loadPanel('left content', 'left', 'L');
     await settle(el);
     await el.loadPanel('right content', 'right', 'R');
     await settle(el);
-    const file = el._files[0];
-    expect(file.path).toBe('virtual://compare');
-    expect(file.original).toBe('left content');
-    expect(file.modified).toBe('right content');
+    const slot = el._virtualComparison;
+    expect(slot.leftContent).toBe('left content');
+    expect(slot.rightContent).toBe('right content');
+    expect(slot.leftLabel).toBe('L');
+    expect(slot.rightLabel).toBe('R');
   });
 
-  it('updates a real file\'s panel when one is active', async () => {
+  it('opening a real file clears the virtual slot', async () => {
+    // D18 contract: _file and _virtualComparison are
+    // mutually exclusive. Opening a real file must
+    // clobber any ad-hoc comparison.
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => 'repo content'),
     });
     const el = mountViewer();
     await settle(el);
-    await el.openFile({ path: 'src/main.py' });
-    await settle(el);
     await el.loadPanel('compare text', 'left', 'reference');
     await settle(el);
-    expect(el._files[0].original).toBe('compare text');
-    // Non-target panel preserved.
-    expect(el._files[0].modified).toBe('repo content');
+    expect(el._virtualComparison).not.toBe(null);
+    await el.openFile({ path: 'src/main.py' });
+    await settle(el);
+    expect(el._virtualComparison).toBe(null);
+    expect(el._file?.path).toBe('src/main.py');
   });
 
   it('rejects invalid panel arguments', async () => {
@@ -781,13 +821,12 @@ describe('DiffViewer loadPanel', () => {
     expect(el.hasOpenFiles).toBe(false);
   });
 
-  it('stores panel label for later render', async () => {
+  it('stores panel label on the virtual slot', async () => {
     const el = mountViewer();
     await settle(el);
     await el.loadPanel('content', 'left', 'history-source');
     await settle(el);
-    const labels = el._panelLabels.get('virtual://compare');
-    expect(labels.left).toBe('history-source');
+    expect(el._virtualComparison.leftLabel).toBe('history-source');
   });
 });
 
@@ -795,44 +834,23 @@ describe('DiffViewer loadPanel', () => {
 // Viewport state
 // ---------------------------------------------------------------------------
 
-describe('DiffViewer viewport state', () => {
+describe('DiffViewer viewport state (no-cache contract)', () => {
+  // D18: per-file viewport state is NOT preserved in
+  // the single-file model. Every openFile starts at
+  // the top; users who accept no-cache accept losing
+  // scroll position on switch.
   beforeEach(() => {
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => 'x'),
     });
   });
 
-  it('captures scroll position when switching away from a file', async () => {
+  it('no viewport state field exists', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.py' });
     await settle(el);
-    // Simulate the user scrolling.
-    const editor = monacoState.editors[0];
-    editor._scrollTop = 400;
-    editor._position = { lineNumber: 20, column: 5 };
-    await el.openFile({ path: 'b.py' });
-    await settle(el);
-    const saved = el._viewportStates.get('a.py');
-    expect(saved).toBeDefined();
-    expect(saved.scrollTop).toBe(400);
-    expect(saved.lineNumber).toBe(20);
-    expect(saved.column).toBe(5);
-  });
-
-  it('viewport state is session-only (cleared on close)', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.py' });
-    await settle(el);
-    const editor = monacoState.editors[0];
-    editor._scrollTop = 100;
-    await el.openFile({ path: 'b.py' });
-    await settle(el);
-    expect(el._viewportStates.has('a.py')).toBe(true);
-    el.closeFile('a.py');
-    await settle(el);
-    expect(el._viewportStates.has('a.py')).toBe(false);
+    expect(el._viewportStates).toBeUndefined();
   });
 });
 
@@ -853,12 +871,12 @@ describe('DiffViewer refreshOpenFiles', () => {
     await settle(el);
     await el.openFile({ path: 'a.py' });
     await settle(el);
-    expect(el._files[0].original).toContain('v1');
+    expect(el._file.original).toContain('v1');
     version = 2;
     await el.refreshOpenFiles();
     await settle(el);
-    expect(el._files[0].original).toContain('v2');
-    expect(el._files[0].modified).toContain('v2');
+    expect(el._file.original).toContain('v2');
+    expect(el._file.modified).toContain('v2');
   });
 
   it('does not re-fetch virtual files', async () => {
@@ -994,45 +1012,23 @@ describe('DiffViewer keyboard shortcuts', () => {
     expect(listener).toHaveBeenCalledOnce();
   });
 
-  it('Ctrl+W closes active file', async () => {
+  it('Ctrl+W does nothing (shortcut removed in single-file model)', async () => {
+    // D18 removed Ctrl+W / Ctrl+PageUp / Ctrl+PageDown
+    // because the single-file model has no tab concept.
+    // Pin the removal with a regression test so a
+    // future refactor can't reintroduce tab cycling by
+    // accident.
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.py' });
     await settle(el);
     fireKey(el, 'w');
     await settle(el);
-    expect(el.hasOpenFiles).toBe(false);
+    expect(el.hasOpenFiles).toBe(true);
+    expect(el._file.path).toBe('a.py');
   });
 
-  it('Ctrl+PageDown cycles to next file', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.py' });
-    await settle(el);
-    await el.openFile({ path: 'b.py' });
-    await settle(el);
-    // b is active.
-    fireKey(el, 'PageDown');
-    await settle(el);
-    // Cycled back to a (0 → 1 → 0 with wrap).
-    expect(el._files[el._activeIndex].path).toBe('a.py');
-  });
-
-  it('Ctrl+PageUp cycles to previous file', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.py' });
-    await settle(el);
-    await el.openFile({ path: 'b.py' });
-    await settle(el);
-    // b is active.
-    fireKey(el, 'PageUp');
-    await settle(el);
-    // Cycled to a.
-    expect(el._files[el._activeIndex].path).toBe('a.py');
-  });
-
-  it('Ctrl+PageDown no-op with single file', async () => {
+  it('Ctrl+PageDown / Ctrl+PageUp do nothing', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.py' });
@@ -1040,8 +1036,10 @@ describe('DiffViewer keyboard shortcuts', () => {
     const listener = vi.fn();
     el.addEventListener('active-file-changed', listener);
     fireKey(el, 'PageDown');
+    fireKey(el, 'PageUp');
     await settle(el);
     expect(listener).not.toHaveBeenCalled();
+    expect(el._file.path).toBe('a.py');
   });
 
   it('keyboard shortcuts without Ctrl do not fire', async () => {
@@ -1925,7 +1923,11 @@ describe('DiffViewer TeX preview — save-triggered compilation', () => {
 });
 
 describe('DiffViewer TeX preview — file switching', () => {
-  it('preserves compile state across file switches', async () => {
+  it('recompiles on switch-back (no-cache contract)', async () => {
+    // D18: no per-file cache means switching back to a
+    // previously-open .tex file triggers a fresh
+    // compile. Users accepting no-cache accept this
+    // tradeoff for .tex too.
     const htmlA = '<h1>File A content</h1>';
     const htmlB = '<h1>File B content</h1>';
     const compileFn = vi.fn(async (content, path) => ({
@@ -1951,7 +1953,8 @@ describe('DiffViewer TeX preview — file switching', () => {
     await settle(el);
     let pane = el.shadowRoot.querySelector('.preview-pane');
     expect(pane.innerHTML).toContain('File B content');
-    // Switch back to a.tex — uses cached state, NO new
+    // Switch back to a.tex — the openFile's fresh fetch
+    // plus preview mode carrying over triggers a new
     // compile.
     const callsBeforeSwitchBack = compileFn.mock.calls.length;
     await el.openFile({ path: 'a.tex' });
@@ -1959,12 +1962,16 @@ describe('DiffViewer TeX preview — file switching', () => {
     await settle(el);
     pane = el.shadowRoot.querySelector('.preview-pane');
     expect(pane.innerHTML).toContain('File A content');
-    expect(compileFn.mock.calls.length).toBe(
+    // At least one more compile fired for a.tex on
+    // switch-back. Not two strict equals because the
+    // availability probe is cached so we don't double-
+    // count it.
+    expect(compileFn.mock.calls.length).toBeGreaterThan(
       callsBeforeSwitchBack,
     );
   });
 
-  it('closing a file clears its compile state', async () => {
+  it('closing a file clears tex compile state', async () => {
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => 'x'),
       'Repo.is_tex_preview_available': vi.fn(async () => ({
@@ -1981,10 +1988,12 @@ describe('DiffViewer TeX preview — file switching', () => {
     el.shadowRoot.querySelector('.preview-button').click();
     await new Promise((r) => setTimeout(r, 10));
     await settle(el);
-    expect(el._texPreviewStates.has('paper.tex')).toBe(true);
+    // State lives on _file.texCompile in the single-
+    // file model.
+    expect(el._file?.texCompile).toBeTruthy();
     el.closeFile('paper.tex');
     await settle(el);
-    expect(el._texPreviewStates.has('paper.tex')).toBe(false);
+    expect(el._file).toBe(null);
   });
 });
 
@@ -2286,18 +2295,26 @@ describe('DiffViewer markdown preview — link navigation', () => {
     const el = mountViewer();
     await settle(el);
     await enterPreview(el, 'docs/README.md');
+    // D18: dispatch target is window so the app shell's
+    // full navigation pipeline runs (grid registration,
+    // collab broadcast, etc). Listening on the element
+    // misses the event.
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    const anchor = el.shadowRoot
-      .querySelector('.preview-pane')
-      .querySelector('a');
-    expect(anchor).toBeTruthy();
-    anchor.click();
-    await settle(el);
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener.mock.calls[0][0].detail).toEqual({
-      path: 'docs/other.md',
-    });
+    window.addEventListener('navigate-file', listener);
+    try {
+      const anchor = el.shadowRoot
+        .querySelector('.preview-pane')
+        .querySelector('a');
+      expect(anchor).toBeTruthy();
+      anchor.click();
+      await settle(el);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'docs/other.md',
+      });
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 
   it('resolves parent-directory links correctly', async () => {
@@ -2310,15 +2327,19 @@ describe('DiffViewer markdown preview — link navigation', () => {
     await settle(el);
     await enterPreview(el, 'docs/nested/page.md');
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    const anchor = el.shadowRoot
-      .querySelector('.preview-pane')
-      .querySelector('a');
-    anchor.click();
-    await settle(el);
-    expect(listener.mock.calls[0][0].detail.path).toBe(
-      'docs/top.md',
-    );
+    window.addEventListener('navigate-file', listener);
+    try {
+      const anchor = el.shadowRoot
+        .querySelector('.preview-pane')
+        .querySelector('a');
+      anchor.click();
+      await settle(el);
+      expect(listener.mock.calls[0][0].detail.path).toBe(
+        'docs/top.md',
+      );
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 
   it('strips fragment from link before dispatching', async () => {
@@ -2331,15 +2352,19 @@ describe('DiffViewer markdown preview — link navigation', () => {
     await settle(el);
     await enterPreview(el, 'docs/README.md');
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    el.shadowRoot
-      .querySelector('.preview-pane')
-      .querySelector('a')
-      .click();
-    await settle(el);
-    expect(listener.mock.calls[0][0].detail.path).toBe(
-      'docs/other.md',
-    );
+    window.addEventListener('navigate-file', listener);
+    try {
+      el.shadowRoot
+        .querySelector('.preview-pane')
+        .querySelector('a')
+        .click();
+      await settle(el);
+      expect(listener.mock.calls[0][0].detail.path).toBe(
+        'docs/other.md',
+      );
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 
   it('ignores absolute http URLs', async () => {
@@ -2436,14 +2461,18 @@ describe('DiffViewer markdown preview — link navigation', () => {
     el.shadowRoot.querySelector('.preview-button').click();
     await settle(el);
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    const anchor = el.shadowRoot
-      .querySelector('.preview-pane')
-      .querySelector('a');
-    anchor.click();
-    await settle(el);
-    // Still fires — the new pane has a new listener.
-    expect(listener).toHaveBeenCalledOnce();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const anchor = el.shadowRoot
+        .querySelector('.preview-pane')
+        .querySelector('a');
+      anchor.click();
+      await settle(el);
+      // Still fires — the new pane has a new listener.
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 });
 
@@ -2700,13 +2729,18 @@ describe('DiffViewer markdown link provider', () => {
     await settle(el);
     await el.openFile({ path: 'docs/spec.md' });
     await settle(el);
+    // D18: dispatch on window, not the element.
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    const opener = monacoState.linkOpeners[0];
-    const result = opener.open('ac-navigate:///other.md');
-    expect(result).toBe(true);
-    expect(listener).toHaveBeenCalledOnce();
-    expect(listener.mock.calls[0][0].detail.path).toBe('docs/other.md');
+    window.addEventListener('navigate-file', listener);
+    try {
+      const opener = monacoState.linkOpeners[0];
+      const result = opener.open('ac-navigate:///other.md');
+      expect(result).toBe(true);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail.path).toBe('docs/other.md');
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 
   it('link opener handles parent-directory references', async () => {
@@ -2715,10 +2749,14 @@ describe('DiffViewer markdown link provider', () => {
     await el.openFile({ path: 'docs/nested/page.md' });
     await settle(el);
     const listener = vi.fn();
-    el.addEventListener('navigate-file', listener);
-    const opener = monacoState.linkOpeners[0];
-    opener.open('ac-navigate:///../top.md');
-    expect(listener.mock.calls[0][0].detail.path).toBe('docs/top.md');
+    window.addEventListener('navigate-file', listener);
+    try {
+      const opener = monacoState.linkOpeners[0];
+      opener.open('ac-navigate:///../top.md');
+      expect(listener.mock.calls[0][0].detail.path).toBe('docs/top.md');
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 
   it('link opener ignores non-ac-navigate URIs', async () => {

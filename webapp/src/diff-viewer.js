@@ -1,35 +1,49 @@
 // DiffViewer — Monaco-based side-by-side diff editor.
 //
-// Layer 5 Phase 3.1a — the core viewer. Replaces Phase 3
-// groundwork's stub with a real Monaco DiffEditor.
+// Single-file, no-cache model. See D18 in IMPLEMENTATION_NOTES.md
+// and specs4/5-webapp/diff-viewer.md.
 //
-// Scope of this commit:
-//   - Multi-file tracking (open/close/switch, internal tab
-//     state with no visible tab bar per specs4)
-//   - Same-file suppression and concurrent-openFile guard
-//   - HEAD + working-copy content fetching via Repo RPCs
-//   - Per-file dirty tracking with Ctrl+S / batch save
-//   - Status LED floating overlay (clean / dirty / new)
-//   - Per-file viewport state (scroll + cursor restoration)
-//   - loadPanel() for ad-hoc comparisons via virtual://
-//     paths (history browser's context menu, Phase 2e.4)
-//   - Virtual file content (read-only, passed through
-//     openFile's virtualContent option)
-//   - Language detection via monaco-setup's languageForPath
-//   - Shadow DOM style synchronization for Monaco's styles
-//     (full re-sync on editor creation + MutationObserver
-//     for dynamic additions; both needed per specs4)
-//   - Keyboard shortcuts: Ctrl+S, Ctrl+W, Ctrl+PageUp/Down
+// Exactly one file is displayed at a time. Every `openFile`
+// call fetches HEAD and working-copy content fresh from the
+// backend — no caching across switches. Clicking the same
+// file in the picker refetches. Unsaved edits to the active
+// file are discarded when any other file is opened,
+// including the same-file case.
 //
-// Deferred to follow-up sub-phases:
-//   - 3.1b: Markdown preview with bidirectional scroll sync
-//   - 3.1c: TeX preview via make4ht + KaTeX
-//   - 3.1d: LSP integration (hover/definition/refs/completions)
-//   - 3.1e: Markdown link provider for Ctrl+click navigation
+// This model deliberately trades per-file state (scroll
+// position, unsaved buffers, dirty tracking across tabs)
+// for predictability — the user's mental model is "every
+// click = fresh content", so external edits (git pull,
+// another tool writing) are always reflected, and review-
+// mode transitions / discard-changes / commits don't leave
+// stale content in the editor.
+//
+// What the viewer still owns:
+//   - Single active-file slot (_file) OR a single virtual
+//     comparison slot (_virtualComparison) — never both
+//   - Single Monaco DiffEditor instance, reused across
+//     opens. Models swapped on every openFile; editor
+//     fully disposed only when returning to empty state
+//   - Dirty tracking for the currently-displayed file
+//     (compared against its freshly-fetched savedContent)
+//   - Status LED, save pipeline, markdown/TeX preview,
+//     LSP providers, markdown link provider
+//   - Generation counter so fast successive openFile calls
+//     don't let a stale fetch clobber a fresher one
+//
+// What was removed:
+//   - _files[] array, _activeIndex, closeFile, saveAll,
+//     getDirtyFiles (collapse to single-file operations)
+//   - _viewportStates, _panelLabels, _texPreviewStates
+//     maps (content-keyed persistence is gone)
+//   - _openingPaths set (replaced by generation counter
+//     semantics — a second call supersedes the first)
+//   - Ctrl+PageUp, Ctrl+PageDown, Ctrl+W keyboard shortcuts
+//   - Same-file suppression in openFile
 //
 // Governing spec: specs4/5-webapp/diff-viewer.md
 //
-// Architectural contracts pinned by this commit:
+// Architectural contracts pinned by this rewrite:
 //
 //   - **Worker configuration must install before editor
 //     construction.** monaco-setup.js side-effect runs at
@@ -37,11 +51,12 @@
 //     monaco-editor use ensures the global env is set up.
 //
 //   - **Editor reuse, not recreation.** A single DiffEditor
-//     handles all open files. Switching files disposes old
-//     models and creates new ones on the existing editor.
-//     Prevents memory leaks and avoids the ~300ms cost of
-//     recreating the editor on every tab switch. The editor
-//     is only fully disposed when the last file closes.
+//     handles all openFile calls. Switching files disposes
+//     old models and creates new ones on the existing
+//     editor. Prevents memory leaks and avoids the ~300ms
+//     cost of recreating the editor. The editor is only
+//     fully disposed when the viewer returns to empty
+//     state (no active file, no virtual comparison).
 //
 //   - **Model disposal order: setModel first, then dispose.**
 //     Disposing a model while it's still attached to the
@@ -49,23 +64,26 @@
 //     DiffEditorWidget model got reset". Capture refs →
 //     setModel to new pair → dispose old pair.
 //
-//   - **Concurrent openFile guard.** openFile is async
-//     (fetches content). Multiple rapid calls for the same
-//     path must not interleave model construction. An
-//     `_openingPath` field drops duplicate concurrent
-//     invocations for the same path.
+//   - **Generation counter for superseded fetches.** Every
+//     openFile call bumps _openingGeneration and captures
+//     the current value. When the async HEAD + working-copy
+//     fetch resolves, the handler checks the counter; if
+//     a later call has bumped it past the captured value,
+//     the model-attach step is skipped. Prevents a slow
+//     fetch from a stale click stomping fresher content.
 //
 //   - **Content-addressed virtual files.** virtual://
-//     paths (e.g., virtual://compare from loadPanel) have
-//     no filesystem backing. Content is held in a Map and
-//     short-circuited in the content-fetch path.
+//     paths (from loadPanel) have no filesystem backing;
+//     content is stored on _virtualComparison directly.
+//     The content-fetch path short-circuits for them.
 //
-//   - **Viewport state survives tab switch.** Before
-//     switching away from a file, capture {scrollTop,
-//     scrollLeft, line, column}. On switch back, restore
-//     after the diff computation settles (one-shot
-//     onDidUpdateDiff listener + 2s fallback timeout for
-//     identical-content case).
+//   - **No viewport persistence across switches.** Moving
+//     to a new file means starting at the top with cursor
+//     at (1, 1). Users accepting the no-cache trade-off
+//     also accept that the diff editor forgets where they
+//     were scrolled in the previous file. Within a single
+//     file, viewport is normal — scrolling and cursor
+//     position work as expected.
 
 import { LitElement, css, html } from 'lit';
 
@@ -171,15 +189,42 @@ const _SCROLL_LOCK_MS = 120;
 
 export class DiffViewer extends LitElement {
   static properties = {
-    _files: { type: Array, state: true },
-    _activeIndex: { type: Number, state: true },
-    /** Dirty state per file — drives the status LED. */
-    _dirtyCount: { type: Number, state: true },
+    /**
+     * The single active file, or null when no file is
+     * open. Shape: {path, original, modified, savedContent,
+     * isNew, isVirtual, isReadOnly, isConfig, configType,
+     * realPath?, texCompile?}.
+     *
+     * Mutually exclusive with _virtualComparison — exactly
+     * one is non-null at any time, or both are null (empty
+     * state).
+     */
+    _file: { type: Object, state: true },
+    /**
+     * Virtual comparison slot for loadPanel's ad-hoc
+     * content view. Shape: {leftContent, leftLabel,
+     * rightContent, rightLabel}. Both sides accumulate
+     * across successive loadPanel calls; opening any
+     * real file clears this slot.
+     */
+    _virtualComparison: { type: Object, state: true },
+    /**
+     * Monotonic counter bumped on every openFile /
+     * loadPanel call. Async handlers capture the current
+     * value at call start and check it before attaching
+     * models; a handler whose captured value is behind
+     * the current counter knows it was superseded and
+     * skips its model-attach step.
+     */
+    _openingGeneration: { type: Number, state: true },
+    /** Drives the status LED (clean / dirty / new). */
+    _dirty: { type: Boolean, state: true },
     /**
      * Preview mode flag — when true AND the active file
-     * is markdown, the layout switches from side-by-side
-     * diff to split editor+preview. Toggled via the
-     * Preview button in the overlay.
+     * is previewable (markdown or TeX), the layout
+     * switches from side-by-side diff to split
+     * editor+preview. Toggled via the Preview button in
+     * the overlay.
      */
     _previewMode: { type: Boolean, state: true },
   };
@@ -484,13 +529,17 @@ export class DiffViewer extends LitElement {
 
   constructor() {
     super();
-    this._files = [];
-    this._activeIndex = -1;
-    this._dirtyCount = 0;
+    // Single-file / virtual-comparison slots — mutually
+    // exclusive. _file holds a real open file; 
+    // _virtualComparison holds loadPanel content.
+    this._file = null;
+    this._virtualComparison = null;
+    this._openingGeneration = 0;
+    this._dirty = false;
     this._previewMode = false;
 
-    // Monaco editor instance. Created on first openFile,
-    // disposed on last closeFile.
+    // Monaco editor instance. Created on first openFile
+    // or loadPanel; disposed when both slots clear.
     this._editor = null;
     // Element reference for the editor host div, read
     // from the shadow root after Lit renders.
@@ -501,38 +550,19 @@ export class DiffViewer extends LitElement {
     // element's innerHTML directly (not via Lit) so every
     // keystroke doesn't re-render the whole component.
     this._previewPane = null;
-    // Virtual-file content map. Keyed by path starting
-    // with virtual://.
-    this._virtualContents = new Map();
-    // Per-file viewport state (scrollTop/scrollLeft/
-    // lineNumber/column). Not persisted — session-only.
-    this._viewportStates = new Map();
-    // Per-file panel labels (from loadPanel's label
-    // parameter). `{left, right}` entries.
-    this._panelLabels = new Map();
-    // Per-file TeX compile state. Keyed by path; each
-    // entry holds `{html, error, log, installHint,
-    // loading}`. Persists across file switches so
-    // toggling back to a .tex file shows the last
-    // compile result rather than a blank pane.
-    this._texPreviewStates = new Map();
     // Availability tristate — null = not yet checked,
     // true = make4ht installed, false = missing. Probed
     // lazily on first .tex file interaction with
-    // preview.
+    // preview. Lives on the component (not the file)
+    // because make4ht availability is process-level.
     this._texPreviewAvailable = null;
     // Generation counter for compile RPC calls — bumped
     // on each compile start; stale responses check it
     // before writing state so fast typing + slow server
-    // doesn't clobber fresher results.
+    // doesn't clobber fresher results. Distinct from
+    // _openingGeneration (which guards file-switch
+    // fetches).
     this._texCompileGeneration = 0;
-    // Concurrent-openFile guard. Holds the set of paths
-    // currently being opened asynchronously; duplicate
-    // calls for any of those paths drop silently.
-    // Different paths proceed in parallel — spec says
-    // "Opening a different file while another is still
-    // loading is allowed — both calls run independently."
-    this._openingPaths = new Set();
     // Current highlight decorations (cleared on next
     // highlight or on file switch).
     this._highlightDecorations = [];
@@ -542,7 +572,8 @@ export class DiffViewer extends LitElement {
     this._contentChangeDisposable = null;
     // Editor scroll listener disposable — only attached
     // in preview mode so we don't pay for scroll events
-    // on every file, only markdown files under preview.
+    // on every file, only previewable files under
+    // preview mode.
     this._editorScrollDisposable = null;
     // Scroll-sync lock. 'editor' or 'preview' identifies
     // which side initiated the scroll; the other side's
@@ -602,19 +633,16 @@ export class DiffViewer extends LitElement {
 
   updated(changedProps) {
     super.updated?.(changedProps);
-    // When files go non-empty, the editor container
+    // When a slot goes non-empty, the editor container
     // appears in the DOM; wire it up.
-    if (
-      this._files.length > 0 &&
-      this._activeIndex >= 0 &&
-      !this._editorContainer
-    ) {
+    const hasContent = this._file !== null || this._virtualComparison !== null;
+    if (hasContent && !this._editorContainer) {
       this._editorContainer =
         this.shadowRoot?.querySelector('.editor-container') || null;
     }
-    // When files go empty, drop the container ref so the
-    // next open re-resolves it.
-    if (this._files.length === 0 && this._editorContainer) {
+    // When both slots clear, drop the container ref so
+    // the next open re-resolves it.
+    if (!hasContent && this._editorContainer) {
       this._editorContainer = null;
     }
   }
@@ -624,282 +652,58 @@ export class DiffViewer extends LitElement {
   // ---------------------------------------------------------------
 
   /**
-   * Open or switch to a file. Fetches content if not
-   * already provided.
+   * Open a file, discarding any previous active file or
+   * virtual comparison. Every call fetches HEAD and
+   * working-copy content fresh — no caching, no same-file
+   * suppression. Clicking the same file twice refetches.
    *
    * Options:
    *   path        — repo-relative or virtual:// path
    *   line        — optional, scroll to this line after open
    *   searchText  — optional, scroll to and highlight this text
-   *   virtualContent — for virtual:// paths, the content to display
+   *   virtualContent — for virtual:// paths, the content
+   *                    to display (always read-only)
    *
-   * Concurrent calls for the same path are dropped. Calls
-   * for a different path while another open is in flight
-   * proceed independently.
+   * Unsaved edits to the previously-active file are
+   * discarded. Concurrent calls supersede: the generation
+   * counter ensures only the latest call's fetch attaches
+   * its models.
    */
   async openFile(opts) {
     if (!opts || typeof opts.path !== 'string' || !opts.path) {
       return;
     }
     const { path, virtualContent } = opts;
-    // Same-file suppression — re-opening the current
-    // active file is a no-op (preserves scroll, cursor,
-    // dirty state).
-    const existing = this._files.findIndex((f) => f.path === path);
-    if (existing !== -1 && existing === this._activeIndex) {
-      // But honour scroll/search requests on the same file.
-      if (opts.line != null) this._scrollToLine(opts.line);
-      if (opts.searchText) this._scrollToSearchText(opts.searchText);
-      return;
-    }
-    // Concurrent-open guard for the same path. Different
-    // paths proceed independently.
-    if (this._openingPaths.has(path)) return;
-    this._openingPaths.add(path);
-    try {
-      await this._openFileInner(opts);
-    } finally {
-      this._openingPaths.delete(path);
-    }
-    // Apply line/search after content is in place.
-    if (opts.line != null) this._scrollToLine(opts.line);
-    if (opts.searchText) this._scrollToSearchText(opts.searchText);
-  }
+    // Bump the generation counter; capture our value.
+    // Async fetches that resolve after the counter has
+    // advanced skip their model-attach step.
+    this._openingGeneration += 1;
+    const myGeneration = this._openingGeneration;
 
-  /**
-   * Close a single file. Disposes its models. Switches to
-   * the next file or clears the active state if empty.
-   */
-  closeFile(path) {
-    const idx = this._files.findIndex((f) => f.path === path);
-    if (idx === -1) return;
-    const wasActive = idx === this._activeIndex;
-    // Clean up virtual content if applicable.
+    // Clear the virtual comparison slot — opening a real
+    // file replaces whatever ad-hoc content was shown.
+    this._virtualComparison = null;
+
+    let newFile;
     if (path.startsWith(_VIRTUAL_PREFIX)) {
-      this._virtualContents.delete(path);
-    }
-    // Drop viewport, panel-label, and TeX compile
-    // state for this file.
-    this._viewportStates.delete(path);
-    this._panelLabels.delete(path);
-    this._texPreviewStates.delete(path);
-
-    const newFiles = [
-      ...this._files.slice(0, idx),
-      ...this._files.slice(idx + 1),
-    ];
-    this._files = newFiles;
-    if (newFiles.length === 0) {
-      this._activeIndex = -1;
-      // Last file — dispose the editor entirely. Releases
-      // Monaco's resources and lets the empty-state
-      // watermark render cleanly.
-      this._disposeEditor();
-      this._recomputeDirtyCount();
-      // Preview mode is per-file; reset so the next file
-      // opened (if any) starts in normal diff view.
-      this._previewMode = false;
-      this._previewPane = null;
-    } else if (wasActive) {
-      // Clamp to remaining range; switch to adjacent file.
-      this._activeIndex = Math.min(idx, newFiles.length - 1);
-      // If the next active file isn't markdown, exit
-      // preview mode so the layout falls back to side-by-
-      // side diff. _showEditor below picks up the new
-      // mode via the template re-render.
-      const nextFile = this._files[this._activeIndex];
-      if (this._previewMode && !this._isMarkdownFile(nextFile)) {
-        this._previewMode = false;
-        this._previewPane = null;
-        this._disposeEditor();
-        this._editorContainer = null;
-      }
-      this._showEditor();
-    } else if (idx < this._activeIndex) {
-      this._activeIndex -= 1;
-    }
-    this._recomputeDirtyCount();
-    this._dispatchActiveFileChanged();
-  }
-
-  /**
-   * Refresh all open non-virtual files by re-fetching
-   * their HEAD + working copy. Preserves the active file
-   * and its viewport. Used after edits land.
-   */
-  async refreshOpenFiles() {
-    // Capture the active file's viewport before we
-    // rebuild its models. _showEditor → _swapModel
-    // creates fresh models which reset cursor and
-    // scroll; restoring after the rebuild keeps the
-    // user's reading position through LLM-initiated
-    // refreshes.
-    this._captureViewport();
-    const paths = this._files
-      .map((f) => f.path)
-      .filter((p) => !p.startsWith(_VIRTUAL_PREFIX));
-    for (const path of paths) {
-      const fetched = await this._fetchFileContent(path);
-      if (!fetched) continue;
-      const file = this._files.find((f) => f.path === path);
-      if (!file) continue; // closed during refetch
-      // HEAD side always refreshes — it tracks the
-      // repository's committed state, which refresh
-      // triggers are meant to surface.
-      file.original = fetched.original;
-      file.isNew = fetched.isNew;
-      // Modified side is the editable working copy.
-      // Preserve local unsaved edits when dirty — the
-      // user has in-progress changes we must not
-      // silently overwrite. Update both modified AND
-      // savedContent from disk only when the file was
-      // clean, so a post-save refresh re-anchors dirty
-      // tracking to the fresh disk content.
-      if (this._isDirty(file)) {
-        // Keep local edits. savedContent stays as-is
-        // (pre-refresh baseline) so the LED remains
-        // dirty. A later save will push the user's
-        // content to disk.
-      } else {
-        file.modified = fetched.modified;
-        file.savedContent = fetched.modified;
-      }
-    }
-    // Rebuild the active editor with refreshed content.
-    // _showEditor's build callback calls _restoreViewport
-    // which waits for diff-ready and replays the saved
-    // cursor/scroll.
-    if (this._activeIndex >= 0) {
-      this._showEditor();
-    }
-    this._recomputeDirtyCount();
-  }
-
-  /** Paths of files with unsaved modifications. */
-  getDirtyFiles() {
-    return this._files.filter((f) => this._isDirty(f)).map((f) => f.path);
-  }
-
-  /** Save all dirty files. */
-  async saveAll() {
-    for (const file of [...this._files]) {
-      if (this._isDirty(file)) {
-        await this._saveFile(file.path);
-      }
-    }
-  }
-
-  /**
-   * Load arbitrary content into one of the panels for
-   * ad-hoc comparison. If no file is open, creates a
-   * virtual file at virtual://compare. If a virtual
-   * comparison already exists, updates only the specified
-   * panel so both sides accumulate independently. If a
-   * real file is open, updates that file's panel model.
-   *
-   * Used by the history browser's context menu
-   * (specs4/5-webapp/chat.md#history-browser → load in
-   * left/right panel).
-   */
-  async loadPanel(content, panel, label) {
-    if (panel !== 'left' && panel !== 'right') return;
-    const text = typeof content === 'string' ? content : '';
-    // If no file is open, create a virtual comparison.
-    if (this._files.length === 0) {
-      const path = `${_VIRTUAL_PREFIX}compare`;
-      const original = panel === 'left' ? text : '';
-      const modified = panel === 'right' ? text : '';
-      // Store content in the virtual map before openFile
-      // reads it.
-      this._virtualContents.set(path, { original, modified });
-      this._setPanelLabel(path, panel, label);
-      await this.openFile({ path });
-      return;
-    }
-    // Existing active file.
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    // Special case for an existing virtual comparison —
-    // update only the target panel so both sides
-    // accumulate across calls.
-    if (file.path === `${_VIRTUAL_PREFIX}compare`) {
-      if (panel === 'left') file.original = text;
-      else file.modified = text;
-      file.savedContent = file.modified;
-      this._virtualContents.set(file.path, {
-        original: file.original,
-        modified: file.modified,
-      });
-    } else {
-      // Real file — update the target side only. The
-      // non-target side keeps its repo content.
-      if (panel === 'left') file.original = text;
-      else file.modified = text;
-      file.savedContent = file.modified;
-    }
-    this._setPanelLabel(file.path, panel, label);
-    this._showEditor();
-    this._recomputeDirtyCount();
-  }
-
-  /** Whether any files are currently open. */
-  get hasOpenFiles() {
-    return this._files.length > 0;
-  }
-
-  // ---------------------------------------------------------------
-  // Internals — file loading
-  // ---------------------------------------------------------------
-
-  async _openFileInner(opts) {
-    const { path, virtualContent } = opts;
-    const existing = this._files.findIndex((f) => f.path === path);
-    if (existing !== -1) {
-      // Open but not active — capture current file's
-      // viewport, switch.
-      this._captureViewport();
-      this._activeIndex = existing;
-      // If switching to a non-markdown file while preview
-      // is on, exit preview so the layout reverts to the
-      // normal side-by-side diff.
-      this._maybeExitPreviewForActiveFile();
-      this._showEditor();
-      this._dispatchActiveFileChanged();
-      // Same preview refresh as the new-file path below —
-      // switching between two already-open previewable
-      // files must swap the pane content too. For TeX,
-      // uses the cached compile state; no recompile.
-      this._maybeRefreshPreviewAfterSwitch(this._files[existing]);
-      return;
-    }
-    // New file. Capture the outgoing file's viewport
-    // before we rebuild the editor for the new one.
-    this._captureViewport();
-    let file;
-    if (path.startsWith(_VIRTUAL_PREFIX)) {
-      // Virtual file — content either passed explicitly
-      // or already staged by loadPanel.
-      const staged = this._virtualContents.get(path) || {
+      // Virtual file — content passed explicitly. Always
+      // read-only. No filesystem backing.
+      newFile = {
+        path,
         original: '',
         modified: virtualContent || '',
-      };
-      file = {
-        path,
-        original: staged.original,
-        modified: staged.modified,
-        savedContent: staged.modified,
+        savedContent: virtualContent || '',
         isNew: false,
         isVirtual: true,
+        isReadOnly: true,
       };
-      // Ensure the map has current content for reads.
-      this._virtualContents.set(path, {
-        original: staged.original,
-        modified: staged.modified,
-      });
     } else {
       const fetched = await this._fetchFileContent(path);
+      // Generation check: if a later openFile bumped past
+      // our captured value, our fetch is stale. Abandon.
+      if (myGeneration !== this._openingGeneration) return;
       if (!fetched) return;
-      file = {
+      newFile = {
         path,
         original: fetched.original,
         modified: fetched.modified,
@@ -908,58 +712,180 @@ export class DiffViewer extends LitElement {
         isVirtual: false,
       };
     }
-    this._files = [...this._files, file];
-    this._activeIndex = this._files.length - 1;
-    this._maybeExitPreviewForActiveFile();
+
+    this._file = newFile;
+    // Preview mode persists across switches only when the
+    // new file is previewable. Otherwise the split layout
+    // falls back to side-by-side diff.
+    if (this._previewMode && !this._isPreviewableFile(newFile)) {
+      this._previewMode = false;
+      this._previewPane = null;
+      this._disposeEditor();
+      this._editorContainer = null;
+    }
     this._showEditor();
     this._dispatchActiveFileChanged();
-    this._recomputeDirtyCount();
-    // Preview is still on after the file switch (active
-    // file is previewable). Refresh the pane so it shows
-    // the new file's content rather than the prior
-    // file's. For TeX, trigger a compile if there's no
-    // cached state for this file yet.
-    this._maybeRefreshPreviewAfterSwitch(file);
+    this._recomputeDirty();
+
+    // Apply line/search after content is in place.
+    if (opts.line != null) this._scrollToLine(opts.line);
+    if (opts.searchText) this._scrollToSearchText(opts.searchText);
+
+    // If preview stayed on (the new file is previewable),
+    // refresh the pane content for the newly-loaded file.
+    if (this._previewMode && this._isPreviewableFile(newFile)) {
+      this.updateComplete.then(() => {
+        this._updatePreview(newFile.modified);
+        if (this._isTexFile(newFile)) {
+          this._compileTex(newFile);
+        }
+      });
+    }
   }
 
   /**
-   * If preview is on but the active file isn't
-   * previewable (markdown or TeX), flip it off and tear
-   * down the editor so _showEditor rebuilds in the
-   * normal side-by-side layout. No-op otherwise.
+   * Refetch the active file's content and rebuild the
+   * model pair. Unsaved edits are discarded (same policy
+   * as cross-file switches — the no-cache contract is
+   * the whole point).
+   *
+   * No-op when no real file is active, or when the
+   * virtual comparison slot holds content (virtual
+   * content has no disk backing to refresh from).
+   *
+   * Callers: stream-complete after LLM edits,
+   * commitResult after a commit, files-reverted after
+   * discard-changes, review-mode transitions.
    */
-  _maybeExitPreviewForActiveFile() {
-    if (!this._previewMode) return;
-    const file =
-      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-    if (this._isPreviewableFile(file)) return;
+  async refreshActiveFile() {
+    if (this._file === null || this._file.isVirtual) return;
+    if (this._virtualComparison !== null) return;
+    const path = this._file.path;
+    // Bump generation so any concurrent openFile supersedes
+    // us, not the other way around.
+    this._openingGeneration += 1;
+    const myGeneration = this._openingGeneration;
+    const fetched = await this._fetchFileContent(path);
+    if (myGeneration !== this._openingGeneration) return;
+    if (!fetched) return;
+    this._file = {
+      path,
+      original: fetched.original,
+      modified: fetched.modified,
+      savedContent: fetched.modified,
+      isNew: fetched.isNew,
+      isVirtual: false,
+    };
+    this._showEditor();
+    this._recomputeDirty();
+  }
+
+  /**
+   * Backwards-compatible alias. App shell callers
+   * (stream-complete, commitResult, files-reverted)
+   * still invoke refreshOpenFiles; the single-file
+   * rewrite collapses the plural to a single file.
+   */
+  async refreshOpenFiles() {
+    await this.refreshActiveFile();
+  }
+
+  /**
+   * Close the active file and return to empty state.
+   * Called by the app-shell's SVG-toggle handler when
+   * swapping viewers for a file; no keyboard shortcut
+   * path in the single-file model.
+   *
+   * The `path` argument exists for backwards compatibility
+   * with the old multi-file closeFile(path); it's
+   * validated against the active file and ignored if it
+   * doesn't match.
+   */
+  closeFile(path) {
+    if (path && this._file !== null && this._file.path !== path) {
+      return;
+    }
+    this._file = null;
+    this._virtualComparison = null;
+    this._disposeEditor();
+    this._recomputeDirty();
     this._previewMode = false;
     this._previewPane = null;
-    this._disposeEditor();
-    this._editorContainer = null;
+    this._dispatchActiveFileChanged();
+  }
+
+  /** Single-element array when the active file is dirty, else empty. */
+  getDirtyFiles() {
+    if (this._file !== null && this._isDirty(this._file)) {
+      return [this._file.path];
+    }
+    return [];
+  }
+
+  /** Save the active file if dirty. Single-file semantics. */
+  async saveAll() {
+    if (this._file !== null && this._isDirty(this._file)) {
+      await this._saveFile(this._file.path);
+    }
   }
 
   /**
-   * After switching to a new file while preview mode is
-   * already on, refresh the pane content for the new
-   * file. For markdown, re-render from the editor's
-   * current content. For TeX, show the cached compile
-   * state; if no state exists, trigger a compile.
+   * Load arbitrary text content into one panel of the
+   * virtual-comparison slot. Two successive loadPanel
+   * calls accumulate across the slot's left and right
+   * sides — this is the history-browser "Load in Left /
+   * Right Panel" workflow.
    *
-   * Runs after Lit has committed the template so the
-   * pane element exists.
+   * Opening a real file (via openFile) clears the
+   * virtual-comparison slot. The two slots are mutually
+   * exclusive.
    */
-  _maybeRefreshPreviewAfterSwitch(file) {
-    if (!this._previewMode) return;
-    if (!this._isPreviewableFile(file)) return;
-    this.updateComplete.then(() => {
-      this._updatePreview(file.modified);
-      if (this._isTexFile(file) &&
-          !this._texPreviewStates.has(file.path)) {
-        this._compileTex(file);
-      }
-    });
+  async loadPanel(content, panel, label) {
+    if (panel !== 'left' && panel !== 'right') return;
+    const text = typeof content === 'string' ? content : '';
+    // Bump generation so a concurrent openFile can't
+    // stomp our loadPanel mid-setup.
+    this._openingGeneration += 1;
+
+    // If no virtual comparison is active yet, initialize
+    // with empty opposite side and clear any real file.
+    if (this._virtualComparison === null) {
+      this._file = null;
+      this._virtualComparison = {
+        leftContent: panel === 'left' ? text : '',
+        leftLabel: panel === 'left' ? label || '' : '',
+        rightContent: panel === 'right' ? text : '',
+        rightLabel: panel === 'right' ? label || '' : '',
+      };
+    } else {
+      // Update only the specified panel; the other side's
+      // content and label are preserved. This is the
+      // accumulation pattern.
+      const current = this._virtualComparison;
+      this._virtualComparison = {
+        leftContent:
+          panel === 'left' ? text : current.leftContent,
+        leftLabel:
+          panel === 'left' ? label || '' : current.leftLabel,
+        rightContent:
+          panel === 'right' ? text : current.rightContent,
+        rightLabel:
+          panel === 'right' ? label || '' : current.rightLabel,
+      };
+    }
+    this._showEditor();
+    this._recomputeDirty();
+    this._dispatchActiveFileChanged();
   }
+
+  /** Whether any content is displayed (real file or virtual comparison). */
+  get hasOpenFiles() {
+    return this._file !== null || this._virtualComparison !== null;
+  }
+
+  // ---------------------------------------------------------------
+  // Internals — file loading
+  // ---------------------------------------------------------------
 
   /**
    * Fetch HEAD and working copy content via Repo RPCs.
@@ -969,20 +895,13 @@ export class DiffViewer extends LitElement {
    * the working copy from loading.
    */
   async _fetchFileContent(path) {
+    // Virtual paths short-circuit — their content lives
+    // on _virtualComparison / _file directly, no disk
+    // fetch ever happens. openFile handles the virtual
+    // branch inline and never calls this method for a
+    // virtual path; this guard is defensive.
     if (path.startsWith(_VIRTUAL_PREFIX)) {
-      const staged = this._virtualContents.get(path);
-      if (staged) {
-        return {
-          original: staged.original,
-          modified: staged.modified,
-          isNew: false,
-        };
-      }
-      return {
-        original: '',
-        modified: '(no content)',
-        isNew: true,
-      };
+      return { original: '', modified: '', isNew: false };
     }
     // Defer to our RPC helper if the app shell has
     // published SharedRpc. DiffViewer is host-agnostic —
@@ -1065,8 +984,11 @@ export class DiffViewer extends LitElement {
   // ---------------------------------------------------------------
 
   _showEditor() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
+    // Nothing to show in empty state. Dispose runs via
+    // closeFile / openFile's clear paths, not here.
+    if (this._file === null && this._virtualComparison === null) {
+      return;
+    }
     // Wait for Lit to commit the template so the editor
     // container div exists.
     const build = () => {
@@ -1087,57 +1009,50 @@ export class DiffViewer extends LitElement {
       if (!this._editor) {
         this._createEditor();
       } else {
-        this._swapModel(file);
+        this._swapModel();
       }
-      this._restoreViewport(file.path);
-      this._setReadOnly(file);
+      this._setReadOnlyForCurrent();
     };
     this.updateComplete.then(build);
   }
 
   _createEditor() {
     if (!this._editorContainer) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
+    const content = this._currentContent();
+    if (!content) return;
     // Install LSP providers on first editor construction.
     // Idempotent across re-creations and across viewer
     // remounts (guard lives on the monaco namespace).
     // The callbacks close over `this` but read current
     // state per-invocation, so file switches and
-    // reconnects are picked up automatically.
+    // reconnects are picked up automatically. For the
+    // virtual-comparison case there's no path to feed
+    // to LSP; the providers return empty results.
     installLspProviders(
       monaco,
-      () => {
-        if (this._activeIndex < 0) return '';
-        const active = this._files[this._activeIndex];
-        return active?.path || '';
-      },
+      () => this._file?.path || '',
       () => this._getRpcCall(),
     );
     // Markdown link provider — makes [text](relative)
-    // links Ctrl+clickable inside the editor. Mirrors
-    // the preview pane's link navigation (Phase 3.1b).
-    // The onNavigate callback resolves the path against
-    // the current file's directory and dispatches a
-    // navigate-file event for the app shell to route.
+    // links Ctrl+clickable inside the editor. The
+    // onNavigate callback resolves the path against the
+    // current file's directory and dispatches
+    // navigate-file on the WINDOW (not this element) so
+    // the app shell's full navigation pipeline runs —
+    // grid registration, collab broadcast, last-open
+    // persistence. Same event channel the picker uses
+    // for its file clicks.
     installMarkdownLinkProvider(
       monaco,
-      () => {
-        if (this._activeIndex < 0) return '';
-        const active = this._files[this._activeIndex];
-        return active?.path || '';
-      },
+      () => this._file?.path || '',
       (relPath) => {
-        if (this._activeIndex < 0) return;
-        const active = this._files[this._activeIndex];
-        if (!active) return;
-        const resolved = resolveRelativePath(active.path, relPath);
+        if (this._file === null) return;
+        const resolved = resolveRelativePath(this._file.path, relPath);
         if (!resolved) return;
-        this.dispatchEvent(
+        window.dispatchEvent(
           new CustomEvent('navigate-file', {
             detail: { path: resolved },
-            bubbles: true,
-            composed: true,
+            bubbles: false,
           }),
         );
       },
@@ -1158,16 +1073,17 @@ export class DiffViewer extends LitElement {
           scrollBeyondLastLine: false,
         },
       );
+      const lang = content.language;
       const original = monaco.editor.createModel(
-        file.original || '',
-        languageForPath(file.path),
+        content.original || '',
+        lang,
       );
       const modified = monaco.editor.createModel(
-        file.modified || '',
-        languageForPath(file.path),
+        content.modified || '',
+        lang,
       );
       this._editor.setModel({ original, modified });
-      this._setReadOnly(file);
+      this._setReadOnlyForCurrent();
       this._attachContentChangeListener();
       this._patchCodeEditorService();
     } catch (err) {
@@ -1175,17 +1091,19 @@ export class DiffViewer extends LitElement {
     }
   }
 
-  _swapModel(file) {
+  _swapModel() {
     if (!this._editor) return;
+    const content = this._currentContent();
+    if (!content) return;
     try {
       const oldModels = this._editor.getModel();
       const newOriginal = monaco.editor.createModel(
-        file.original || '',
-        languageForPath(file.path),
+        content.original || '',
+        content.language,
       );
       const newModified = monaco.editor.createModel(
-        file.modified || '',
-        languageForPath(file.path),
+        content.modified || '',
+        content.language,
       );
       // Disposal order: setModel detaches old, then
       // dispose old. Disposing before setModel throws.
@@ -1199,18 +1117,49 @@ export class DiffViewer extends LitElement {
       }
       // Read-only state goes AFTER setModel — inline diff
       // mode can reset it otherwise.
-      this._setReadOnly(file);
+      this._setReadOnlyForCurrent();
       this._attachContentChangeListener();
     } catch (err) {
       console.error('[diff-viewer] model swap failed', err);
     }
   }
 
-  _setReadOnly(file) {
+  /**
+   * Return the current content pair + language for
+   * Monaco model construction. Dispatches by which slot
+   * is active.
+   *
+   * Shape: {original, modified, language, readOnly}.
+   * Returns null when both slots are empty.
+   */
+  _currentContent() {
+    if (this._file !== null) {
+      return {
+        original: this._file.original || '',
+        modified: this._file.modified || '',
+        language: languageForPath(this._file.path),
+        readOnly: !!(this._file.isVirtual || this._file.isReadOnly),
+      };
+    }
+    if (this._virtualComparison !== null) {
+      return {
+        original: this._virtualComparison.leftContent || '',
+        modified: this._virtualComparison.rightContent || '',
+        // Virtual comparisons are always plain text —
+        // no path to derive language from.
+        language: 'plaintext',
+        readOnly: true,
+      };
+    }
+    return null;
+  }
+
+  _setReadOnlyForCurrent() {
     if (!this._editor) return;
     const modifiedEditor = this._getModifiedEditor();
     if (!modifiedEditor) return;
-    const readOnly = !!(file?.isVirtual || file?.isReadOnly);
+    const content = this._currentContent();
+    const readOnly = !!content?.readOnly;
     try {
       modifiedEditor.updateOptions({ readOnly });
     } catch (_) {
@@ -1294,8 +1243,8 @@ export class DiffViewer extends LitElement {
    * existing editor, the editor must be recreated.
    */
   _togglePreview() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
+    if (this._file === null) return;
+    const file = this._file;
     if (!this._isPreviewableFile(file)) return;
     // Detach any preview-pane scroll listener attached
     // to the OLD pane element before Lit replaces the
@@ -1356,11 +1305,9 @@ export class DiffViewer extends LitElement {
         this.shadowRoot?.querySelector('.preview-pane') || null;
     }
     if (!this._previewPane) return;
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
-    if (this._isTexFile(file)) {
-      this._renderTexPreviewFromState(file);
+    if (this._file === null) return;
+    if (this._isTexFile(this._file)) {
+      this._renderTexPreviewFromState();
       return;
     }
     // Markdown path — render live from content.
@@ -1391,13 +1338,20 @@ export class DiffViewer extends LitElement {
    *   - html — the compiled output
    *   - absent — "Save to preview" placeholder
    */
-  _renderTexPreviewFromState(file) {
+  /**
+   * Write the TeX preview pane's content from the
+   * active file's compile state. State lives on the
+   * file object itself (`_file.texCompile`) in the
+   * single-file model — no separate map.
+   */
+  _renderTexPreviewFromState() {
     if (!this._previewPane) {
       this._previewPane =
         this.shadowRoot?.querySelector('.preview-pane') || null;
     }
     if (!this._previewPane) return;
-    const state = this._texPreviewStates.get(file.path);
+    if (this._file === null) return;
+    const state = this._file.texCompile;
     if (!state) {
       this._previewPane.innerHTML =
         '<div class="tex-preview-placeholder">' +
@@ -1469,19 +1423,25 @@ export class DiffViewer extends LitElement {
     if (!this._isTexFile(file)) return;
     const path = file.path;
     const gen = ++this._texCompileGeneration;
+    // Helper: write compile state onto the active file
+    // IF it's still the one we started compiling for.
+    // Rapid file switches bump _openingGeneration; if
+    // this._file changes out from under us we skip the
+    // state write (nothing to write to — file is gone).
+    const setState = (state) => {
+      if (this._file === null || this._file.path !== path) return;
+      this._file = { ...this._file, texCompile: state };
+      this._renderTexPreviewIfActive(path);
+    };
     // Show loading state immediately so the pane isn't
     // blank during the async probe + compile.
-    this._texPreviewStates.set(path, { loading: true });
-    this._renderTexPreviewIfActive(path);
+    setState({ loading: true });
     // Run availability probe once per session. Cached
     // outcome applies to every subsequent .tex file.
     const call = this._getRpcCall();
     if (!call) {
       if (gen !== this._texCompileGeneration) return;
-      this._texPreviewStates.set(path, {
-        error: 'RPC unavailable',
-      });
-      this._renderTexPreviewIfActive(path);
+      setState({ error: 'RPC unavailable' });
       return;
     }
     if (this._texPreviewAvailable === null) {
@@ -1493,13 +1453,12 @@ export class DiffViewer extends LitElement {
             unwrapped.available === false) {
           this._texPreviewAvailable = false;
           if (gen !== this._texCompileGeneration) return;
-          this._texPreviewStates.set(path, {
+          setState({
             error: 'make4ht not installed',
             installHint:
               unwrapped.install_hint ||
               'Install TeX Live or MiKTeX to enable TeX preview.',
           });
-          this._renderTexPreviewIfActive(path);
           return;
         }
         this._texPreviewAvailable = true;
@@ -1507,23 +1466,21 @@ export class DiffViewer extends LitElement {
         // Probe failed — treat as unavailable.
         this._texPreviewAvailable = false;
         if (gen !== this._texCompileGeneration) return;
-        this._texPreviewStates.set(path, {
+        setState({
           error: 'Availability check failed',
           installHint:
             'Ensure make4ht is installed and on PATH.',
         });
-        this._renderTexPreviewIfActive(path);
         return;
       }
     }
     if (this._texPreviewAvailable === false) {
       if (gen !== this._texCompileGeneration) return;
-      this._texPreviewStates.set(path, {
+      setState({
         error: 'make4ht not installed',
         installHint:
           'Install TeX Live or MiKTeX to enable TeX preview.',
       });
-      this._renderTexPreviewIfActive(path);
       return;
     }
     // Run the compile.
@@ -1535,16 +1492,13 @@ export class DiffViewer extends LitElement {
       );
     } catch (err) {
       if (gen !== this._texCompileGeneration) return;
-      this._texPreviewStates.set(path, {
-        error: err?.message || 'Compilation RPC failed',
-      });
-      this._renderTexPreviewIfActive(path);
+      setState({ error: err?.message || 'Compilation RPC failed' });
       return;
     }
     if (gen !== this._texCompileGeneration) return;
     const unwrapped = this._unwrapRpc(result);
     if (unwrapped && unwrapped.error) {
-      this._texPreviewStates.set(path, {
+      setState({
         error: unwrapped.error,
         log: unwrapped.log,
         installHint: unwrapped.install_hint,
@@ -1559,13 +1513,10 @@ export class DiffViewer extends LitElement {
         anchors,
         totalLines,
       );
-      this._texPreviewStates.set(path, { html: annotated });
+      setState({ html: annotated });
     } else {
-      this._texPreviewStates.set(path, {
-        error: 'Malformed compile response',
-      });
+      setState({ error: 'Malformed compile response' });
     }
-    this._renderTexPreviewIfActive(path);
   }
 
   /**
@@ -1576,10 +1527,9 @@ export class DiffViewer extends LitElement {
    */
   _renderTexPreviewIfActive(path) {
     if (!this._previewMode) return;
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file || file.path !== path) return;
-    this._renderTexPreviewFromState(file);
+    if (this._file === null) return;
+    if (this._file.path !== path) return;
+    this._renderTexPreviewFromState();
   }
 
   /**
@@ -1893,9 +1843,9 @@ export class DiffViewer extends LitElement {
    *     indicates the problem, image dimmed via opacity
    */
   async _resolvePreviewImages(generation) {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file || !this._previewPane) return;
+    if (this._file === null) return;
+    if (!this._previewPane) return;
+    const file = this._file;
     const imgs = this._previewPane.querySelectorAll('img');
     if (imgs.length === 0) return;
     const call = this._getRpcCall();
@@ -2028,9 +1978,7 @@ export class DiffViewer extends LitElement {
     if (href.startsWith('/')) return;
     // mailto:, tel:, etc. — anything with a scheme prefix.
     if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return;
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
+    if (this._file === null) return;
     let relPath;
     try {
       relPath = decodeURIComponent(href);
@@ -2041,14 +1989,16 @@ export class DiffViewer extends LitElement {
     const hashIdx = relPath.indexOf('#');
     const pathPart =
       hashIdx >= 0 ? relPath.slice(0, hashIdx) : relPath;
-    const resolved = resolveRelativePath(file.path, pathPart);
+    const resolved = resolveRelativePath(this._file.path, pathPart);
     if (!resolved || this._isAbsoluteUrl(resolved)) return;
     event.preventDefault();
-    this.dispatchEvent(
+    // Dispatch on window (not this element) so the app
+    // shell's navigation pipeline runs — same rationale
+    // as the Monaco cross-file-nav patch above.
+    window.dispatchEvent(
       new CustomEvent('navigate-file', {
         detail: { path: resolved },
-        bubbles: true,
-        composed: true,
+        bubbles: false,
       }),
     );
   }
@@ -2067,9 +2017,8 @@ export class DiffViewer extends LitElement {
    * editor to the visual SVG viewer.
    */
   _switchToVisualSvg() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
+    if (this._file === null) return;
+    const file = this._file;
     // Read live content from the editor.
     const modifiedEditor = this._getModifiedEditor();
     let content = file.modified;
@@ -2091,19 +2040,21 @@ export class DiffViewer extends LitElement {
   }
 
   _onContentChange() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
+    // Only real files fire content-change that we care
+    // about. Virtual comparisons are read-only; Monaco
+    // enforces it but defensive guard here too.
+    if (this._file === null) return;
+    if (this._file.isVirtual || this._file.isReadOnly) return;
     const modifiedEditor = this._getModifiedEditor();
     if (!modifiedEditor) return;
     try {
       const value = modifiedEditor.getValue();
-      file.modified = value;
+      this._file = { ...this._file, modified: value };
     } catch (_) {
       // Model disposed between events and handler — skip.
       return;
     }
-    this._recomputeDirtyCount();
+    this._recomputeDirty();
     // Live preview — when preview mode is on, re-render
     // on every keystroke. Markdown uses renderMarkdownWith
     // SourceMap which is pure string work, cheap enough
@@ -2111,8 +2062,8 @@ export class DiffViewer extends LitElement {
     // update — make4ht compilation is subprocess-bound and
     // too expensive for keystroke frequency. TeX preview
     // refreshes on save via _saveFile.
-    if (this._previewMode && this._isMarkdownFile(file)) {
-      this._updatePreview(file.modified);
+    if (this._previewMode && this._isMarkdownFile(this._file)) {
+      this._updatePreview(this._file.modified);
     }
   }
 
@@ -2135,7 +2086,22 @@ export class DiffViewer extends LitElement {
           const line =
             input.options?.selection?.startLineNumber;
           if (path) {
-            await this.openFile({ path, line });
+            // Dispatch navigate-file on the window so
+            // the app shell's pipeline (file-nav grid,
+            // collab broadcast, last-open persistence)
+            // runs — same channel the picker uses. In
+            // the single-file model this guarantees
+            // cross-file Go-to-Def behaves identically
+            // to every other file-open trigger; calling
+            // this.openFile directly would bypass the
+            // app shell and leave the grid / collab
+            // state inconsistent.
+            window.dispatchEvent(
+              new CustomEvent('navigate-file', {
+                detail: { path, line },
+                bubbles: false,
+              }),
+            );
           }
         }
       } catch (err) {
@@ -2312,46 +2278,17 @@ export class DiffViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
-  // Internals — viewport state
+  // Internals — diff-ready waiter
   // ---------------------------------------------------------------
-
-  _captureViewport() {
-    if (this._activeIndex < 0 || !this._editor) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
-    try {
-      const modifiedEditor = this._getModifiedEditor();
-      if (!modifiedEditor) return;
-      const pos = modifiedEditor.getPosition?.();
-      this._viewportStates.set(file.path, {
-        scrollTop: modifiedEditor.getScrollTop?.() || 0,
-        scrollLeft: modifiedEditor.getScrollLeft?.() || 0,
-        lineNumber: pos?.lineNumber || 1,
-        column: pos?.column || 1,
-      });
-    } catch (_) {
-      // Mock editor without scroll methods — skip.
-    }
-  }
-
-  _restoreViewport(path) {
-    const state = this._viewportStates.get(path);
-    if (!state) return;
-    this._waitForDiffReady().then(() => {
-      const modifiedEditor = this._getModifiedEditor();
-      if (!modifiedEditor) return;
-      try {
-        modifiedEditor.setPosition?.({
-          lineNumber: state.lineNumber,
-          column: state.column,
-        });
-        modifiedEditor.setScrollTop?.(state.scrollTop);
-        modifiedEditor.setScrollLeft?.(state.scrollLeft);
-      } catch (_) {
-        // Mock editor — skip.
-      }
-    });
-  }
+  //
+  // Per-file viewport state is not preserved in the
+  // no-cache model — every openFile starts fresh at
+  // (1, 1) with scrollTop 0. Users who accept the
+  // no-cache trade-off also accept losing the viewport
+  // on file switch. The wait-for-diff-ready helper is
+  // still needed for scroll-to-line and
+  // scroll-to-search-text, which run after the diff
+  // computation has produced its layout.
 
   /**
    * Resolve after Monaco's diff computation settles.
@@ -2522,39 +2459,46 @@ export class DiffViewer extends LitElement {
     return this._isMarkdownFile(file) || this._isTexFile(file);
   }
 
-  _recomputeDirtyCount() {
-    const count = this._files.filter((f) => this._isDirty(f)).length;
-    this._dirtyCount = count;
+  /**
+   * Recompute _dirty from the active file. Single-file
+   * semantics — no counting, just a boolean.
+   */
+  _recomputeDirty() {
+    this._dirty = this._file !== null && this._isDirty(this._file);
   }
 
+  /**
+   * Save the active file. The path argument exists for
+   * signature compatibility with callers that still
+   * pass it (status-LED click, Ctrl+S); it's validated
+   * against the active file and ignored if it doesn't
+   * match.
+   */
   async _saveFile(path) {
-    const file = this._files.find((f) => f.path === path);
-    if (!file) return;
-    if (file.isVirtual || file.isReadOnly) return;
-    // Read live content from editor if it's the active
-    // file; otherwise use the stored modified value.
-    let content = file.modified;
-    if (
-      this._editor &&
-      path === this._files[this._activeIndex]?.path
-    ) {
-      const modifiedEditor = this._getModifiedEditor();
-      try {
-        content = modifiedEditor?.getValue?.() ?? file.modified;
-      } catch (_) {}
-    }
-    file.modified = content;
-    file.savedContent = content;
-    this._recomputeDirtyCount();
+    if (this._file === null) return;
+    if (path && this._file.path !== path) return;
+    if (this._file.isVirtual || this._file.isReadOnly) return;
+    // Read live content from editor.
+    let content = this._file.modified;
+    const modifiedEditor = this._getModifiedEditor();
+    try {
+      content = modifiedEditor?.getValue?.() ?? this._file.modified;
+    } catch (_) {}
+    this._file = {
+      ...this._file,
+      modified: content,
+      savedContent: content,
+    };
+    this._recomputeDirty();
     // Dispatch file-saved — parent routes to Repo write
     // or Settings save depending on the file's flags.
     this.dispatchEvent(
       new CustomEvent('file-saved', {
         detail: {
-          path,
+          path: this._file.path,
           content,
-          isConfig: !!file.isConfig,
-          configType: file.configType,
+          isConfig: !!this._file.isConfig,
+          configType: this._file.configType,
         },
         bubbles: true,
         composed: true,
@@ -2564,8 +2508,8 @@ export class DiffViewer extends LitElement {
     // already updated on each keystroke via
     // _onContentChange; TeX was holding its last
     // compiled output until now.
-    if (this._previewMode && this._isTexFile(file)) {
-      this._compileTex(file);
+    if (this._previewMode && this._isTexFile(this._file)) {
+      this._compileTex(this._file);
     }
   }
 
@@ -2574,45 +2518,43 @@ export class DiffViewer extends LitElement {
   // ---------------------------------------------------------------
 
   _statusLedClass() {
-    if (this._activeIndex < 0) return '';
-    const file = this._files[this._activeIndex];
-    if (!file) return '';
-    if (this._isDirty(file)) return 'dirty';
-    if (file.isNew) return 'new-file';
+    if (this._file === null) return '';
+    if (this._isDirty(this._file)) return 'dirty';
+    if (this._file.isNew) return 'new-file';
     return 'clean';
   }
 
   _statusLedTitle() {
-    if (this._activeIndex < 0) return '';
-    const file = this._files[this._activeIndex];
-    if (!file) return '';
+    if (this._file === null) return '';
     const klass = this._statusLedClass();
-    if (klass === 'dirty') return `${file.path} — unsaved (click to save)`;
-    if (klass === 'new-file') return `${file.path} — new file`;
-    return file.path;
+    if (klass === 'dirty') {
+      return `${this._file.path} — unsaved (click to save)`;
+    }
+    if (klass === 'new-file') {
+      return `${this._file.path} — new file`;
+    }
+    return this._file.path;
   }
 
   _onStatusLedClick() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
-    if (this._isDirty(file)) {
-      this._saveFile(file.path);
+    if (this._file === null) return;
+    if (this._isDirty(this._file)) {
+      this._saveFile(this._file.path);
     }
   }
 
-  _setPanelLabel(path, panel, label) {
-    if (!label) return;
-    const entry = this._panelLabels.get(path) || {};
-    entry[panel] = label;
-    this._panelLabels.set(path, entry);
-  }
-
+  /**
+   * Panel labels come from the virtual-comparison slot
+   * when it's active; real files never show panel
+   * labels (their context is obvious from the file
+   * path).
+   */
   _currentPanelLabels() {
-    if (this._activeIndex < 0) return {};
-    const file = this._files[this._activeIndex];
-    if (!file) return {};
-    return this._panelLabels.get(file.path) || {};
+    if (this._virtualComparison === null) return {};
+    return {
+      left: this._virtualComparison.leftLabel || '',
+      right: this._virtualComparison.rightLabel || '',
+    };
   }
 
   // ---------------------------------------------------------------
@@ -2621,7 +2563,13 @@ export class DiffViewer extends LitElement {
 
   _onKeyDown(event) {
     if (!this.isConnected) return;
-    if (this._activeIndex < 0) return;
+    // Ctrl+F and Ctrl+S only apply when there's content
+    // to act on. The no-cache model has no concept of
+    // cycling between open files, so Ctrl+W/PageUp/
+    // PageDown are gone (see D18).
+    if (this._file === null && this._virtualComparison === null) {
+      return;
+    }
     const ctrl = event.ctrlKey || event.metaKey;
     if (!ctrl) return;
     // Ctrl+F — find in file. Forward to Monaco's built-in
@@ -2643,34 +2591,7 @@ export class DiffViewer extends LitElement {
         this._eventTargetInsideUs(event)
       ) {
         event.preventDefault();
-        const file = this._files[this._activeIndex];
-        if (file) this._saveFile(file.path);
-      }
-      return;
-    }
-    // Ctrl+W — close active file. Only when focus is
-    // inside the viewer to avoid hijacking other tabs'
-    // close-tab shortcut.
-    if (event.key === 'w' || event.key === 'W') {
-      if (this._eventTargetInsideUs(event)) {
-        event.preventDefault();
-        const file = this._files[this._activeIndex];
-        if (file) this.closeFile(file.path);
-      }
-      return;
-    }
-    // Ctrl+PageDown / Ctrl+PageUp — next/previous file.
-    if (event.key === 'PageDown') {
-      if (this._eventTargetInsideUs(event)) {
-        event.preventDefault();
-        this._cycleFile(1);
-      }
-      return;
-    }
-    if (event.key === 'PageUp') {
-      if (this._eventTargetInsideUs(event)) {
-        event.preventDefault();
-        this._cycleFile(-1);
+        if (this._file !== null) this._saveFile(this._file.path);
       }
       return;
     }
@@ -2686,18 +2607,6 @@ export class DiffViewer extends LitElement {
   _eventTargetInsideUs(event) {
     const path = event.composedPath ? event.composedPath() : [];
     return path.includes(this);
-  }
-
-  _cycleFile(delta) {
-    if (this._files.length < 2) return;
-    const next =
-      (this._activeIndex + delta + this._files.length) %
-      this._files.length;
-    if (next === this._activeIndex) return;
-    this._captureViewport();
-    this._activeIndex = next;
-    this._showEditor();
-    this._dispatchActiveFileChanged();
   }
 
   /**
@@ -2723,11 +2632,13 @@ export class DiffViewer extends LitElement {
   }
 
   _dispatchActiveFileChanged() {
-    const activeFile =
-      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    // For virtual comparisons, path is null — the viewer
+    // is showing ad-hoc content, not a file. Matches the
+    // single-file slot's null-when-empty convention.
+    const path = this._file !== null ? this._file.path : null;
     this.dispatchEvent(
       new CustomEvent('active-file-changed', {
-        detail: { path: activeFile ? activeFile.path : null },
+        detail: { path },
         bubbles: true,
         composed: true,
       }),
@@ -2739,7 +2650,8 @@ export class DiffViewer extends LitElement {
   // ---------------------------------------------------------------
 
   render() {
-    if (this._files.length === 0 || this._activeIndex < 0) {
+    // Empty state — no real file, no virtual comparison.
+    if (this._file === null && this._virtualComparison === null) {
       return html`
         <div class="empty-state">
           <div class="watermark">
@@ -2750,9 +2662,12 @@ export class DiffViewer extends LitElement {
     }
     const ledClass = this._statusLedClass();
     const labels = this._currentPanelLabels();
-    const activeFile =
-      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
-    const showPreviewButton = this._isPreviewableFile(activeFile);
+    // Preview button and status LED only meaningful
+    // when a real file is active. Virtual comparisons
+    // have no file path, no preview path, no save target.
+    const showPreviewButton =
+      this._file !== null && this._isPreviewableFile(this._file);
+    const showStatusLed = this._file !== null;
     if (this._previewMode && showPreviewButton) {
       return html`
         <div class="split-root">
@@ -2771,12 +2686,14 @@ export class DiffViewer extends LitElement {
             title="Exit preview"
             aria-label="Exit preview"
           >✕ Preview</button>
-          <div
-            class="status-led ${ledClass}"
-            title=${this._statusLedTitle()}
-            aria-label=${this._statusLedTitle()}
-            @click=${this._onStatusLedClick}
-          ></div>
+          ${showStatusLed
+            ? html`<div
+                class="status-led ${ledClass}"
+                title=${this._statusLedTitle()}
+                aria-label=${this._statusLedTitle()}
+                @click=${this._onStatusLedClick}
+              ></div>`
+            : ''}
         </div>
       `;
     }
@@ -2797,7 +2714,7 @@ export class DiffViewer extends LitElement {
             aria-label="Toggle markdown preview"
           >👁 Preview</button>`
         : ''}
-      ${this._isSvgFile(activeFile)
+      ${this._file !== null && this._isSvgFile(this._file)
         ? html`<button
             class="preview-button"
             style="right: ${showPreviewButton ? '110px' : '46px'}"
@@ -2806,12 +2723,14 @@ export class DiffViewer extends LitElement {
             aria-label="Switch to visual SVG editor"
           >🎨 Visual</button>`
         : ''}
-      <div
-        class="status-led ${ledClass}"
-        title=${this._statusLedTitle()}
-        aria-label=${this._statusLedTitle()}
-        @click=${this._onStatusLedClick}
-      ></div>
+      ${showStatusLed
+        ? html`<div
+            class="status-led ${ledClass}"
+            title=${this._statusLedTitle()}
+            aria-label=${this._statusLedTitle()}
+            @click=${this._onStatusLedClick}
+          ></div>`
+        : ''}
     `;
   }
 }

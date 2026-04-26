@@ -582,7 +582,7 @@ describe('AppShell', () => {
       await settle(shell);
       const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
       expect(diff.hasOpenFiles).toBe(true);
-      expect(diff._files[0].path).toBe('src/main.py');
+      expect(diff._file.path).toBe('src/main.py');
     });
 
     it('navigate-file to .svg routes to svg viewer', async () => {
@@ -598,8 +598,10 @@ describe('AppShell', () => {
       const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
       expect(svg.hasOpenFiles).toBe(true);
       expect(svg._files[0].path).toBe('docs/flow.svg');
-      // Diff viewer didn't receive it.
+      // Diff viewer didn't receive it — no file in the
+      // single-file slot.
       expect(diff.hasOpenFiles).toBe(false);
+      expect(diff._file).toBe(null);
     });
 
     it('opening an .svg flips active viewer to svg', async () => {
@@ -668,9 +670,9 @@ describe('AppShell', () => {
       await settle(shell);
       const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
       const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
-      // Both viewers still have their files.
-      expect(diff._files).toHaveLength(1);
-      expect(diff._files[0].path).toBe('a.py');
+      // Diff viewer holds its single active file; SVG
+      // viewer still uses the multi-file model.
+      expect(diff._file?.path).toBe('a.py');
       expect(svg._files).toHaveLength(1);
       expect(svg._files[0].path).toBe('b.svg');
     });
