@@ -57,13 +57,15 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Forward reference for type hints without paying the import
     # cost on module load. None of these are imported at runtime
     # by this file — the enricher holds them as Any.
-    from ac_dc.doc_index.models import DocOutline
+    from ac_dc.doc_index.models import DocHeading, DocOutline, DocProseBlock
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,89 @@ logger = logging.getLogger(__name__)
 # Small, fast, English-focused. Users can override via
 # `config.doc_index_config["keyword_model"]`.
 _DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
+
+# Adaptive top-n: sections at or above this line count get extra
+# keywords. Spec'd in specs4/2-indexing/keyword-enrichment.md —
+# "Large sections get extra keywords to capture vocabulary from
+# multiple branches". 15 lines is the cutoff.
+_LARGE_SECTION_LINE_THRESHOLD = 15
+_LARGE_SECTION_TOPN_BONUS = 2
+
+
+# Regex patterns for code stripping. Fenced code blocks (both
+# backtick and tilde, 3+ chars, with optional language info
+# string on the opener) and inline code spans. Not CommonMark-
+# exact — handles the common cases without a full markdown
+# parser. Unmatched openers and unterminated spans are left
+# in the text, which is fine since KeyBERT doesn't care about
+# syntactic validity.
+_FENCED_CODE_RE = re.compile(
+    r"^(```|~~~)[^\n]*\n.*?^\1\s*$",
+    re.MULTILINE | re.DOTALL,
+)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnrichmentConfig:
+    """Runtime knobs for keyword extraction.
+
+    Read from :attr:`ConfigManager.doc_index_config` and passed
+    into :meth:`KeywordEnricher.enrich_outline`. Frozen so
+    callers can't mutate mid-enrichment and cause a batch to
+    half-apply old values and half-apply new ones.
+
+    Fields match the config keys in ``app.json``'s ``doc_index``
+    section — see ``specs4/2-indexing/keyword-enrichment.md`` for
+    semantics. Defaults mirror the values in
+    :attr:`ConfigManager.doc_index_config`.
+    """
+
+    top_n: int = 3
+    ngram_range: tuple[int, int] = (1, 2)
+    min_section_chars: int = 50
+    min_score: float = 0.3
+    diversity: float = 0.5
+    tfidf_fallback_chars: int = 150
+    max_doc_freq: float = 0.6
+
+    @classmethod
+    def from_dict(cls, cfg: dict[str, Any]) -> "EnrichmentConfig":
+        """Build from the ``doc_index_config`` dict shape.
+
+        Uses ``.get`` with defaults so a partial config doesn't
+        crash — matches :attr:`ConfigManager.doc_index_config`'s
+        lenient parsing.
+        """
+        ngram_raw = cfg.get("keywords_ngram_range", [1, 2])
+        if (
+            isinstance(ngram_raw, (list, tuple))
+            and len(ngram_raw) == 2
+        ):
+            ngram = (int(ngram_raw[0]), int(ngram_raw[1]))
+        else:
+            ngram = (1, 2)
+        return cls(
+            top_n=int(cfg.get("keywords_top_n", 3)),
+            ngram_range=ngram,
+            min_section_chars=int(
+                cfg.get("keywords_min_section_chars", 50)
+            ),
+            min_score=float(cfg.get("keywords_min_score", 0.3)),
+            diversity=float(cfg.get("keywords_diversity", 0.5)),
+            tfidf_fallback_chars=int(
+                cfg.get("keywords_tfidf_fallback_chars", 150)
+            ),
+            max_doc_freq=float(
+                cfg.get("keywords_max_doc_freq", 0.6)
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -265,54 +350,518 @@ class KeywordEnricher:
         return True
 
     # ------------------------------------------------------------------
-    # Enrichment surface (stubs for 2.8.4a)
+    # Enrichment entry point
     # ------------------------------------------------------------------
 
     def enrich_outline(
         self,
         outline: "DocOutline",
         source_text: str = "",
+        config: EnrichmentConfig | None = None,
     ) -> "DocOutline":
         """Enrich an outline with keywords per section / prose block.
 
-        **Not yet implemented.** Full implementation lands in
-        2.8.4b. For now, returns the outline unchanged so callers
-        can wire in the enricher without committing to a specific
-        extraction behaviour.
+        Mutates the outline in place: populates
+        :attr:`DocHeading.keywords` for eligible markdown
+        sections and :attr:`DocProseBlock.keywords` for SVG
+        prose blocks. Returns the same outline for call-
+        chaining convenience.
 
-        When implemented, will:
+        Pipeline:
 
-        - Collect eligible sections (headings with text ≥
-          ``keywords_min_section_chars``) and SVG prose blocks
-          into a single batch
-        - Call KeyBERT once with all section texts (batch
-          encoding via the sentence transformer)
-        - Apply MMR diversity to reduce near-duplicate keywords
-        - Apply a corpus-aware document-frequency filter
-          (bigrams only filtered when all constituent unigrams
-          exceed threshold)
-        - Use TF-IDF fallback for sections below
-          ``keywords_tfidf_fallback_chars``
-        - Attach keywords to :attr:`DocHeading.keywords` and
-          :attr:`DocProseBlock.keywords` in place
-        - Return the mutated outline
+        1. Collect eligible units — each is a tuple of
+           ``(target, text, line_count)`` where ``target`` is
+           the heading or prose block object, ``text`` is the
+           content to extract from (with code stripped for
+           markdown), and ``line_count`` feeds the adaptive
+           top-n rule.
+        2. Split units into two groups by text length:
+           short → TF-IDF fallback, long → KeyBERT embedding
+           extraction.
+        3. Run KeyBERT once per group with the batch of texts.
+        4. Apply min-score filter inside each candidate list.
+        5. Apply corpus-aware document-frequency filter across
+           the whole document (bigrams survive if any
+           constituent unigram is below threshold — specs4).
+        6. Attach the resulting keyword lists to their targets
+           in place.
+
+        When KeyBERT isn't available (probe failed, model
+        missing), this method returns the outline unchanged.
+        Callers check :meth:`is_available` before calling to
+        avoid the no-op round trip, but calling anyway is safe.
 
         Parameters
         ----------
         outline:
             The outline to enrich. Modified in place; also
-            returned for call-chaining convenience.
+            returned for call-chaining.
         source_text:
-            Full source text. Needed for section slicing in the
-            markdown case (section text = lines between this
-            heading and the next). Unused for SVG outlines
+            Full source text. Required for markdown outlines —
+            section text is sliced from this using each
+            heading's ``start_line``. Ignored for SVG outlines
             (prose blocks carry their text inline).
+        config:
+            Enrichment parameters. Defaults to
+            :class:`EnrichmentConfig`'s default values when
+            None.
         """
-        # Parameters unused in the stub. Preserved on the signature
-        # so 2.8.4b can drop in the real implementation without
-        # call sites changing.
-        del source_text
+        cfg = config or EnrichmentConfig()
+
+        # Graceful degradation: no keywords if the model isn't
+        # ready. Callers can still call in a loop without
+        # checking availability first; this just no-ops.
+        if not self.ensure_loaded():
+            return outline
+
+        # Step 1 — collect eligible units. Headings need their
+        # section text sliced from the source; prose blocks
+        # carry their text already.
+        units = self._collect_units(outline, source_text, cfg)
+        if not units:
+            return outline
+
+        # Step 2 — partition by length. Below the TF-IDF
+        # fallback threshold, use TF-IDF; at or above, use
+        # KeyBERT embeddings. The two paths produce the same
+        # shape (list of (keyword, score) tuples per unit) so
+        # the downstream filter steps are uniform.
+        short_units: list[tuple[Any, str, int]] = []
+        long_units: list[tuple[Any, str, int]] = []
+        for unit in units:
+            target, text, lines = unit
+            if len(text) < cfg.tfidf_fallback_chars:
+                short_units.append(unit)
+            else:
+                long_units.append(unit)
+
+        long_results = self._run_keybert_batch(long_units, cfg)
+        short_results = self._run_tfidf_batch(short_units, cfg)
+
+        # Index by target identity so we can stitch the two
+        # results back into outline order.
+        by_target: dict[int, list[tuple[str, float]]] = {}
+        for unit, kws in zip(long_units, long_results):
+            by_target[id(unit[0])] = kws
+        for unit, kws in zip(short_units, short_results):
+            by_target[id(unit[0])] = kws
+
+        # Step 5 — corpus-aware document-frequency filter.
+        # Operates on the whole document at once so filtering
+        # is contrastive against siblings.
+        filtered = self._apply_corpus_filter(units, by_target, cfg)
+
+        # Step 6 — attach keywords in place.
+        for target, _text, _lines in units:
+            kws = filtered.get(id(target), [])
+            target.keywords = [kw for kw, _score in kws]
+
         return outline
+
+    # ------------------------------------------------------------------
+    # Unit collection
+    # ------------------------------------------------------------------
+
+    def _collect_units(
+        self,
+        outline: "DocOutline",
+        source_text: str,
+        cfg: EnrichmentConfig,
+    ) -> list[tuple[Any, str, int]]:
+        """Collect eligible (target, text, line_count) tuples.
+
+        Walks the outline's flat heading list and its prose
+        blocks. For each heading, slices its section text from
+        the source via ``start_line`` and the next heading's
+        ``start_line`` (or end of file for the last heading).
+        For prose blocks, uses the inline ``text`` field.
+
+        Filters:
+
+        - Empty text — skipped
+        - Text below ``min_section_chars`` — skipped
+        - Code-stripped text that becomes empty — falls back
+          to unstripped text (matches the spec's "sections
+          that become empty after stripping fall back to
+          unstripped text")
+
+        Returns units in document order: headings first
+        (depth-first flattened), then prose blocks.
+        """
+        units: list[tuple[Any, str, int]] = []
+        headings = outline.all_headings_flat
+
+        # Build (heading, body_text, line_count) for each.
+        # Section body is the text between this heading's
+        # start_line and the next heading's start_line. The
+        # last heading runs to end-of-file.
+        if source_text and headings:
+            source_lines = source_text.split("\n")
+            total_lines = len(source_lines)
+            for i, heading in enumerate(headings):
+                # start_line is 1-indexed per the extractor
+                # convention. Body starts on the line AFTER the
+                # heading line. End is the line BEFORE the next
+                # heading's line, or EOF.
+                body_start = heading.start_line  # 0-indexed: line after heading
+                if i + 1 < len(headings):
+                    body_end = headings[i + 1].start_line - 1
+                else:
+                    body_end = total_lines
+                body_start = max(0, body_start)
+                body_end = max(body_start, body_end)
+                body_lines = source_lines[body_start:body_end]
+                raw_text = "\n".join(body_lines)
+
+                stripped = self._strip_code(raw_text)
+                # Fall back to unstripped if stripping emptied
+                # the section (pure code block or similar).
+                text_for_extraction = stripped or raw_text
+
+                if not text_for_extraction.strip():
+                    continue
+                if not self.is_section_eligible(
+                    len(text_for_extraction),
+                    cfg.min_section_chars,
+                ):
+                    continue
+                units.append(
+                    (heading, text_for_extraction, len(body_lines))
+                )
+
+        # Prose blocks — SVG long text. Carry their text
+        # inline; no slicing needed. Line count is 1 for
+        # adaptive top-n purposes (prose blocks are typically
+        # single multi-line elements that don't correspond
+        # to a source-file line structure).
+        for block in outline.prose_blocks:
+            text = block.text or ""
+            if not text.strip():
+                continue
+            if not self.is_section_eligible(
+                len(text), cfg.min_section_chars
+            ):
+                continue
+            # Adaptive top-n for prose doesn't apply
+            # meaningfully — use 1 line so the bonus never
+            # triggers. Callers that want per-prose top-n
+            # can override via config (future).
+            units.append((block, text, 1))
+
+        return units
+
+    # ------------------------------------------------------------------
+    # Code stripping
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_code(text: str) -> str:
+        """Remove fenced code blocks and inline code spans.
+
+        Applied to markdown body text before extraction. Code
+        vocabulary dominates in short sections; stripping
+        keeps keyword extraction focused on explanatory prose.
+
+        Not a CommonMark-exact strip — we use a pair of regex
+        passes for speed. Unmatched openers are left in the
+        output, which is harmless because KeyBERT treats them
+        as noise.
+        """
+        without_fences = _FENCED_CODE_RE.sub("", text)
+        without_spans = _INLINE_CODE_RE.sub("", without_fences)
+        return without_spans
+
+    # ------------------------------------------------------------------
+    # KeyBERT batch extraction
+    # ------------------------------------------------------------------
+
+    def _run_keybert_batch(
+        self,
+        units: list[tuple[Any, str, int]],
+        cfg: EnrichmentConfig,
+    ) -> list[list[tuple[str, float]]]:
+        """Extract keywords for a batch of units via KeyBERT.
+
+        Single KeyBERT call for the whole batch — the
+        sentence-transformer encodes all section texts in one
+        forward pass. Adaptive top-n is handled per-unit: a
+        section at or above ``_LARGE_SECTION_LINE_THRESHOLD``
+        gets ``top_n + _LARGE_SECTION_TOPN_BONUS`` keywords.
+
+        KeyBERT's ``extract_keywords`` returns a list of lists
+        when given a list input; we pass the max top-n
+        globally and then trim per-unit to the adaptive value
+        and apply the min-score filter.
+
+        Returns a list of keyword-score pairs aligned with
+        ``units``. Empty list for units with zero keywords
+        after filtering.
+        """
+        if not units:
+            return []
+        if self._model is None:
+            return [[] for _ in units]
+
+        texts = [u[1] for u in units]
+        # Use the max possible top-n so the adaptive per-unit
+        # trim has enough candidates to choose from.
+        global_top_n = cfg.top_n + _LARGE_SECTION_TOPN_BONUS
+
+        try:
+            raw = self._model.extract_keywords(
+                texts,
+                keyphrase_ngram_range=cfg.ngram_range,
+                top_n=global_top_n,
+                use_mmr=True,
+                diversity=cfg.diversity,
+            )
+        except Exception as exc:
+            # Defensive — a malformed input or an internal
+            # KeyBERT error shouldn't kill the whole enrichment
+            # pass. Log and return empty keyword lists for
+            # every unit; the user gets unenriched keywords
+            # (empty) rather than a crash.
+            logger.warning(
+                "KeyBERT batch extraction failed: %s", exc
+            )
+            return [[] for _ in units]
+
+        # KeyBERT returns a list-of-lists when given a list
+        # input. Some versions return a flat list when given
+        # a single input — we always pass a list so we always
+        # get list-of-lists. Normalise defensively just in
+        # case.
+        if raw and not isinstance(raw[0], list):
+            raw = [raw]
+
+        results: list[list[tuple[str, float]]] = []
+        for (target, text, lines), candidates in zip(units, raw):
+            # Per-unit top-n — adaptive bonus for large sections.
+            if lines >= _LARGE_SECTION_LINE_THRESHOLD:
+                per_unit_top_n = cfg.top_n + _LARGE_SECTION_TOPN_BONUS
+            else:
+                per_unit_top_n = cfg.top_n
+
+            # Normalise: KeyBERT returns (keyword, score) tuples;
+            # some callers return plain strings. Defensive
+            # coercion to a uniform shape.
+            normalised: list[tuple[str, float]] = []
+            for entry in candidates[:per_unit_top_n]:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    kw, score = entry
+                    normalised.append((str(kw), float(score)))
+                elif isinstance(entry, str):
+                    normalised.append((entry, 1.0))
+                # else: malformed entry — skip silently.
+
+            # Min-score filter.
+            kept = [
+                (kw, score) for kw, score in normalised
+                if score >= cfg.min_score
+            ]
+            results.append(kept)
+        return results
+
+    # ------------------------------------------------------------------
+    # TF-IDF fallback
+    # ------------------------------------------------------------------
+
+    def _run_tfidf_batch(
+        self,
+        units: list[tuple[Any, str, int]],
+        cfg: EnrichmentConfig,
+    ) -> list[list[tuple[str, float]]]:
+        """Extract keywords for short units via TF-IDF.
+
+        Used when a section's text is below
+        ``tfidf_fallback_chars``. Embedding-based extraction
+        tends to pick generic terms for very short passages;
+        TF-IDF penalises corpus-wide frequency and surfaces
+        terms distinctive to this section relative to its
+        siblings in the document.
+
+        The corpus for the vectoriser is the full set of short
+        texts within this document. Too few texts (< 2) means
+        TF-IDF can't compute inverse document frequency
+        meaningfully; in that case we return a candidate list
+        from raw term frequency instead.
+
+        Returns empty keyword lists when scikit-learn isn't
+        installed — the enricher is still useful via the
+        KeyBERT path alone.
+        """
+        if not units:
+            return []
+
+        try:
+            from sklearn.feature_extraction.text import (  # type: ignore[import-not-found]
+                TfidfVectorizer,
+            )
+        except ImportError:
+            logger.info(
+                "scikit-learn not installed; TF-IDF fallback "
+                "disabled. Short sections will have no keywords."
+            )
+            return [[] for _ in units]
+
+        texts = [u[1] for u in units]
+
+        # Vectoriser params: match the ngram range the KeyBERT
+        # path uses so the keyword vocabulary is consistent
+        # across paths. English stopwords filter helps with
+        # very short inputs.
+        try:
+            vectoriser = TfidfVectorizer(
+                ngram_range=cfg.ngram_range,
+                stop_words="english",
+                lowercase=True,
+            )
+            matrix = vectoriser.fit_transform(texts)
+        except ValueError:
+            # Empty vocabulary after stop-word filtering — all
+            # texts were boilerplate. Return empty lists; a
+            # section that's pure stop words is noise anyway.
+            return [[] for _ in units]
+
+        feature_names = list(vectoriser.get_feature_names_out())
+        results: list[list[tuple[str, float]]] = []
+        for idx, (target, text, lines) in enumerate(units):
+            if lines >= _LARGE_SECTION_LINE_THRESHOLD:
+                per_unit_top_n = cfg.top_n + _LARGE_SECTION_TOPN_BONUS
+            else:
+                per_unit_top_n = cfg.top_n
+
+            row = matrix[idx].toarray()[0]
+            # Rank features by TF-IDF score.
+            scored = [
+                (feature_names[i], float(row[i]))
+                for i in range(len(feature_names))
+                if row[i] > 0.0
+            ]
+            scored.sort(key=lambda kv: kv[1], reverse=True)
+            top = scored[:per_unit_top_n]
+            # Normalise scores to 0..1 per-row so the min-score
+            # filter works on a comparable scale with KeyBERT.
+            # KeyBERT scores are cosine similarities in roughly
+            # the 0..1 range; TF-IDF row values vary wildly so
+            # we rescale by the max in this row.
+            if top:
+                row_max = max(score for _, score in top)
+                if row_max > 0:
+                    rescaled = [
+                        (kw, score / row_max)
+                        for kw, score in top
+                    ]
+                else:
+                    rescaled = top
+                kept = [
+                    (kw, score) for kw, score in rescaled
+                    if score >= cfg.min_score
+                ]
+            else:
+                kept = []
+            results.append(kept)
+        return results
+
+    # ------------------------------------------------------------------
+    # Corpus-aware document-frequency filter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_corpus_filter(
+        units: list[tuple[Any, str, int]],
+        by_target: dict[int, list[tuple[str, float]]],
+        cfg: EnrichmentConfig,
+    ) -> dict[int, list[tuple[str, float]]]:
+        """Filter keywords that appear in too many sections.
+
+        Pervasive terms ("system", "function") appear in many
+        sections of a repo's documentation and don't
+        disambiguate — they're effectively domain stopwords.
+        We filter keywords whose document frequency (fraction
+        of sections containing them) exceeds
+        ``cfg.max_doc_freq``.
+
+        Bigrams survive if ANY constituent unigram is below
+        the threshold — matches the spec: "A bigram is
+        filtered only if all its constituent unigrams exceed
+        the threshold". Rationale: a bigram like "request
+        handler" may be distinctive even if "request" is
+        pervasive.
+
+        If filtering would leave a section keyword-less, the
+        top-scoring keyword is retained regardless — also per
+        spec: "If pruning would leave a section keyword-less,
+        the top keyword is retained regardless".
+
+        Returns a fresh dict with filtered keyword lists; the
+        input dict is not mutated.
+
+        No-op for single-section documents. Doc frequency
+        requires a non-trivial corpus to be meaningful — with
+        only one section, every keyword has 100% document
+        frequency and the filter would incorrectly mark
+        everything as pervasive. The fallback-to-top-keyword
+        rule would salvage one per section but lose the
+        others, producing surprising behaviour on small
+        documents. Skipping the filter entirely when there's
+        nothing to be contrastive against is cleaner.
+        """
+        if not units or not by_target:
+            return by_target
+
+        # Compute document frequency per unigram keyword.
+        # Normalised to lowercase for comparison.
+        total_sections = len(units)
+        # Filter needs at least 2 sections to produce useful
+        # contrastive signals. One-section documents bypass
+        # the filter — every keyword would trivially be at
+        # 100% doc frequency.
+        if total_sections < 2:
+            return by_target
+        unigram_counts: dict[str, int] = {}
+        for target, _text, _lines in units:
+            kws = by_target.get(id(target), [])
+            seen_in_this_section: set[str] = set()
+            for kw, _score in kws:
+                for token in kw.lower().split():
+                    if token in seen_in_this_section:
+                        continue
+                    seen_in_this_section.add(token)
+                    unigram_counts[token] = (
+                        unigram_counts.get(token, 0) + 1
+                    )
+
+        if total_sections == 0:
+            return by_target
+
+        threshold = cfg.max_doc_freq
+        # A unigram is "pervasive" if its fraction exceeds
+        # the threshold. Pre-compute the set for fast lookup.
+        pervasive: set[str] = {
+            token for token, count in unigram_counts.items()
+            if (count / total_sections) > threshold
+        }
+
+        filtered: dict[int, list[tuple[str, float]]] = {}
+        for target, _text, _lines in units:
+            kws = by_target.get(id(target), [])
+            survivors: list[tuple[str, float]] = []
+            for kw, score in kws:
+                tokens = kw.lower().split()
+                # Keep if at least one token is NOT pervasive.
+                # Unigrams with their only token pervasive get
+                # filtered; bigrams with at least one non-
+                # pervasive token survive.
+                if any(t not in pervasive for t in tokens):
+                    survivors.append((kw, score))
+            # Never leave a section keyword-less if the
+            # original had any candidates: fall back to the
+            # top-scoring keyword.
+            if not survivors and kws:
+                survivors = [kws[0]]
+            filtered[id(target)] = survivors
+        return filtered
 
     def is_section_eligible(
         self,
