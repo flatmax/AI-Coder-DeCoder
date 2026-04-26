@@ -28,10 +28,25 @@ function mountTab(props = {}) {
   return t;
 }
 
-/** Install a fake RPC proxy matching jrpc-oo's single-key envelope. */
+/**
+ * Install a fake RPC proxy matching jrpc-oo's single-key
+ * envelope. Stubs `Repo.get_current_branch` by default so
+ * every mount doesn't emit a "method not found" warning;
+ * callers can override by passing an explicit entry in
+ * `methods`. Branch-specific tests override; everyone
+ * else gets a valid default ('main', not detached).
+ */
 function publishFakeRpc(methods) {
+  const merged = {
+    'Repo.get_current_branch': () => ({
+      branch: 'main',
+      detached: false,
+      sha: null,
+    }),
+    ...methods,
+  };
   const proxy = {};
-  for (const [name, impl] of Object.entries(methods)) {
+  for (const [name, impl] of Object.entries(merged)) {
     proxy[name] = async (...args) => {
       const value = await impl(...args);
       return { fake: value };
@@ -2511,6 +2526,16 @@ describe('FilesTab context-menu action dispatch', () => {
     const deleteFile = vi.fn().mockResolvedValue({});
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
+      // Stub the branch RPC too — every _loadFileTree call
+      // fires both in parallel. Without this stub the test
+      // output gets cluttered with "[files-tab]
+      // get_current_branch failed" warnings even though
+      // the code path handles them gracefully.
+      'Repo.get_current_branch': vi.fn().mockResolvedValue({
+        branch: 'main',
+        detached: false,
+        sha: null,
+      }),
       'Repo.stage_files': stage,
       'Repo.unstage_files': unstage,
       'Repo.discard_changes': discard,
@@ -2591,6 +2616,11 @@ describe('FilesTab context-menu action dispatch', () => {
               { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
             ]),
           ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
         'Repo.stage_files': vi.fn().mockResolvedValue({
           error: 'restricted',
           reason: 'Participants cannot stage files',
@@ -2628,6 +2658,11 @@ describe('FilesTab context-menu action dispatch', () => {
               { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
             ]),
           ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
         'Repo.stage_files': vi
           .fn()
           .mockRejectedValue(new Error('stage boom')),
@@ -2788,6 +2823,11 @@ describe('FilesTab context-menu action dispatch', () => {
                 { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
               ]),
             ),
+          'Repo.get_current_branch': vi.fn().mockResolvedValue({
+            branch: 'main',
+            detached: false,
+            sha: null,
+          }),
           'Repo.discard_changes': vi
             .fn()
             .mockRejectedValue(new Error('discard boom')),
@@ -2918,6 +2958,11 @@ describe('FilesTab context-menu action dispatch', () => {
                 { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
               ]),
             ),
+          'Repo.get_current_branch': vi.fn().mockResolvedValue({
+            branch: 'main',
+            detached: false,
+            sha: null,
+          }),
           'Repo.delete_file': vi.fn().mockResolvedValue({}),
           'LLMService.set_excluded_index_files': vi
             .fn()

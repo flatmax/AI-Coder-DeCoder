@@ -37,8 +37,23 @@ function mountTab(props = {}) {
 }
 
 function publishFakeRpc(methods) {
+  // Stub Repo.get_current_branch by default — every
+  // _loadFileTree call fires both the tree and branch
+  // RPCs in parallel. Without the default stub, tests
+  // produce "[files-tab] get_current_branch failed"
+  // warnings on stderr even though the code path
+  // handles the missing method gracefully. Callers
+  // override by passing an explicit entry in `methods`.
+  const merged = {
+    'Repo.get_current_branch': () => ({
+      branch: 'main',
+      detached: false,
+      sha: null,
+    }),
+    ...methods,
+  };
   const proxy = {};
-  for (const [name, impl] of Object.entries(methods)) {
+  for (const [name, impl] of Object.entries(merged)) {
     proxy[name] = async (...args) => {
       const value = await impl(...args);
       return { fake: value };

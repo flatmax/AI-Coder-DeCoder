@@ -472,6 +472,12 @@ describe('AppShell', () => {
 
     it('callbacks return true for jrpc-oo ack', () => {
       const shell = mountShell();
+      // streamComplete also triggers a history-status fetch
+      // via _onCompactionStatusRefresh. The rpcCall path has
+      // no proxy published in this test, which produces a
+      // noisy stderr warning. Stub the method so the fetch
+      // silently no-ops.
+      shell._fetchHistoryStatus = () => {};
       expect(shell.streamChunk('r', 'c')).toBe(true);
       expect(shell.streamComplete('r', {})).toBe(true);
       expect(shell.filesChanged([])).toBe(true);
