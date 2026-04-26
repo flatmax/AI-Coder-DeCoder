@@ -368,11 +368,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onActiveFileChanged =
       this._onActiveFileChanged.bind(this);
     // Context-menu action handler — bubbles up from the
-    // picker via `bubbles: true, composed: true`. Phase
-    // 8b wires stage / unstage / discard / delete; later
-    // sub-commits wire rename / duplicate / include /
-    // exclude / load-in-panel.
+    // picker via `bubbles: true, composed: true`. 8b
+    // wires stage / unstage / discard / delete; 8c
+    // wires rename / duplicate; later sub-commits wire
+    // include / exclude / load-in-panel.
     this._onContextMenuAction = this._onContextMenuAction.bind(this);
+    // Rename and duplicate commit handlers — fire when
+    // the picker's inline input is confirmed with
+    // Enter. Bind so the `@rename-committed` /
+    // `@duplicate-committed` template bindings see a
+    // stable reference.
+    this._onRenameCommitted = this._onRenameCommitted.bind(this);
+    this._onDuplicateCommitted =
+      this._onDuplicateCommitted.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -1123,12 +1131,18 @@ export class FilesTab extends RpcMixin(LitElement) {
       case 'delete':
         this._dispatchDelete(path);
         return;
+      case 'rename':
+        this._dispatchRename(path);
+        return;
+      case 'duplicate':
+        this._dispatchDuplicate(path);
+        return;
       default:
-        // Known actions (rename, duplicate, include,
-        // exclude, load-left, load-right) not yet wired
-        // — dropped silently rather than logged, since
-        // the event reaches here on every right-click
-        // + hover path and logging would be noisy.
+        // Known actions (include, exclude, load-left,
+        // load-right) not yet wired — dropped silently
+        // rather than logged, since the event reaches
+        // here on every right-click + hover path and
+        // logging would be noisy.
         return;
     }
   }
@@ -1261,6 +1275,184 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
+   * Kick off an inline rename. The picker renders an
+   * input in place of the file row; Enter dispatches
+   * `rename-committed` back to us, Escape dispatches
+   * nothing (the user bailed). Pure delegation — the
+   * picker owns the inline-input lifecycle.
+   */
+  _dispatchRename(path) {
+    const picker = this._picker();
+    if (!picker) return;
+    picker.beginRename(path);
+  }
+
+  /**
+   * Kick off an inline duplicate. Same pattern as
+   * rename — picker shows an input pre-filled with the
+   * source path so the user can edit the target
+   * location. Commit fires `duplicate-committed`.
+   */
+  _dispatchDuplicate(path) {
+    const picker = this._picker();
+    if (!picker) return;
+    picker.beginDuplicate(path);
+  }
+
+  /**
+   * Handle the picker's `rename-committed` event. Event
+   * detail: `{sourcePath, targetName}` where
+   * `targetName` is just the filename (not the full
+   * path) — the picker's input pre-filled with the
+   * current name, so the user edited a name, not a
+   * path. We rebuild the full target path by
+   * preserving the source's parent directory.
+   *
+   * Rejects target names with path separators — users
+   * who want to move a file to a different directory
+   * should use duplicate (or a future "move" action)
+   * rather than sneaking in through rename. A slash in
+   * the target would also collide with git's rename-
+   * detection heuristics in confusing ways.
+   */
+  async _onRenameCommitted(event) {
+    const detail = event.detail || {};
+    const sourcePath = detail.sourcePath;
+    const targetName = detail.targetName;
+    if (typeof sourcePath !== 'string' || !sourcePath) return;
+    if (typeof targetName !== 'string' || !targetName) return;
+    if (targetName.includes('/') || targetName.includes('\\')) {
+      this._showToast(
+        'Rename target cannot contain path separators. Use duplicate to move files.',
+        'warning',
+      );
+      return;
+    }
+    // Rebuild full target path from source's parent dir.
+    const lastSlash = sourcePath.lastIndexOf('/');
+    const targetPath =
+      lastSlash >= 0
+        ? `${sourcePath.slice(0, lastSlash)}/${targetName}`
+        : targetName;
+    // Same-path no-op — the picker's commit handler
+    // already short-circuits on unchanged names, but
+    // defensive in case a future refactor loosens that.
+    if (targetPath === sourcePath) return;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.rename_file',
+        sourcePath,
+        targetPath,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      // If the renamed file was selected, migrate the
+      // selection to the new path so the next LLM
+      // request still includes it. Server's
+      // `filesChanged` broadcast (if any) will also
+      // update us, but doing it locally means no
+      // one-frame gap.
+      if (this._selectedFiles.has(sourcePath)) {
+        const next = new Set(this._selectedFiles);
+        next.delete(sourcePath);
+        next.add(targetPath);
+        this._applySelection(next, /* notifyServer */ true);
+      }
+      // Migrate exclusion too — same reasoning.
+      if (this._excludedFiles.has(sourcePath)) {
+        const next = new Set(this._excludedFiles);
+        next.delete(sourcePath);
+        next.add(targetPath);
+        this._applyExclusion(next, /* notifyServer */ true);
+      }
+      this._showToast(
+        `Renamed to ${targetName}`,
+        'success',
+      );
+    } catch (err) {
+      console.error('[files-tab] rename_file failed', err);
+      this._showToast(
+        `Failed to rename ${sourcePath}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Handle the picker's `duplicate-committed` event.
+   * Event detail: `{sourcePath, targetName}` where
+   * `targetName` is the FULL target path (the picker's
+   * input pre-filled with the source path, so the user
+   * edited a path). Read source content via
+   * `Repo.get_file_content`, then create the target
+   * via `Repo.create_file`. No backend
+   * `copy_file` RPC exists, so the client-side
+   * read-then-write is the canonical flow.
+   *
+   * Failure at either step aborts cleanly — if the
+   * read succeeds but the write fails (e.g. target
+   * already exists, per `Repo.create_file`'s semantics),
+   * nothing's created and the toast explains the
+   * failure.
+   */
+  async _onDuplicateCommitted(event) {
+    const detail = event.detail || {};
+    const sourcePath = detail.sourcePath;
+    const targetPath = detail.targetName;
+    if (typeof sourcePath !== 'string' || !sourcePath) return;
+    if (typeof targetPath !== 'string' || !targetPath) return;
+    if (targetPath === sourcePath) return;
+    try {
+      // Read source content. The RPC envelope is
+      // single-key; `rpcExtract` unwraps it.
+      const content = await this.rpcExtract(
+        'Repo.get_file_content',
+        sourcePath,
+      );
+      // The RPC returns a plain string for text files.
+      // Binary files raise a RepoError on the server
+      // side, which surfaces here as a rejected
+      // promise — caught by the outer try/catch.
+      if (typeof content !== 'string') {
+        this._showToast(
+          `Cannot duplicate ${sourcePath}: unexpected content type`,
+          'error',
+        );
+        return;
+      }
+      const result = await this.rpcExtract(
+        'Repo.create_file',
+        targetPath,
+        content,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      this._showToast(
+        `Duplicated to ${targetPath}`,
+        'success',
+      );
+    } catch (err) {
+      console.error('[files-tab] duplicate failed', err);
+      this._showToast(
+        `Failed to duplicate ${sourcePath}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
    * Wrap `window.confirm` so tests can stub it cleanly.
    * The real implementation delegates directly; tests
    * mock this method to drive the confirm / cancel
@@ -1342,6 +1534,8 @@ export class FilesTab extends RpcMixin(LitElement) {
           @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}
           @context-menu-action=${this._onContextMenuAction}
+          @rename-committed=${this._onRenameCommitted}
+          @duplicate-committed=${this._onDuplicateCommitted}
         ></ac-file-picker>
       </div>
       <div class="chat-pane">

@@ -19,6 +19,9 @@ const _SUBVIEW_KEY = 'ac-dc-context-subview';
 /** localStorage key for expanded tiers in the cache sub-view. */
 const _CACHE_EXPANDED_KEY = 'ac-dc-cache-expanded';
 
+/** localStorage key for the Files category expanded state in Budget view. */
+const _BUDGET_FILES_EXPANDED_KEY = 'ac-dc-budget-files-expanded';
+
 /** Tier colors for the cache sub-view. */
 const _TIER_COLORS = {
   L0: '#50c878',
@@ -97,6 +100,18 @@ export class ContextTab extends RpcMixin(LitElement) {
      * "Item Click → View Map Block".
      */
     _mapModal: { type: Object, state: true },
+    /**
+     * Whether the Files category in Budget view is expanded to
+     * show per-file detail. When true, the Files row renders
+     * each selected file's path and token count below the
+     * aggregate bar. Persisted to localStorage so users who
+     * habitually audit their context don't have to re-expand
+     * every session. Defaults to true — the whole point of
+     * looking at the Budget view is to see what's in context,
+     * and aggregate-only display made it hard to diagnose
+     * "file I thought was in context isn't" cases.
+     */
+    _budgetFilesExpanded: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -274,6 +289,50 @@ export class ContextTab extends RpcMixin(LitElement) {
       min-width: 4rem;
       text-align: right;
       font-size: 0.8125rem;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: #7ee787;
+    }
+    .category-row-expandable {
+      cursor: pointer;
+      user-select: none;
+    }
+    .category-row-expandable:hover {
+      background: rgba(240, 246, 252, 0.04);
+      border-radius: 3px;
+    }
+    .category-toggle {
+      display: inline-block;
+      width: 0.75rem;
+      font-size: 0.625rem;
+      color: var(--text-secondary, #8b949e);
+      flex-shrink: 0;
+    }
+    .file-detail-list {
+      display: flex;
+      flex-direction: column;
+      margin-left: 6.75rem;
+      margin-bottom: 0.5rem;
+      padding-left: 0.5rem;
+      border-left: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .file-detail-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.15rem 0;
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+    }
+    .file-detail-path {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+    .file-detail-tokens {
+      flex-shrink: 0;
       font-family: 'SFMono-Regular', Consolas, monospace;
       color: #7ee787;
     }
@@ -588,6 +647,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._rebuilding = false;
     this._cacheExpanded = this._loadCacheExpanded();
     this._mapModal = null;
+    this._budgetFilesExpanded = this._loadBudgetFilesExpanded();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -903,6 +963,31 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._saveCacheExpanded();
   }
 
+  _loadBudgetFilesExpanded() {
+    try {
+      const raw = localStorage.getItem(_BUDGET_FILES_EXPANDED_KEY);
+      // Default true — aggregate-only Files row made it
+      // hard to see what the LLM actually sees. Only
+      // respect an explicit "false" to keep it collapsed.
+      if (raw === 'false') return false;
+    } catch (_) {}
+    return true;
+  }
+
+  _saveBudgetFilesExpanded() {
+    try {
+      localStorage.setItem(
+        _BUDGET_FILES_EXPANDED_KEY,
+        this._budgetFilesExpanded ? 'true' : 'false',
+      );
+    } catch (_) {}
+  }
+
+  _toggleBudgetFiles() {
+    this._budgetFilesExpanded = !this._budgetFilesExpanded;
+    this._saveBudgetFilesExpanded();
+  }
+
   // ---------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------
@@ -1014,22 +1099,80 @@ export class ContextTab extends RpcMixin(LitElement) {
 
       <div class="category-list">
         ${categories.map(
-          (c) => html`
-            <div class="category-row">
-              <span class="category-name">${c.label}</span>
-              <div class="category-bar-track">
-                <div
-                  class="category-bar-fill"
-                  style="width: ${(c.tokens / maxCat) * 100}%; background: ${_COLORS[c.key] || '#8b949e'}"
-                ></div>
-              </div>
-              <span class="category-tokens">${_fmtTokens(c.tokens)}</span>
-            </div>
-          `,
+          (c) => this._renderCategoryRow(c, maxCat),
         )}
       </div>
 
       ${this._renderSessionTotals()}
+    `;
+  }
+
+  _renderCategoryRow(c, maxCat) {
+    // Files is the only category with per-entry detail worth
+    // surfacing inline. Render it as a clickable expander row
+    // followed by a nested file list when expanded. Every
+    // other category renders as a plain non-interactive row.
+    const color = _COLORS[c.key] || '#8b949e';
+    const tokenPct = maxCat > 0 ? (c.tokens / maxCat) * 100 : 0;
+    if (c.key !== 'files') {
+      return html`
+        <div class="category-row">
+          <span class="category-name">${c.label}</span>
+          <div class="category-bar-track">
+            <div
+              class="category-bar-fill"
+              style="width: ${tokenPct}%; background: ${color}"
+            ></div>
+          </div>
+          <span class="category-tokens">${_fmtTokens(c.tokens)}</span>
+        </div>
+      `;
+    }
+    const expanded = this._budgetFilesExpanded;
+    const fileDetails =
+      this._data?.breakdown?.file_details;
+    const hasDetails =
+      Array.isArray(fileDetails) && fileDetails.length > 0;
+    return html`
+      <div
+        class="category-row category-row-expandable"
+        role="button"
+        aria-expanded=${expanded}
+        title=${hasDetails
+          ? (expanded
+              ? 'Click to collapse file list'
+              : 'Click to expand file list')
+          : 'No file detail available'}
+        @click=${hasDetails ? () => this._toggleBudgetFiles() : undefined}
+      >
+        <span class="category-toggle">
+          ${hasDetails ? (expanded ? '▼' : '▶') : ''}
+        </span>
+        <span class="category-name">${c.label}</span>
+        <div class="category-bar-track">
+          <div
+            class="category-bar-fill"
+            style="width: ${tokenPct}%; background: ${color}"
+          ></div>
+        </div>
+        <span class="category-tokens">${_fmtTokens(c.tokens)}</span>
+      </div>
+      ${expanded && hasDetails
+        ? html`
+            <div class="file-detail-list">
+              ${fileDetails.map(
+                (f) => html`
+                  <div class="file-detail-row" title=${f.path}>
+                    <span class="file-detail-path">${f.path}</span>
+                    <span class="file-detail-tokens">
+                      ${_fmtTokens(f.tokens)}
+                    </span>
+                  </div>
+                `,
+              )}
+            </div>
+          `
+        : ''}
     `;
   }
 

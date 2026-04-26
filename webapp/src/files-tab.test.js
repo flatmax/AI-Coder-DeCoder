@@ -3041,9 +3041,9 @@ describe('FilesTab context-menu action dispatch', () => {
     it('unknown actions are silently dropped (reserved for later sub-commits)', async () => {
       const { t, stage, unstage, discard, deleteFile } =
         await setupTabWithFile();
+      // 8c wired rename/duplicate; remaining unwired:
+      // load-left, load-right, include, exclude.
       for (const action of [
-        'rename',
-        'duplicate',
         'load-left',
         'load-right',
         'include',
@@ -3064,6 +3064,881 @@ describe('FilesTab context-menu action dispatch', () => {
       expect(unstage).not.toHaveBeenCalled();
       expect(discard).not.toHaveBeenCalled();
       expect(deleteFile).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------
+  // Rename (8c)
+  // -------------------------------------------------------
+
+  describe('rename action', () => {
+    /**
+     * Build a files-tab with stubbed RPCs covering the
+     * rename pipeline: file tree load, branch info, and
+     * rename_file. Returns the tab plus the rename stub
+     * so tests can assert call shapes directly.
+     */
+    async function setupRenameTab() {
+      const getTree = vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+          ]),
+        );
+      const rename = vi.fn().mockResolvedValue({});
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': rename,
+      });
+      const t = mountTab();
+      await settle(t);
+      return { t, getTree, rename };
+    }
+
+    it('context-menu action calls beginRename on the picker', async () => {
+      const { t } = await setupRenameTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const spy = vi.spyOn(picker, 'beginRename');
+      const picker2 = t.shadowRoot.querySelector('ac-file-picker');
+      picker2.dispatchEvent(
+        new CustomEvent('context-menu-action', {
+          detail: {
+            action: 'rename',
+            type: 'file',
+            path: 'a.md',
+            name: 'a.md',
+            isExcluded: false,
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy.mock.calls[0][0]).toBe('a.md');
+    });
+
+    it('rename-committed dispatches Repo.rename_file with the rebuilt target path', async () => {
+      // Picker sends just the new filename; the tab
+      // rebuilds the full path by preserving the
+      // source's parent directory. A file in src/
+      // renamed to b.md produces src/b.md.
+      const getTree = vi.fn().mockResolvedValue(
+        fakeTreeResponse([
+          {
+            name: 'src',
+            path: 'src',
+            type: 'dir',
+            children: [
+              {
+                name: 'a.md',
+                path: 'src/a.md',
+                type: 'file',
+                lines: 5,
+              },
+            ],
+          },
+        ]),
+      );
+      const rename = vi.fn().mockResolvedValue({});
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': rename,
+      });
+      const t = mountTab();
+      await settle(t);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'src/a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(rename).toHaveBeenCalledOnce();
+      expect(rename.mock.calls[0][0]).toBe('src/a.md');
+      expect(rename.mock.calls[0][1]).toBe('src/b.md');
+    });
+
+    it('top-level file rename produces a top-level target', async () => {
+      const { t, rename } = await setupRenameTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(rename.mock.calls[0][0]).toBe('a.md');
+      expect(rename.mock.calls[0][1]).toBe('b.md');
+    });
+
+    it('reloads the file tree after rename succeeds', async () => {
+      const { t, rename, getTree } = await setupRenameTab();
+      const initialCalls = getTree.mock.calls.length;
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(rename).toHaveBeenCalledOnce();
+      expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+    });
+
+    it('shows a success toast after rename', async () => {
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const { t } = await setupRenameTab();
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('rename-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const successToasts = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'success');
+        expect(successToasts.length).toBeGreaterThan(0);
+        expect(successToasts.at(-1).message).toContain('b.md');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('rejects target names containing path separators', async () => {
+      // Users who want to move a file across
+      // directories should use duplicate (or a future
+      // explicit move). Letting rename accept a path
+      // would interact poorly with git's rename-
+      // detection heuristics.
+      const { t, rename } = await setupRenameTab();
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('rename-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'src/b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        expect(rename).not.toHaveBeenCalled();
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message.toLowerCase()).toContain(
+          'separator',
+        );
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('ignores malformed rename-committed events', async () => {
+      const { t, rename } = await setupRenameTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      // Missing sourcePath.
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: { targetName: 'b.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Missing targetName.
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: { sourcePath: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Empty sourcePath.
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: { sourcePath: '', targetName: 'b.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Empty targetName.
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: { sourcePath: 'a.md', targetName: '' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Null detail.
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: null,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(rename).not.toHaveBeenCalled();
+    });
+
+    it('surfaces restricted error as warning toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': vi.fn().mockResolvedValue({
+          error: 'restricted',
+          reason: 'Participants cannot rename files',
+        }),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('rename-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message).toContain('Participants');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('surfaces RPC rejection as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': vi
+          .fn()
+          .mockRejectedValue(new Error('rename boom')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('rename-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain('rename boom');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('migrates selection to the new path after rename', async () => {
+      // A selected file that gets renamed should stay
+      // selected under its new name — the LLM request
+      // that just finished referred to it, and the
+      // next request probably should too. Server gets
+      // a set_selected_files call with the migrated
+      // set.
+      const setFiles = vi.fn().mockResolvedValue(['b.md']);
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': vi.fn().mockResolvedValue({}),
+        'LLMService.set_selected_files': setFiles,
+      });
+      const t = mountTab();
+      await settle(t);
+      // Seed selection via a server broadcast so the
+      // first-load auto-select is already done.
+      pushEvent('files-changed', { selectedFiles: ['a.md'] });
+      await settle(t);
+      expect(t._selectedFiles.has('a.md')).toBe(true);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(t._selectedFiles.has('a.md')).toBe(false);
+      expect(t._selectedFiles.has('b.md')).toBe(true);
+      // Server notified of the migration.
+      const lastCall = setFiles.mock.calls.at(-1);
+      expect(lastCall[0]).toContain('b.md');
+      expect(lastCall[0]).not.toContain('a.md');
+    });
+
+    it('migrates exclusion to the new path after rename', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.rename_file': vi.fn().mockResolvedValue({}),
+        'LLMService.set_excluded_index_files': vi
+          .fn()
+          .mockResolvedValue([]),
+      });
+      const t = mountTab();
+      await settle(t);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      // Exclude a.md.
+      picker.dispatchEvent(
+        new CustomEvent('exclusion-changed', {
+          detail: { excludedFiles: ['a.md'] },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(t._excludedFiles.has('a.md')).toBe(true);
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(t._excludedFiles.has('a.md')).toBe(false);
+      expect(t._excludedFiles.has('b.md')).toBe(true);
+    });
+
+    it('same-name commit is a no-op', async () => {
+      // Picker's _commitInlineInput already short-
+      // circuits on unchanged names, so this case
+      // shouldn't reach the tab in practice. But
+      // defensive against a future refactor that
+      // loosens the picker's check.
+      const { t, rename } = await setupRenameTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('rename-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'a.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(rename).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------
+  // Duplicate (8c)
+  // -------------------------------------------------------
+
+  describe('duplicate action', () => {
+    /**
+     * Build a files-tab with stubbed RPCs covering the
+     * duplicate pipeline: tree load, branch info,
+     * get_file_content, create_file.
+     */
+    async function setupDuplicateTab({
+      sourceContent = 'hello world',
+    } = {}) {
+      const getTree = vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+          ]),
+        );
+      const getContent = vi
+        .fn()
+        .mockResolvedValue(sourceContent);
+      const createFile = vi.fn().mockResolvedValue({});
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': getContent,
+        'Repo.create_file': createFile,
+      });
+      const t = mountTab();
+      await settle(t);
+      return { t, getTree, getContent, createFile };
+    }
+
+    it('context-menu action calls beginDuplicate on the picker', async () => {
+      const { t } = await setupDuplicateTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const spy = vi.spyOn(picker, 'beginDuplicate');
+      picker.dispatchEvent(
+        new CustomEvent('context-menu-action', {
+          detail: {
+            action: 'duplicate',
+            type: 'file',
+            path: 'a.md',
+            name: 'a.md',
+            isExcluded: false,
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(spy).toHaveBeenCalledOnce();
+      expect(spy.mock.calls[0][0]).toBe('a.md');
+    });
+
+    it('duplicate-committed reads source then creates target with content', async () => {
+      const { t, getContent, createFile } =
+        await setupDuplicateTab({ sourceContent: 'source body' });
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'a-copy.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(getContent).toHaveBeenCalledOnce();
+      expect(getContent.mock.calls[0][0]).toBe('a.md');
+      expect(createFile).toHaveBeenCalledOnce();
+      expect(createFile.mock.calls[0][0]).toBe('a-copy.md');
+      expect(createFile.mock.calls[0][1]).toBe('source body');
+    });
+
+    it('duplicate target can be in a different directory', async () => {
+      // The picker's input for duplicate pre-fills
+      // with the full source path, so the user can
+      // edit either the filename OR the directory.
+      // Crosss-directory duplicates are the whole
+      // point of distinguishing duplicate from rename.
+      const { t, createFile } = await setupDuplicateTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'archive/a.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile.mock.calls[0][0]).toBe('archive/a.md');
+    });
+
+    it('reloads the file tree after duplicate succeeds', async () => {
+      const { t, createFile, getTree } = await setupDuplicateTab();
+      const initialCalls = getTree.mock.calls.length;
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'b.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile).toHaveBeenCalledOnce();
+      expect(getTree.mock.calls.length).toBe(initialCalls + 1);
+    });
+
+    it('shows a success toast with the target path', async () => {
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const { t } = await setupDuplicateTab();
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('duplicate-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const successes = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'success');
+        expect(successes.length).toBeGreaterThan(0);
+        expect(successes.at(-1).message).toContain('b.md');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('same-path commit is a no-op', async () => {
+      const { t, getContent, createFile } = await setupDuplicateTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: {
+            sourcePath: 'a.md',
+            targetName: 'a.md',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(getContent).not.toHaveBeenCalled();
+      expect(createFile).not.toHaveBeenCalled();
+    });
+
+    it('ignores malformed duplicate-committed events', async () => {
+      const { t, getContent, createFile } = await setupDuplicateTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: { targetName: 'b.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: { sourcePath: 'a.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: { sourcePath: '', targetName: 'b.md' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('duplicate-committed', {
+          detail: null,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(getContent).not.toHaveBeenCalled();
+      expect(createFile).not.toHaveBeenCalled();
+    });
+
+    it('read-source failure aborts without attempting create', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi
+          .fn()
+          .mockRejectedValue(new Error('binary file')),
+        'Repo.create_file': vi.fn().mockResolvedValue({}),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('duplicate-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain('binary file');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('create-file failure surfaces as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi.fn().mockResolvedValue('body'),
+        'Repo.create_file': vi
+          .fn()
+          .mockRejectedValue(new Error('already exists')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('duplicate-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain('already exists');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('surfaces restricted error as warning toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi.fn().mockResolvedValue('body'),
+        'Repo.create_file': vi.fn().mockResolvedValue({
+          error: 'restricted',
+          reason: 'Participants cannot create files',
+        }),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('duplicate-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message).toContain('Participants');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('handles non-string content from get_file_content', async () => {
+      // Defensive — if a future backend change made
+      // get_file_content return something odd (object,
+      // null, etc.), we bail with a clear error toast
+      // rather than dispatching garbage to create_file.
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi
+          .fn()
+          .mockResolvedValue({ not: 'a string' }),
+        'Repo.create_file': vi.fn().mockResolvedValue({}),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('duplicate-committed', {
+            detail: {
+              sourcePath: 'a.md',
+              targetName: 'b.md',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message.toLowerCase()).toContain(
+          'unexpected',
+        );
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
     });
   });
 });
