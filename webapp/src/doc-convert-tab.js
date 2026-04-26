@@ -211,6 +211,19 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     .dirty-tree-banner-icon {
       flex-shrink: 0;
     }
+    .dirty-tree-banner {
+      background: rgba(210, 153, 34, 0.08);
+      border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+      color: #d29922;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8125rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .dirty-tree-banner-icon {
+      flex-shrink: 0;
+    }
     .dep-chip {
       display: inline-flex;
       align-items: center;
@@ -844,6 +857,26 @@ export class DocConvertTab extends RpcMixin(LitElement) {
 
   _onFilterInput(event) {
     this._filter = event.target.value || '';
+  }
+
+  /**
+   * Compose the Convert button tooltip. Prioritises the
+   * most actionable message:
+   *
+   *   1. Tree dirty → "Commit or stash first" (spec
+   *      wording is explicit here).
+   *   2. No selection → "Select files to convert".
+   *   3. Otherwise → confirmation count.
+   */
+  _convertButtonTitle(selectedCount) {
+    if (this._treeClean === false) {
+      return 'Commit or stash uncommitted changes first';
+    }
+    if (selectedCount === 0) {
+      return 'Select files to convert';
+    }
+    const plural = selectedCount === 1 ? '' : 's';
+    return `Convert ${selectedCount} selected file${plural}`;
   }
 
   /**
