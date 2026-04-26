@@ -3238,7 +3238,31 @@ Design points pinned by tests:
 
 Increment 8 complete. File context menu has nine working actions (stage / unstage / discard / rename / duplicate / load-left / load-right / exclude-or-include / delete). Next up — Increment 9: directory context menu.
 
-### Increment 9 — Context menu (directories)
+### ~~Increment 9 — Context menu (directories)~~ (delivered `45205c5`, `1684f63`, tests on followup)
+
+Delivered in two commits plus a test-gap fill:
+
+- `45205c5` — part 1 (non-create actions) + part 2 (new-file and new-directory inline inputs). Shipped `INLINE_MODE_*` constants, `_creating` reactive state, `beginCreateFile` / `beginCreateDirectory` public methods, `_renderInlineInput` dispatch for the new modes, and the matching `_onNewFileCommitted` / `_onNewDirectoryCommitted` event handlers in files-tab.
+- `1684f63` — removed duplicate path-separator validation found during test-gap filling.
+- followup — new-file and new-directory describe blocks cover: happy paths (including `.gitkeep` construction for empty dirs), path-separator rejection, reload-after-creation, success-toast shape (directory toast names the directory, not the `.gitkeep` path — pins the "implementation detail doesn't leak" invariant), malformed events dropped silently, RPC-rejection error toast, restricted-caller warning toast. Parallel shape to the rename-committed / duplicate-committed coverage from Increment 8c.
+
+Design points pinned by tests:
+
+- **`.gitkeep` placeholder for new directories.** Git doesn't track empty directories. Creating `{parent}/{name}/.gitkeep` with empty content gets the directory into the tree. Pinned by `new-directory-committed creates .gitkeep inside the new dir`.
+
+- **User-facing toast never names `.gitkeep`.** The directory-creation success message says "Created src/utils", not "Created src/utils/.gitkeep". Implementation choice is invisible to the user. Pinned explicitly by `success toast names the directory, not the .gitkeep path` with an `expect(...).not.toContain('.gitkeep')` assertion.
+
+- **Path separators rejected with a warning, not a silent drop.** User typed `foo/bar.md` in the new-file input — they got feedback explaining why it didn't work, rather than watching a single file get silently created with the wrong name. Same rule as `_onRenameCommitted`'s separator rejection. Pinned by `rejects names with path separators` on both handlers.
+
+- **Empty `parentPath` produces a bare-name target.** Root-directory creations produce `a.md`, not `/a.md` or `//a.md`. Pinned by `creates at repo root when parentPath is empty` on both handlers.
+
+### Increment 9 — original planned scope
+
+Same mechanism as #8 with different actions — stage-all / unstage-all / rename (inline) / new-file (inline) / new-directory (inline, creates with `.gitkeep`) / exclude-or-include-in-index.
+
+- `file-picker.js` — dir-specific menu item set
+- `files-tab.js` — dir-level RPC dispatchers; new-directory creates `.gitkeep` inside the new dir so git tracks it
+- tests — all six actions, inline input integration, `.gitkeep` creation
 
 Same mechanism as #8 with different actions. Split into two parts:
 
