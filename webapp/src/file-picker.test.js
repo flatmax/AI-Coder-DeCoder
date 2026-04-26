@@ -3010,6 +3010,166 @@ describe('FilePicker component', () => {
   });
 
   // ---------------------------------------------------------------
+  // Middle-click path insertion (Increment 10a)
+  // ---------------------------------------------------------------
+
+  describe('middle-click path insertion', () => {
+    // Helper — fire a middle-click (auxclick with button=1)
+    // on a row. jsdom supports MouseEvent with button in
+    // its options dict; the @auxclick handler reads
+    // event.button to filter out other non-primary
+    // buttons.
+    function middleClick(row) {
+      const event = new MouseEvent('auxclick', {
+        bubbles: true,
+        cancelable: true,
+        button: 1,
+      });
+      row.dispatchEvent(event);
+      return event;
+    }
+
+    it('middle-click on file row dispatches insert-path', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      middleClick(row);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+      });
+    });
+
+    it('middle-click on directory row dispatches insert-path', async () => {
+      // Directories are legitimate insertion targets —
+      // user might want to reference a subtree in prose.
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      const row = p.shadowRoot.querySelector(
+        '.row.is-dir:not(.is-root)',
+      );
+      middleClick(row);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'src',
+      });
+    });
+
+    it('calls preventDefault to suppress selection-buffer paste', async () => {
+      // On Linux, middle-click triggers the browser's
+      // selection-buffer auto-paste. The preventDefault
+      // call is load-bearing — without it, a middle-click
+      // that reaches an unrelated focused element would
+      // paste the previously-selected text there.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      const event = middleClick(row);
+      expect(event.defaultPrevented).toBe(true);
+    });
+
+    it('stops propagation so parent handlers do not fire', async () => {
+      // A middle-click on a row shouldn't also trigger the
+      // row's click handler or any ancestor listener. The
+      // `insert-path` event bubbles (it's a CustomEvent
+      // with bubbles:true); only the native `auxclick`
+      // is stopped.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const ancestorListener = vi.fn();
+      document.body.addEventListener('auxclick', ancestorListener);
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      middleClick(row);
+      document.body.removeEventListener(
+        'auxclick',
+        ancestorListener,
+      );
+      // The native auxclick didn't reach document.body
+      // because stopPropagation was called.
+      expect(ancestorListener).not.toHaveBeenCalled();
+    });
+
+    it('ignores non-middle button clicks', async () => {
+      // @auxclick fires for ANY non-primary button
+      // (middle, right, side). Our handler filters to
+      // button=1 so a right-click that reaches auxclick
+      // (some browsers synthesise) doesn't misfire.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      row.dispatchEvent(
+        new MouseEvent('auxclick', {
+          bubbles: true,
+          cancelable: true,
+          button: 2, // right-click
+        }),
+      );
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('insert-path bubbles across shadow DOM', async () => {
+      // The orchestrator (files-tab) binds the handler
+      // via @insert-path on the picker element. The
+      // event must cross the shadow boundary —
+      // bubbles:true + composed:true.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const parentListener = vi.fn();
+      document.body.addEventListener(
+        'insert-path',
+        parentListener,
+      );
+      const row = p.shadowRoot.querySelector('.row.is-file');
+      middleClick(row);
+      document.body.removeEventListener(
+        'insert-path',
+        parentListener,
+      );
+      expect(parentListener).toHaveBeenCalledOnce();
+    });
+
+    it('nested file path preserved verbatim in detail', async () => {
+      // Path should be whatever was in the tree node,
+      // not re-derived from basename.
+      const tree = rootOf([
+        dir('src', [
+          dir('src/utils', [
+            file('src/utils/helpers.py'),
+          ]),
+        ]),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      // Expand the dirs so the file row is rendered.
+      p.expandAll();
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      const fileRow = Array.from(
+        p.shadowRoot.querySelectorAll('.row.is-file'),
+      ).find((r) =>
+        r.textContent.includes('helpers.py'),
+      );
+      middleClick(fileRow);
+      expect(listener.mock.calls[0][0].detail.path).toBe(
+        'src/utils/helpers.py',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------
   // Context menu — file rows (Increment 8a shell)
   // ---------------------------------------------------------------
 

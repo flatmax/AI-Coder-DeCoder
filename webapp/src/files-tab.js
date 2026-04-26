@@ -381,6 +381,11 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onRenameCommitted = this._onRenameCommitted.bind(this);
     this._onDuplicateCommitted =
       this._onDuplicateCommitted.bind(this);
+    // Middle-click path insertion. Picker dispatches
+    // `insert-path` with `{path}` on middle-click of
+    // any row; we insert the path into the chat
+    // panel's textarea at the current cursor.
+    this._onInsertPath = this._onInsertPath.bind(this);
     // New-file and new-directory commit handlers —
     // fired when the picker's inline input is
     // confirmed with Enter. Same bind pattern as
@@ -1378,6 +1383,69 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
+   * Handle the picker's `insert-path` event — fired on
+   * middle-click of a file or directory row. Inserts
+   * the path into the chat panel's textarea at the
+   * current cursor position, padded with spaces so it
+   * doesn't jam against surrounding prose.
+   *
+   * On Linux, middle-click triggers the selection-
+   * buffer paste AFTER focus() is called. We set the
+   * chat panel's `_suppressNextPaste` flag BEFORE
+   * focus to pre-empt that paste — the flag is
+   * one-shot and clears in the paste handler, so a
+   * later intentional paste still works.
+   *
+   * Path padding:
+   *   - If cursor is preceded by non-whitespace, prepend a space
+   *   - If cursor is followed by non-whitespace, append a space
+   *
+   * Matches the pattern used by `_insertSnippet` on
+   * the chat panel side for snippet insertion.
+   */
+  _onInsertPath(event) {
+    const path = event.detail?.path;
+    if (typeof path !== 'string' || !path) return;
+    const chat = this._chat();
+    if (!chat) return;
+    // Find the textarea inside the chat panel's shadow
+    // DOM. Querying via the chat panel's shadowRoot
+    // respects encapsulation.
+    const ta = chat.shadowRoot?.querySelector('.input-textarea');
+    if (!ta) return;
+    // Compute surround-padding from the textarea's
+    // current state (not from any reactive property),
+    // so the insertion reflects exactly what the user
+    // sees.
+    const before = ta.value.slice(0, ta.selectionStart);
+    const after = ta.value.slice(ta.selectionEnd);
+    const prefix =
+      before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const suffix =
+      after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+    const insertion = `${prefix}${path}${suffix}`;
+    const next = `${before}${insertion}${after}`;
+    // Push through the chat panel's reactive state so
+    // the send-button enablement and auto-resize
+    // respond to the change. Direct textarea value
+    // assignment keeps cursor positioning accurate;
+    // Lit's next render reflects the reactive value.
+    chat._input = next;
+    ta.value = next;
+    const cursor = before.length + insertion.length;
+    ta.setSelectionRange(cursor, cursor);
+    // Set the suppression flag BEFORE focus — on Linux
+    // the focus() call triggers the selection-buffer
+    // auto-paste, which we need to swallow.
+    chat._suppressNextPaste = true;
+    ta.focus();
+    // Fire an input event so the auto-resize logic
+    // runs. The chat panel's _onInputChange handles
+    // this via the native input event.
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  /**
    * Handle the picker's `rename-committed` event. Event
    * detail: `{sourcePath, targetName}` where
    * `targetName` is just the filename (not the full
@@ -2154,6 +2222,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @context-menu-action=${this._onContextMenuAction}
           @rename-committed=${this._onRenameCommitted}
           @duplicate-committed=${this._onDuplicateCommitted}
+          @insert-path=${this._onInsertPath}
           @new-file-committed=${this._onNewFileCommitted}
           @new-directory-committed=${this._onNewDirectoryCommitted}
         ></ac-file-picker>

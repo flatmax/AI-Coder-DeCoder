@@ -1451,6 +1451,7 @@ export class FilePicker extends LitElement {
         style="padding-left: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onDirClick(e, node)}
+        @auxclick=${(e) => this._onDirAuxClick(e, node)}
         @contextmenu=${(e) => this._onDirContextMenu(e, node)}
         role="treeitem"
         aria-expanded=${isOpen}
@@ -1524,6 +1525,7 @@ export class FilePicker extends LitElement {
         style="padding-left: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
+        @auxclick=${(e) => this._onFileAuxClick(e, node)}
         @contextmenu=${(e) => this._onFileContextMenu(e, node)}
         role="treeitem"
         aria-current=${isFocused ? 'true' : 'false'}
@@ -2231,6 +2233,51 @@ export class FilePicker extends LitElement {
       'keydown',
       this._onDocumentKeyDownForMenu,
       true,
+    );
+  }
+
+  /**
+   * Handle middle-click on a file row. Dispatches
+   * `insert-path` with `{path}` so the orchestrator
+   * can insert the path into the chat textarea.
+   * Called via `@auxclick` which fires for non-primary
+   * button clicks in modern browsers (middle click is
+   * `button === 1`).
+   *
+   * `preventDefault()` is important — middle-click
+   * typically triggers the browser's selection-buffer
+   * paste (Linux) or autoscroll (Windows/macOS).
+   * Neither belongs here.
+   */
+  _onFileAuxClick(event, node) {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: { path: node.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Middle-click on a directory row. Same contract as
+   * file rows — useful for inserting a subtree
+   * reference into the chat (e.g., "look at
+   * src/utils/").
+   */
+  _onDirAuxClick(event, node) {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: { path: node.path },
+        bubbles: true,
+        composed: true,
+      }),
     );
   }
 

@@ -1550,6 +1550,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   constructor() {
     super();
+    // One-shot flag — when true, the next paste event
+    // into the chat textarea is swallowed via
+    // preventDefault(). Set by the files-tab's
+    // `_onInsertPath` handler immediately before
+    // focusing the textarea, which would otherwise
+    // trigger the browser's selection-buffer paste on
+    // Linux (middle-click → focus → autoplace selected
+    // text). Instance field, not a reactive property:
+    // reactive would cause a Lit re-render on every
+    // flag flip and the flag exists entirely in
+    // paste-handler event scope.
+    this._suppressNextPaste = false;
     this.messages = [];
     this.repoFiles = [];
     this._input = '';
@@ -2672,6 +2684,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * which is the single code path shared with re-attach.
    */
   async _onInputPaste(event) {
+    // Check the one-shot suppression flag first —
+    // set by the files-tab's middle-click-insert flow
+    // to block the Linux selection-buffer auto-paste
+    // that follows the focus() call. The flag clears
+    // on the same event, so a subsequent user paste
+    // (Ctrl+V or right-click → paste) flows through
+    // normally.
+    if (this._suppressNextPaste) {
+      this._suppressNextPaste = false;
+      event.preventDefault();
+      return;
+    }
     const cb = event.clipboardData;
     if (!cb) return;
     const images = await extractImagesFromClipboard(cb);
