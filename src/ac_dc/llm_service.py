@@ -100,6 +100,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from ac_dc.context_manager import ContextManager, Mode
 from ac_dc.doc_index.index import DocIndex
+from ac_dc.doc_index.keyword_enricher import (
+    EnrichmentConfig,
+    KeywordEnricher,
+)
 from ac_dc.edit_pipeline import EditPipeline
 from ac_dc.edit_protocol import (
     EditResult,
@@ -603,8 +607,26 @@ class LLMService:
         # so we always build one. Empty until the background
         # build populates it via complete_deferred_init (2.8.2b).
         # When repo is None, DocIndex runs in memory-only mode.
+        #
+        # Keyword enricher is wired optionally. Construction
+        # here is cheap — the enricher's internal KeyBERT model
+        # is lazy-loaded on first ensure_loaded call. When
+        # KeyBERT isn't installed (stripped-down releases), the
+        # enricher's availability probe returns False and
+        # enrich_single_file degrades to a no-op. Enrichment
+        # config is built from the config manager's doc_index
+        # section so hot-reloaded thresholds take effect on
+        # next request.
+        enrichment_config = self._build_enrichment_config()
+        self._enricher = KeywordEnricher(
+            model_name=self._config.doc_index_config.get(
+                "keyword_model", "BAAI/bge-small-en-v1.5"
+            ),
+        )
         self._doc_index = DocIndex(
-            repo_root=repo.root if repo is not None else None
+            repo_root=repo.root if repo is not None else None,
+            enricher=self._enricher,
+            enrichment_config=enrichment_config,
         )
         # Readiness flags — flip during the background build
         # (2.8.2b). Cross-reference toggle gates on
@@ -1074,6 +1096,22 @@ class LLMService:
                 message="Documentation indexing complete",
                 percent=100,
             )
+
+            # Chain keyword enrichment. Fire-and-forget — the
+            # enrichment loop emits its own progress events
+            # and flips _doc_index_enriched on completion.
+            # We schedule rather than await so the _building
+            # flag flips off promptly (structural extraction
+            # IS complete at this point) while enrichment
+            # runs in the background. A user who switches to
+            # doc mode mid-enrichment sees unenriched outlines
+            # via the cache's structure-only lookup; the
+            # enriched versions land on the next chat request
+            # after their per-file enrichment completes.
+            assert self._main_loop is not None
+            asyncio.ensure_future(
+                self._run_enrichment_background()
+            )
         except Exception as exc:
             # Background-build failure. Log; leave readiness
             # False; emit a compaction-error-style event so the
@@ -1093,6 +1131,192 @@ class LLMService:
                 pass
         finally:
             self._doc_index_building = False
+
+    def _build_enrichment_config(self) -> EnrichmentConfig:
+        """Build an EnrichmentConfig from the config manager.
+
+        Delegates to :meth:`EnrichmentConfig.from_dict` so the
+        config dict shape stays owned by the dataclass. Called
+        on construction; a future hot-reload pathway could
+        re-read and swap the config on the enricher instance
+        without reconstructing.
+
+        ``keyword_model`` and ``keywords_enabled`` live in the
+        config dict but not on :class:`EnrichmentConfig` — the
+        caller reads those separately from
+        :attr:`ConfigManager.doc_index_config`.
+        """
+        return EnrichmentConfig.from_dict(self._config.doc_index_config)
+
+    async def _run_enrichment_background(self) -> None:
+        """Enrich every queued doc-index file in the aux executor.
+
+        Called by _build_doc_index_background after structural
+        extraction completes. Per-file operation:
+
+        1. Read source text (disk I/O — batched with the GIL-
+           heavy extraction in the same executor task).
+        2. Call :meth:`DocIndex.enrich_single_file` with the
+           source text.
+        3. Emit a progress event so the frontend's dialog
+           header bar advances.
+
+        Yields to the event loop between files via
+        ``await asyncio.sleep(0)`` so WebSocket traffic flows
+        during long enrichment runs (specs4 — "background
+        enrichment splits work into per-file executor calls
+        so the event loop stays responsive").
+
+        Eager model load happens before the loop starts so the
+        first file doesn't pay the model-download cost (can be
+        10+ seconds on a fresh install). Failure to load the
+        model (KeyBERT missing, no network, invalid model
+        name) flips the enricher's availability flag and the
+        loop exits cleanly — structural doc index still works.
+
+        Progress event stages per specs4/2-indexing/
+        keyword-enrichment.md § "Progress Feedback":
+
+        - ``doc_enrichment_queued`` — fired once at the top
+          with the total count so the bar can size itself
+        - ``doc_enrichment_file_done`` — fired per file with
+          per-file progress + current filename
+        - ``doc_enrichment_complete`` — fired on completion;
+          the bar fades out
+
+        Sets ``_doc_index_enriched = True`` on completion so
+        ``get_mode`` reports the new state. Non-fatal — if
+        enrichment fails mid-loop, the flag stays False and
+        the structural outlines remain fully functional.
+        """
+        if self._enricher is None:
+            # Shouldn't happen given we construct one in
+            # __init__, but defensive against future refactors
+            # that make the field optional.
+            return
+        if not self._enricher.is_available():
+            logger.info(
+                "Keyword enrichment disabled — KeyBERT not "
+                "available. Structural doc outlines remain "
+                "fully functional."
+            )
+            return
+
+        # Eager model load. Failure is non-fatal — the enricher
+        # flips its availability flag internally and subsequent
+        # enrich calls become no-ops.
+        assert self._main_loop is not None
+        loop = self._main_loop
+        loaded = await loop.run_in_executor(
+            self._aux_executor,
+            self._enricher.ensure_loaded,
+        )
+        if not loaded:
+            logger.warning(
+                "Keyword enrichment model failed to load. "
+                "Structural outlines remain functional."
+            )
+            return
+
+        queue = self._doc_index.queue_enrichment()
+        if not queue:
+            # No files need enrichment (rare but possible —
+            # every file was already enriched in a prior
+            # session and the disk cache carried over). Flip
+            # the flag and emit the completion event anyway
+            # so the UI can show "enriched" rather than
+            # "building".
+            self._doc_index_enriched = True
+            await self._send_doc_index_progress(
+                stage="doc_enrichment_complete",
+                message="Keyword enrichment complete",
+                percent=100,
+            )
+            return
+
+        total = len(queue)
+        logger.info(
+            "Keyword enrichment: %d files queued", total
+        )
+        await self._send_doc_index_progress(
+            stage="doc_enrichment_queued",
+            message=f"Enriching {total} documents",
+            percent=0,
+        )
+
+        # Per-file loop. Each iteration runs the read + enrich
+        # in the aux executor, emits a progress event, and
+        # yields to the event loop via sleep(0) so the
+        # WebSocket heartbeat and any chat traffic keep
+        # flowing. Per-file failures are logged but don't
+        # abort — one corrupt file shouldn't block enrichment
+        # for the rest of the repo.
+        for idx, rel_path in enumerate(queue, start=1):
+            try:
+                await loop.run_in_executor(
+                    self._aux_executor,
+                    self._enrich_one_file_sync,
+                    rel_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Enrichment failed for %s: %s",
+                    rel_path, exc,
+                )
+                # Continue — next file.
+
+            percent = int((idx / total) * 100)
+            await self._send_doc_index_progress(
+                stage="doc_enrichment_file_done",
+                message=f"Enriched {rel_path}",
+                percent=percent,
+            )
+            # Yield so other coroutines (chat streaming,
+            # WebSocket pings) get scheduling time.
+            await asyncio.sleep(0)
+
+        self._doc_index_enriched = True
+        logger.info("Keyword enrichment: complete")
+        await self._send_doc_index_progress(
+            stage="doc_enrichment_complete",
+            message="Keyword enrichment complete",
+            percent=100,
+        )
+
+    def _enrich_one_file_sync(self, rel_path: str) -> None:
+        """Read source text and run enrichment. Executor-side.
+
+        Split out as a named method so ``run_in_executor`` has
+        something to call without a closure. The read + enrich
+        pair runs on a single worker thread so the disk I/O
+        is adjacent to the GIL-heavy extraction work rather
+        than ping-ponging across threads.
+
+        Missing files (deleted between structural extraction
+        and enrichment) are handled by the enricher itself —
+        :meth:`DocIndex.enrich_single_file` returns None when
+        the file's mtime can't be stat'd. We don't distinguish
+        here; missing files get "enriched" as no-ops, which
+        leaves them in the unenriched state and a future
+        index_repo pass will prune them.
+        """
+        if self._repo is None:
+            # Can't resolve the path without a repo.
+            return
+        try:
+            source_text = self._repo.get_file_content(rel_path)
+        except Exception as exc:
+            # File vanished, turned binary, or became
+            # unreadable. Skip silently — next index_repo
+            # pass will clean up the stale cache entry.
+            logger.debug(
+                "Enrichment source read failed for %s: %s",
+                rel_path, exc,
+            )
+            return
+        self._doc_index.enrich_single_file(
+            rel_path, source_text=source_text
+        )
 
     async def _send_doc_index_progress(
         self,

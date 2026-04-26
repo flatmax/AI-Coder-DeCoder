@@ -63,6 +63,10 @@ from typing import TYPE_CHECKING
 from ac_dc.doc_index.cache import DocCache
 from ac_dc.doc_index.extractors import EXTRACTORS, BaseDocExtractor
 from ac_dc.doc_index.formatter import DocFormatter
+from ac_dc.doc_index.keyword_enricher import (
+    EnrichmentConfig,
+    KeywordEnricher,
+)
 from ac_dc.doc_index.reference_index import DocReferenceIndex
 if TYPE_CHECKING:
     from ac_dc.doc_index.models import DocOutline
@@ -95,17 +99,49 @@ class DocIndex:
     in-memory), and :meth:`index_repo` with no explicit file
     list is a no-op.
     """
-    def __init__(self, repo_root: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path | str | None = None,
+        enricher: "KeywordEnricher | None" = None,
+        enrichment_config: "EnrichmentConfig | None" = None,
+    ) -> None:
         """Initialise the orchestrator.
+
         Parameters
         ----------
         repo_root
             Repository root directory. Used for path
             resolution and as the base for cache persistence.
             When None, cache runs in memory-only mode.
+        enricher
+            Optional :class:`KeywordEnricher` instance. When
+            supplied, :meth:`queue_enrichment` returns files
+            needing keyword extraction and
+            :meth:`enrich_single_file` applies the enricher in
+            place. When None, both methods behave as no-ops —
+            matches the optional-dependency contract for
+            keybert.
+        enrichment_config
+            Optional :class:`EnrichmentConfig`. Used by
+            :meth:`needs_enrichment` (to decide eligibility
+            with matching thresholds) and by
+            :meth:`enrich_single_file` (to pass to the
+            enricher). Defaults to
+            :class:`EnrichmentConfig`'s own defaults when
+            None.
         """
         self.repo_root: Path | None = (
             Path(repo_root) if repo_root is not None else None
+        )
+        # Enricher is optional. None means keyword enrichment
+        # is disabled; queue_enrichment returns empty and
+        # enrich_single_file no-ops. Callers in stripped-down
+        # releases (no keybert) pass None; production wiring
+        # (2.8.4d) passes a real instance constructed from
+        # config.
+        self._enricher = enricher
+        self._enrichment_config = (
+            enrichment_config or EnrichmentConfig()
         )
         # Cache: mtime-keyed with disk persistence when root
         # is set. Signature hashes over the structural outline
@@ -505,3 +541,147 @@ class DocIndex:
         """
         rel = self._normalise_rel_path(path)
         return self._cache.get_signature_hash(rel)
+
+    # ------------------------------------------------------------------
+    # Enrichment orchestration
+    # ------------------------------------------------------------------
+
+    def needs_enrichment(self, outline: "DocOutline") -> bool:
+        """Return True when ``outline`` has uncenriched eligible units.
+
+        A unit is a heading (with sliced section text) or prose
+        block. "Eligible" means text length ≥
+        :attr:`EnrichmentConfig.min_section_chars`. "Unenriched"
+        means the unit's :attr:`keywords` list is empty.
+
+        Files with only short labels (SVG flowcharts, sparse
+        READMEs) return False — there's nothing the enricher
+        would produce. Queuing them anyway would waste an
+        enricher call and progress-event slot.
+
+        For markdown outlines, heading bodies can only be
+        measured against the source text — which the caller
+        doesn't have at this stage. We use a conservative
+        proxy: a heading with :attr:`section_lines` ≥ 1 and
+        no keywords is assumed enrichable. False positives
+        (short sections that look enrichable but aren't) are
+        rare and harmless — the enricher's own eligibility
+        check drops them silently. False negatives (bodies
+        that would be enrichable but report zero lines) are
+        worse, so the proxy leans permissive.
+
+        For prose blocks, the block carries its text inline,
+        so we can measure directly and match the enricher's
+        real eligibility rule.
+        """
+        # Any eligible heading missing keywords → needs work.
+        for heading in outline.all_headings_flat:
+            if heading.keywords:
+                continue
+            if heading.section_lines >= 1:
+                return True
+
+        # Any eligible prose block missing keywords → needs work.
+        min_chars = self._enrichment_config.min_section_chars
+        for block in outline.prose_blocks:
+            if block.keywords:
+                continue
+            if len(block.text or "") >= min_chars:
+                return True
+
+        return False
+
+    def queue_enrichment(self) -> list[str]:
+        """Return paths whose outlines need keyword enrichment.
+
+        Iterates the currently-loaded outlines and collects
+        those where :meth:`needs_enrichment` returns True.
+        Returns an empty list when no enricher is attached
+        (matches the optional-dependency contract) or when
+        every outline is already enriched.
+
+        The returned list is sorted by path for deterministic
+        ordering — matters for tests and for the progress
+        events the caller emits per-file.
+        """
+        if self._enricher is None:
+            return []
+        return sorted(
+            path
+            for path, outline in self._all_outlines.items()
+            if self.needs_enrichment(outline)
+        )
+
+    def enrich_single_file(
+        self,
+        path: str | Path,
+        source_text: str,
+    ) -> "DocOutline | None":
+        """Enrich one file's outline and replace its cache entry.
+
+        The enricher mutates the outline in place (per Layer
+        2.8.4b's contract). We then:
+
+        1. Re-hash via :class:`DocCache`'s put path (signature
+           hash reflects the new keyword content).
+        2. Persist with ``keyword_model`` set to the enricher's
+           model name so future structure-only lookups with
+           the same model hit, and lookups with a different
+           model miss (forcing re-extraction when the user
+           changes their configured model).
+        3. Invalidate the prior cache entry's sidecar via
+           put's overwrite semantics — `DocCache.put` writes
+           the new sidecar and the old one is replaced in place.
+
+        Returns the enriched outline, or None when:
+
+        - No enricher is attached (optional-dependency path)
+        - The file isn't in ``_all_outlines`` (never indexed,
+          or pruned)
+        - The file is missing from disk at the resolved
+          absolute path (mtime stat fails) — needed for the
+          cache put's mtime field
+
+        Source text is passed by the caller — the orchestrator
+        doesn't re-read the file, keeping this method
+        synchronous and straightforward to test.
+        """
+        if self._enricher is None:
+            return None
+
+        rel = self._normalise_rel_path(path)
+        outline = self._all_outlines.get(rel)
+        if outline is None:
+            return None
+
+        # Resolve mtime for the cache put. If the file has
+        # vanished between extraction and enrichment, skip —
+        # the next index_repo pass will prune the stale
+        # entry.
+        absolute = self._absolute_path(rel)
+        try:
+            mtime = absolute.stat().st_mtime
+        except OSError:
+            return None
+
+        # Run enrichment in place. The enricher's own
+        # ensure_loaded check gates; if it fails, the outline
+        # is returned unchanged and we still re-cache it so
+        # the orchestrator doesn't re-queue it forever.
+        self._enricher.enrich_outline(
+            outline,
+            source_text=source_text,
+            config=self._enrichment_config,
+        )
+
+        # Replace the cache entry with the enriched outline
+        # and the current model name. Put handles sidecar
+        # persistence; prior entry is overwritten in place.
+        self._cache.put(
+            rel,
+            mtime,
+            outline,
+            keyword_model=self._enricher.model_name,
+        )
+
+        return outline
