@@ -4192,6 +4192,268 @@ describe('FilesTab context-menu action dispatch', () => {
     });
   });
 
+  describe('new-directory action', () => {
+    async function setupNewDirTab() {
+      const getTree = vi.fn().mockResolvedValue(
+        fakeTreeResponse([
+          {
+            name: 'src',
+            path: 'src',
+            type: 'dir',
+            children: [],
+          },
+        ]),
+      );
+      const createFile = vi.fn().mockResolvedValue({});
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': createFile,
+      });
+      const t = mountTab();
+      await settle(t);
+      return { t, getTree, createFile };
+    }
+
+    it('new-directory-committed creates .gitkeep inside the new dir', async () => {
+      // The load-bearing test for Part 2 — empty dirs
+      // aren't tracked by git, so we create a
+      // placeholder file inside. The path is
+      // `{parentPath}/{name}/.gitkeep` and the
+      // content is empty.
+      const { t, createFile } = await setupNewDirTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { parentPath: 'src', name: 'utils' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile).toHaveBeenCalledOnce();
+      expect(createFile.mock.calls[0][0]).toBe(
+        'src/utils/.gitkeep',
+      );
+      expect(createFile.mock.calls[0][1]).toBe('');
+    });
+
+    it('creates at repo root when parentPath is empty', async () => {
+      const { t, createFile } = await setupNewDirTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { parentPath: '', name: 'toplevel' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile.mock.calls[0][0]).toBe(
+        'toplevel/.gitkeep',
+      );
+    });
+
+    it('reloads the file tree after creation', async () => {
+      const { t, getTree } = await setupNewDirTab();
+      const initial = getTree.mock.calls.length;
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { parentPath: 'src', name: 'utils' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(getTree.mock.calls.length).toBe(initial + 1);
+    });
+
+    it('success toast names the directory, not the .gitkeep path', async () => {
+      // Users created a directory; they shouldn't
+      // see "Created src/utils/.gitkeep" — that
+      // leaks our implementation choice. Toast
+      // should name the directory.
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const { t } = await setupNewDirTab();
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-directory-committed', {
+            detail: { parentPath: 'src', name: 'utils' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const successes = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'success');
+        expect(successes.length).toBeGreaterThan(0);
+        const message = successes.at(-1).message;
+        expect(message).toContain('src/utils');
+        // The .gitkeep implementation detail should
+        // NOT leak into user-facing messaging.
+        expect(message).not.toContain('.gitkeep');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('rejects names with path separators', async () => {
+      const { t, createFile } = await setupNewDirTab();
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-directory-committed', {
+            detail: {
+              parentPath: 'src',
+              name: 'nested/inner',
+            },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        expect(createFile).not.toHaveBeenCalled();
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message.toLowerCase()).toContain(
+          'separator',
+        );
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+
+    it('ignores malformed new-directory-committed events', async () => {
+      const { t, createFile } = await setupNewDirTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { name: 'utils' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { parentPath: 'src' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: { parentPath: 'src', name: '' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      picker.dispatchEvent(
+        new CustomEvent('new-directory-committed', {
+          detail: null,
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      expect(createFile).not.toHaveBeenCalled();
+    });
+
+    it('surfaces RPC rejection as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(fakeTreeResponse([])),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': vi
+          .fn()
+          .mockRejectedValue(new Error('permission denied')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-directory-committed', {
+            detail: { parentPath: '', name: 'utils' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain(
+          'permission denied',
+        );
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('surfaces restricted error as warning toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(fakeTreeResponse([])),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.create_file': vi.fn().mockResolvedValue({
+          error: 'restricted',
+          reason: 'Participants cannot create directories',
+        }),
+      });
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        picker.dispatchEvent(
+          new CustomEvent('new-directory-committed', {
+            detail: { parentPath: '', name: 'utils' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await settle(t);
+        const warnings = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'warning');
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings.at(-1).message).toContain('Participants');
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+  });
+
   describe('exclude action', () => {
     async function setupExcludeTab({ excludedFiles = [] } = {}) {
       const getTree = vi
