@@ -3068,6 +3068,7 @@ export class AppShell extends JRPCClient {
             </div>
           ` : null}
         </div>
+        <ac-doc-index-progress></ac-doc-index-progress>
         ${this._renderCompactionBar()}
         <div
           class="resize-handle right"
@@ -3105,8 +3106,6 @@ export class AppShell extends JRPCClient {
           </div>
         `)}
       </div>
-
-      <ac-doc-index-progress></ac-doc-index-progress>
 
       <ac-compaction-progress></ac-compaction-progress>
 

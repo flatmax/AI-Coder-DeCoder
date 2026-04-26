@@ -78,12 +78,7 @@ export class CompactionProgress extends LitElement {
   static styles = css`
     :host {
       position: fixed;
-      /* Anchored below the doc-index progress overlay (top: 1rem).
-       * Doc-index work can run for minutes; keeping its slot at
-       * the top makes it the primary indicator when both are
-       * active. Compaction is brief and is OK displaced
-       * slightly further down. */
-      top: 4rem;
+      top: 1rem;
       left: 50%;
       transform: translateX(-50%);
       /* Above the dialog (z-index 10) but below the startup

@@ -89,31 +89,25 @@ export class DocIndexProgress extends LitElement {
 
   static styles = css`
     :host {
-      position: fixed;
-      /* Anchor above the compaction overlay so both stack
-       * cleanly when active simultaneously. Compaction at
-       * top: 4rem leaves this at top: 1rem. */
-      top: 1rem;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 500;
-      pointer-events: none;
+      /* Inline element inside the dialog. Sits above the
+       * thin compaction-capacity bar at the dialog bottom.
+       * No fixed positioning — the overlay flows with the
+       * dialog layout and hides cleanly when _state is
+       * 'hidden' (render returns an empty template). */
+      display: block;
+      flex-shrink: 0;
     }
 
     .overlay {
-      display: inline-flex;
+      display: flex;
       flex-direction: column;
       gap: 0.4rem;
-      min-width: 280px;
       background: rgba(22, 27, 34, 0.96);
-      border: 1px solid rgba(240, 246, 252, 0.18);
+      border-top: 1px solid rgba(240, 246, 252, 0.1);
       border-left: 3px solid var(--accent-primary, #58a6ff);
-      border-radius: 6px;
-      padding: 0.6rem 1rem;
-      font-size: 0.875rem;
+      padding: 0.5rem 1rem;
+      font-size: 0.8125rem;
       color: var(--text-primary, #c9d1d9);
-      backdrop-filter: blur(8px);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
       opacity: 1;
       transition: opacity 400ms ease-out;
     }
