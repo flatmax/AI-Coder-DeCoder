@@ -975,6 +975,30 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
+   * Chat panel dispatched `filter-from-chat` — the user
+   * typed `@pattern` in the chat textarea, or deleted/
+   * exited a prior mention. Forward the query to the
+   * picker's `setFilter` so the tree filters live as
+   * the user types.
+   *
+   * Edge-triggered on the chat side — we only receive
+   * this event when the mention state actually changes
+   * (entering, updating, or exiting). Empty query is a
+   * legitimate clearing signal.
+   *
+   * Defensive against missing detail or non-string
+   * query — silently drop malformed events rather than
+   * passing junk to the picker.
+   */
+  _onFilterFromChat(event) {
+    const query = event?.detail?.query;
+    if (typeof query !== 'string') return;
+    const picker = this._picker();
+    if (!picker) return;
+    picker.setFilter(query);
+  }
+
+  /**
    * Chat panel dispatched `file-search-scroll` — the match
    * overlay scrolled, and we should update the picker's
    * focused-path highlight to show which file section is
@@ -2234,6 +2258,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @file-chips-add-all=${this._onFileChipsAddAll}
           @file-search-changed=${this._onFileSearchChanged}
           @file-search-scroll=${this._onFileSearchScroll}
+          @filter-from-chat=${this._onFilterFromChat}
         ></ac-chat-panel>
       </div>
     `;

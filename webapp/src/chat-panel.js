@@ -1562,6 +1562,19 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // flag flip and the flag exists entirely in
     // paste-handler event scope.
     this._suppressNextPaste = false;
+    // Active @mention range in the textarea. When the
+    // cursor sits inside an @word sequence (e.g. typing
+    // `@foo|` where | is the cursor), this holds
+    // `{start, end}` — `start` is the index of the `@`,
+    // `end` is the cursor position. Null when no active
+    // mention. Used to detect edge transitions between
+    // input events so we emit `filter-from-chat` only
+    // when the mention state actually changes, and emit
+    // a clearing event when the user exits a mention
+    // (deletes the `@`, types whitespace after, etc.).
+    // Instance field, not reactive — changes per
+    // keystroke and doesn't affect rendering.
+    this._activeMention = null;
     this.messages = [];
     this.repoFiles = [];
     this._input = '';
@@ -2671,6 +2684,113 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const ta = event.target;
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+    // @-filter detection. Runs after every input event —
+    // we check whether the cursor is inside an @word
+    // sequence and dispatch edge-triggered
+    // `filter-from-chat` events so the files-tab can
+    // forward to the picker's setFilter.
+    this._updateMentionFilter(ta);
+  }
+
+  /**
+   * Detect an active @mention at the cursor position and
+   * dispatch `filter-from-chat` when the mention state
+   * changes. Edge-triggered:
+   *
+   *   - Entering a mention (no prior → has mention):
+   *     emit event with the query.
+   *   - Mention query changed (has mention → different
+   *     mention range): emit with new query.
+   *   - Exiting a mention (had mention → no mention):
+   *     emit empty query to clear the filter.
+   *
+   * A mention is an `@` followed by zero or more
+   * non-whitespace characters, with the cursor INSIDE
+   * the sequence. The `@` must be at a word boundary —
+   * preceded by whitespace OR start-of-string, not
+   * preceded by another word character. This is the
+   * rule that keeps `foo@bar` from being treated as
+   * a mention.
+   */
+  _updateMentionFilter(ta) {
+    const value = ta.value;
+    const cursor = ta.selectionStart;
+    const mention = this._detectActiveMention(value, cursor);
+    // Compare against prior state to decide whether to
+    // emit. Same range and same query → no-op. Different
+    // → emit.
+    if (mention === null && this._activeMention === null) {
+      return;
+    }
+    if (
+      mention !== null &&
+      this._activeMention !== null &&
+      mention.start === this._activeMention.start &&
+      mention.end === this._activeMention.end &&
+      mention.query === this._activeMention.query
+    ) {
+      return;
+    }
+    // State changed. Store the new state and emit.
+    this._activeMention = mention;
+    const query = mention === null ? '' : mention.query;
+    this.dispatchEvent(
+      new CustomEvent('filter-from-chat', {
+        detail: { query },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Walk backward from the cursor to find an active
+   * @mention. Returns `{start, end, query}` or null.
+   *
+   *   - `start` is the index of the `@` character
+   *   - `end` is the cursor position (exclusive end of
+   *     the mention)
+   *   - `query` is the substring `value[start+1..end]`
+   *     — the filter pattern without the leading `@`
+   *
+   * Returns null when:
+   *   - No `@` found before cursor at word boundary
+   *   - Whitespace between the `@` and cursor (mention
+   *     terminated)
+   *   - `@` is preceded by a non-boundary character
+   *     (word char like letter, digit, or underscore)
+   */
+  _detectActiveMention(value, cursor) {
+    // Walk backward from cursor looking for @ or
+    // whitespace. Whitespace terminates the scan — no
+    // mention if we hit whitespace before @.
+    for (let i = cursor - 1; i >= 0; i -= 1) {
+      const ch = value[i];
+      if (/\s/.test(ch)) {
+        // Hit whitespace before @ — no active mention.
+        return null;
+      }
+      if (ch === '@') {
+        // Check the boundary rule — the char before @
+        // must be whitespace or start-of-string, not a
+        // word character. This blocks `foo@bar` from
+        // matching.
+        const before = i > 0 ? value[i - 1] : '';
+        if (before !== '' && !/\s/.test(before)) {
+          // @ is embedded in a word (e.g. email-like).
+          // Not a mention.
+          return null;
+        }
+        // Found a valid @word mention.
+        return {
+          start: i,
+          end: cursor,
+          query: value.slice(i + 1, cursor),
+        };
+      }
+    }
+    // Walked to start-of-string without finding @.
+    return null;
   }
 
   /**
