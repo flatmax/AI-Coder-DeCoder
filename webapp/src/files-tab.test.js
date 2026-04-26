@@ -5439,7 +5439,12 @@ describe('FilesTab context-menu action dispatch', () => {
         it('filter changes propagate visually to the picker', async () => {
           const t = await setupBridgeTab();
           const picker = t.shadowRoot.querySelector('ac-file-picker');
-          fireFilterFromChat(t, { query: 'bar' });
+          // Use a query that matches multiple files by
+          // subsequence to pin the filter's actual behaviour.
+          // `ba` matches both bar.md (b,a...) and baz.md
+          // (b,a...) — fuzzyMatch requires chars in order,
+          // not contiguous. Doesn't match a.md (no 'b').
+          fireFilterFromChat(t, { query: 'ba' });
           await settle(t);
           const rows = picker.shadowRoot.querySelectorAll('.row.is-file');
           const names = Array.from(rows).map((r) => r.textContent);
