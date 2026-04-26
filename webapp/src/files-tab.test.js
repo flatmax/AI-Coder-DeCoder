@@ -1120,6 +1120,259 @@ describe('FilesTab file click → navigate-file', () => {
 // flattenTreePaths helper
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Middle-click path insertion integration (Increment 10a)
+// ---------------------------------------------------------------------------
+
+describe('FilesTab middle-click path insertion', () => {
+  /**
+   * Dispatch an `insert-path` event from the picker
+   * child to simulate the middle-click flow. The
+   * picker's actual auxclick handler is tested in
+   * file-picker.test.js; here we only exercise the
+   * orchestrator's response to the event.
+   */
+  function firePickerInsertPath(tab, path) {
+    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: { path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  async function setupTab() {
+    const getTree = vi
+      .fn()
+      .mockResolvedValue(
+        fakeTreeResponse([
+          { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        ]),
+      );
+    publishFakeRpc({ 'Repo.get_file_tree': getTree });
+    const t = mountTab();
+    await settle(t);
+    return t;
+  }
+
+  it('inserts path into empty textarea', async () => {
+    const t = await setupTab();
+    firePickerInsertPath(t, 'src/foo.py');
+    await settle(t);
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    expect(chat._input).toBe('src/foo.py');
+  });
+
+  it('inserts path at cursor position in non-empty textarea', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'before  after';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(7, 7); // between "before " and " after"
+    firePickerInsertPath(t, 'INSERTED');
+    await settle(t);
+    // Spacing rule: prefix space skipped because char
+    // before cursor is already whitespace; suffix space
+    // skipped because char after cursor is already
+    // whitespace. Result: "before INSERTED after".
+    expect(chat._input).toBe('before INSERTED after');
+  });
+
+  it('adds prefix space when preceded by non-whitespace', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'word';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(4, 4); // end of "word"
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    expect(chat._input).toBe('word path.py');
+  });
+
+  it('adds suffix space when followed by non-whitespace', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'trailing';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(0, 0); // start, before "trailing"
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    expect(chat._input).toBe('path.py trailing');
+  });
+
+  it('adds both spaces when jammed between non-whitespace', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'ab';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(1, 1); // between "a" and "b"
+    firePickerInsertPath(t, 'P');
+    await settle(t);
+    expect(chat._input).toBe('a P b');
+  });
+
+  it('replaces selection when one exists', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'keep OLD keep';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(5, 8); // "OLD"
+    firePickerInsertPath(t, 'NEW');
+    await settle(t);
+    // Selection boundaries (space before, space after)
+    // — no extra padding needed.
+    expect(chat._input).toBe('keep NEW keep');
+  });
+
+  it('positions cursor at end of inserted text', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = '';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(0, 0);
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    // Inserted "path.py" into empty textarea at pos 0 —
+    // no padding needed, cursor ends at 7.
+    expect(ta.selectionStart).toBe(7);
+    expect(ta.selectionEnd).toBe(7);
+  });
+
+  it('sets _suppressNextPaste flag before focus', async () => {
+    // Load-bearing ordering — on Linux, focus() triggers
+    // the selection-buffer auto-paste. If the flag is
+    // set AFTER focus, the paste fires before we've
+    // raised the suppression. The test pins the order
+    // by spying on the textarea's focus method and
+    // checking the flag is already true when it's
+    // called.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    let flagAtFocus = null;
+    const originalFocus = ta.focus.bind(ta);
+    ta.focus = vi.fn(() => {
+      flagAtFocus = chat._suppressNextPaste;
+      originalFocus();
+    });
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    expect(ta.focus).toHaveBeenCalledOnce();
+    // Flag was TRUE at the moment focus fired.
+    expect(flagAtFocus).toBe(true);
+  });
+
+  it('focuses the textarea after insertion', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    expect(chat.shadowRoot.activeElement).toBe(ta);
+  });
+
+  it('ignores malformed events without a path', async () => {
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const originalInput = chat._input;
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    // Null detail.
+    picker.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: null,
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    // Missing path field.
+    picker.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: {},
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    // Empty string path.
+    picker.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: { path: '' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    // Non-string path.
+    picker.dispatchEvent(
+      new CustomEvent('insert-path', {
+        detail: { path: 42 },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(chat._input).toBe(originalInput);
+    expect(chat._suppressNextPaste).toBe(false);
+  });
+
+  it('dispatches input event so auto-resize runs', async () => {
+    // The chat panel's _onInputChange runs on native
+    // input events and handles textarea auto-resize.
+    // Without firing an input event, a multi-line
+    // path would be inserted but the textarea height
+    // wouldn't adjust.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    const inputSpy = vi.fn();
+    ta.addEventListener('input', inputSpy);
+    firePickerInsertPath(t, 'path.py');
+    await settle(t);
+    expect(inputSpy).toHaveBeenCalled();
+  });
+
+  it('accumulates multiple insertions', async () => {
+    // User middle-clicks several files in sequence —
+    // each one appends with proper padding to whatever
+    // was there before.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    firePickerInsertPath(t, 'a.py');
+    await settle(t);
+    firePickerInsertPath(t, 'b.py');
+    await settle(t);
+    firePickerInsertPath(t, 'c.py');
+    await settle(t);
+    // Each insertion lands at the cursor, which is now
+    // at the end of the previously-inserted path.
+    // Trailing whitespace from the prior insertion would
+    // suppress the new prefix space; here there's no
+    // trailing whitespace, so spaces are added.
+    expect(chat._input).toBe('a.py b.py c.py');
+  });
+
+  it('preserves directory paths verbatim', async () => {
+    // Directories are legitimate insertion targets.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    firePickerInsertPath(t, 'src/utils');
+    await settle(t);
+    expect(chat._input).toBe('src/utils');
+  });
+});
+
 describe('flattenTreePaths', () => {
   it('empty / null / undefined input returns empty array', () => {
     expect(flattenTreePaths(null)).toEqual([]);
