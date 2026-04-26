@@ -3085,8 +3085,8 @@ Largest single feature. Delivered in sub-commits to keep each change reviewable:
 
 - **8a — shell** (delivered): right-click opens menu, positioning with viewport clamping, outside-click + Escape dismissal, action-routing scaffold via `context-menu-action` events.
 - **8b — simple RPC actions** (delivered): stage / unstage / discard / delete with confirm.
-- **8c — inline-input actions** (planned): rename / duplicate with inline textbox rendered at row indent.
-- **8d — include/exclude + load-in-panel** (planned): route include/exclude through existing exclusion path; dispatch `load-diff-panel` events.
+- **8c — inline-input actions** (delivered): rename / duplicate with inline textbox rendered at row indent.
+- **8d — include/exclude + load-in-panel** (delivered): route include/exclude through existing exclusion path; dispatch `load-diff-panel` events.
 
 ### ~~Increment 8a — Context menu shell~~ (delivered)
 
@@ -3154,13 +3154,149 @@ Design points pinned by tests:
 
 Next sub-commit — **8c**: inline-input pattern for rename and duplicate. Rename shows an inline textbox at the row's indentation level, pre-filled with the current name and auto-selected. Duplicate shows the same pattern pre-filled with the full path so the user can edit the target location. Enter submits, Escape / blur cancels.
 
+### ~~Increment 8c — Rename and duplicate via inline input~~ (delivered)
+
+Rename and duplicate both use the same inline-input pattern: the picker renders a textbox in place of (rename) or below (duplicate) the target file row, pre-filled with a sensible starting value, and the commit handler fires a `rename-committed` or `duplicate-committed` event back to the orchestrator. The orchestrator owns the RPC dispatch, including the file-vs-directory routing for rename.
+
+- `webapp/src/file-picker.js` — additions:
+  - `_renaming` and `_duplicating` non-reactive fields on the constructor. Null when no inline input is active; a path string when one is. Mutually exclusive — `beginRename` clears `_duplicating` and vice versa, so users can't accidentally open two inputs at once.
+  - `beginRename(path)` and `beginDuplicate(path)` public methods. Callers (the files-tab orchestrator, in response to context-menu action events) pass the source path; the picker handles the input lifecycle. Defensive against empty / non-string paths.
+  - `_renderInlineInput({ mode, sourcePath, sourceName, depth })` — renders a row with the same two-level indent as file rows so the input lines up visually. Pre-fill: rename uses `sourceName` (just the basename); duplicate uses `sourcePath` (full path) so the user can edit the directory as well as the filename.
+  - `_renderFile` branches — when `_renaming === node.path`, the file row is REPLACED with the inline input (rendering the source row alongside would show two text affordances for the same file). When `_duplicating === node.path`, the file row stays and the input appends BELOW it (the source still exists; the input specifies the target location).
+  - `_onInlineKeyDown` handles Enter (commit), Escape (cancel), other keys passthrough. Blur also cancels via `_onInlineBlur` — accidental click-aways discard the pending edit rather than auto-committing, which users find surprising.
+  - `_commitInlineInput(inputEl, mode, sourcePath)` — reads `inputEl.value`, trims, clears state first so the blur firing after re-render doesn't re-enter through `_onInlineBlur`'s guard, then validates. Empty value → silent no-op (state cleared, no event). Unchanged value for rename (target equals current name) → no-op. Equal source and target for duplicate → no-op. Otherwise dispatches `rename-committed` or `duplicate-committed` with `{sourcePath, targetName}`.
+  - `_cancelInlineInput(mode, sourcePath?)` — clears the relevant state. Optional `sourcePath` guard prevents double-cancel in the blur-after-commit race: `_commitInlineInput` clears `_renaming` first, which triggers re-render and removes the input, which fires blur, which calls `_cancelInlineInput` with the just-cleared sourcePath. The guard skips the second cancel because the state no longer matches.
+  - `updated(changedProps)` — auto-focuses and pre-selects the stem (the part before the final `.`) of any newly-rendered inline input. Stem selection means typing immediately replaces the filename but preserves the extension; users who want a different extension just type past the selection.
+
+- `webapp/src/files-tab.js` — additions:
+  - `_dispatchRename(path)` and `_dispatchDuplicate(path)` — one-liners that call `picker.beginRename(path)` / `picker.beginDuplicate(path)`. Pure delegation; the picker owns the input lifecycle.
+  - `_onRenameCommitted(event)` — the real work. Validates detail shape, rejects path separators in the target (users who want to move should use duplicate), rebuilds the target path by preserving the source's parent directory, determines whether the source is a file or a directory via `_findNodeByPath`, routes to `Repo.rename_file` or `Repo.rename_directory` accordingly. On success, reloads the tree AND migrates selection/exclusion state so the file stays selected/excluded under its new path. On failure, surfaces via toast.
+  - `_onDuplicateCommitted(event)` — reads source content via `Repo.get_file_content`, then creates the target via `Repo.create_file(targetPath, content)`. Two-step because no backend `copy_file` RPC exists. Failures at either step surface as error toasts without partial state. Defensive type check on returned content — a future backend change that returned a different shape shouldn't dispatch garbage to `create_file`.
+  - `_findNodeByPath(path)` — depth-first walk through `_latestTree` returning the node (file OR directory) at that path, or null when missing. Used by `_onRenameCommitted` to determine whether to call `rename_file` or `rename_directory`. Missing nodes (deleted between menu open and Enter press) default to file rename since the RPC surfaces a clean error.
+  - `_migrateSubtreeState(oldDir, newDir)` — on directory rename, every descendant path under `oldDir` gets migrated to the equivalent path under `newDir` in both `_selectedFiles` and `_excludedFiles`. Nested selections survive a parent rename. Uses prefix-rewrite (`oldPrefix = oldDir + "/"`) so sibling directories with names that start the same (e.g. `src` and `src-archive`) don't cross-contaminate.
+  - Template bindings — `@rename-committed=${this._onRenameCommitted}` and `@duplicate-committed=${this._onDuplicateCommitted}` on the `<ac-file-picker>` element. Handlers bound in the constructor for stable references.
+
+- `webapp/src/file-picker.test.js` — 20+ tests across `describe('inline-input rename')` and `describe('inline-input duplicate')` blocks (the file-picker's side). Tests cover: `beginRename`/`beginDuplicate` state flip, inline input rendering shape (mode attr, data attributes), pre-fill values (basename vs full path), auto-focus and stem selection via `updated()`, Enter commits and dispatches the right event, Escape cancels without dispatch, blur cancels, blur-after-commit race short-circuit, mutual exclusion (starting duplicate while renaming cancels rename), empty-input no-op, unchanged-value no-op, path separators in target (orchestrator-level test — the picker itself allows them, rejection happens in `_onRenameCommitted`).
+
+- `webapp/src/files-tab.test.js` — 20+ tests across `describe('rename action')` and `describe('duplicate action')` blocks in the `FilesTab context-menu action dispatch` section. Tests cover: context-menu action calls `beginRename`/`beginDuplicate` on the picker, commit handler routes to `rename_file` vs `rename_directory` based on tree inspection (critical — a naive implementation that always called `rename_file` would break directory renames silently), target path reconstruction (nested source produces nested target; top-level source produces top-level target), tree reload after success, success toast with target name, path-separator rejection with warning toast, selection migration (selected file stays selected under new name; directory rename migrates descendants via prefix rewrite), exclusion migration (parallel to selection), malformed event rejection, restricted error (warning toast), RPC rejection (error toast), same-path no-op. Duplicate tests also cover: source read via `get_file_content`, cross-directory duplicates, non-string content defense, read-source failure abortion without create attempt.
+
+Design points pinned by tests:
+
+- **Rename vs directory rename dispatch happens at the orchestrator, not the picker.** The picker's `beginRename` doesn't carry a file-vs-directory discriminator — it operates on paths. The orchestrator inspects `_latestTree` at commit time to route to the correct RPC. Alternative (two separate picker methods) would duplicate the inline-input rendering code for no UX benefit. Pinned by `rename-committed on a dir path routes to rename_directory` and `file rename still routes to rename_file`.
+
+- **Path separators rejected in rename targets.** A rename target containing `/` or `\` is rejected with a warning toast. Users wanting to MOVE a file to a different directory should use duplicate (which pre-fills with the full path and lets them edit the directory). Letting rename accept a path would interact badly with git's rename-detection heuristics — git sees `rename_file(old, new/different/path)` as a rename AND the creation of intermediate directories, which is surprising. Pinned by `rejects target names containing path separators`.
+
+- **Directory rename migrates all descendant selection + exclusion.** Users who had `src/a.md` and `src/b.md` selected before renaming `src → lib` expect to find `lib/a.md` and `lib/b.md` selected after. Without migration, the selection would silently drop to empty. Pinned by `migrates subtree selection on dir rename` and `migrates subtree exclusion on dir rename`. The prefix-rewrite uses `oldPrefix = oldDir + "/"` so `src` doesn't accidentally match `src-archive/a.md`.
+
+- **Duplicate is client-side read-then-write.** No backend `copy_file` RPC exists; `Repo.create_file` refuses to overwrite existing files. The client reads source content via `Repo.get_file_content`, then calls `create_file(targetPath, content)`. If the target already exists, the server surfaces the error and no partial state is created. Pinned by `duplicate-committed reads source then creates target with content`.
+
+- **Same-path no-op for both.** Rename where target equals the current name is a no-op; duplicate where target equals source is a no-op. The picker's `_commitInlineInput` already checks this, but the orchestrator also checks defensively — a direct commit-handler invocation (e.g. from a future programmatic API) shouldn't trigger spurious RPCs. Pinned by `same-name commit is a no-op` and `same-path commit is a no-op`.
+
+- **Blur cancels, not commits.** Accidental click-aways during typing shouldn't silently save. Users use Enter to commit or Escape/blur to cancel. Alternative (auto-commit on blur) is surprising and hard to undo. Pinned by `blur cancels without dispatch` and the commit-path-test-is-separate structure.
+
+- **Unchanged commits are no-ops.** Opening rename and pressing Enter without typing should not fire a rename RPC. The picker's check catches this (target === source name); if the picker loosened the check in a future refactor, the orchestrator's same-path check would catch it there instead. Pinned on both sides.
+
+- **Auto-focus and stem selection on render.** Users opening rename want to type immediately. Stem selection (everything before the final `.`) lets them replace `my-file` in `my-file.md` without losing the extension. Pinned indirectly via the `updated()` lifecycle — hard to test reliably in jsdom (no real selection model), but the implementation is documented and trusts the browser.
+
+Open carried over:
+
+- **Inline input rendering alignment with directory rows.** The current implementation assumes the input's indent matches a file row's indent, which works because rename and duplicate are file-only in 8c. When directory rename lands (9 part 1) the orchestrator calls the same `beginRename`, so the inline input appears at the directory's indent level automatically — specs4 validated that the shape is right.
+- **Collab broadcast of rename events.** If another client renamed a file while this client had rename open on the same file, the rename RPC would succeed on the server but the picker would still show the old name until the next tree reload. Not blocking any current flow; future collab enhancement could short-circuit the picker's input on `filesChanged` with a stale source path.
+
+Next sub-commit — **8d**: wire include/exclude and load-in-panel actions. Include/exclude dispatches through the existing exclusion machinery; load-in-panel dispatches `load-diff-panel` events that the app shell catches and routes to the diff viewer's `loadPanel`.
+
+### ~~Increment 8d — Include/exclude and load-in-panel actions~~ (delivered)
+
+Wires the remaining four context-menu actions. Include and exclude dispatch through the existing three-state exclusion machinery (Increment 5); load-left and load-right fetch the file content and dispatch `load-diff-panel` events that the app shell catches (same pathway the history browser's context menu uses since 2e.4).
+
+- `webapp/src/files-tab.js` — additions:
+  - `_dispatchExclude(path)` — adds the path to `_excludedFiles` via `_applyExclusion`. Idempotent — if already excluded, `_applyExclusion`'s set-equality short-circuit makes this a no-op and no server round-trip happens. Also deselects if the file was selected (mutual exclusion between selected and excluded states — matches the shift+click behaviour in the picker's `_toggleExclusion`).
+  - `_dispatchInclude(path)` — removes the path from `_excludedFiles`. Returns the file to the default index-only state — does NOT auto-select. Matches the shift+click-from-excluded semantics and the "Include in index" menu item's documented behaviour. Idempotent.
+  - `_dispatchLoadInPanel(path, panel)` — validates panel ∈ {'left', 'right'}, fetches content via `Repo.get_file_content`, dispatches `load-diff-panel` with `{content, panel, label}` where `label` is the file's basename. Defensive type check on content (non-string → error toast, no dispatch). Invalid panel values rejected silently — the switch in `_onContextMenuAction` only passes 'left' or 'right', but a direct call with a bad value shouldn't fire.
+  - Switch cases in `_dispatchFileAction` wired: `include` → `_dispatchInclude`, `exclude` → `_dispatchExclude`, `load-left` → `_dispatchLoadInPanel(path, 'left')`, `load-right` → `_dispatchLoadInPanel(path, 'right')`.
+
+- `webapp/src/files-tab.test.js` — 15 new tests across three describe blocks:
+  - `describe('exclude action')` — 4 tests: adds to excluded set + notifies server, no-op when already excluded, deselects the file when excluding a selected file (two events: exclusion + deselection), propagates the new exclusion to the picker via direct-update.
+  - `describe('include action')` — 4 tests: removes from excluded set + notifies server, does NOT add to selected set (returns to index-only), no-op when not currently excluded, propagates updated exclusion to picker.
+  - `describe('load-in-panel actions')` — 7 tests: load-left dispatches with panel=left + correct content + label, load-right dispatches with panel=right, fetches file content before dispatching (order matters — content first, then event), uses basename as label (nested paths produce compact labels), RPC failure surfaces as error toast without dispatching panel event, non-string content defensively handled, invalid panel values rejected silently via direct `_dispatchLoadInPanel` call.
+
+Design points pinned by tests:
+
+- **Include returns to index-only, not selected.** The "Include in index" context-menu item does NOT tick the file's selection checkbox — it returns the file to the default index-only state. Matches the picker's shift+click-from-excluded behaviour. Users who want to select after including just tick the checkbox. Pinned by `does NOT add to the selected set (returns to index-only)`. The alternative (auto-select on include) is surprising because it changes two states with one gesture; the explicit two-step lets users decide intent.
+
+- **Regular click on excluded in the picker does auto-select (the one exception).** Specs4's "Regular click on an excluded file — un-excludes and selects" is the one path that combines both actions into one gesture. But that's the picker's checkbox click, NOT the context-menu include action. The distinction matters — two different gestures for two different intents, not surprising because they're distinct UI elements.
+
+- **Exclude deselects the file if selected.** Mutual exclusion between selected and excluded is enforced. Pinned by `deselects the file when excluding a selected file` which verifies both `setExcluded` and `setSelected` are called. Alternative (let them coexist) would require a tracker three-state dispatch that doesn't exist — specs4 is explicit about the mutual exclusion.
+
+- **Basename as the load-in-panel label.** A deep path like `src/services/auth/handler.py` would produce an unreadable label in the diff viewer's floating panel chip. Using just `handler.py` keeps it compact. If two files with the same basename load into different panels, the user can distinguish by viewer position; adding the full path would waste horizontal space. Pinned by `uses the basename as the label`.
+
+- **load-diff-panel event is the single dispatch point for ad-hoc comparisons.** Phase 2e.4 (history browser refinements) already uses this event; the files-tab uses the same pathway. The app shell's handler flips the active viewer to 'diff' and calls `diffViewer.loadPanel(content, panel, label)`. Future sources (e.g., a URL chip's content, a commit diff) will use the same event.
+
+- **RPC failure aborts cleanly.** A binary file or missing file produces a rejected `Repo.get_file_content` promise. The handler surfaces the error via toast and does NOT dispatch the panel event. Users see "Failed to load src/logo.png: binary file rejected" rather than a diff viewer showing garbage. Pinned by `surfaces RPC failure as error toast`.
+
+- **Non-string content defensive check.** Mirrors the duplicate action's content validation. If a future backend change makes `get_file_content` return something unexpected (dict, null), we bail with "Cannot load X: unexpected content type" rather than dispatching it verbatim. Pinned by `handles non-string content defensively`.
+
+Increment 8 complete. File context menu has nine working actions (stage / unstage / discard / rename / duplicate / load-left / load-right / exclude-or-include / delete). Next up — Increment 9: directory context menu.
+
 ### Increment 9 — Context menu (directories)
 
-Same mechanism as #8 with different actions — stage-all / unstage-all / rename (inline) / new-file (inline) / new-directory (inline, creates with `.gitkeep`) / exclude-or-include-in-index.
+Same mechanism as #8 with different actions. Split into two parts:
 
-- `file-picker.js` — dir-specific menu item set
-- `files-tab.js` — dir-level RPC dispatchers; new-directory creates `.gitkeep` inside the new dir so git tracks it
-- tests — all six actions, inline input integration, `.gitkeep` creation
+- **Part 1** (delivered): stage-all / unstage-all / rename-dir / exclude-all / include-all
+- **Part 2** (planned): new-file / new-directory via inline-input flow
+
+### ~~Increment 9 part 1 — Directory batch actions~~ (delivered)
+
+Directory context menu with five actions that operate on the whole subtree. Stage-all and unstage-all collect every descendant file and send a single RPC; exclude-all and include-all apply the change to every descendant in one batch through the existing exclusion machinery; rename-dir reuses the file-rename inline-input flow with a commit handler that inspects the tree to route to `Repo.rename_directory`.
+
+- `webapp/src/file-picker.js` — additions:
+  - `_CONTEXT_MENU_DIR_ITEMS` module-level catalog — seven entries: `stage-all`, `unstage-all`, `rename-dir`, `new-file`, `new-directory` (part 2 placeholders, silent-drop in the orchestrator), `exclude-all`, `include-all`. Separator positions: after unstage-all, after rename-dir, after new-directory. `showWhen` gates on `allExcluded` / `someExcluded` context flags so a fully-excluded dir shows only Include-all, a partially-excluded dir shows both Exclude-all and Include-all, and a fully-included dir shows only Exclude-all.
+  - New module-level action constants: `CTX_ACTION_STAGE_ALL`, `CTX_ACTION_UNSTAGE_ALL`, `CTX_ACTION_RENAME_DIR`, `CTX_ACTION_NEW_FILE`, `CTX_ACTION_NEW_DIR`, `CTX_ACTION_EXCLUDE_ALL`, `CTX_ACTION_INCLUDE_ALL`. Distinct from the file-row action IDs so a stale menu open on one node type can't dispatch to a handler expecting the other.
+  - `_onDirContextMenu(event, node)` — parallel to `_onFileContextMenu` but with dir-specific context fields. Computes `allExcluded` and `someExcluded` at menu-open time by walking `_collectDescendantFiles(node)` and counting how many are in `excludedFiles`. Empty directories produce `allExcluded=false` and `someExcluded=false` (only Exclude-all shows).
+  - `_renderMenuItems(ctx)` — dispatches on `ctx.type` to pick between `_CONTEXT_MENU_FILE_ITEMS` and `_CONTEXT_MENU_DIR_ITEMS`. The `showWhen` evaluator reads context flags the appropriate catalog's entries care about.
+  - `@contextmenu=${(e) => this._onDirContextMenu(e, node)}` binding on directory rows in `_renderDir`.
+
+- `webapp/src/files-tab.js` — additions:
+  - `_dispatchDirAction(action, path, name)` — routes directory actions. Five implemented cases (`stage-all`, `unstage-all`, `rename-dir`, `exclude-all`, `include-all`); `new-file` and `new-directory` fall through to the silent-drop default (part 2).
+  - `_dispatchStageAll(dirPath)` — collects every descendant file via `_collectDescendantFilesFromPath`, sends a single `Repo.stage_files(paths)` RPC (batch-friendly), reloads tree, success toast with count and dir name. Empty directories (no descendants) short-circuit silently.
+  - `_dispatchUnstageAll(dirPath)` — symmetric to stage-all. Files that aren't currently staged contribute nothing but don't break the batch — git silently skips unstaged paths.
+  - `_dispatchRenameDir(path, name)` — delegates to `picker.beginRename(path)`. Reuses the file rename flow because the input shape is identical (pre-filled with current name, Enter commits, Escape cancels). The `_onRenameCommitted` handler inspects `_latestTree` via `_findNodeByPath` to determine whether the source is a directory and routes to `Repo.rename_directory` accordingly (plus calls `_migrateSubtreeState` for descendant selection/exclusion).
+  - `_dispatchExcludeAll(dirPath)` — adds every descendant file to `_excludedFiles` via `_applyExclusion`. Deselects any that were selected (mutual exclusion rule). Empty directories no-op.
+  - `_dispatchIncludeAll(dirPath)` — removes every descendant file from `_excludedFiles`. Does NOT auto-select — returns descendants to index-only, matching the file-level include behaviour. Partially-excluded directories only remove the files that are actually in the excluded set (other descendants weren't there to begin with).
+  - `_collectDescendantFilesFromPath(dirPath)` — walks `_latestTree` via `_findDirNode` + `_collectDescendantsOfNode`. Empty-string dirPath is a special case (repo root) handled without walking. Missing paths return an empty array (defensive — shouldn't happen with menu-sourced paths but safe against a stale menu targeting a just-deleted directory).
+  - `_findDirNode(root, dirPath)` — simple depth-first walk returning the matching directory node or null.
+  - `_collectDescendantsOfNode(node)` — recursive helper. Files contribute their paths; directories contribute their descendants' paths. Directories themselves contribute nothing (only file paths end up in the result).
+
+- `webapp/src/files-tab.test.js` — ~30 tests in `describe('directory actions')` across five sub-describe blocks:
+  - `describe('stage-all action')` — 6 tests: stages every descendant in a single RPC, reloads tree after, success toast with count and dir name, empty directory no-op (no RPC, no toast), surfaces restricted error as warning toast, recursively collects from nested subdirs (proves the DFS walks deep).
+  - `describe('unstage-all action')` — 2 tests: unstages every descendant in a single RPC, reloads tree. Shares the error-handling pattern with stage-all; doesn't duplicate those tests.
+  - `describe('rename-dir action')` — 7 tests: context-menu action calls `beginRename` on the picker, `rename-committed` on a dir path routes to `rename_directory`, file rename still routes to `rename_file` (regression check — the new dir-detection logic must not misroute), migrates subtree selection on dir rename, migrates subtree exclusion on dir rename, rejects target with path separators.
+  - `describe('exclude-all action')` — 3 tests: adds every descendant to excluded set, deselects descendants that were selected, empty dir no-op.
+  - `describe('include-all action')` — 3 tests: removes every descendant from excluded set, does NOT auto-select them, partially-excluded dir only removes files that were actually excluded.
+  - `describe('unknown dir actions')` — 2 tests: unknown actions silently drop, new-file and new-directory silently drop (part 2 scope — reaching the default case confirms the part-1 split is clean).
+
+Design points pinned by tests:
+
+- **Menu-item visibility gates on `allExcluded` / `someExcluded`.** A fully-included dir shows only Exclude-all (nothing to include). A fully-excluded dir shows only Include-all (nothing more to exclude). A partially-excluded dir shows BOTH so the user picks the direction. Pinned by `fully-excluded dir shows only include-all (not exclude-all)` and `partially-excluded dir shows both exclude-all and include-all`. Without the gate, users would see a no-op menu item and wonder why their click did nothing.
+
+- **Batch RPCs for stage-all / unstage-all.** Single `Repo.stage_files(paths)` call for the whole subtree rather than N calls. Network round-trip count is O(1) regardless of directory size — matters for repos with hundreds of files in a single subtree. Pinned by `stages every descendant file in a single RPC` which asserts `stage` was called exactly once.
+
+- **Rename-dir reuses the file rename flow.** The picker's `beginRename` is type-agnostic — it opens an inline input with the current name pre-filled. The orchestrator's `_onRenameCommitted` inspects the tree at commit time to determine whether to call `rename_file` or `rename_directory`. Alternative (parallel `beginRenameDir` method) would duplicate the input rendering and commit handler for zero UX benefit. Pinned by `rename-committed on a dir path routes to rename_directory` and `file rename still routes to rename_file`.
+
+- **Subtree selection migration on dir rename.** Users renaming `src → lib` expect `src/a.md` (selected) to become `lib/a.md` (still selected). The `_migrateSubtreeState` helper uses prefix-rewrite (`oldPrefix = oldDir + "/"`) so sibling dirs with names that start the same don't cross-contaminate. Pinned by `migrates subtree selection on dir rename` and `migrates subtree exclusion on dir rename`. Without migration, the selection would silently drop to empty after rename — a data-loss-feeling bug.
+
+- **Empty directory batch actions are silent no-ops.** A dir with no descendant files produces no RPC, no toast, no state change. Pinned by `empty directory is a no-op (no RPC, no toast)`. Without this, an accidental right-click on an empty dir + stage-all would produce a confusing "Staged 0 files" toast.
+
+- **Include-all does NOT auto-select descendants.** Mirrors the file-level include behaviour — returns to index-only. Users wanting to select can tick individual checkboxes or the dir-level checkbox. Pinned by `does NOT auto-select the descendants`.
+
+- **Directory-action IDs distinct from file-action IDs.** A stale menu open on one node type can't accidentally dispatch to a handler expecting the other. The `type` discriminator in the event detail (`'file'` or `'dir'`) is belt-and-braces — the dispatch method also routes on it. A future refactor that merged the two action namespaces would need to re-add the type check throughout the dispatcher. Pinned by `menu item click dispatches context-menu-action with type=dir`.
+
+- **`someExcluded` uses an OR condition, not percentage.** Any non-zero count of excluded descendants makes `someExcluded=true`. A dir with 100 files where 1 is excluded still shows Include-all (the user might want to include that one). Alternative (e.g. only show when >50% excluded) would add UX complexity for no clear benefit.
+
+Open for Part 2:
+
+- **New file / new directory inline inputs.** Part 2 of Increment 9. The picker will need a new type of inline input — not replacing or appending to an existing row but inserting a new "create a new entry in this directory" row. Enter commits with `new-file-committed` or `new-directory-committed` events carrying `{parentPath, name}`. The orchestrator dispatches to `Repo.create_file(path, '')` for new files, or `Repo.create_file(path + '/.gitkeep', '')` for new directories (so git tracks the otherwise-empty dir). Reuses the same validation (path separators rejected). Same UX as rename/duplicate — stem selection, Enter commits, Escape cancels, blur cancels.
+- **Scoping consideration.** Part 2 can land independently because it only adds new inline-input types and new dispatcher branches; nothing in part 1 needs to change.
 
 ### Increment 10 — Middle-click path insertion + @-filter bridge
 
@@ -3184,6 +3320,14 @@ Per specs4 this is the architectural fix for stale-message overwrites on selecti
 
 - `files-tab.js` — `_syncMessagesFromChat()` reads `chatPanel.messages` into the tab's own `_messages` field; called at the start of every method that ends up calling `requestUpdate` on the chat panel (selection change, file mention click, exclusion change, review start, state load, files changed)
 - tests — regression test: send message → click file mention → assert message still in chat panel state
+
+### File picker completion — progress summary
+
+Increments 1–8 delivered; increment 9 part 1 delivered. Remaining work: 9 part 2 (new-file / new-directory inline inputs), 10 (middle-click path insertion + @-filter bridge), 11 (review mode banner), 12 (_syncMessagesFromChat defensive pattern).
+
+The picker is now fully usable for the common operations: browsing, selecting, excluding, git staging/unstaging, discarding, deleting, renaming (files and directories), duplicating, ad-hoc panel comparisons, and sort-mode-and-direction control. Keyboard navigation works end-to-end. Status badges + branch pill give visual git context. Active-file highlight follows the viewer.
+
+The remaining increments add bridges and polish — the file-picker workflow itself is feature-complete for day-to-day use.
 
 ### Out of scope for this plan
 
