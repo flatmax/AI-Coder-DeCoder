@@ -133,6 +133,28 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     /** Last scan error (null on success). */
     _scanError: { type: String, state: true },
     /**
+     * Working-tree cleanliness from Repo.is_clean. Three
+     * states per specs4/4-features/doc-convert.md §
+     * Clean-Tree Gate:
+     *
+     *   - true  — clean, conversion allowed
+     *   - false — dirty, Convert button disabled + banner
+     *             tells user to commit/stash/discard
+     *   - null  — probe hasn't completed or failed (e.g.,
+     *             Repo.is_clean RPC unavailable). Don't
+     *             block the Convert button — the backend's
+     *             clean-tree gate is the final authority
+     *             when the user actually clicks. Don't
+     *             flash the banner either — showing a
+     *             dirty-tree warning when we don't know
+     *             the state would be misleading.
+     *
+     * Refetched on every files-modified window event so
+     * the banner and button state follow commits / resets
+     * the user performs elsewhere in the app.
+     */
+    _treeClean: { type: Object, state: true },
+    /**
      * Conversion view state machine:
      *   - 'idle'       — file list visible, user can select
      *   - 'converting' — progress view visible, events arriving
@@ -198,6 +220,23 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       gap: 1rem;
       flex-wrap: wrap;
     }
+
+    /* Dirty-tree banner — amber warning strip. Same
+     * visual language as the shell's review banner
+     * (per specs4/5-webapp/file-picker.md § Review
+     * Banner) so the two banners feel like one system.
+     * Not dismissable — it reflects an operational
+     * constraint (can't convert with uncommitted
+     * changes) that the user resolves by changing
+     * state, not by clicking X. */
+    .dirty-tree-banner {
+      background: rgba(210, 153, 34, 0.12);
+      border-bottom: 1px solid rgba(210, 153, 34, 0.4);
+      color: #d29922;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+    }
     .dirty-tree-banner {
       background: rgba(210, 153, 34, 0.08);
       border-bottom: 1px solid rgba(210, 153, 34, 0.3);
@@ -237,6 +276,23 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     }
     .dep-dot.on { background: #3fb950; }
     .dep-dot.off { background: #8b949e; opacity: 0.6; }
+
+    /* Dirty-tree banner — amber warning strip. Same
+     * visual language as the shell's review banner
+     * (per specs4/5-webapp/file-picker.md § Review
+     * Banner) so the two banners feel like one system.
+     * Not dismissable — it reflects an operational
+     * constraint (can't convert with uncommitted
+     * changes) that the user resolves by changing
+     * state, not by clicking X. */
+    .dirty-tree-banner {
+      background: rgba(210, 153, 34, 0.12);
+      border-bottom: 1px solid rgba(210, 153, 34, 0.4);
+      color: #d29922;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+    }
 
     .toolbar {
       display: flex;
@@ -483,6 +539,9 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     this._filter = '';
     this._scanning = false;
     this._scanError = null;
+    // null until the first Repo.is_clean probe completes.
+    // See property docstring for the three-state contract.
+    this._treeClean = null;
     this._convertPhase = 'idle';
     this._convertBatch = [];
     this._progressByPath = new Map();
@@ -637,6 +696,28 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     }
   }
 
+  async _loadCleanliness() {
+    // Probe Repo.is_clean. Failure leaves `_treeClean`
+    // null, which keeps the Convert button enabled (the
+    // backend's gate is the final authority) and the
+    // dirty-tree banner hidden. Matches the
+    // graceful-degradation contract in specs4.
+    try {
+      const result = await this.rpcExtract('Repo.is_clean');
+      // RPC returns a bare boolean. Coerce defensively —
+      // if a future backend wraps it differently, we'd
+      // rather null out than store a truthy object.
+      if (typeof result === 'boolean') {
+        this._treeClean = result;
+      } else {
+        this._treeClean = null;
+      }
+    } catch (err) {
+      this._treeClean = null;
+      console.warn('[doc-convert] Repo.is_clean failed', err);
+    }
+  }
+
   async _loadFiles() {
     this._scanning = true;
     this._scanError = null;
@@ -722,9 +803,16 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       }
       if (result.error) {
         // Restricted caller, dirty tree, or other
-        // pre-flight rejection. Surface it and give the
-        // user a Retry path.
-        this._convertError = String(result.error);
+        // pre-flight rejection. Surface the
+        // human-readable `reason` when present (e.g.,
+        // "Participants cannot convert files") and
+        // fall back to the error code only when no
+        // reason was supplied — users shouldn't see a
+        // bare "restricted" string when the server
+        // told us what it actually meant.
+        this._convertError = String(
+          result.reason || result.error,
+        );
         this._convertPhase = 'complete';
         return;
       }
@@ -959,8 +1047,35 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     const visibleSelected = visible.filter(
       (e) => this._selected.has(e.path),
     ).length;
-    // Convert button is intentionally disabled in this
-    // commit — Commit 4 wires the RPC call + progress view.
+    // Convert button is disabled in three cases:
+    //   1. No selection (user hasn't picked anything)
+    //   2. A conversion is already running
+    //   3. Working tree is dirty (commit first — the
+    //      diff review story depends on it)
+    //
+    // Tooltip priority mirrors this order so the hover
+    // text explains the MOST USER-ACTIONABLE reason.
+    // Dirty-tree wins over no-selection because a user
+    // with a dirty tree AND no selection needs to
+    // commit first anyway; selection comes second. Null
+    // cleanliness (probe pending/failed) doesn't
+    // disable — the backend gate is the authority.
+    const convertDisabled =
+      selectedCount === 0
+      || this._convertPhase !== 'idle'
+      || this._treeClean === false;
+    let convertTitle;
+    if (this._treeClean === false) {
+      convertTitle =
+        'Commit or stash your changes before converting — '
+        + 'output files must appear as clear diffs.';
+    } else if (selectedCount === 0) {
+      convertTitle = 'Select files to convert';
+    } else {
+      convertTitle = `Convert ${selectedCount} selected file${
+        selectedCount === 1 ? '' : 's'
+      }`;
+    }
     return html`
       <div class="toolbar">
         <button
@@ -1174,9 +1289,10 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     }
     return html`
       <div class="progress-row" title=${path}>
-        <span class="progress-status" style="color: ${iconColor}">
-          ${icon}
-        </span>
+        <span
+          class="progress-status"
+          style="color: ${iconColor}"
+        >${icon}</span>
         <span class="progress-path">${path}</span>
         <span class=${detailClass}>${detail}</span>
       </div>
