@@ -37,8 +37,66 @@
 // but logs "Unknown key 'test'" warnings in recent Vite versions.
 import { defineConfig } from 'vitest/config';
 
+/**
+ * Patch `@flatmax/jrpc-oo/dist/bundle.js` so every `typeof
+ * module !== 'undefined'` / `typeof exports === 'object'`
+ * check inside it takes the browser branch.
+ *
+ * Why: in production, Rollup sees the file's `require('crypto')`
+ * and `typeof module` probes and wraps the whole thing (plus
+ * its transitive closure in the same entry chunk) in a
+ * CommonJS emulation helper that passes synthetic `module` /
+ * `exports` objects. The bundle's UMD wrappers then take the
+ * `module.exports = e()` branch instead of the browser
+ * `window.JRPC = e()` branch, and the following bare
+ * `JRPC` / `ExposeClass` / `JRPCCommon` identifier references
+ * throw `ReferenceError: ... is not defined`.
+ *
+ * Dev (`vite`) is unaffected because Vite serves the file as a
+ * native ES module with no synthetic `module`/`exports` in
+ * scope — the UMD falls through to the browser branch
+ * correctly.
+ *
+ * Rather than try to stop the CJS emulation (which other deps
+ * like `highlight.js` rely on), we rewrite the `typeof module`
+ * probes in this one file to always resolve false. Patterns
+ * match the minified + unminified forms the package ships.
+ * The plugin is a no-op if no pattern matches, so an upstream
+ * bundle rewrite won't silently break things.
+ */
+const jrpcOoFixPlugin = () => {
+  const REPLACEMENTS = [
+    // Minified UMD inside the inlined `jrpc` dep (line 152 of
+    // bundle.js). `"object"==typeof exports&&"undefined"!=typeof module`
+    ['"object"==typeof exports&&"undefined"!=typeof module', 'false'],
+    // Hand-written node guards (lines 88, 222, 501). Rewrite to
+    // `false` so the else branch (browser) runs.
+    [
+      "typeof module !== 'undefined' && typeof module.exports !== 'undefined'",
+      'false',
+    ],
+  ];
+  return {
+    name: 'ac-dc:jrpc-oo-umd-fix',
+    enforce: 'pre',
+    transform(code, id) {
+      if (!id.includes('@flatmax/jrpc-oo/dist/bundle.js')) return null;
+      let patched = code;
+      let hits = 0;
+      for (const [needle, sub] of REPLACEMENTS) {
+        if (!patched.includes(needle)) continue;
+        patched = patched.split(needle).join(sub);
+        hits++;
+      }
+      if (hits === 0) return null;
+      return { code: patched, map: null };
+    },
+  };
+};
+
 export default defineConfig({
   base: './',
+  plugins: [jrpcOoFixPlugin()],
   optimizeDeps: {
     // Dev-mode only. Rollup (prod) ignores this field entirely.
     exclude: ['@flatmax/jrpc-oo', 'monaco-editor'],

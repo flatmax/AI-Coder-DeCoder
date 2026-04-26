@@ -25,99 +25,18 @@
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 
 /**
- * Configure Monaco's worker loader.
+ * Worker environment installation has moved to
+ * `./monaco-env.js`, which is imported at the top of
+ * this file. The env module runs before Monaco itself
+ * so `self.MonacoEnvironment` is set by the time Monaco
+ * captures it.
  *
- * Monaco's diff computation runs in a dedicated editor
- * worker. Language services (JS/TS/JSON/CSS/HTML typings,
- * validation) normally run in additional workers. We use a
- * hybrid:
- *
- *   - The editor worker (label 'editorWorkerService') is a
- *     real Worker loaded from monaco-editor's ESM build.
- *     Required for diff computation — without it the diff
- *     editor renders but shows no line-level indicators.
- *   - All other worker requests get a no-op Blob worker.
- *     Backend LSP covers the language-service features
- *     these workers would have provided.
- *
- * The no-op worker must reply to any incoming message;
- * Monaco hangs waiting for responses to language-service
- * pings if the worker never dispatches.
- *
- * Guard: installing the config twice is harmless but
- * pointless. The flag lets tests or callers that import
- * this module multiple times skip re-installation.
+ * Kept as a no-op function for any external caller that
+ * may still import it. Returns immediately; the real
+ * work happened at module-init time in monaco-env.js.
  */
-let _workerEnvInstalled = false;
-
 export function installMonacoWorkerEnvironment() {
-  if (_workerEnvInstalled) return;
-  _workerEnvInstalled = true;
-  // In a non-browser test env (jsdom), `self` isn't always
-  // globalThis. Set on globalThis for safety; Monaco
-  // reads `self.MonacoEnvironment` at editor-construction
-  // time, and jsdom aliases `self = globalThis` in the
-  // browser-like module scope, so this works in both.
-  const target = typeof self !== 'undefined' ? self : globalThis;
-  target.MonacoEnvironment = {
-    getWorker(_workerId, label) {
-      if (label === 'editorWorkerService') {
-        // Dynamic import path — Vite recognises the
-        // `new URL(..., import.meta.url)` pattern at
-        // build time and emits the worker bundle as a
-        // separate asset. In tests this path is never
-        // hit (the mocked monaco doesn't request a real
-        // worker) so the URL construction is harmless.
-        //
-        // CRITICAL: the editor worker is required for
-        // diff computation. Without it, Monaco renders
-        // both sides of a diff editor but never computes
-        // line-level change indicators — the visible
-        // symptom is "diff editor shows two panels but
-        // no highlights". We wrap construction in a
-        // try/catch and log loudly so the failure
-        // surfaces in the console rather than silently
-        // producing a broken editor.
-        try {
-          return new Worker(
-            new URL(
-              'monaco-editor/esm/vs/editor/editor.worker.js',
-              import.meta.url,
-            ),
-            { type: 'module' },
-          );
-        } catch (err) {
-          console.error(
-            '[monaco-setup] editor worker creation failed — ' +
-              'diff highlighting will not work. Check Vite worker ' +
-              'config and CSP for blob:/worker-src restrictions.',
-            err,
-          );
-          // Fall through to the no-op worker so Monaco
-          // doesn't crash. Diff won't compute but the
-          // editor will at least render.
-        }
-      }
-      // No-op worker for everything else. `URL.createObjectURL`
-      // of a Blob is a data-URL-like worker source that runs
-      // our tiny stub script. The stub swallows messages; Monaco
-      // doesn't need a reply for language-service calls, it just
-      // needs the worker to exist so dispatches don't queue.
-      try {
-        const blob = new Blob(
-          ['self.onmessage = function() {}'],
-          { type: 'application/javascript' },
-        );
-        return new Worker(URL.createObjectURL(blob));
-      } catch (_) {
-        // jsdom's Blob/Worker are incomplete; tests mock
-        // Monaco entirely so this path isn't hit. Defensive
-        // fallback prevents an unhandled rejection if a
-        // future test inadvertently constructs an editor.
-        return { postMessage() {}, terminate() {} };
-      }
-    },
-  };
+  // no-op — see ./monaco-env.js
 }
 
 /**
@@ -451,10 +370,11 @@ export function registerLatexLanguage() {
   });
 }
 
-// Install worker env and register MATLAB + LaTeX as side
-// effects at module load. Callers importing this module
-// get them automatically; tests that need to opt out
-// should mock the module rather than importing it.
+// Register MATLAB + LaTeX at module load as side effects.
+// Worker env was installed earlier by ./monaco-env.js
+// which is imported before monaco-editor itself.
+// `installMonacoWorkerEnvironment()` is called for
+// backward compatibility but is now a no-op.
 installMonacoWorkerEnvironment();
 registerMatlabLanguage();
 registerLatexLanguage();
