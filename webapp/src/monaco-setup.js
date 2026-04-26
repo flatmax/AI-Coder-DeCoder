@@ -68,13 +68,35 @@ export function installMonacoWorkerEnvironment() {
         // separate asset. In tests this path is never
         // hit (the mocked monaco doesn't request a real
         // worker) so the URL construction is harmless.
-        return new Worker(
-          new URL(
-            'monaco-editor/esm/vs/editor/editor.worker.js',
-            import.meta.url,
-          ),
-          { type: 'module' },
-        );
+        //
+        // CRITICAL: the editor worker is required for
+        // diff computation. Without it, Monaco renders
+        // both sides of a diff editor but never computes
+        // line-level change indicators — the visible
+        // symptom is "diff editor shows two panels but
+        // no highlights". We wrap construction in a
+        // try/catch and log loudly so the failure
+        // surfaces in the console rather than silently
+        // producing a broken editor.
+        try {
+          return new Worker(
+            new URL(
+              'monaco-editor/esm/vs/editor/editor.worker.js',
+              import.meta.url,
+            ),
+            { type: 'module' },
+          );
+        } catch (err) {
+          console.error(
+            '[monaco-setup] editor worker creation failed — ' +
+              'diff highlighting will not work. Check Vite worker ' +
+              'config and CSP for blob:/worker-src restrictions.',
+            err,
+          );
+          // Fall through to the no-op worker so Monaco
+          // doesn't crash. Diff won't compute but the
+          // editor will at least render.
+        }
       }
       // No-op worker for everything else. `URL.createObjectURL`
       // of a Blob is a data-URL-like worker source that runs
@@ -317,12 +339,125 @@ export function registerMatlabLanguage() {
   });
 }
 
-// Install worker env and register MATLAB as side effects
-// at module load. Callers importing this module get both
-// automatically; tests that need to opt out should mock
-// the module rather than importing it.
+/**
+ * Register LaTeX language with Monaco.
+ *
+ * Monaco has no built-in LaTeX. Like MATLAB, registration
+ * must run at module load time — an editor constructed
+ * with language 'latex' before registration renders as
+ * plain text.
+ *
+ * The tokenizer covers:
+ *   - Line comments (`% ...`) — `%` is TeX's comment char
+ *   - Backslash commands (`\section`, `\begin`, etc.)
+ *   - Math delimiters ($...$, $$...$$, \(...\), \[...\])
+ *   - Braces and brackets as delimiters
+ *   - Environment begin/end as keywords
+ *
+ * Not a full TeX parser — just enough for the diff editor
+ * to show commands, comments, and math in distinct
+ * colours.
+ */
+let _latexRegistered = false;
+
+export function registerLatexLanguage() {
+  if (_latexRegistered) return;
+  _latexRegistered = true;
+  monaco.languages.register({ id: 'latex' });
+  monaco.languages.setMonarchTokensProvider('latex', {
+    defaultToken: '',
+    tokenPostfix: '.tex',
+
+    tokenizer: {
+      root: [
+        // Comments — % to end of line, unless escaped
+        // as \%. Escape handling is approximate; real
+        // TeX tracks catcodes.
+        [/%.*$/, 'comment'],
+
+        // Environment begin/end. `\begin{name}` and
+        // `\end{name}` get a keyword highlight.
+        [/\\(begin|end)\s*\{/, {
+          token: 'keyword',
+          next: '@envName',
+        }],
+
+        // Generic commands — backslash followed by
+        // letters. Optional star for unnumbered variants
+        // (\section*, \chapter*, etc.).
+        [/\\[a-zA-Z]+\*?/, 'type.identifier'],
+
+        // Single-char escapes — \%, \&, \$, \#, \_, \{,
+        // \}, \\. Render as plain string so they don't
+        // trip the punctuation rules.
+        [/\\[%&$#_{}\\]/, 'string.escape'],
+
+        // Display math: $$ ... $$ on one line.
+        [/\$\$/, { token: 'string.math', next: '@displayMath' }],
+
+        // Inline math: $ ... $ (single dollar).
+        [/\$/, { token: 'string.math', next: '@inlineMath' }],
+
+        // Display math: \[ ... \]
+        [/\\\[/, { token: 'string.math', next: '@bracketMath' }],
+
+        // Inline math: \( ... \)
+        [/\\\(/, { token: 'string.math', next: '@parenMath' }],
+
+        // Braces + brackets — delimiters.
+        [/[{}]/, '@brackets'],
+        [/[\[\]]/, '@brackets'],
+
+        // Numbers.
+        [/\d+(\.\d+)?/, 'number'],
+
+        // Whitespace.
+        [/\s+/, 'white'],
+      ],
+
+      envName: [
+        [/[a-zA-Z*]+/, 'type'],
+        [/\}/, { token: 'keyword', next: '@pop' }],
+      ],
+
+      displayMath: [
+        [/\$\$/, { token: 'string.math', next: '@pop' }],
+        [/\\[a-zA-Z]+\*?/, 'type.identifier'],
+        [/[^$\\]+/, 'string.math'],
+        [/[\\$]/, 'string.math'],
+      ],
+
+      inlineMath: [
+        [/\$/, { token: 'string.math', next: '@pop' }],
+        [/\\[a-zA-Z]+\*?/, 'type.identifier'],
+        [/[^$\\]+/, 'string.math'],
+        [/[\\]/, 'string.math'],
+      ],
+
+      bracketMath: [
+        [/\\\]/, { token: 'string.math', next: '@pop' }],
+        [/\\[a-zA-Z]+\*?/, 'type.identifier'],
+        [/[^\\]+/, 'string.math'],
+        [/[\\]/, 'string.math'],
+      ],
+
+      parenMath: [
+        [/\\\)/, { token: 'string.math', next: '@pop' }],
+        [/\\[a-zA-Z]+\*?/, 'type.identifier'],
+        [/[^\\]+/, 'string.math'],
+        [/[\\]/, 'string.math'],
+      ],
+    },
+  });
+}
+
+// Install worker env and register MATLAB + LaTeX as side
+// effects at module load. Callers importing this module
+// get them automatically; tests that need to opt out
+// should mock the module rather than importing it.
 installMonacoWorkerEnvironment();
 registerMatlabLanguage();
+registerLatexLanguage();
 
 // Re-export monaco so callers can import everything through
 // this module. Keeps import ordering correct — importing

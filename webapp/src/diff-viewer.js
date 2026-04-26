@@ -526,10 +526,13 @@ export class DiffViewer extends LitElement {
     // before writing state so fast typing + slow server
     // doesn't clobber fresher results.
     this._texCompileGeneration = 0;
-    // Concurrent-openFile guard. Holds the path that is
+    // Concurrent-openFile guard. Holds the set of paths
     // currently being opened asynchronously; duplicate
-    // calls for the same path drop silently.
-    this._openingPath = null;
+    // calls for any of those paths drop silently.
+    // Different paths proceed in parallel — spec says
+    // "Opening a different file while another is still
+    // loading is allowed — both calls run independently."
+    this._openingPaths = new Set();
     // Current highlight decorations (cleared on next
     // highlight or on file switch).
     this._highlightDecorations = [];
@@ -649,13 +652,14 @@ export class DiffViewer extends LitElement {
       if (opts.searchText) this._scrollToSearchText(opts.searchText);
       return;
     }
-    // Concurrent-open guard for the same path.
-    if (this._openingPath === path) return;
-    this._openingPath = path;
+    // Concurrent-open guard for the same path. Different
+    // paths proceed independently.
+    if (this._openingPaths.has(path)) return;
+    this._openingPaths.add(path);
     try {
       await this._openFileInner(opts);
     } finally {
-      this._openingPath = null;
+      this._openingPaths.delete(path);
     }
     // Apply line/search after content is in place.
     if (opts.line != null) this._scrollToLine(opts.line);
@@ -724,6 +728,13 @@ export class DiffViewer extends LitElement {
    * and its viewport. Used after edits land.
    */
   async refreshOpenFiles() {
+    // Capture the active file's viewport before we
+    // rebuild its models. _showEditor → _swapModel
+    // creates fresh models which reset cursor and
+    // scroll; restoring after the rebuild keeps the
+    // user's reading position through LLM-initiated
+    // refreshes.
+    this._captureViewport();
     const paths = this._files
       .map((f) => f.path)
       .filter((p) => !p.startsWith(_VIRTUAL_PREFIX));
@@ -732,12 +743,32 @@ export class DiffViewer extends LitElement {
       if (!fetched) continue;
       const file = this._files.find((f) => f.path === path);
       if (!file) continue; // closed during refetch
+      // HEAD side always refreshes — it tracks the
+      // repository's committed state, which refresh
+      // triggers are meant to surface.
       file.original = fetched.original;
-      file.modified = fetched.modified;
-      file.savedContent = fetched.modified;
       file.isNew = fetched.isNew;
+      // Modified side is the editable working copy.
+      // Preserve local unsaved edits when dirty — the
+      // user has in-progress changes we must not
+      // silently overwrite. Update both modified AND
+      // savedContent from disk only when the file was
+      // clean, so a post-save refresh re-anchors dirty
+      // tracking to the fresh disk content.
+      if (this._isDirty(file)) {
+        // Keep local edits. savedContent stays as-is
+        // (pre-refresh baseline) so the LED remains
+        // dirty. A later save will push the user's
+        // content to disk.
+      } else {
+        file.modified = fetched.modified;
+        file.savedContent = fetched.modified;
+      }
     }
     // Rebuild the active editor with refreshed content.
+    // _showEditor's build callback calls _restoreViewport
+    // which waits for diff-ready and replays the saved
+    // cursor/scroll.
     if (this._activeIndex >= 0) {
       this._showEditor();
     }
@@ -1039,6 +1070,10 @@ export class DiffViewer extends LitElement {
     // Wait for Lit to commit the template so the editor
     // container div exists.
     const build = () => {
+      // Bail if the component was disconnected between
+      // scheduling and this frame. Prevents infinite rAF
+      // chains when a rapid mount/unmount happens.
+      if (!this.isConnected) return;
       const container =
         this.shadowRoot?.querySelector('.editor-container');
       if (!container) {
@@ -2589,6 +2624,18 @@ export class DiffViewer extends LitElement {
     if (this._activeIndex < 0) return;
     const ctrl = event.ctrlKey || event.metaKey;
     if (!ctrl) return;
+    // Ctrl+F — find in file. Forward to Monaco's built-in
+    // find widget rather than letting the browser's
+    // page-find hijack it. The keystroke only applies
+    // inside the viewer; outside, the browser find still
+    // works normally.
+    if (event.key === 'f' || event.key === 'F') {
+      if (this._eventTargetInsideUs(event)) {
+        event.preventDefault();
+        this._triggerFindWidget();
+      }
+      return;
+    }
     // Ctrl+S — save active file.
     if (event.key === 's' || event.key === 'S') {
       if (
@@ -2651,6 +2698,28 @@ export class DiffViewer extends LitElement {
     this._activeIndex = next;
     this._showEditor();
     this._dispatchActiveFileChanged();
+  }
+
+  /**
+   * Open Monaco's find widget in the modified (right)
+   * editor. The find widget is a built-in Monaco
+   * contribution; triggering it via the 'actions.find'
+   * command is the public API.
+   *
+   * Must focus the editor first so the widget is wired
+   * to the right editor instance. Without focus, Monaco
+   * opens the widget but it doesn't catch subsequent
+   * keystrokes.
+   */
+  _triggerFindWidget() {
+    const modifiedEditor = this._getModifiedEditor();
+    if (!modifiedEditor) return;
+    try {
+      modifiedEditor.focus?.();
+      modifiedEditor.trigger?.('keyboard', 'actions.find', null);
+    } catch (err) {
+      console.debug('[diff-viewer] find widget trigger failed', err);
+    }
   }
 
   _dispatchActiveFileChanged() {

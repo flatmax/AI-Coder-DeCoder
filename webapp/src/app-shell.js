@@ -831,6 +831,9 @@ export class AppShell extends JRPCClient {
 
     // Global toast event listener binding.
     this._onToastEvent = this._onToastEvent.bind(this);
+    // file-saved — routes editor saves to Repo.write_file
+    // or Settings.save_config_content.
+    this._onFileSaved = this._onFileSaved.bind(this);
     // Navigate-file routing. Bound so add/remove match.
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
@@ -876,6 +879,13 @@ export class AppShell extends JRPCClient {
     const host = window.location.hostname || 'localhost';
     this.serverURI = `ws://${host}:${port}`;
     window.addEventListener(TOAST_EVENT, this._onToastEvent);
+    // file-saved bubbles from the diff viewer (Ctrl+S in
+    // the editor, clicking the dirty status LED, or
+    // explicit saveAll). The shell routes to Repo.write_file
+    // for normal files, or Settings.save_config_content
+    // when the file is flagged as a config file. Without
+    // this handler, saves silently vanish.
+    window.addEventListener('file-saved', this._onFileSaved);
     // navigate-file is dispatched by the files tab (file
     // picker clicks), the chat panel (file mention clicks),
     // and the navigateFile server-push callback (when
@@ -961,6 +971,7 @@ export class AppShell extends JRPCClient {
 
   disconnectedCallback() {
     window.removeEventListener(TOAST_EVENT, this._onToastEvent);
+    window.removeEventListener('file-saved', this._onFileSaved);
     window.removeEventListener('resize', this._onWindowResize);
     // Cancel any pending RAF callback — leaking it would fire
     // after the element is gone and try to query a detached
@@ -1974,6 +1985,75 @@ export class AppShell extends JRPCClient {
     const { message, type } = event.detail || {};
     if (!message) return;
     this._showToast(message, type || 'info');
+  }
+
+  /**
+   * Route a `file-saved` event from the diff viewer to
+   * the right backend RPC. Normal files go to
+   * `Repo.write_file`; files flagged as config route to
+   * `Settings.save_config_content` instead (the settings
+   * tab uses the diff viewer for config editing).
+   *
+   * On failure, surfaces a toast. On success, no toast —
+   * the viewer's LED flips from dirty to clean, which is
+   * feedback enough for a routine save.
+   */
+  async _onFileSaved(event) {
+    const detail = event.detail || {};
+    const { path, content, isConfig, configType } = detail;
+    if (typeof path !== 'string' || !path) return;
+    if (typeof content !== 'string') return;
+    if (!this.call) {
+      this._showToast('Save failed: not connected', 'error');
+      return;
+    }
+    try {
+      if (isConfig && configType) {
+        const fn = this.call['Settings.save_config_content'];
+        if (typeof fn !== 'function') {
+          this._showToast('Save failed: settings RPC unavailable', 'error');
+          return;
+        }
+        const raw = await fn(configType, content);
+        // Unwrap single-key envelope.
+        let result = raw;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const keys = Object.keys(raw);
+          if (keys.length === 1) {
+            const inner = raw[keys[0]];
+            if (inner && typeof inner === 'object') result = inner;
+          }
+        }
+        if (result && result.error) {
+          const reason = result.reason || result.error;
+          this._showToast(`Save failed: ${reason}`, 'error');
+        }
+      } else {
+        const fn = this.call['Repo.write_file'];
+        if (typeof fn !== 'function') {
+          this._showToast('Save failed: write RPC unavailable', 'error');
+          return;
+        }
+        const raw = await fn(path, content);
+        let result = raw;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const keys = Object.keys(raw);
+          if (keys.length === 1) {
+            const inner = raw[keys[0]];
+            if (inner && typeof inner === 'object') result = inner;
+          }
+        }
+        if (result && result.error) {
+          const reason = result.reason || result.error;
+          this._showToast(`Save failed: ${reason}`, 'error');
+        }
+      }
+    } catch (err) {
+      this._showToast(
+        `Save failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
   }
 
   _showToast(message, type = 'info') {
