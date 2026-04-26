@@ -3388,18 +3388,55 @@ Open carried over:
 - **Middle-click on directory rows.** Currently only file rows dispatch `insert-path`. Directory rows could plausibly insert their path too (e.g. for "reference this whole directory"), but specs3 is silent on this and the current file-only behavior matches user expectation. Deferred unless a real use case appears.
 - **Filter reset on session change.** A `@mention` in the chat input that was applied to the file picker stays applied across session changes. `_onSessionChanged` clears the input text but not the filter state — the next empty-query emission from a user keystroke will clear it naturally. If the visible filter stickiness becomes a pain point, the session handler can explicitly fire `filter-from-chat` with empty query.
 
-### Increment 11 — Review mode banner
+### ~~Increment 11 — Review mode banner~~ (delivered `898c239`, `58036a8`, `66deda5`)
 
-- `file-picker.js` — banner at top of picker showing branch / commit range / file+line stats / exit button when `reviewState.active`; `reviewState` prop
-- `files-tab.js` — `_onReviewStarted` handler clears selection (defense-in-depth with server-side clear), refreshes tree, updates chat panel's review state; `_onReviewEnded` symmetric
-- tests — banner visibility, stats rendering, exit button dispatch, selection clearing on entry
+Delivered across three commits. Sub-commits split along natural seams — UI first (no wiring), then state management, then event routing and tests — so each landed with passing tests rather than a single wholesale change.
 
-### Increment 12 — `_syncMessagesFromChat` defensive pattern
+**898c239 — Picker banner UI.** `file-picker.js` — `reviewState` property (Object defaulting null), `_renderReviewBanner` method emitting amber-tinted banner above the filter bar when `reviewState.active === true`. Shows branch name in title, commit count (singular/plural), file count (singular/plural), `+additions` / `-deletions` stats (both conditionally rendered — omitted at zero), and an exit button. Defensive against partial state — missing `commits`, `stats`, or `branch` all degrade to sensible defaults (0 counts, fallback title). CSS uses an amber/orange palette distinct from the default grey filter bar, mirroring the detached-HEAD pill colour scheme so the signal "you're not in normal editing mode" is consistent. Template puts the banner as the first child of the host so it always renders before the filter bar regardless of prop-update order. Tests (22) cover render gating, branch/stat display, singular/plural grammar, zero-stat omission, exit button dispatch across the shadow boundary, defensive degradation paths, and lifecycle (banner hides when `reviewState` clears).
 
-Per specs4 this is the architectural fix for stale-message overwrites on selection changes. Subtle. Best landed once every other selection path is in place so it can be verified end-to-end.
+**58036a8 — Files-tab review state management.** `files-tab.js` — `_reviewState` field (defaults null), bound `_onReviewStarted` / `_onReviewEnded` / `_onExitReview` handlers, window listeners registered in `connectedCallback` / unregistered in `disconnectedCallback`, `reviewState` push added to `_pushChildProps`. Review-started handler populates state, clears selection locally (defense-in-depth with the server's clear per specs3/4-features/code_review.md), triggers a file tree reload so the picker reflects the soft-reset's staging changes. Review-ended handler clears state without touching selection — the server's `end_review` doesn't touch `_selected_files` either, and the user likely wants their review-mode file selection carried forward.
 
-- `files-tab.js` — `_syncMessagesFromChat()` reads `chatPanel.messages` into the tab's own `_messages` field; called at the start of every method that ends up calling `requestUpdate` on the chat panel (selection change, file mention click, exclusion change, review start, state load, files changed)
-- tests — regression test: send message → click file mention → assert message still in chat panel state
+**66deda5 — Exit event wiring + tests.** `files-tab.js` template — `.reviewState=${this._reviewState}` and `@exit-review=${this._onExitReview}` on the picker. `_onExitReview` calls `LLMService.end_review`, handles restricted responses (warning toast, state preserved — banner stays visible since the server rejected), partial-exit responses (warning toast with the git-reattach error message), and RPC rejections (error toast with exception message). No optimistic local clear — the server's `review-ended` broadcast is what actually ends review from the UI's perspective. 17 tests cover every dispatch path plus lifecycle invariants (review-ended doesn't clear selection, tree reload during review preserves banner, listener cleanup on disconnect).
+
+Design points pinned by tests:
+
+- **Review-started clears selection locally, review-ended does not.** Asymmetric by spec — entry is a fresh start, exit preserves context. A user who selected files during review and clicks exit shouldn't have to re-tick them. `review-ended does NOT clear selection` pins this; `review-started clears selection locally` pins the reverse.
+
+- **Exit does not optimistically clear state.** If the server rejects (restricted caller in collab mode), the banner must stay visible so the user sees the error state rather than a confusing UI transition back to normal mode. Pinned by `exit-review does not optimistically clear state` — state checked immediately after dispatch, before the RPC resolves.
+
+- **Banner survives tree reloads.** Mid-review `files-modified` events (from commits, resets, etc.) trigger `_loadFileTree`, which calls `_pushChildProps`, which now includes `reviewState`. Without re-pushing, the banner would disappear on every reload. Pinned by `tree reload during review pushes reviewState again`.
+
+- **Partial-exit case is distinct from success.** When the server couldn't reattach the original branch but did clear review state server-side, the response carries `status: "partial"` and `error: "..."`. We warn rather than error — the review IS over, just with an unusual git state the user should know about. Pinned by `exit-review surfaces partial status as warning`.
+
+- **Defensive degradation in banner render.** Missing `commits`, `stats`, or `branch` fields all render without crashing. A partial response from an older backend or a future refactor loosening the shape shouldn't break the UI. Three separate tests pin these paths.
+
+### Increment 12 — `_syncMessagesFromChat` (skipped with documentation)
+
+The spec (specs4/5-webapp/file-picker.md § Direct Update Pattern) describes a defensive pattern for preventing stale-message overwrites when selection changes trigger a files-tab re-render. The failure mode it guards against:
+
+> User sends message → chat panel updates its messages array → user clicks a file mention → files tab re-renders → chat panel receives the files tab's stale messages prop → latest messages are lost.
+
+**Decision: skip with documentation.** This failure mode does not exist in the current implementation because `<ac-files-tab>` never binds `.messages` on `<ac-chat-panel>`. The chat panel is the sole source of truth for its own message list; files-tab pushes `repoFiles` and `selectedFiles` down via the direct-update pattern but never touches `messages`. A files-tab re-render cannot clobber chat state that files-tab doesn't hold.
+
+**Why skip rather than land preemptively:**
+
+Adding the field, helper, and sync calls now would create defensive infrastructure against a race that can't fire. The "no code without a test that fails without it" discipline applies — a test that synthetically mutates `chatPanel.messages` and verifies the sync helper preserves it would pass identically with or without the helper, because the current rendering path never feeds messages back down. The test would be an architectural guardrail rather than a regression test, and dead defensive code tends to accumulate without corresponding understanding of what it protects.
+
+**When Increment 12 becomes necessary:**
+
+If a future refactor adds `.messages=${this._messages}` to the `<ac-chat-panel>` binding in the render template — for example, to support a shared-session model where files-tab mediates between chat history and some other consumer, or a collaboration feature where server-pushed message arrays flow through files-tab — the race becomes real and this increment must land. At that point:
+
+1. Add `this._messages = []` to the constructor
+2. Add `_syncMessagesFromChat()` helper that reads `chatPanel.messages` into `this._messages` when the chat panel exists
+3. Call it at the start of every method that ends up calling `chat.requestUpdate()` — currently `_applySelection`, `_onReviewStarted`, and any others added in the refactor
+4. Land a regression test that mutates `chat.messages`, triggers a selection change, and asserts the chat panel's messages are preserved
+5. Document the binding + sync requirement alongside the binding in the template
+
+**Grep breadcrumbs for future contributors:**
+
+- `.messages=${` in `files-tab.js` — if this ever appears, revisit this increment
+- `chatPanel.messages` access — if files-tab reads from it in any handler, the sync pattern is required
+- The comment in `_applySelection` mentioning "DIRECT-UPDATE PATTERN (load-bearing)" documents which operations need the sync when it becomes necessary
 
 ### File picker completion — progress summary
 
@@ -3417,6 +3454,24 @@ The remaining increments add cross-component bridges (file-picker ↔ chat panel
 - Window resize handling, remaining global keyboard shortcuts — own small commit
 
 Each increment above is a standalone commit. After each lands, strike through the heading in this plan, add a one-line delivery note with the commit hash, and note any deviations from the spec as decisions (D-N) in the main notes body.
+
+### Plan status — complete
+
+All twelve increments delivered or documented. Increments 1–11 shipped as individual commits; Increment 12 documented as skip-with-conditions. The file picker now covers the full feature surface specs4/5-webapp/file-picker.md calls for — status badges, sort modes, auto-selection, three-state checkboxes, active-file highlight, keyboard navigation, context menus for files and directories, middle-click path insertion, @-filter bridge, and the review mode banner.
+
+Commit trail:
+- **Increment 1** — status badges, diff stats, line-count color (delivered earlier)
+- **Increment 2** — `71ea694` branch badge + tooltips
+- **Increment 3** — `1e32eb2` sort modes
+- **Increment 4** — auto-selection on first load
+- **Increment 5** — three-state checkbox with exclusion
+- **Increment 6** — active-file highlight
+- **Increment 7** — keyboard navigation
+- **Increment 8** — context menu (files) across 8a / 8b / 8c / 8d
+- **Increment 9** — context menu (directories)
+- **Increment 10** — `cafa47e`..`76fdcf9` middle-click path insertion + @-filter bridge
+- **Increment 11** — `898c239`, `58036a8`, `66deda5` review mode banner
+- **Increment 12** — skipped, documented above
 
 ## Resumption protocol
 
