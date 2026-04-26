@@ -76,6 +76,18 @@ const _DOC_INDEX_STAGES = new Set([
   'doc_enrichment_complete',
 ]);
 
+/**
+ * localStorage key for the one-shot "enrichment unavailable"
+ * warning toast. When `enrichment_status === "unavailable"`
+ * arrives in a state snapshot or modeChanged broadcast, we
+ * show a toast pointing users at `pip install 'ac-dc[docs]'`
+ * — but only once per browser session. Setting this flag
+ * suppresses repeats across page reloads and mid-session
+ * broadcasts.
+ */
+const _ENRICHMENT_UNAVAILABLE_SHOWN_KEY =
+  'ac-dc-enrichment-unavailable-shown';
+
 // ---------------------------------------------------------------
 // Dialog persistence keys and sizing constants
 // ---------------------------------------------------------------
@@ -1092,6 +1104,13 @@ export class AppShell extends JRPCClient {
       // backend) keeps the tab hidden, which is the safe
       // degradation path.
       this._docConvertAvailable = !!state.doc_convert_available;
+      // Enrichment status — show the one-shot toast if the
+      // backend reports KeyBERT is unavailable. No-op for
+      // other values. Older backends omit the field; in that
+      // case we pass undefined and the helper returns silently.
+      this._maybeShowEnrichmentUnavailableToast(
+        state.enrichment_status,
+      );
       // Fallback when the persisted active tab no longer
       // applies. Happens when the user's last session was
       // in a repo with doc-convert enabled and they've
@@ -1967,6 +1986,50 @@ export class AppShell extends JRPCClient {
     }, 3000);
   }
 
+  /**
+   * Show the one-shot "enrichment unavailable" warning toast.
+   *
+   * Called when the backend reports
+   * `enrichment_status === "unavailable"` — either in the
+   * initial state snapshot (page load) or via a modeChanged
+   * broadcast (mid-session transition, e.g. the model-load
+   * step failed after structural extraction succeeded).
+   *
+   * Suppressed after the first successful display within a
+   * browser session via a localStorage flag. Rationale: the
+   * condition is effectively permanent for the session
+   * (user has to install `ac-dc[docs]` and restart the
+   * backend to fix it), so repeated toasts would just be
+   * noise. A page reload or a new session doesn't re-show
+   * — the flag persists.
+   *
+   * Silently no-ops when `enrichment_status` is any other
+   * value. Callers don't need to gate the call.
+   */
+  _maybeShowEnrichmentUnavailableToast(status) {
+    if (status !== 'unavailable') return;
+    // Check the suppression flag. Swallow localStorage errors
+    // (private-browsing quirks) and proceed — one duplicate
+    // toast across reloads is better than failing silently.
+    let alreadyShown = false;
+    try {
+      alreadyShown = localStorage.getItem(
+        _ENRICHMENT_UNAVAILABLE_SHOWN_KEY,
+      ) === 'true';
+    } catch (_) {}
+    if (alreadyShown) return;
+    this._showToast(
+      'Keyword enrichment disabled — install ac-dc[docs] '
+      + 'for richer document outlines.',
+      'warning',
+    );
+    try {
+      localStorage.setItem(
+        _ENRICHMENT_UNAVAILABLE_SHOWN_KEY, 'true',
+      );
+    } catch (_) {}
+  }
+
   // ---------------------------------------------------------------
   // Dialog persistence
   // ---------------------------------------------------------------
@@ -2429,6 +2492,15 @@ export class AppShell extends JRPCClient {
     }
     if (typeof detail.cross_ref_enabled === 'boolean') {
       this._crossRefEnabled = detail.cross_ref_enabled;
+    }
+    // Enrichment status may piggyback on modeChanged — the
+    // backend broadcasts when it flips to "unavailable" so
+    // mid-session clients learn without polling. Route to
+    // the one-shot toast helper; it no-ops for other values.
+    if (typeof detail.enrichment_status === 'string') {
+      this._maybeShowEnrichmentUnavailableToast(
+        detail.enrichment_status,
+      );
     }
   }
 

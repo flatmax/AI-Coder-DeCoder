@@ -1351,6 +1351,7 @@ class TestStateSnapshot:
             "init_complete",
             "mode",
             "cross_ref_enabled",
+            "enrichment_status",
             "review_state",
             "excluded_index_files",
             "doc_convert_available",
@@ -1946,6 +1947,117 @@ class TestEnrichmentStatus:
         result = service.get_mode()
         assert result["enrichment_status"] == "unavailable"
         assert result["doc_index_enriched"] is False
+
+    def test_state_snapshot_includes_enrichment_status(
+        self, service: LLMService
+    ) -> None:
+        """get_current_state carries enrichment_status for clients.
+
+        Frontend reads this on connect / reconnect to decide
+        whether to show the one-shot unavailable toast without
+        waiting for a separate get_mode call.
+        """
+        state = service.get_current_state()
+        assert "enrichment_status" in state
+        assert state["enrichment_status"] == "pending"
+
+    def test_state_snapshot_reflects_unavailable_status(
+        self, service: LLMService
+    ) -> None:
+        """Snapshot updates as the backend state changes."""
+        service._enrichment_status = "unavailable"
+        state = service.get_current_state()
+        assert state["enrichment_status"] == "unavailable"
+
+    async def test_unavailable_triggers_mode_changed_broadcast(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Probe failure broadcasts modeChanged with status.
+
+        Mid-session clients (browser reload during a build that
+        then fails) need to learn about the unavailable state
+        without polling. The broadcast carries mode +
+        cross-reference + enrichment_status so the frontend's
+        modeChanged handler can route it.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        # Force probe failure.
+        svc._enricher._available = False
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        # Filter to modeChanged events carrying the status.
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        # At least one mode-changed broadcast with unavailable.
+        unavailable_broadcasts = [
+            args[0] for args in mode_events
+            if isinstance(args[0], dict)
+            and args[0].get("enrichment_status") == "unavailable"
+        ]
+        assert len(unavailable_broadcasts) >= 1
+        payload = unavailable_broadcasts[0]
+        # Mode and cross-ref carried along so the frontend's
+        # handler sees a consistent snapshot.
+        assert payload["mode"] == "code"
+        assert "cross_ref_enabled" in payload
+
+    async def test_model_load_failure_triggers_broadcast(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Model load failure also broadcasts.
+
+        Symmetric with the probe failure — both paths set
+        `_enrichment_status = "unavailable"` and both must
+        broadcast so the frontend can react.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc._enricher._available = True
+        monkeypatch.setattr(
+            svc._enricher, "ensure_loaded", lambda: False
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        mode_events = [
+            args for name, args in event_cb.events
+            if name == "modeChanged"
+        ]
+        unavailable_broadcasts = [
+            args[0] for args in mode_events
+            if isinstance(args[0], dict)
+            and args[0].get("enrichment_status") == "unavailable"
+        ]
+        assert len(unavailable_broadcasts) >= 1
 
 
 # ---------------------------------------------------------------------------

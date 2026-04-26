@@ -1223,4 +1223,177 @@ describe('AppShell', () => {
       );
     });
   });
+
+  // ---------------------------------------------------------------
+  // Enrichment unavailable — one-shot toast
+  // ---------------------------------------------------------------
+  //
+  // When the backend reports
+  // `enrichment_status === "unavailable"` (KeyBERT probe failed
+  // or model load failed), the shell shows a one-shot warning
+  // toast pointing users at `pip install 'ac-dc[docs]'`. The
+  // toast fires from two places:
+  //
+  //   - `_fetchCurrentState` — initial state snapshot on
+  //     connect / reconnect.
+  //   - `_onModeChanged` — mid-session modeChanged broadcast
+  //     when the backend transitions to unavailable after
+  //     startup.
+  //
+  // Suppressed after first display via a localStorage flag,
+  // which persists across reloads. The condition is effectively
+  // permanent for the session — repeated toasts would be noise.
+
+  describe('enrichment unavailable toast', () => {
+    const STORAGE_KEY = 'ac-dc-enrichment-unavailable-shown';
+
+    beforeEach(() => {
+      localStorage.clear();
+    });
+    afterEach(() => {
+      localStorage.clear();
+    });
+
+    it('fires on modeChanged with unavailable status', () => {
+      const shell = mountShell();
+      shell._onModeChanged({
+        detail: {
+          mode: 'code',
+          cross_ref_enabled: false,
+          enrichment_status: 'unavailable',
+        },
+      });
+      expect(shell.toasts.length).toBe(1);
+      expect(shell.toasts[0].type).toBe('warning');
+      expect(shell.toasts[0].message)
+        .toContain('ac-dc[docs]');
+    });
+
+    it('does not fire for other enrichment_status values', () => {
+      const shell = mountShell();
+      for (const status of ['pending', 'building', 'ready']) {
+        shell._onModeChanged({
+          detail: {
+            mode: 'code',
+            cross_ref_enabled: false,
+            enrichment_status: status,
+          },
+        });
+      }
+      expect(shell.toasts.length).toBe(0);
+    });
+
+    it('does not fire when enrichment_status field is absent', () => {
+      // Older backends omit the field entirely. The handler
+      // must silently pass — no toast, no exception.
+      const shell = mountShell();
+      shell._onModeChanged({
+        detail: { mode: 'code', cross_ref_enabled: false },
+      });
+      expect(shell.toasts.length).toBe(0);
+    });
+
+    it('sets localStorage suppression flag after first fire', () => {
+      const shell = mountShell();
+      shell._onModeChanged({
+        detail: { enrichment_status: 'unavailable' },
+      });
+      expect(localStorage.getItem(STORAGE_KEY)).toBe('true');
+    });
+
+    it('suppresses repeats within a session', () => {
+      const shell = mountShell();
+      // First broadcast — toast appears.
+      shell._onModeChanged({
+        detail: { enrichment_status: 'unavailable' },
+      });
+      expect(shell.toasts.length).toBe(1);
+      // Second broadcast — no new toast.
+      shell._onModeChanged({
+        detail: { enrichment_status: 'unavailable' },
+      });
+      expect(shell.toasts.length).toBe(1);
+    });
+
+    it('suppresses repeats across reloads via localStorage', () => {
+      // Simulate a prior session that already showed the toast.
+      localStorage.setItem(STORAGE_KEY, 'true');
+      const shell = mountShell();
+      shell._onModeChanged({
+        detail: { enrichment_status: 'unavailable' },
+      });
+      expect(shell.toasts.length).toBe(0);
+    });
+
+    it('direct helper call matches the event-driven path', () => {
+      const shell = mountShell();
+      shell._maybeShowEnrichmentUnavailableToast('unavailable');
+      expect(shell.toasts.length).toBe(1);
+      expect(shell.toasts[0].type).toBe('warning');
+    });
+
+    it('direct helper no-ops for non-unavailable values', () => {
+      const shell = mountShell();
+      shell._maybeShowEnrichmentUnavailableToast('pending');
+      shell._maybeShowEnrichmentUnavailableToast('building');
+      shell._maybeShowEnrichmentUnavailableToast('ready');
+      shell._maybeShowEnrichmentUnavailableToast(undefined);
+      shell._maybeShowEnrichmentUnavailableToast(null);
+      expect(shell.toasts.length).toBe(0);
+    });
+
+    it('preserves other modeChanged side effects', () => {
+      // The enrichment-status check must not interfere with
+      // mode and cross-ref handling. A single event carrying
+      // all three fields should update mode state AND fire
+      // the toast.
+      const shell = mountShell();
+      shell._mode = 'code';
+      shell._crossRefEnabled = false;
+      shell._onModeChanged({
+        detail: {
+          mode: 'doc',
+          cross_ref_enabled: true,
+          enrichment_status: 'unavailable',
+        },
+      });
+      expect(shell._mode).toBe('doc');
+      // cross_ref_enabled resets to false on mode change,
+      // then gets set from the payload's value.
+      expect(shell._crossRefEnabled).toBe(true);
+      expect(shell.toasts.length).toBe(1);
+    });
+
+    it('survives localStorage errors on read', () => {
+      // Private-browsing modes can throw on getItem. The
+      // helper must swallow and proceed — one duplicate
+      // toast across reloads is better than failing silently.
+      const shell = mountShell();
+      const origGet = Storage.prototype.getItem;
+      Storage.prototype.getItem = () => {
+        throw new Error('quota');
+      };
+      try {
+        shell._maybeShowEnrichmentUnavailableToast('unavailable');
+        expect(shell.toasts.length).toBe(1);
+      } finally {
+        Storage.prototype.getItem = origGet;
+      }
+    });
+
+    it('survives localStorage errors on write', () => {
+      const shell = mountShell();
+      const origSet = Storage.prototype.setItem;
+      Storage.prototype.setItem = () => {
+        throw new Error('quota');
+      };
+      try {
+        shell._maybeShowEnrichmentUnavailableToast('unavailable');
+        // Toast still displayed even though persistence failed.
+        expect(shell.toasts.length).toBe(1);
+      } finally {
+        Storage.prototype.setItem = origSet;
+      }
+    });
+  });
 });

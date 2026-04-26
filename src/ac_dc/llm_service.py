@@ -1220,6 +1220,7 @@ class LLMService:
                 "fully functional."
             )
             self._enrichment_status = "unavailable"
+            self._broadcast_enrichment_status()
             return
 
         # Eager model load. Failure is non-fatal — the enricher
@@ -1237,6 +1238,7 @@ class LLMService:
                 "Structural outlines remain functional."
             )
             self._enrichment_status = "unavailable"
+            self._broadcast_enrichment_status()
             return
 
         queue = self._doc_index.queue_enrichment()
@@ -1566,6 +1568,7 @@ class LLMService:
             "init_complete": self._init_complete,
             "mode": self._context.mode.value,
             "cross_ref_enabled": self._cross_ref_enabled,
+            "enrichment_status": self._enrichment_status,
             "review_state": self.get_review_state(),
             "doc_convert_available": doc_convert_available,
         }
@@ -5814,6 +5817,31 @@ class LLMService:
     # ------------------------------------------------------------------
     # Event broadcast
     # ------------------------------------------------------------------
+
+    def _broadcast_enrichment_status(self) -> None:
+        """Broadcast a modeChanged event with the current enrichment status.
+
+        Piggybacks on the existing modeChanged channel so the
+        frontend's one-time "unavailable" toast can fire even
+        when the status flips mid-session (e.g., the user
+        reloads the browser during a build that subsequently
+        fails at the model-load step).
+
+        The payload carries the current mode and cross-reference
+        state alongside the enrichment status, so the frontend's
+        modeChanged handler (which also routes this event) sees
+        a consistent snapshot. No mode change actually occurs —
+        the handler's same-mode short-circuit applies, so
+        cross-reference state is preserved.
+        """
+        self._broadcast_event(
+            "modeChanged",
+            {
+                "mode": self._context.mode.value,
+                "cross_ref_enabled": self._cross_ref_enabled,
+                "enrichment_status": self._enrichment_status,
+            },
+        )
 
     def _broadcast_event(
         self, event_name: str, *args: Any
