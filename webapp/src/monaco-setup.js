@@ -25,18 +25,73 @@
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 
 /**
- * Worker environment installation has moved to
- * `./monaco-env.js`, which is imported at the top of
- * this file. The env module runs before Monaco itself
- * so `self.MonacoEnvironment` is set by the time Monaco
- * captures it.
+ * Install Monaco's worker environment on `self`.
  *
- * Kept as a no-op function for any external caller that
- * may still import it. Returns immediately; the real
- * work happened at module-init time in monaco-env.js.
+ * The primary install site is `./monaco-env.js` which is
+ * imported at the top of this file and runs before
+ * Monaco is imported. That's the path that matters in
+ * production — Monaco reads `self.MonacoEnvironment`
+ * during its own init, so the env module must run first.
+ *
+ * This function is a defensive re-installer. Tests that
+ * isolate globals between files (Vitest does this in
+ * some configurations) may see `self.MonacoEnvironment`
+ * wiped after the env module's top-level code has
+ * already run and won't re-run. Calling this function
+ * from a test or a late-loading module re-installs the
+ * same config.
+ *
+ * Idempotent when `self.MonacoEnvironment` is already
+ * set to a truthy value; overwrites any previous install
+ * otherwise. The test suite calls this explicitly and
+ * asserts that `self.MonacoEnvironment.getWorker` is a
+ * function after the call.
  */
 export function installMonacoWorkerEnvironment() {
-  // no-op — see ./monaco-env.js
+  const target =
+    typeof self !== 'undefined'
+      ? self
+      : typeof globalThis !== 'undefined'
+        ? globalThis
+        : window;
+  if (!target) return;
+  if (target.MonacoEnvironment) return;
+  target.MonacoEnvironment = {
+    getWorker(_workerId, label) {
+      if (label === 'editorWorkerService') {
+        try {
+          return new Worker(
+            new URL(
+              'monaco-editor/esm/vs/editor/editor.worker.js',
+              import.meta.url,
+            ),
+            { type: 'module' },
+          );
+        } catch (err) {
+          console.error(
+            '[monaco-setup] editor worker creation failed — ' +
+              'diff highlighting will not work. Check Vite worker ' +
+              'config and CSP for blob:/worker-src restrictions.',
+            err,
+          );
+        }
+      }
+      // Fallback no-op worker-like object. Non-critical
+      // workers (e.g. language-service pings) get this
+      // stub so Monaco doesn't hang waiting for a
+      // worker that will never exist.
+      return {
+        postMessage: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+        terminate: () => {},
+        onerror: null,
+        onmessage: null,
+        onmessageerror: null,
+      };
+    },
+  };
 }
 
 /**
@@ -371,10 +426,12 @@ export function registerLatexLanguage() {
 }
 
 // Register MATLAB + LaTeX at module load as side effects.
-// Worker env was installed earlier by ./monaco-env.js
-// which is imported before monaco-editor itself.
-// `installMonacoWorkerEnvironment()` is called for
-// backward compatibility but is now a no-op.
+// Worker env was already installed by ./monaco-env.js
+// (imported above) before Monaco itself loaded; that's
+// the path that matters in production. The explicit
+// call here is a defensive re-install for test
+// environments where Vitest isolates globals between
+// files — it idempotents if already set.
 installMonacoWorkerEnvironment();
 registerMatlabLanguage();
 registerLatexLanguage();
