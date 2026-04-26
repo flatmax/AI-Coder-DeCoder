@@ -39,6 +39,7 @@ import './doc-convert-tab.js';
 import './file-nav.js';
 import './token-hud.js';
 import './compaction-progress.js';
+import './doc-index-progress.js';
 import { viewerForPath } from './viewer-routing.js';
 
 // ---------------------------------------------------------------
@@ -58,6 +59,22 @@ function _repoKey(key, repoName) {
 
 const _LAST_OPEN_FILE_KEY = 'ac-last-open-file';
 const _LAST_VIEWPORT_KEY = 'ac-last-viewport';
+
+/**
+ * Stages that drive the doc-index progress overlay, not the
+ * startup overlay. Per specs4/5-webapp/shell.md § "Doc Index
+ * Stage Filtering" — in-progress doc-index updates shouldn't
+ * re-show the already-dismissed startup overlay. We re-dispatch
+ * them on the `doc-index-progress` window channel so
+ * `ac-doc-index-progress` picks them up.
+ */
+const _DOC_INDEX_STAGES = new Set([
+  'doc_index',
+  'doc_index_error',
+  'doc_enrichment_queued',
+  'doc_enrichment_file_done',
+  'doc_enrichment_complete',
+]);
 
 // ---------------------------------------------------------------
 // Dialog persistence keys and sizing constants
@@ -1231,11 +1248,29 @@ export class AppShell extends JRPCClient {
    * Startup progress event. Drives the overlay's message +
    * progress bar. When stage === 'ready', the overlay fades out.
    *
+   * Doc-index stages (listed in _DOC_INDEX_STAGES) are
+   * intercepted here and re-dispatched on the
+   * `doc-index-progress` window channel so the doc-index
+   * overlay component handles them instead of the startup
+   * overlay. Without this split, a long enrichment run
+   * arriving after the `ready` stage would re-show the
+   * already-dismissed startup overlay, which would be jarring.
+   *
    * specs4/5-webapp/shell.md#startup-overlay pins the stage names
    * and message conventions; the backend's startup sequence fires
    * these in order during deferred init.
    */
   startupProgress(stage, message, percent) {
+    // Doc-index-related stages take a separate path — they
+    // flow to ac-doc-index-progress via the doc-index-progress
+    // window channel, not to the startup overlay.
+    if (stage && _DOC_INDEX_STAGES.has(stage)) {
+      window.dispatchEvent(new CustomEvent('doc-index-progress', {
+        detail: { stage, message, percent },
+      }));
+      return true;
+    }
+
     this.startupStage = stage || '';
     this.startupMessage = message || '';
     this.startupPercent = Math.max(0, Math.min(100, percent || 0));
@@ -2998,6 +3033,8 @@ export class AppShell extends JRPCClient {
           </div>
         `)}
       </div>
+
+      <ac-doc-index-progress></ac-doc-index-progress>
 
       <ac-compaction-progress></ac-compaction-progress>
 
