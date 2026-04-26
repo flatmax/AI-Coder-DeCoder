@@ -636,6 +636,25 @@ class LLMService:
         # Enrichment flag — always False in 2.8.2; flips in
         # 2.8.4 when keyword enrichment lands.
         self._doc_index_enriched = False
+        # Tristate enrichment status. Four values per
+        # IMPLEMENTATION_NOTES.md § "Keyword enrichment UX
+        # completion plan" Step 1:
+        #
+        # - "pending" — background build hasn't reached the
+        #   enrichment phase yet (initial state, or structural
+        #   extraction still running)
+        # - "building" — enrichment loop is actively processing
+        #   files
+        # - "complete" — all queued files enriched
+        # - "unavailable" — KeyBERT probe failed or model load
+        #   failed; structural outlines work but no keywords
+        #
+        # The frontend distinguishes "unavailable" from "pending"
+        # to know whether to show a warning toast vs. wait for
+        # the background build. The `doc_index_enriched` boolean
+        # stays as a backwards-compatibility shim — it maps to
+        # `enrichment_status == "complete"`.
+        self._enrichment_status = "pending"
         self._event_callback = event_callback
         self._history_store = history_store
 
@@ -1200,6 +1219,7 @@ class LLMService:
                 "available. Structural doc outlines remain "
                 "fully functional."
             )
+            self._enrichment_status = "unavailable"
             return
 
         # Eager model load. Failure is non-fatal — the enricher
@@ -1216,6 +1236,7 @@ class LLMService:
                 "Keyword enrichment model failed to load. "
                 "Structural outlines remain functional."
             )
+            self._enrichment_status = "unavailable"
             return
 
         queue = self._doc_index.queue_enrichment()
@@ -1227,6 +1248,7 @@ class LLMService:
             # so the UI can show "enriched" rather than
             # "building".
             self._doc_index_enriched = True
+            self._enrichment_status = "complete"
             await self._send_doc_index_progress(
                 stage="doc_enrichment_complete",
                 message="Keyword enrichment complete",
@@ -1238,6 +1260,12 @@ class LLMService:
         logger.info(
             "Keyword enrichment: %d files queued", total
         )
+        # Flip to "building" after the queued event so the
+        # frontend's progress overlay can show a determinate
+        # bar. "pending" → "building" is the normal transition;
+        # a direct "pending" → "complete" is possible when the
+        # queue is empty (handled above).
+        self._enrichment_status = "building"
         await self._send_doc_index_progress(
             stage="doc_enrichment_queued",
             message=f"Enriching {total} documents",
@@ -1276,6 +1304,7 @@ class LLMService:
             await asyncio.sleep(0)
 
         self._doc_index_enriched = True
+        self._enrichment_status = "complete"
         logger.info("Keyword enrichment: complete")
         await self._send_doc_index_progress(
             stage="doc_enrichment_complete",
@@ -2638,9 +2667,25 @@ class LLMService:
           cross-reference toggle can activate.
         - ``doc_index_building`` — structural extraction in
           progress; UI can show a progress indicator.
-        - ``doc_index_enriched`` — keyword enrichment complete
-          (2.8.4). Always False in 2.8.2; outlines work
-          without keywords but annotations are empty.
+        - ``doc_index_enriched`` — keyword enrichment complete.
+          Backwards-compatibility boolean; maps to
+          ``enrichment_status == "complete"``. Prefer
+          ``enrichment_status`` for new callers — it
+          distinguishes "unavailable" from "pending".
+        - ``enrichment_status`` — tristate keyword-enrichment
+          state. Values:
+
+          - ``"pending"`` — background build hasn't started
+            enrichment yet (or the service just started and
+            the build is running structural extraction).
+          - ``"building"`` — enrichment loop is active.
+            Frontend shows a progress overlay.
+          - ``"complete"`` — all files enriched. Overlay fades
+            out.
+          - ``"unavailable"`` — KeyBERT or sentence-transformers
+            not installed, or the model failed to load.
+            Frontend shows a one-time warning toast pointing
+            at ``pip install 'ac-dc[docs]'``.
         - ``cross_ref_ready`` — currently mirrors
           ``doc_index_ready``. Structural extraction is the
           minimum readiness for cross-reference to produce
@@ -2655,6 +2700,7 @@ class LLMService:
             "doc_index_ready": self._doc_index_ready,
             "doc_index_building": self._doc_index_building,
             "doc_index_enriched": self._doc_index_enriched,
+            "enrichment_status": self._enrichment_status,
             "cross_ref_ready": self._doc_index_ready,
             "cross_ref_enabled": self._cross_ref_enabled,
         }

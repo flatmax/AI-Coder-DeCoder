@@ -1391,8 +1391,8 @@ class TestMode:
         """get_mode returns the documented shape in default state.
 
         Default state has all readiness flags False — tracker
-        hasn't run the background build yet, enrichment is
-        never complete in 2.8.2.
+        hasn't run the background build yet, enrichment starts
+        in "pending".
         """
         result = service.get_mode()
         assert result == {
@@ -1400,6 +1400,7 @@ class TestMode:
             "doc_index_ready": False,
             "doc_index_building": False,
             "doc_index_enriched": False,
+            "enrichment_status": "pending",
             "cross_ref_ready": False,
             "cross_ref_enabled": False,
         }
@@ -1691,6 +1692,260 @@ class TestMode:
         service.set_cross_reference(True)
         service.switch_mode("code")
         assert service.get_current_state()["cross_ref_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Enrichment status tristate — follow-up to Layer 2.8.4
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichmentStatus:
+    """The ``enrichment_status`` field on ``get_mode()``.
+
+    Four states track the keyword-enrichment lifecycle:
+
+    - ``"pending"`` — initial state, or structural extraction
+      still running before enrichment starts
+    - ``"building"`` — enrichment loop is actively processing files
+    - ``"complete"`` — all files enriched
+    - ``"unavailable"`` — KeyBERT or sentence-transformers not
+      installed, or model load failed
+
+    The transitions "pending → building → complete" cover the
+    happy path; "pending → complete" handles the cache-hit case
+    where everything was already enriched from a prior session;
+    "pending → unavailable" handles missing dependencies or
+    model load failures.
+
+    Tests drive the background enrichment loop via
+    :meth:`LLMService.complete_deferred_init` with a controlled
+    :class:`KeywordEnricher` stub — real KeyBERT isn't available
+    in the test environment and we don't want to exercise the
+    real model download path. Status transitions are checked
+    synchronously via ``asyncio.sleep`` to let the executor
+    task complete.
+    """
+
+    async def test_initial_state_is_pending(
+        self, service: LLMService
+    ) -> None:
+        """Fresh service reports pending — enrichment hasn't run."""
+        result = service.get_mode()
+        assert result["enrichment_status"] == "pending"
+        assert result["doc_index_enriched"] is False
+
+    async def test_unavailable_when_enricher_probe_fails(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """KeyBERT probe returns False → status flips to unavailable."""
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        # Force the enricher to report unavailable. The probe
+        # caches its result, so setting _available directly
+        # short-circuits future is_available() calls.
+        svc._enricher._available = False
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        result = svc.get_mode()
+        assert result["enrichment_status"] == "unavailable"
+        # Backwards-compatibility boolean stays False.
+        assert result["doc_index_enriched"] is False
+
+    async def test_unavailable_when_model_load_fails(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Model load failure → unavailable.
+
+        Enricher passes the probe (library importable) but the
+        KeyBERT instance can't be constructed — matches the
+        real case of corrupted model cache or HF Hub rate limit.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        # Force probe to pass but ensure_loaded to fail.
+        svc._enricher._available = True
+        monkeypatch.setattr(
+            svc._enricher, "ensure_loaded", lambda: False
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        result = svc.get_mode()
+        assert result["enrichment_status"] == "unavailable"
+        assert result["doc_index_enriched"] is False
+
+    async def test_complete_when_no_files_queued(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Empty queue → pending → complete (skips building).
+
+        Common case on a warm start: every file was enriched in
+        a prior session and the disk cache carries forward.
+        The enricher loads the model but the queue is empty;
+        status skips "building" and goes straight to "complete".
+        """
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        # Probe passes; model loads; queue is empty.
+        svc._enricher._available = True
+        monkeypatch.setattr(
+            svc._enricher, "ensure_loaded", lambda: True
+        )
+        # Ensure the queue is empty regardless of any files
+        # that the doc index might have picked up.
+        monkeypatch.setattr(
+            svc._doc_index, "queue_enrichment", lambda: []
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        result = svc.get_mode()
+        assert result["enrichment_status"] == "complete"
+        assert result["doc_index_enriched"] is True
+
+    async def test_complete_after_enriching_queued_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Happy path: pending → building → complete.
+
+        Files are queued, enrichment runs, status ends at
+        "complete". We can't easily observe "building" mid-flight
+        from a sync test (the loop completes quickly with stub
+        enrichment), but we can pin that the terminal state is
+        correct and that the loop path was actually taken.
+        """
+        (repo_dir / "doc.md").write_text("# Doc\n\nBody.\n")
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc._enricher._available = True
+        monkeypatch.setattr(
+            svc._enricher, "ensure_loaded", lambda: True
+        )
+        # Stub enrich_single_file so we don't exercise real
+        # KeyBERT. Just records that enrichment happened.
+        enrichment_calls: list[str] = []
+
+        def _stub_enrich(
+            path: str, source_text: str = ""
+        ) -> Any:
+            enrichment_calls.append(path)
+            return svc._doc_index._all_outlines.get(path)
+
+        monkeypatch.setattr(
+            svc._doc_index, "enrich_single_file", _stub_enrich
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        result = svc.get_mode()
+        assert result["enrichment_status"] == "complete"
+        assert result["doc_index_enriched"] is True
+        # Enrichment actually ran (loop path taken, not
+        # early-return from empty queue).
+        assert len(enrichment_calls) >= 1
+
+    async def test_doc_index_enriched_mirrors_complete_status(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Backwards-compat boolean stays consistent with tristate.
+
+        ``doc_index_enriched`` is True iff ``enrichment_status``
+        is "complete". Pinning this so a future refactor that
+        drops the boolean doesn't silently diverge the two
+        fields during the transition.
+        """
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=event_cb,
+            deferred_init=True,
+        )
+        svc._enricher._available = True
+        monkeypatch.setattr(
+            svc._enricher, "ensure_loaded", lambda: True
+        )
+        monkeypatch.setattr(
+            svc._doc_index, "queue_enrichment", lambda: []
+        )
+
+        svc.complete_deferred_init(symbol_index=object())
+        await asyncio.sleep(0.3)
+
+        result = svc.get_mode()
+        # Both indicate complete.
+        assert result["enrichment_status"] == "complete"
+        assert result["doc_index_enriched"] is True
+
+    def test_unavailable_keeps_doc_index_enriched_false(
+        self, service: LLMService
+    ) -> None:
+        """Unavailable → doc_index_enriched stays False.
+
+        Critical for the frontend: the old boolean alone would
+        report False both during "still building" and during
+        "can't build". The new tristate distinguishes them, but
+        the boolean must remain reliable for existing callers
+        that haven't migrated yet.
+        """
+        service._enrichment_status = "unavailable"
+        service._doc_index_enriched = False
+
+        result = service.get_mode()
+        assert result["enrichment_status"] == "unavailable"
+        assert result["doc_index_enriched"] is False
 
 
 # ---------------------------------------------------------------------------
