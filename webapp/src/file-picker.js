@@ -242,6 +242,77 @@ const _CONTEXT_MENU_FILE_ITEMS = [
   },
 ];
 
+// Directory-row action identifiers. Distinct from the
+// file-row action IDs so a stale menu open on one node
+// type can't accidentally dispatch to a handler
+// expecting the other. Files-tab dispatches on
+// `{action, type}` so the `type: 'dir'` discriminator
+// also guards against wire-level mismatches.
+const CTX_ACTION_STAGE_ALL = 'stage-all';
+const CTX_ACTION_UNSTAGE_ALL = 'unstage-all';
+const CTX_ACTION_RENAME_DIR = 'rename-dir';
+const CTX_ACTION_NEW_FILE = 'new-file';
+const CTX_ACTION_NEW_DIR = 'new-directory';
+const CTX_ACTION_EXCLUDE_ALL = 'exclude-all';
+const CTX_ACTION_INCLUDE_ALL = 'include-all';
+
+// Menu items for directory rows. The exclude-all /
+// include-all gate via `showWhen` reading the context
+// object's `allExcluded` / `someExcluded` flags —
+// computed at menu-open time by `_onDirContextMenu`.
+// A partially-excluded dir (some descendants excluded,
+// others not) shows BOTH items so the user picks
+// which direction they want; a fully-excluded dir
+// shows only Include-all; a fully-included dir shows
+// only Exclude-all.
+//
+// New-file and new-directory items trigger the
+// picker's inline-input flow, parallel to rename /
+// duplicate for file rows. Part 2 of Increment 9
+// wires these.
+const _CONTEXT_MENU_DIR_ITEMS = [
+  {
+    action: CTX_ACTION_STAGE_ALL,
+    label: 'Stage all',
+    icon: '➕',
+  },
+  {
+    action: CTX_ACTION_UNSTAGE_ALL,
+    label: 'Unstage all',
+    icon: '➖',
+  },
+  null,
+  {
+    action: CTX_ACTION_RENAME_DIR,
+    label: 'Rename…',
+    icon: '✎',
+  },
+  null,
+  {
+    action: CTX_ACTION_NEW_FILE,
+    label: 'New file…',
+    icon: '📄',
+  },
+  {
+    action: CTX_ACTION_NEW_DIR,
+    label: 'New directory…',
+    icon: '📁',
+  },
+  null,
+  {
+    action: CTX_ACTION_EXCLUDE_ALL,
+    label: 'Exclude all from index',
+    icon: '✕',
+    showWhen: (ctx) => !ctx.allExcluded,
+  },
+  {
+    action: CTX_ACTION_INCLUDE_ALL,
+    label: 'Include all in index',
+    icon: '✓',
+    showWhen: (ctx) => ctx.someExcluded,
+  },
+];
+
 // Viewport margin — the menu is kept this many pixels
 // from every window edge. Enough to show the box-shadow
 // glow without clipping on high-DPI displays.
@@ -1283,6 +1354,7 @@ export class FilePicker extends LitElement {
         style="padding-left: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onDirClick(e, node)}
+        @contextmenu=${(e) => this._onDirContextMenu(e, node)}
         role="treeitem"
         aria-expanded=${isOpen}
         title=${tooltip}
@@ -1964,6 +2036,52 @@ export class FilePicker extends LitElement {
   }
 
   /**
+   * Open the directory-row context menu at the click
+   * coordinates. Parallel to `_onFileContextMenu` but
+   * with dir-specific context fields — `allExcluded`
+   * and `someExcluded` gate the exclude-all /
+   * include-all items' visibility.
+   *
+   * Empty directories (no descendant files) produce
+   * `allExcluded=false` and `someExcluded=false` so
+   * only the Exclude-all item shows. Dispatching it
+   * with no descendants is a no-op in the files-tab
+   * handler — defensive but not user-reachable in
+   * practice since empty directories are rare.
+   */
+  _onDirContextMenu(event, node) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._contextMenu !== null) {
+      this._closeContextMenu();
+    }
+    const descendants = this._collectDescendantFiles(node);
+    const excludedCount = descendants.filter((p) =>
+      this.excludedFiles.has(p),
+    ).length;
+    this._contextMenu = {
+      type: 'dir',
+      path: node.path,
+      name: node.name,
+      allExcluded:
+        descendants.length > 0 && excludedCount === descendants.length,
+      someExcluded: excludedCount > 0,
+      x: event.clientX,
+      y: event.clientY,
+    };
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForMenu,
+      true,
+    );
+  }
+
+  /**
    * Close the menu and release document listeners. Safe
    * to call when no menu is open (idempotent). Called
    * from every action dispatch path, from outside-click,
@@ -2055,8 +2173,12 @@ export class FilePicker extends LitElement {
   }
 
   _renderMenuItems(ctx) {
+    const catalog =
+      ctx.type === 'dir'
+        ? _CONTEXT_MENU_DIR_ITEMS
+        : _CONTEXT_MENU_FILE_ITEMS;
     const items = [];
-    for (const entry of _CONTEXT_MENU_FILE_ITEMS) {
+    for (const entry of catalog) {
       if (entry === null) {
         items.push(html`<div class="menu-separator"></div>`);
         continue;
@@ -2402,4 +2524,11 @@ export {
   CTX_ACTION_EXCLUDE,
   CTX_ACTION_INCLUDE,
   CTX_ACTION_DELETE,
+  CTX_ACTION_STAGE_ALL,
+  CTX_ACTION_UNSTAGE_ALL,
+  CTX_ACTION_RENAME_DIR,
+  CTX_ACTION_NEW_FILE,
+  CTX_ACTION_NEW_DIR,
+  CTX_ACTION_EXCLUDE_ALL,
+  CTX_ACTION_INCLUDE_ALL,
 };

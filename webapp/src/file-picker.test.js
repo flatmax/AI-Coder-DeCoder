@@ -3417,4 +3417,239 @@ describe('FilePicker component', () => {
       expect(p._contextMenu).toBeTruthy();
     });
   });
+
+  // ---------------------------------------------------------------
+  // Context menu — directory rows (Increment 9 part 1)
+  // ---------------------------------------------------------------
+
+  describe('context menu (directories)', () => {
+    function rightClick(row, clientX = 100, clientY = 150) {
+      const event = new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+      });
+      row.dispatchEvent(event);
+      return event;
+    }
+
+    it('right-click on dir row opens the menu', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const row = p.shadowRoot.querySelector(
+        '.row.is-dir:not(.is-root)',
+      );
+      rightClick(row, 100, 100);
+      await p.updateComplete;
+      expect(p.shadowRoot.querySelector('.context-menu')).toBeTruthy();
+    });
+
+    it('menu context has type=dir', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      expect(p._contextMenu.type).toBe('dir');
+      expect(p._contextMenu.path).toBe('src');
+      expect(p._contextMenu.name).toBe('src');
+    });
+
+    it('renders all dir menu actions for a fully-included dir', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(),
+      });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      // Stage-all, unstage-all, rename, new-file,
+      // new-directory, exclude-all (no include-all
+      // since nothing is excluded).
+      expect(actions).toEqual([
+        'stage-all',
+        'unstage-all',
+        'rename-dir',
+        'new-file',
+        'new-directory',
+        'exclude-all',
+      ]);
+    });
+
+    it('fully-excluded dir shows only include-all (not exclude-all)', async () => {
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['src/a.md', 'src/b.md']),
+      });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actions).toContain('include-all');
+      expect(actions).not.toContain('exclude-all');
+    });
+
+    it('partially-excluded dir shows both exclude-all and include-all', async () => {
+      // Users see both options so they pick which
+      // direction to homogenise the subtree.
+      const tree = rootOf([
+        dir('src', [file('src/a.md'), file('src/b.md')]),
+      ]);
+      const p = mountPicker({
+        tree,
+        excludedFiles: new Set(['src/a.md']),
+      });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actions).toContain('exclude-all');
+      expect(actions).toContain('include-all');
+    });
+
+    it('empty directory shows only exclude-all (no descendants)', async () => {
+      // `allExcluded` requires at least one descendant,
+      // so an empty dir's allExcluded is false → shows
+      // exclude-all. The files-tab handler short-
+      // circuits on empty descendant lists so no
+      // damage is done if the user clicks it.
+      const tree = rootOf([dir('empty', [])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actions).toContain('exclude-all');
+      expect(actions).not.toContain('include-all');
+    });
+
+    it('menu item click dispatches context-menu-action with type=dir', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('context-menu-action', listener);
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="stage-all"]')
+        .click();
+      expect(listener).toHaveBeenCalledOnce();
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.action).toBe('stage-all');
+      expect(detail.type).toBe('dir');
+      expect(detail.path).toBe('src');
+      expect(detail.name).toBe('src');
+    });
+
+    it('menu closes after action click', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="unstage-all"]')
+        .click();
+      await p.updateComplete;
+      expect(p._contextMenu).toBeNull();
+    });
+
+    it('right-click on dir does not toggle its expansion', async () => {
+      // The dir's click handler toggles expansion,
+      // but contextmenu is a separate event that
+      // preventDefaults AND stopPropagations, so the
+      // click handler should never fire for a
+      // right-click.
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      expect(p._expanded.has('src')).toBe(false);
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      // Still collapsed — right-click didn't expand.
+      expect(p._expanded.has('src')).toBe(false);
+    });
+
+    it('switching from file menu to dir menu replaces cleanly', async () => {
+      // Right-click on a file, then without
+      // dismissing, right-click on a dir. The dir
+      // menu replaces the file menu rather than
+      // opening a second one.
+      const tree = rootOf([
+        file('a.md'),
+        dir('src', [file('src/b.md')]),
+      ]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      expect(p._contextMenu.type).toBe('file');
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      expect(p._contextMenu.type).toBe('dir');
+      // Menu items reflect the new type.
+      const firstAction = p.shadowRoot
+        .querySelector('.menu-item')
+        .getAttribute('data-action');
+      expect(firstAction).toBe('stage-all');
+      // Only one menu DOM instance.
+      expect(
+        p.shadowRoot.querySelectorAll('.context-menu'),
+      ).toHaveLength(1);
+    });
+
+    it('dir menu has separators between action groups', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const separators = p.shadowRoot.querySelectorAll(
+        '.menu-separator',
+      );
+      // Catalog has three null separators: after
+      // unstage-all, after rename, and after new-
+      // directory. All three render regardless of
+      // which exclude variant(s) show.
+      expect(separators.length).toBeGreaterThanOrEqual(3);
+    });
+  });
 });

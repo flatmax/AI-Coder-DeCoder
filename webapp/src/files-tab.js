@@ -1113,11 +1113,32 @@ export class FilesTab extends RpcMixin(LitElement) {
     const detail = event.detail;
     if (!detail || typeof detail.action !== 'string') return;
     const { action, type, path } = detail;
-    // 8a ships with file-row menus only. Directory menus
-    // land later; reject non-file types cleanly rather
-    // than dispatching to per-file RPCs.
-    if (type !== 'file') return;
-    if (typeof path !== 'string' || !path) return;
+    if (typeof path !== 'string') return;
+    // Empty string paths ARE legal for the repo root
+    // directory (its `path` is the empty string). File
+    // actions require a non-empty path, dir actions
+    // tolerate the empty string.
+    if (type === 'file') {
+      if (!path) return;
+      this._dispatchFileAction(action, path);
+      return;
+    }
+    if (type === 'dir') {
+      this._dispatchDirAction(action, path, detail.name);
+      return;
+    }
+    // Unknown type — ignore. Either a future type or a
+    // malformed event; neither should reach any
+    // handler.
+  }
+
+  /**
+   * Route a file-row context menu action to the
+   * appropriate dispatcher. Extracted from the main
+   * handler for readability — 10 cases were starting
+   * to crowd out the type-routing logic.
+   */
+  _dispatchFileAction(action, path) {
     switch (action) {
       case 'stage':
         this._dispatchStage(path);
@@ -1154,6 +1175,38 @@ export class FilesTab extends RpcMixin(LitElement) {
         // defensive default keeps the switch from
         // throwing on a future refactor that adds a
         // new menu item without wiring it here.
+        return;
+    }
+  }
+
+  /**
+   * Route a directory-row context menu action. Part 1
+   * of Increment 9 wires five actions; part 2 adds
+   * new-file and new-directory via the inline-input
+   * flow.
+   */
+  _dispatchDirAction(action, path, name) {
+    switch (action) {
+      case 'stage-all':
+        this._dispatchStageAll(path);
+        return;
+      case 'unstage-all':
+        this._dispatchUnstageAll(path);
+        return;
+      case 'rename-dir':
+        this._dispatchRenameDir(path, name);
+        return;
+      case 'exclude-all':
+        this._dispatchExcludeAll(path);
+        return;
+      case 'include-all':
+        this._dispatchIncludeAll(path);
+        return;
+      default:
+        // new-file / new-directory land in part 2.
+        // Silent drop until then — right-clicks on
+        // the menu items produce no error toast or
+        // console noise.
         return;
     }
   }
@@ -1349,9 +1402,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     // already short-circuits on unchanged names, but
     // defensive in case a future refactor loosens that.
     if (targetPath === sourcePath) return;
+    // Inspect the tree to see whether the source is a
+    // file or a directory. The picker's beginRename
+    // doesn't carry that discriminator — it operates on
+    // a path — so we determine the correct RPC here.
+    // Missing nodes (e.g., deleted between menu open
+    // and Enter press) default to file rename since the
+    // RPC surfaces a clean error anyway.
+    const sourceNode = this._findNodeByPath(sourcePath);
+    const isDir = sourceNode?.type === 'dir';
+    const rpcMethod = isDir ? 'Repo.rename_directory' : 'Repo.rename_file';
     try {
       const result = await this.rpcExtract(
-        'Repo.rename_file',
+        rpcMethod,
         sourcePath,
         targetPath,
       );
@@ -1363,35 +1426,89 @@ export class FilesTab extends RpcMixin(LitElement) {
         return;
       }
       await this._loadFileTree();
-      // If the renamed file was selected, migrate the
-      // selection to the new path so the next LLM
-      // request still includes it. Server's
-      // `filesChanged` broadcast (if any) will also
-      // update us, but doing it locally means no
-      // one-frame gap.
-      if (this._selectedFiles.has(sourcePath)) {
-        const next = new Set(this._selectedFiles);
-        next.delete(sourcePath);
-        next.add(targetPath);
-        this._applySelection(next, /* notifyServer */ true);
-      }
-      // Migrate exclusion too — same reasoning.
-      if (this._excludedFiles.has(sourcePath)) {
-        const next = new Set(this._excludedFiles);
-        next.delete(sourcePath);
-        next.add(targetPath);
-        this._applyExclusion(next, /* notifyServer */ true);
+      // Migrate selection and exclusion state to the
+      // new path. For directory renames we migrate
+      // every descendant path's prefix so nested
+      // selections survive.
+      if (isDir) {
+        this._migrateSubtreeState(sourcePath, targetPath);
+      } else {
+        if (this._selectedFiles.has(sourcePath)) {
+          const next = new Set(this._selectedFiles);
+          next.delete(sourcePath);
+          next.add(targetPath);
+          this._applySelection(next, /* notifyServer */ true);
+        }
+        if (this._excludedFiles.has(sourcePath)) {
+          const next = new Set(this._excludedFiles);
+          next.delete(sourcePath);
+          next.add(targetPath);
+          this._applyExclusion(next, /* notifyServer */ true);
+        }
       }
       this._showToast(
         `Renamed to ${targetName}`,
         'success',
       );
     } catch (err) {
-      console.error('[files-tab] rename_file failed', err);
+      console.error('[files-tab] rename failed', err);
       this._showToast(
         `Failed to rename ${sourcePath}: ${err?.message || err}`,
         'error',
       );
+    }
+  }
+
+  /**
+   * Locate any tree node (file OR directory) by path.
+   * Used by rename commit to distinguish file vs dir
+   * source so we can route to the correct RPC.
+   * Returns null when not found.
+   */
+  _findNodeByPath(path) {
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.path === path) return node;
+      if (!Array.isArray(node.children)) return null;
+      for (const child of node.children) {
+        const found = walk(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    return walk(this._latestTree);
+  }
+
+  /**
+   * Migrate every selection and exclusion entry
+   * whose path lives under `oldDir` to the
+   * equivalent path under `newDir`. Called after a
+   * successful directory rename so that per-file
+   * state survives the move.
+   */
+  _migrateSubtreeState(oldDir, newDir) {
+    const oldPrefix = `${oldDir}/`;
+    const migrateSet = (set) => {
+      let mutated = false;
+      const next = new Set(set);
+      for (const p of set) {
+        if (p === oldDir || p.startsWith(oldPrefix)) {
+          next.delete(p);
+          const rewritten =
+            p === oldDir ? newDir : `${newDir}/${p.slice(oldPrefix.length)}`;
+          next.add(rewritten);
+          mutated = true;
+        }
+      }
+      return mutated ? next : null;
+    };
+    const nextSelected = migrateSet(this._selectedFiles);
+    if (nextSelected) {
+      this._applySelection(nextSelected, /* notifyServer */ true);
+    }
+    const nextExcluded = migrateSet(this._excludedFiles);
+    if (nextExcluded) {
+      this._applyExclusion(nextExcluded, /* notifyServer */ true);
     }
   }
 
@@ -1564,6 +1681,216 @@ export class FilesTab extends RpcMixin(LitElement) {
         'error',
       );
     }
+  }
+
+  /**
+   * Walk `_latestTree` to find the directory at `path`
+   * and return an array of all repo-relative file
+   * paths beneath it. Empty array when the path
+   * isn't found or the target isn't a directory.
+   *
+   * Used by every directory-level dispatcher — batch-
+   * operations naturally want the full descendant set
+   * so the RPC round-trip count is O(1) regardless of
+   * directory size.
+   */
+  _collectDescendantFilesFromPath(dirPath) {
+    if (typeof dirPath !== 'string') return [];
+    const root = this._latestTree;
+    if (!root || typeof root !== 'object') return [];
+    // Special case — repo root has empty path. Collect
+    // from the root itself without walking to find it.
+    if (dirPath === '') {
+      return this._collectDescendantsOfNode(root);
+    }
+    // Walk to the target directory.
+    const target = this._findDirNode(root, dirPath);
+    if (!target) return [];
+    return this._collectDescendantsOfNode(target);
+  }
+
+  /**
+   * Recursive helper — depth-first walk collecting
+   * file paths. Directories contribute nothing of
+   * their own; their descendants' file paths flow up.
+   */
+  _collectDescendantsOfNode(node) {
+    const out = [];
+    const walk = (n) => {
+      if (!n || typeof n !== 'object') return;
+      if (n.type === 'file' && typeof n.path === 'string' && n.path) {
+        out.push(n.path);
+        return;
+      }
+      if (Array.isArray(n.children)) {
+        for (const child of n.children) walk(child);
+      }
+    };
+    walk(node);
+    return out;
+  }
+
+  /**
+   * Locate a directory node by path within the tree.
+   * Returns null when not found. Simple DFS — tree
+   * sizes are small enough that a path-indexed lookup
+   * wouldn't justify the cache-invalidation
+   * complexity.
+   */
+  _findDirNode(root, dirPath) {
+    if (!root || typeof root !== 'object') return null;
+    if (root.type === 'dir' && root.path === dirPath) return root;
+    if (!Array.isArray(root.children)) return null;
+    for (const child of root.children) {
+      const found = this._findDirNode(child, dirPath);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * Stage every file under the given directory.
+   * Single RPC round-trip for the whole subtree.
+   * Empty directories (no descendants) short-circuit
+   * silently — no server call, no toast.
+   */
+  async _dispatchStageAll(dirPath) {
+    const files = this._collectDescendantFilesFromPath(dirPath);
+    if (files.length === 0) return;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.stage_files',
+        files,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      const label = dirPath || 'repository';
+      this._showToast(
+        `Staged ${files.length} file${files.length === 1 ? '' : 's'} in ${label}`,
+        'success',
+      );
+    } catch (err) {
+      console.error('[files-tab] stage_files (batch) failed', err);
+      this._showToast(
+        `Failed to stage files: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Symmetric to stage-all. A file that isn't
+   * currently staged contributes nothing to the
+   * unstage but doesn't break the batch — git
+   * silently skips unstaged paths.
+   */
+  async _dispatchUnstageAll(dirPath) {
+    const files = this._collectDescendantFilesFromPath(dirPath);
+    if (files.length === 0) return;
+    try {
+      const result = await this.rpcExtract(
+        'Repo.unstage_files',
+        files,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      await this._loadFileTree();
+      const label = dirPath || 'repository';
+      this._showToast(
+        `Unstaged ${files.length} file${files.length === 1 ? '' : 's'} in ${label}`,
+        'success',
+      );
+    } catch (err) {
+      console.error('[files-tab] unstage_files (batch) failed', err);
+      this._showToast(
+        `Failed to unstage files: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Rename a directory. Delegates to the picker's
+   * inline-input flow via `beginRename` — the picker
+   * doesn't currently distinguish file vs directory
+   * rename at the input level (both want an inline
+   * input prefilled with the current name), but the
+   * commit event carries the path unchanged and our
+   * file rename handler rebuilds the target. The
+   * DIRECTORY rename needs a separate commit handler
+   * (`rename-dir-committed`) because the backend RPC
+   * is different: `Repo.rename_directory` vs
+   * `Repo.rename_file`.
+   *
+   * For simplicity we reuse the picker's existing
+   * rename flow — `beginRename` sets `_renaming` to
+   * the node's path regardless of type, and the
+   * `rename-committed` event fires on Enter. We
+   * differentiate at the commit-handler level by
+   * checking whether the source path exists as a
+   * file or a directory in the tree. Alternative
+   * would be to add a parallel `beginRenameDir` but
+   * it duplicates the input rendering for no UX
+   * benefit.
+   *
+   * The dir-case branch is in `_onRenameCommitted`
+   * — it inspects `_latestTree` to decide which RPC
+   * to call.
+   */
+  _dispatchRenameDir(path, name) {
+    const picker = this._picker();
+    if (!picker) return;
+    // Reuse the file rename input — same pre-filled
+    // name pattern.
+    picker.beginRename(path);
+  }
+
+  /**
+   * Add every descendant file to the excluded set.
+   * Skips the server round-trip when the union is
+   * already the current state (every descendant
+   * already excluded). Deselects any descendants
+   * that were selected, matching the mutual-
+   * exclusion rule between selection and exclusion.
+   */
+  _dispatchExcludeAll(dirPath) {
+    const files = this._collectDescendantFilesFromPath(dirPath);
+    if (files.length === 0) return;
+    const nextExcluded = new Set(this._excludedFiles);
+    for (const p of files) nextExcluded.add(p);
+    this._applyExclusion(nextExcluded, /* notifyServer */ true);
+    // Deselect any that were selected.
+    const hadSelected = files.some((p) => this._selectedFiles.has(p));
+    if (hadSelected) {
+      const nextSelected = new Set(this._selectedFiles);
+      for (const p of files) nextSelected.delete(p);
+      this._applySelection(nextSelected, /* notifyServer */ true);
+    }
+  }
+
+  /**
+   * Remove every descendant file from the excluded
+   * set. Returns them to the default index-only
+   * state — does NOT auto-select, matching the
+   * file-level Include behaviour.
+   */
+  _dispatchIncludeAll(dirPath) {
+    const files = this._collectDescendantFilesFromPath(dirPath);
+    if (files.length === 0) return;
+    const next = new Set(this._excludedFiles);
+    for (const p of files) next.delete(p);
+    this._applyExclusion(next, /* notifyServer */ true);
   }
 
   /**
