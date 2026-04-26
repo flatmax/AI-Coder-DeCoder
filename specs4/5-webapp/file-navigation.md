@@ -43,13 +43,12 @@ Multiple nodes may reference the same file path. All nodes sharing a path are co
 - Grid is not persisted
 - On page reload, the grid is empty
 - The first file opened after reload becomes the root node
-### No Dirty Tracking
-- Navigating away from a file does not preserve unsaved changes in the grid
-- Standard save behavior works while a file is active
-### Viewport Restoration
-- When navigating back to a previously visited file, the diff viewer restores the scroll position and cursor to where the user left off
-- Viewport state saved per-file in a transient map before switching away, restored after the diff editor finishes computing
-- Not persisted — on page reload all saved viewports are lost along with the grid
+
+### Pure Navigation History
+- The grid tracks which files the user has visited; it does not correspond to open tabs or persistent viewer state
+- Navigating back to a previously-visited node triggers a fresh fetch in the diff viewer — the content is not cached across the visit
+- Unsaved edits are discarded whenever the user navigates away from a file, whether by Alt+Arrow, picker click, or any other `navigate-file` dispatch. This is the diff viewer's no-cache policy (see [diff-viewer.md](diff-viewer.md#no-caching-across-switches))
+- No per-node viewport state. When returning to a previously-visited node the diff editor starts at the top of the file.
 ## Node Creation
 ### Triggers
 Any action that opens a file creates a new node:
@@ -111,10 +110,13 @@ When an Alt+Arrow key is pressed:
 2. If a node exists, increment the travel count for the current-neighbor pair
 3. If no node exists at that cell, wrap to the opposite edge of the grid along the same axis (see edge wrapping)
 4. If wrapping also finds no node, no-op
-5. The neighbor becomes the current node
-6. The file at the neighbor node is opened in the appropriate viewer
-7. The HUD updates to show the new position
+5. The neighbor becomes the current node (immediately — HUD updates without waiting)
+6. Dispatching `navigate-file` for the new current node is **debounced** — rapid arrow sequences coalesce into a single fetch for the final position. The dispatch fires on Alt release or after a short pause (on the order of 200ms) with no additional arrow press.
+7. The HUD updates to show the new position (no wait for the fetch)
+
 Handled at the app shell level with a capture-phase listener to intercept before Monaco's word-navigation Alt+Arrow bindings. When the grid has nodes, all Alt+Arrow events are consumed regardless of whether a neighbor exists — prevents unintended edits in Monaco while the HUD is visible.
+
+The debounce is necessary because the diff viewer refetches on every `openFile` (see [diff-viewer.md](diff-viewer.md#no-caching-across-switches)). Without coalescing, holding Alt and pressing an arrow key ten times in a second would trigger ten round-trip fetches, most of which would be wasted work superseded by the final position. Debouncing aligns the user's intent ("move to the file at the end of this sequence") with the cost model ("one fetch per visible target").
 ### Edge Wrapping
 When Alt+Arrow is pressed and no node exists in the adjacent cell, navigation wraps to the opposite edge of the grid along the same row or column:
 | Direction | Wrap target |

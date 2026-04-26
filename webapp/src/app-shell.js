@@ -834,6 +834,11 @@ export class AppShell extends JRPCClient {
     // file-saved — routes editor saves to Repo.write_file
     // or Settings.save_config_content.
     this._onFileSaved = this._onFileSaved.bind(this);
+    // files-reverted — after Discard Changes and
+    // similar working-tree reverts, refresh open
+    // viewers so stale modified buffers get replaced
+    // with the new on-disk content.
+    this._onFilesReverted = this._onFilesReverted.bind(this);
     // Navigate-file routing. Bound so add/remove match.
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
@@ -886,6 +891,16 @@ export class AppShell extends JRPCClient {
     // when the file is flagged as a config file. Without
     // this handler, saves silently vanish.
     window.addEventListener('file-saved', this._onFileSaved);
+    // files-reverted fires from files-tab after a
+    // successful Discard Changes (and in future: stage
+    // rollback, reset-to-HEAD paths). Refresh open
+    // viewers so any editor showing a discarded file
+    // picks up the on-disk content, otherwise the
+    // user's already-discarded edits stay visible and
+    // the next save round-trips them back.
+    window.addEventListener(
+      'files-reverted', this._onFilesReverted,
+    );
     // navigate-file is dispatched by the files tab (file
     // picker clicks), the chat panel (file mention clicks),
     // and the navigateFile server-push callback (when
@@ -972,6 +987,9 @@ export class AppShell extends JRPCClient {
   disconnectedCallback() {
     window.removeEventListener(TOAST_EVENT, this._onToastEvent);
     window.removeEventListener('file-saved', this._onFileSaved);
+    window.removeEventListener(
+      'files-reverted', this._onFilesReverted,
+    );
     window.removeEventListener('resize', this._onWindowResize);
     // Cancel any pending RAF callback — leaking it would fire
     // after the element is gone and try to query a detached
@@ -2053,6 +2071,42 @@ export class AppShell extends JRPCClient {
         `Save failed: ${err?.message || 'RPC error'}`,
         'error',
       );
+    }
+  }
+
+  /**
+   * Refresh open viewers after a working-tree revert.
+   * Dispatched by files-tab on Discard Changes (and
+   * future stage-rollback / reset paths). Mirrors the
+   * refresh logic in streamComplete and commitResult —
+   * refreshOpenFiles on the diff and SVG viewers
+   * re-fetches content for each open file, swapping
+   * stale modified buffers for the new on-disk state.
+   *
+   * The event detail.paths is informational today
+   * (logs / future filtering); refreshOpenFiles
+   * re-fetches ALL open files rather than just the
+   * listed ones, which is simpler and cheap (each
+   * viewer iterates only its own open set).
+   */
+  _onFilesReverted(_event) {
+    const diffViewer =
+      this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svgViewer =
+      this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
+      diffViewer.refreshOpenFiles().catch((err) => {
+        console.warn(
+          '[app-shell] diff viewer refresh after revert failed', err,
+        );
+      });
+    }
+    if (svgViewer && typeof svgViewer.refreshOpenFiles === 'function') {
+      svgViewer.refreshOpenFiles().catch((err) => {
+        console.warn(
+          '[app-shell] svg viewer refresh after revert failed', err,
+        );
+      });
     }
   }
 

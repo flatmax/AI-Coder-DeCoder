@@ -24,6 +24,26 @@
 // is the editor.api module.
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 
+// Monaco's CSS is NOT pulled in by the editor.api.js entry
+// — that module only exposes the programmatic API. Without
+// this explicit side-effect import, diff decorations (the
+// red/green line backgrounds, gutter markers, connecting
+// lines between panels) are computed correctly by Monaco
+// but render invisibly because the CSS classes that style
+// them don't exist in the DOM.
+//
+// Vite bundles this CSS and injects it into document.head
+// automatically. The DiffViewer's _syncAllStyles then
+// clones it into the shadow root so Monaco (living inside
+// the viewer's shadow DOM) can see the rules.
+//
+// Symptom if this import is missing: diff editor works,
+// content changes are tracked, but visually both panels
+// look identical — no highlighting at all. Confirmed via
+// devtools by checking `document.head` for class names
+// like `line-insert` / `line-delete` (they'll be absent).
+import 'monaco-editor/min/vs/editor/editor.main.css';
+
 /**
  * Install Monaco's worker environment on `self`.
  *

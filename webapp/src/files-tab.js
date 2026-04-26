@@ -1463,6 +1463,22 @@ export class FilesTab extends RpcMixin(LitElement) {
         return;
       }
       await this._loadFileTree();
+      // Notify the app shell that working-tree content
+      // has reverted. The shell's _onFilesReverted
+      // handler calls refreshOpenFiles on the diff /
+      // SVG viewers so any open editor showing this
+      // path picks up the new on-disk content instead
+      // of the stale modified buffer. Without this,
+      // "Discard Changes" silently succeeds on the
+      // backend but the editor keeps the user's edits
+      // visible — confusing, because the next save
+      // round-trips them right back.
+      window.dispatchEvent(
+        new CustomEvent('files-reverted', {
+          detail: { paths: [path] },
+          bubbles: false,
+        }),
+      );
       this._showToast(`Discarded changes to ${path}`, 'success');
     } catch (err) {
       console.error('[files-tab] discard_changes failed', err);

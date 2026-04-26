@@ -1,20 +1,23 @@
 # Diff Viewer
 **Status:** stub
-Side-by-side diff editor for text file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features. Deliberately has no visible tabs — files are tracked internally, navigation is via keyboard and status LED only.
+Side-by-side diff editor for text file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
+
+**Single-file, no-cache model.** Exactly one file is displayed at a time. Every `openFile` call fetches HEAD and working-copy content fresh from the backend — there is no caching of file content across switches. Unsaved edits to the currently-displayed file are discarded when any other file is opened, including when the same file is opened again (same-file click forces refetch). The diff editor is a transient window onto disk state, not a stateful workspace.
+
 For SVG files, see [svg-viewer.md](svg-viewer.md) — a dedicated side-by-side viewer that replaces the Monaco editor for SVG content.
 ## Layout
 - Background layer filling the viewport, sibling of the dialog
 - Empty state shows a watermark (brand mark, low opacity)
 - Floating overlay buttons in the top-right corner when a file is open — status LED, preview toggle (for markdown/tex), text-diff toggle (for SVG passthroughs)
 ## Status LED
-Circular indicator replacing a traditional tab bar:
+Circular indicator showing the active file's state:
 | State | Color | Behavior |
 |---|---|---|
 | Clean | Green (steady glow) | File matches saved content |
 | Dirty | Orange (pulsing) | Unsaved changes — click to save |
 | New file | Cyan (steady glow) | File doesn't exist in HEAD |
 - Tooltip shows current file path and save hint when dirty
-- Multiple files tracked internally; navigation is keyboard-only (next/previous tab, close)
+- At most one file displayed at a time; no tab bar and no per-file keyboard navigation. The [file navigation grid](file-navigation.md) provides history-based navigation across previously-visited files (next/previous tab, close)
 ## Editor Features
 - Side-by-side — original (read-only) left, modified (editable) right
 - Auto language detection from extension
@@ -52,19 +55,19 @@ Why the full re-sync is needed — Monaco adds styles synchronously during edito
 - Not present in document head — raw-import pattern bypasses the normal style-cloning loop
 - Without this, KaTeX math in TeX preview renders as unstyled broken fragments
 ## File Management
-Multiple files can be open simultaneously, tracked internally as an ordered list. No visible tab bar — navigation between open files is keyboard-only. The status LED reflects the active file's state.
-### Same-File Suppression
-- When a file that is already active is re-opened, the editor is not rebuilt
-- Avoids recreating models (which resets scroll position and cancels internal delayers)
-- If the file is open but not active, the tab is switched and viewport restored
-### Concurrent openFile Guard
-- openFile is async (fetches content) and can be invoked multiple times before the first completes
-- A guard field stores the currently-opening path; duplicate calls for the same path are dropped
-- Opening a different file while another is still loading is allowed — both calls run independently
-- Guard only rejects concurrent calls for the same path
-### Adjacent Same-File Reuse
-- When openFile is called and an adjacent neighbor in the file navigation grid already references the target path, navigation reuses that neighbor rather than creating a new node
-- See [file-navigation.md](file-navigation.md)
+Exactly one file is displayed at a time. The viewer holds a single active file object plus a single virtual-comparison slot (see [Load Panel](#load-panel-ad-hoc-comparison)). Opening any file replaces whatever was previously displayed.
+
+### No Caching Across Switches
+Every `openFile` call fetches HEAD and working-copy content fresh — both panels rebuild from the returned strings. There is no `_files[]` array, no per-file content cache, no per-file viewport memory, no dirty-buffer preservation. Consequences:
+- **Switching away from an unsaved file discards those edits.** The new file's fetch rebuilds the Monaco model pair; the outgoing model's buffer is disposed.
+- **Clicking the same file again refetches.** This is a feature, not a bug — the user can force-refresh at any time by clicking the picker entry.
+- **External changes (git pull, another tool writing to disk) are reflected on the next click.** No filesystem watcher is needed for consistency; user action drives refresh.
+- **Review mode transitions, discard-changes, commits, and LLM edits all require either a refetch of the active file or acceptance that the next click will pick up the new state.** Triggers that affect the currently-displayed file (review enter/exit, discard-changes on the active path, commit) should dispatch `files-reverted` or equivalent so the viewer refetches without waiting for a user click.
+
+### Concurrent openFile
+- `openFile` is async (it fetches content) and can be invoked multiple times before the first completes
+- A second call for any path (same or different) cancels the first logically — the first's model-attach is skipped if the active path has changed by the time its fetch resolves
+- Rapid sequences (e.g., held Alt+Arrow through the file navigation grid) coalesce to a single fetch for the final target; see [file-navigation.md](file-navigation.md) for the debounce contract
 ## Saving
 ### Single File Save
 - Compare editor content against saved content
@@ -81,12 +84,15 @@ Multiple files can be open simultaneously, tracked internally as an ordered list
 - Global dirty set
 - State change events propagated to parent
 ## Load Panel (Ad-Hoc Comparison)
-Loads arbitrary text content into the left or right panel, enabling ad-hoc comparison of content from different sources (e.g., history messages, file content via context menu).
-- If no file is open — creates a virtual comparison file at a special virtual path
-- If a virtual comparison file already exists — updates only the specified panel; other side's content is preserved so both sides accumulate independently
-- If a real file is open — updates the specified panel's model directly
-- Label parameter sets a floating panel label (see earlier)
-- After loading, file's dirty state is cleared (loaded content becomes the new baseline)
+Loads arbitrary text content into the left or right panel for ad-hoc comparison of content from different sources (e.g., history messages, file content via context menu).
+
+The viewer maintains a dedicated virtual-comparison slot separate from the single active-file slot. The virtual slot holds `{leftContent, leftLabel, rightContent, rightLabel}` — the two sides accumulate across successive `loadPanel` calls.
+
+- **First `loadPanel` call**: activates the virtual slot, populates the specified side, leaves the other side empty. The diff editor swaps from displaying the active file (if any) to displaying the virtual pair.
+- **Subsequent `loadPanel` calls**: update only the specified side of the virtual slot. The other side is preserved, so the accumulation pattern "load A in left, then B in right" produces a side-by-side diff between A and B.
+- **Opening a real file via `openFile`** clears the virtual slot. The virtual comparison is replaced by the real file's HEAD-vs-working diff.
+- **Label parameter** sets a floating panel label (see [Floating Panel Labels](#floating-panel-labels))
+- **Virtual comparisons are read-only** — there is no save path. The dirty LED does not apply. Closing the comparison requires opening any real file.
 ## LSP Integration
 Registered when editor and RPC are both ready:
 | Feature | Trigger | Backend |
@@ -200,46 +206,54 @@ Used for:
 - Modified (right) always editable — user can make changes and save regardless of whether the file has uncommitted changes
 - Response normalization — the content RPC may return a plain string or an object with a content field; handler accepts both shapes
 ### Editor Reuse
-- Single diff editor instance created and reused for all files
-- Switching files disposes old models and creates new ones on the existing editor — prevents memory leaks and avoids the cost of recreating the editor on every tab switch
-- Editor only fully disposed when the last file is closed
+- Single diff editor instance created on first `openFile`, reused across subsequent opens
+- Every open disposes the old model pair and creates a new one on the existing editor
+- Editor fully disposed only when the viewer's empty state is restored (all files cleared, including virtual slot)
+
 ### Model Disposal Ordering
-- When switching files on an existing editor, old models must be disposed AFTER set-model detaches them
+- Old models must be disposed AFTER `setModel` detaches them
 - Disposing while still attached causes "model disposed before widget model was reset" errors
 - Sequence — capture reference to old model pair, update editor options, create new models, set new models on editor, dispose old models, set read-only state on the modified editor (must come after set-model so inline diff mode doesn't override it)
+
 ### Editor Disposal Ordering
-- When the editor itself is disposed (last file closed), the diff editor is disposed first, then the text models
+- When the viewer returns to empty state, the diff editor is disposed first, then the text models
 - Editor releases its references before the models are destroyed
-### Post-Edit Refresh
-- Only reloads already-open files
-- Re-fetch HEAD and working copy, update models in place, clear dirty state, maintain active tab
-## Per-File Viewport State
-- Transient map keyed by path storing each file's scroll position and cursor location
-- Captured before switching away from a file (via openFile, keyboard navigation, or file-navigation grid traversal)
-- Restored after switching back — waits for diff computation to finish (scrolling before the diff result arrives would be overwritten by Monaco's layout pass)
-- Map not persisted; on page reload all saved viewports are lost
-- Entries removed when a file is closed
+
+### Active-File Refresh
+- `refreshActiveFile()` re-fetches HEAD and working copy for the currently-displayed file and rebuilds the model pair
+- Dirty state is cleared (any unsaved edits are discarded — same policy as cross-file switches)
+- Virtual comparisons are unaffected by refresh (no backing disk state to refetch)
+- Callers: `stream-complete` after LLM edits, `commitResult` after a commit, `files-reverted` after discard-changes, review-mode transitions
 ## File Navigation Grid Integration
-- Any action that opens a file creates a new node on the 2D spatial grid (see [file-navigation.md](file-navigation.md))
-- Alt+Arrow keys traverse the grid spatially
-- Navigation events from the grid carry a flag indicating they originated from the grid itself (so the diff viewer does not re-register them as new navigation)
+- The grid (see [file-navigation.md](file-navigation.md)) is pure navigation history. It tracks which files the user has visited; it does not correspond to open tabs or persistent viewer state
+- Alt+Arrow keys traverse the grid spatially. Each arrow dispatches a `navigate-file` event after a debounce interval, so rapid arrow sequences coalesce into a single fetch for the final target
+- Navigation events from the grid carry a flag indicating they originated from the grid itself (so the app shell does not re-register them as new grid nodes)
+
 ## File Object Schema
-Each open file tracked internally with:
+The single active file is tracked with:
 - Path
-- Original content
-- Modified content
+- Original content (HEAD)
+- Modified content (working copy, then edited buffer)
+- Saved content (for dirty-flag computation)
 - New-file flag (for files that don't exist in HEAD)
 - Read-only flag (virtual, config read-only)
 - Config flags — whether this is a config file, and its config type
 - Real path (distinguishes virtual paths from actual repo paths)
+
+The virtual-comparison slot is tracked separately with:
+- Left content, left label
+- Right content, right label
+
+At most one of the two slots is active at any time; opening a real file clears the virtual slot and vice versa.
+
 ## Invariants
 - Editor configuration installation precedes any editor construction — worker setup and MATLAB tokenizer registration must happen at module load time
 - Component-level patch flag for cross-file navigation prevents override-closure chains regardless of how many times the editor is recreated
 - The full shadow-DOM style re-sync catches all styles Monaco adds during construction; pure observer-based approaches would miss them
 - Model disposal always happens after set-model has detached the old models
-- Virtual files never trigger repository content fetches
-- A file that is already active is never rebuilt by openFile — same-file suppression preserves scroll, cursor, and dirty state
-- Viewport state restoration waits for diff-ready; never scrolls before Monaco has settled
+- Virtual comparisons never trigger repository content fetches
+- Every `openFile` call refetches content — there is no same-file suppression. Clicking the same file discards any unsaved edits and reloads from disk.
+- Cross-file Monaco Go-to-Definition dispatches `navigate-file` on the window; it never calls the viewer's `openFile` directly, so the app shell's full pipeline (grid registration, collab broadcast, last-open persistence, viewer switch) always runs
 - Scroll-lock mutex in markdown preview prevents infinite feedback loops between editor and preview scrolling
 - Preview image resolution runs as a post-processing step; never blocks initial render
 specs4/5-webapp/tex-preview.md

@@ -1091,10 +1091,61 @@ Deferred to later sub-phases:
 
 Next up — Phase 2d: chat panel advanced features — edit block rendering with diff highlighting, file mentions, snippet drawer, session controls, input history, message action buttons. The @-filter bridge and middle-click path insertion also land here since they need the chat textarea side.
 
+## Post-Phase-3 design change — DiffViewer single-file, no-cache model
+
+After Phase 3 shipped the Monaco diff viewer, end-user testing exposed a mismatch between the multi-file `_files[]` design and how the viewer is actually used. The symptoms:
+
+- Switching files preserved Monaco models silently, so users holding unsaved edits in file A and opening file B found A's edits still there on return. The dirty LED also lied after a switch-back because `_dirtySet.delete` wasn't called on the switch-away path.
+- Clicking the same file didn't refetch. External changes (git pull, another tool writing) were invisible until an explicit refresh trigger (stream-complete, commit result, files-modified).
+- Picker "Discard Changes" didn't propagate to the viewer — open tabs showed pre-discard content indefinitely.
+- Review mode enter/exit silently shifted HEAD/working-copy underneath the viewer without refetching open tabs.
+
+The multi-file design also supported features the user does not need:
+
+- Ctrl+PageUp/PageDown/W for cycling between tabs (no visible tab bar, so the shortcuts were discoverable only by reading the keyboard reference)
+- `loadPanel`'s "accumulate across both panels" pattern, which only the history browser's context menu uses
+- Per-file viewport state preservation
+
+**Decision: rewrite DiffViewer to single-file, no-cache, refetch-on-every-click.** Rationale:
+
+- Matches user's stated model: "every openFile fetches fresh; unsaved edits are lost on switch."
+- Collapses the bug list from six items (caching lies, stale LED, discard-changes silence, review-mode silence, rename-points-to-dead-path, Monaco Go-to-Def bypass) to one (Monaco Go-to-Def, addressed separately as a dispatch fix).
+- Eliminates ~150 lines of state management in diff-viewer.js.
+- Aligns viewer cost with user action: one click = one fetch, predictably.
+
+**What stays:**
+
+- Single Monaco editor instance, reused across opens (disposal only when returning to empty state). Editor construction is expensive; the rewrite preserves the reuse pattern.
+- `loadPanel` for ad-hoc comparison. Uses a dedicated virtual-comparison slot separate from the active-file slot. Two successive `loadPanel` calls accumulate across the slot's left and right sides, preserving the history-browser workflow.
+- File navigation grid (`ac-file-nav`). The grid becomes pure navigation history — it tracks visited paths and supports Alt+Arrow traversal, but the diff viewer refetches on every navigation. Alt+Arrow is debounced (on Alt release or a short pause) so rapid sequences coalesce to a single fetch for the final target.
+- Status LED, save pipeline, LSP, markdown/TeX preview, markdown link provider, Ctrl+S, Ctrl+F find widget.
+
+**What goes:**
+
+- `_files[]` array, `_activeIndex`, `closeFile`, `saveAll`, `getDirtyFiles` (all collapse to operations on the single active-file slot or become no-ops)
+- `_viewportStates`, `_panelLabels`, `_texPreviewStates` maps (content-keyed persistence across switches)
+- `_openingPaths` set (replaced by a single-slot guard plus generation-counter discard for superseded fetches)
+- Ctrl+PageUp, Ctrl+PageDown, Ctrl+W keyboard shortcuts
+- Same-file suppression in `openFile`
+- Adjacent same-file reuse in `file-nav.openFile` (grid-side change)
+
+**What changes:**
+
+- Monaco Go-to-Def cross-file navigation: `_codeEditorService.openCodeEditor` patch dispatches `navigate-file` on the window instead of calling `this.openFile` directly. Aligns cross-file navigation with the single dispatch graph.
+- Review mode enter/exit: `LLMService.start_review` and `end_review` responses trigger `files-reverted` so the active file refetches.
+- `refreshOpenFiles` becomes `refreshActiveFile` (alias kept for backward compatibility with app-shell callers).
+
+Spec updates landed alongside the code change:
+- `specs4/5-webapp/diff-viewer.md` — rewrote File Management, Same-File Suppression, Concurrent openFile Guard, Load Panel, Editor Reuse, Per-File Viewport State, File Object Schema, Invariants sections
+- `specs4/5-webapp/file-navigation.md` — added the debounce contract to Alt+Arrow; rewrote "Viewport Restoration" as "Pure Navigation History" to reflect no per-node cache
+
+Implementation work tracked in `/IMPLEMENTATION_NOTES.md` under "DiffViewer redesign plan".
+
 ## Remaining Layer 5 work
 
 Tracked in `/IMPLEMENTATION_NOTES.md`:
 
+- **DiffViewer redesign** — single-file, no-cache, refetch-on-every-click. Planned; see IMPLEMENTATION_NOTES.md.
 - **Doc Convert tab** — Commits 1–5 delivered; commit 6 remaining
 - **Dialog polish** — dragging, resizing, minimizing, position persistence
 - **File picker enhancements plan** — 12 increments, all delivered or documented
