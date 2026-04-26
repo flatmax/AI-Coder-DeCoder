@@ -3357,15 +3357,36 @@ Design points pinned by tests:
 
 Increment 9 complete. Directory context menu has seven working actions. Next up — Increment 10: middle-click path insertion + @-filter bridge.
 
-### Increment 10 — Middle-click path insertion + @-filter bridge
+### ~~Increment 10 — Middle-click path insertion + @-filter bridge~~ (delivered)
 
-Two cross-component features. Middle-click path insertion uses the one-shot flag pattern to suppress the browser's selection-buffer paste.
+Delivered across multiple commits. Middle-click path insertion (10a) completed in `cafa47e`; @-filter bridge (10b) completed in `fdb4f84` (chat panel) and `a0956af` (files-tab bridge), with a follow-up test fix in `76fdcf9`.
 
-- `file-picker.js` — middle-click on any row dispatches `insert-path` event with `{path}`
-- `files-tab.js` — `_onInsertPath` handler queries chat panel's textarea, inserts path at cursor with space padding, sets `chatPanel._suppressNextPaste = true` **before** focus, then calls focus
-- `chat-panel.js` — `_suppressNextPaste` instance field (not reactive), paste handler checks-and-clears the flag, calls `preventDefault()` when set
-- `filter-from-chat` bridge — files-tab listens for the event and forwards to picker's `setFilter()`
-- tests — middle-click insertion with cursor position preserved, paste suppression fires exactly once per insertion, @-filter round-trip
+- `file-picker.js` — middle-click (`auxclick` + `button === 1`) on any file row dispatches `insert-path` with `{path}`. `event.preventDefault()` suppresses the browser's selection-buffer paste at its source.
+- `files-tab.js` — `_onInsertPath` queries the chat panel's textarea via `chat._input`, splices the path at the current cursor position with space-padding (prepending a space when preceded by a non-whitespace char, appending one when followed by a non-whitespace char), sets `chatPanel._suppressNextPaste = true` BEFORE calling `chatPanel.focus()`, then fires an `input` event so auto-resize runs. The order is load-bearing: setting the flag after focus would race against any paste event queued by the middle-click itself.
+- `chat-panel.js` — `_suppressNextPaste` non-reactive instance field (don't declare it as a `static properties` entry — Lit would re-render on every flag flip). The paste handler checks-and-clears the flag before any other logic; when set, it calls `event.preventDefault()` and returns. Matches specs3/5-webapp/file_picker.md's "cross-component flag contract" — one-shot, parent sets before focus, child consumes on the next paste event OR discards on first non-paste input.
+- **@-filter bridge (10b).** Chat panel detects `@pattern` as the user types via `_updateMentionFilter` + `_detectActiveMention`. The detector walks backward from the cursor looking for `@` at a word boundary (preceded by whitespace or start-of-string). Edge-triggered emission of `filter-from-chat` events with `{query}` — only fires on state transitions (enter, update, exit) to keep the bridge signal ratio high. Files-tab's `_onFilterFromChat` validates the query is a string and calls `picker.setFilter(query)` via `this._picker()`. Malformed events (missing detail, non-string query, missing query field) silently dropped.
+- **Tests — chat-panel side.** Mention detection with `@` at start-of-line, `@` after whitespace, `@` rejected mid-word (`foo@bar`), multi-char query extraction, exit on whitespace, exit on deletion, empty-query emission on exit. Edge-trigger verification: identical state doesn't re-emit. The existing `_onInputChange` extension doesn't break any prior tests.
+- **Tests — files-tab side.** The bridge forwards non-empty queries, clears on empty string, silently drops malformed events, survives picker-not-mounted case (via `_picker()` returning null), end-to-end propagation from textarea through two shadow-DOM boundaries into visible picker filtering. The end-to-end test uses query `'ba'` rather than `'bar'` to match the fuzzy-match subsequence rule (query chars must appear in order, not necessarily contiguous) — this caught a live bug in the initial test where `'bar'` was asserted against `baz.md` which has no `r`.
+- **Delivery note on the @-filter detector.** The walk-backward approach is O(N) per keystroke where N is the distance from cursor to the nearest `@` or whitespace. In practice this is under ~20 chars for realistic @-mention usage (users don't write 100-char paths without whitespace). The detector intentionally does NOT clear the filter when the user moves the cursor out of a mention without typing — specs3's minimal `@-filter` description doesn't require it, and adding click / selection-change listeners would complicate the hot path. The next input event re-evaluates; if the cursor is no longer in a mention, the filter clears then.
+
+Design points pinned by tests:
+
+- **Mention boundary rule.** `@` must be preceded by whitespace or start-of-string — not a word character. Blocks `foo@bar` from being treated as a mention, which would be surprising when a user types an email-like path. Pinned by `test_rejects_at_in_middle_of_word`.
+
+- **Edge-triggered emission.** The detector stores `_activeMention = {start, end, query}` and compares against it on every input event. Same range + same query → no-op. Prevents redundant setFilter calls during rapid typing and prevents the picker from re-rendering at every keystroke even when the filter query hasn't changed. Pinned by `test_identical_state_does_not_re_emit`.
+
+- **Cursor movement without typing is not a trigger.** Users who click inside an existing `@mention` to edit it don't cause a new emission — only actual typing (which fires an input event) re-evaluates. Simplifies the hot path significantly; specs3 doesn't require the alternative behavior.
+
+- **Bridge is a dumb forwarder.** Files-tab doesn't dedup `filter-from-chat` events — it just passes them through to `picker.setFilter`. The chat panel already edge-triggers, and the picker's own property-change check handles any remaining redundancy. Pinned by `test_repeated_identical_queries_forward`.
+
+- **Empty query is a legitimate clearing signal.** When the user exits a mention (deletes the `@`, types whitespace, cursor leaves the sequence), the chat panel emits `filter-from-chat` with `query: ''`. Files-tab forwards this to `picker.setFilter('')` which clears the picker's filter. Pinned by `test_empty_string_clears_the_filter`.
+
+- **No crash when picker unmounted.** The `_picker()` helper returns null if the picker isn't in the shadow tree yet (mount-order race). The `_onFilterFromChat` handler short-circuits gracefully on null — no exception, no console noise. Pinned by `test_no_crash_when_picker_is_not_mounted`.
+
+Open carried over:
+
+- **Middle-click on directory rows.** Currently only file rows dispatch `insert-path`. Directory rows could plausibly insert their path too (e.g. for "reference this whole directory"), but specs3 is silent on this and the current file-only behavior matches user expectation. Deferred unless a real use case appears.
+- **Filter reset on session change.** A `@mention` in the chat input that was applied to the file picker stays applied across session changes. `_onSessionChanged` clears the input text but not the filter state — the next empty-query emission from a user keystroke will clear it naturally. If the visible filter stickiness becomes a pain point, the session handler can explicitly fire `filter-from-chat` with empty query.
 
 ### Increment 11 — Review mode banner
 
