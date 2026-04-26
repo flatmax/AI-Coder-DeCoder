@@ -5327,6 +5327,124 @@ describe('ChatPanel message search — multimodal content', () => {
   });
 });
 
+describe('ChatPanel paste suppression', () => {
+  // Helper — build a fake paste event matching the
+  // image-paste test pattern but simpler since we're
+  // just asserting preventDefault behaviour.
+  function pasteEvent(items = []) {
+    const ev = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(ev, 'clipboardData', {
+      value: { items },
+      writable: false,
+    });
+    return ev;
+  }
+
+  it('_suppressNextPaste defaults to false', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._suppressNextPaste).toBe(false);
+  });
+
+  it('swallows the next paste when flag is set', async () => {
+    // Load-bearing — this is the whole point of the
+    // flag. The files-tab's middle-click handler sets
+    // the flag immediately before focus() on the
+    // textarea; on Linux that focus triggers the
+    // selection-buffer auto-paste, which we need to
+    // preventDefault.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._suppressNextPaste = true;
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    const ev = pasteEvent([
+      { kind: 'string', type: 'text/plain' },
+    ]);
+    const preventSpy = vi.spyOn(ev, 'preventDefault');
+    ta.dispatchEvent(ev);
+    await settle(p);
+    expect(preventSpy).toHaveBeenCalled();
+  });
+
+  it('clears the flag after one paste', async () => {
+    // One-shot — a subsequent paste must work normally.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._suppressNextPaste = true;
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.dispatchEvent(pasteEvent());
+    await settle(p);
+    expect(p._suppressNextPaste).toBe(false);
+  });
+
+  it('subsequent paste is not suppressed', async () => {
+    // End-to-end: first paste swallowed, second paste
+    // falls through to normal handling. Proves the
+    // flag clears rather than staying stuck on.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    p._suppressNextPaste = true;
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // First paste — swallowed.
+    const ev1 = pasteEvent([
+      { kind: 'string', type: 'text/plain' },
+    ]);
+    const prevent1 = vi.spyOn(ev1, 'preventDefault');
+    ta.dispatchEvent(ev1);
+    await settle(p);
+    expect(prevent1).toHaveBeenCalled();
+    // Second paste — text paste falls through, no
+    // preventDefault.
+    const ev2 = pasteEvent([
+      { kind: 'string', type: 'text/plain' },
+    ]);
+    const prevent2 = vi.spyOn(ev2, 'preventDefault');
+    ta.dispatchEvent(ev2);
+    await settle(p);
+    expect(prevent2).not.toHaveBeenCalled();
+  });
+
+  it('flag does not prevent image paste when not set', async () => {
+    // Sanity check — flag off means normal paste
+    // behaviour works unchanged.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    expect(p._suppressNextPaste).toBe(false);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    // A text paste with flag off — no preventDefault.
+    const ev = pasteEvent([
+      { kind: 'string', type: 'text/plain' },
+    ]);
+    const preventSpy = vi.spyOn(ev, 'preventDefault');
+    ta.dispatchEvent(ev);
+    await settle(p);
+    expect(preventSpy).not.toHaveBeenCalled();
+  });
+
+  it('flag is not a reactive property (no re-render on flip)', async () => {
+    // Pinned because reactive state would cause a Lit
+    // re-render on every flag flip — wasteful for a
+    // field that exists purely for paste-handler scope
+    // and changes multiple times per middle-click flow.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const updateSpy = vi.spyOn(p, 'requestUpdate');
+    p._suppressNextPaste = true;
+    p._suppressNextPaste = false;
+    p._suppressNextPaste = true;
+    // No re-render triggered by the flag changes.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChatPanel message search — scroll behaviour', () => {
   it('calls scrollIntoView when current match changes', async () => {
     // Element.scrollIntoView is a no-op in jsdom, so spy
