@@ -3038,18 +3038,15 @@ describe('FilesTab context-menu action dispatch', () => {
       expect(stage).not.toHaveBeenCalled();
     });
 
-    it('unknown actions are silently dropped (reserved for later sub-commits)', async () => {
+    it('unknown actions are silently dropped', async () => {
       const { t, stage, unstage, discard, deleteFile } =
         await setupTabWithFile();
-      // 8c wired rename/duplicate; remaining unwired:
-      // load-left, load-right, include, exclude.
-      for (const action of [
-        'load-left',
-        'load-right',
-        'include',
-        'exclude',
-        'bogus',
-      ]) {
+      // 8c wired rename/duplicate; 8d wired
+      // include/exclude/load-left/load-right. Only
+      // truly unknown actions remain in this test —
+      // defensive against a future refactor that
+      // adds a new menu item without wiring it.
+      for (const action of ['bogus', 'stage-all', 'future-thing']) {
         fireContextAction(t, {
           action,
           type: 'file',
@@ -3938,6 +3935,465 @@ describe('FilesTab context-menu action dispatch', () => {
         );
       } finally {
         window.removeEventListener('ac-toast', toastListener);
+      }
+    });
+  });
+
+  // -------------------------------------------------------
+  // Include / Exclude (8d)
+  // -------------------------------------------------------
+
+  describe('exclude action', () => {
+    async function setupExcludeTab({ excludedFiles = [] } = {}) {
+      const getTree = vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+          ]),
+        );
+      const setExcluded = vi.fn().mockResolvedValue([]);
+      const setSelected = vi.fn().mockResolvedValue([]);
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'LLMService.set_excluded_index_files': setExcluded,
+        'LLMService.set_selected_files': setSelected,
+      });
+      const t = mountTab();
+      await settle(t);
+      // Seed initial exclusion state via a broadcast so
+      // we don't need to toggle via the picker.
+      if (excludedFiles.length > 0) {
+        for (const path of excludedFiles) {
+          t._excludedFiles.add(path);
+        }
+      }
+      return { t, setExcluded, setSelected };
+    }
+
+    it('adds the file to the excluded set', async () => {
+      const { t, setExcluded } = await setupExcludeTab();
+      fireContextAction(t, {
+        action: 'exclude',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(t._excludedFiles.has('a.md')).toBe(true);
+      expect(setExcluded).toHaveBeenCalledOnce();
+      expect(setExcluded.mock.calls[0][0]).toEqual(['a.md']);
+    });
+
+    it('no-op when file is already excluded', async () => {
+      const { t, setExcluded } = await setupExcludeTab({
+        excludedFiles: ['a.md'],
+      });
+      fireContextAction(t, {
+        action: 'exclude',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: true,
+      });
+      await settle(t);
+      // No server round-trip for an idempotent call.
+      expect(setExcluded).not.toHaveBeenCalled();
+    });
+
+    it('deselects the file when excluding a selected file', async () => {
+      // Exclusion and selection are mutually
+      // exclusive — excluding a selected file
+      // deselects it in the same operation.
+      const { t, setExcluded, setSelected } =
+        await setupExcludeTab();
+      // Seed selection.
+      t._selectedFiles.add('a.md');
+      fireContextAction(t, {
+        action: 'exclude',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(t._excludedFiles.has('a.md')).toBe(true);
+      expect(t._selectedFiles.has('a.md')).toBe(false);
+      // Server notified of both changes.
+      expect(setExcluded).toHaveBeenCalledOnce();
+      expect(setSelected).toHaveBeenCalledOnce();
+      expect(setSelected.mock.calls[0][0]).toEqual([]);
+    });
+
+    it('propagates the new exclusion to the picker', async () => {
+      const { t } = await setupExcludeTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      fireContextAction(t, {
+        action: 'exclude',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(picker.excludedFiles.has('a.md')).toBe(true);
+    });
+  });
+
+  describe('include action', () => {
+    async function setupIncludeTab({ excludedFiles = ['a.md'] } = {}) {
+      const getTree = vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+          ]),
+        );
+      const setExcluded = vi.fn().mockResolvedValue([]);
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'LLMService.set_excluded_index_files': setExcluded,
+      });
+      const t = mountTab();
+      await settle(t);
+      for (const path of excludedFiles) {
+        t._excludedFiles.add(path);
+      }
+      return { t, setExcluded };
+    }
+
+    it('removes the file from the excluded set', async () => {
+      const { t, setExcluded } = await setupIncludeTab();
+      fireContextAction(t, {
+        action: 'include',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: true,
+      });
+      await settle(t);
+      expect(t._excludedFiles.has('a.md')).toBe(false);
+      expect(setExcluded).toHaveBeenCalledOnce();
+      expect(setExcluded.mock.calls[0][0]).toEqual([]);
+    });
+
+    it('does NOT add to the selected set (returns to index-only)', async () => {
+      // Per spec — "Include in index" returns the file
+      // to the default index-only state, not to
+      // selected. Users who want to select it can tick
+      // the checkbox after. Matches the shift+click-
+      // from-excluded behaviour in the picker.
+      const { t } = await setupIncludeTab();
+      fireContextAction(t, {
+        action: 'include',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: true,
+      });
+      await settle(t);
+      expect(t._selectedFiles.has('a.md')).toBe(false);
+    });
+
+    it('no-op when file is not currently excluded', async () => {
+      const { t, setExcluded } = await setupIncludeTab({
+        excludedFiles: [],
+      });
+      fireContextAction(t, {
+        action: 'include',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(setExcluded).not.toHaveBeenCalled();
+    });
+
+    it('propagates the updated exclusion to the picker', async () => {
+      const { t } = await setupIncludeTab();
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      // Seed picker's view of exclusion to match.
+      picker.excludedFiles = new Set(['a.md']);
+      fireContextAction(t, {
+        action: 'include',
+        type: 'file',
+        path: 'a.md',
+        name: 'a.md',
+        isExcluded: true,
+      });
+      await settle(t);
+      expect(picker.excludedFiles.has('a.md')).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------
+  // Load in panel (8d)
+  // -------------------------------------------------------
+
+  describe('load-in-panel actions', () => {
+    async function setupLoadPanelTab({
+      content = 'file contents',
+    } = {}) {
+      const getTree = vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+          ]),
+        );
+      const getContent = vi.fn().mockResolvedValue(content);
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': getContent,
+      });
+      const t = mountTab();
+      await settle(t);
+      return { t, getContent };
+    }
+
+    it('load-left dispatches load-diff-panel with panel=left', async () => {
+      const { t } = await setupLoadPanelTab({
+        content: 'left-side body',
+      });
+      const listener = vi.fn();
+      window.addEventListener('load-diff-panel', listener);
+      try {
+        fireContextAction(t, {
+          action: 'load-left',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(listener).toHaveBeenCalledOnce();
+        const detail = listener.mock.calls[0][0].detail;
+        expect(detail.panel).toBe('left');
+        expect(detail.content).toBe('left-side body');
+        expect(detail.label).toBe('a.md');
+      } finally {
+        window.removeEventListener('load-diff-panel', listener);
+      }
+    });
+
+    it('load-right dispatches load-diff-panel with panel=right', async () => {
+      const { t } = await setupLoadPanelTab();
+      const listener = vi.fn();
+      window.addEventListener('load-diff-panel', listener);
+      try {
+        fireContextAction(t, {
+          action: 'load-right',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(listener).toHaveBeenCalledOnce();
+        expect(listener.mock.calls[0][0].detail.panel).toBe('right');
+      } finally {
+        window.removeEventListener('load-diff-panel', listener);
+      }
+    });
+
+    it('fetches the file content before dispatching', async () => {
+      const { t, getContent } = await setupLoadPanelTab();
+      fireContextAction(t, {
+        action: 'load-left',
+        type: 'file',
+        path: 'src/deep/a.md',
+        name: 'a.md',
+        isExcluded: false,
+      });
+      await settle(t);
+      expect(getContent).toHaveBeenCalledOnce();
+      expect(getContent.mock.calls[0][0]).toBe('src/deep/a.md');
+    });
+
+    it('uses the basename as the label', async () => {
+      // Nested paths still produce a compact label so
+      // the diff viewer's floating panel chip stays
+      // readable.
+      const getTree = vi.fn().mockResolvedValue(
+        fakeTreeResponse([
+          {
+            name: 'src',
+            path: 'src',
+            type: 'dir',
+            children: [
+              {
+                name: 'main.py',
+                path: 'src/main.py',
+                type: 'file',
+                lines: 5,
+              },
+            ],
+          },
+        ]),
+      );
+      publishFakeRpc({
+        'Repo.get_file_tree': getTree,
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi.fn().mockResolvedValue('body'),
+      });
+      const listener = vi.fn();
+      window.addEventListener('load-diff-panel', listener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        fireContextAction(t, {
+          action: 'load-right',
+          type: 'file',
+          path: 'src/main.py',
+          name: 'main.py',
+          isExcluded: false,
+        });
+        await settle(t);
+        expect(listener.mock.calls[0][0].detail.label).toBe('main.py');
+      } finally {
+        window.removeEventListener('load-diff-panel', listener);
+      }
+    });
+
+    it('surfaces RPC failure as error toast', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi
+          .fn()
+          .mockRejectedValue(new Error('binary file')),
+      });
+      const consoleSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const toastListener = vi.fn();
+      const panelListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('load-diff-panel', panelListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        fireContextAction(t, {
+          action: 'load-left',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message).toContain('binary file');
+        // load-diff-panel never fired — the fetch
+        // failed before we had content to dispatch.
+        expect(panelListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('load-diff-panel', panelListener);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    it('handles non-string content defensively', async () => {
+      publishFakeRpc({
+        'Repo.get_file_tree': vi
+          .fn()
+          .mockResolvedValue(
+            fakeTreeResponse([
+              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
+            ]),
+          ),
+        'Repo.get_current_branch': vi.fn().mockResolvedValue({
+          branch: 'main',
+          detached: false,
+          sha: null,
+        }),
+        'Repo.get_file_content': vi
+          .fn()
+          .mockResolvedValue({ weird: 'shape' }),
+      });
+      const toastListener = vi.fn();
+      const panelListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('load-diff-panel', panelListener);
+      try {
+        const t = mountTab();
+        await settle(t);
+        fireContextAction(t, {
+          action: 'load-left',
+          type: 'file',
+          path: 'a.md',
+          name: 'a.md',
+          isExcluded: false,
+        });
+        await settle(t);
+        const errors = toastListener.mock.calls
+          .map((call) => call[0].detail)
+          .filter((d) => d.type === 'error');
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.at(-1).message.toLowerCase()).toContain(
+          'unexpected',
+        );
+        expect(panelListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('load-diff-panel', panelListener);
+      }
+    });
+
+    it('rejects invalid panel values silently', async () => {
+      // _dispatchLoadInPanel validates the panel arg
+      // before doing anything. The switch in
+      // _onContextMenuAction only passes 'left' /
+      // 'right', but a direct call with a bad value
+      // (or a future refactor) shouldn't fire.
+      const { t, getContent } = await setupLoadPanelTab();
+      const listener = vi.fn();
+      window.addEventListener('load-diff-panel', listener);
+      try {
+        // Call the internal dispatcher directly since
+        // the context-menu action catalog doesn't have
+        // a way to produce an invalid panel value
+        // through normal means.
+        t._dispatchLoadInPanel('a.md', 'middle');
+        await settle(t);
+        expect(getContent).not.toHaveBeenCalled();
+        expect(listener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('load-diff-panel', listener);
       }
     });
   });

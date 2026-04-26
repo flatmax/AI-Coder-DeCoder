@@ -1137,12 +1137,23 @@ export class FilesTab extends RpcMixin(LitElement) {
       case 'duplicate':
         this._dispatchDuplicate(path);
         return;
+      case 'include':
+        this._dispatchInclude(path);
+        return;
+      case 'exclude':
+        this._dispatchExclude(path);
+        return;
+      case 'load-left':
+        this._dispatchLoadInPanel(path, 'left');
+        return;
+      case 'load-right':
+        this._dispatchLoadInPanel(path, 'right');
+        return;
       default:
-        // Known actions (include, exclude, load-left,
-        // load-right) not yet wired — dropped silently
-        // rather than logged, since the event reaches
-        // here on every right-click + hover path and
-        // logging would be noisy.
+        // No remaining unwired file actions. A
+        // defensive default keeps the switch from
+        // throwing on a future refactor that adds a
+        // new menu item without wiring it here.
         return;
     }
   }
@@ -1447,6 +1458,109 @@ export class FilesTab extends RpcMixin(LitElement) {
       console.error('[files-tab] duplicate failed', err);
       this._showToast(
         `Failed to duplicate ${sourcePath}: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Add `path` to the excluded set via the standard
+   * exclusion path. Idempotent — a file already
+   * excluded produces a set-equality short-circuit
+   * inside `_applyExclusion`, and the user sees no
+   * server round-trip.
+   *
+   * Excluding a selected file also deselects it —
+   * the two states are mutually exclusive. Mirrors
+   * the shift+click behaviour in the picker's
+   * `_toggleExclusion` path.
+   */
+  _dispatchExclude(path) {
+    if (this._excludedFiles.has(path)) return;
+    const nextExcluded = new Set(this._excludedFiles);
+    nextExcluded.add(path);
+    this._applyExclusion(nextExcluded, /* notifyServer */ true);
+    // Deselect if currently selected — excluded and
+    // selected can't coexist.
+    if (this._selectedFiles.has(path)) {
+      const nextSelected = new Set(this._selectedFiles);
+      nextSelected.delete(path);
+      this._applySelection(nextSelected, /* notifyServer */ true);
+    }
+  }
+
+  /**
+   * Remove `path` from the excluded set. Returns the
+   * file to the default index-only state — NOT to
+   * selected. Matches the shift+click-from-excluded
+   * semantics in the picker (the "Include in index"
+   * menu item is the non-selecting path; users who
+   * want to select it can tick the checkbox after).
+   *
+   * Idempotent — a file not currently excluded
+   * short-circuits via set-equality.
+   */
+  _dispatchInclude(path) {
+    if (!this._excludedFiles.has(path)) return;
+    const next = new Set(this._excludedFiles);
+    next.delete(path);
+    this._applyExclusion(next, /* notifyServer */ true);
+  }
+
+  /**
+   * Fetch the file's content via `Repo.get_file_content`
+   * and dispatch a `load-diff-panel` event carrying the
+   * content, target panel, and a label (the file's
+   * basename). The app shell catches the event and
+   * routes to the diff viewer's `loadPanel(content,
+   * panel, label)` — same pathway the history browser's
+   * "Load in Left/Right Panel" context menu uses.
+   *
+   * The panel parameter is 'left' or 'right'. Invalid
+   * panels are rejected silently — the switch in
+   * `_onContextMenuAction` only calls us with known
+   * values.
+   *
+   * Failures (binary file, missing file, RPC error)
+   * surface as error toasts. Non-string content (e.g.,
+   * if the backend changes shape) guards with a
+   * defensive type check, mirroring duplicate's
+   * content validation.
+   */
+  async _dispatchLoadInPanel(path, panel) {
+    if (panel !== 'left' && panel !== 'right') return;
+    try {
+      const content = await this.rpcExtract(
+        'Repo.get_file_content',
+        path,
+      );
+      if (typeof content !== 'string') {
+        this._showToast(
+          `Cannot load ${path}: unexpected content type`,
+          'error',
+        );
+        return;
+      }
+      // Derive the label from the basename. The diff
+      // viewer's floating panel label shows this to
+      // disambiguate panels when the user has loaded
+      // content from multiple sources.
+      const lastSlash = path.lastIndexOf('/');
+      const basename = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+      window.dispatchEvent(
+        new CustomEvent('load-diff-panel', {
+          detail: {
+            content,
+            panel,
+            label: basename,
+          },
+          bubbles: false,
+        }),
+      );
+    } catch (err) {
+      console.error('[files-tab] load-in-panel failed', err);
+      this._showToast(
+        `Failed to load ${path}: ${err?.message || err}`,
         'error',
       );
     }
