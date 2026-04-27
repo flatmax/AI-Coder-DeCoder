@@ -1,65 +1,60 @@
 // SvgViewer — side-by-side SVG diff viewer.
 //
-// Phase 3.2a delivers the lifecycle layer: multi-file
-// tracking, content fetching via Repo RPCs, dirty
-// tracking, save pipeline, status LED, keyboard shortcuts.
-// No pan/zoom yet, no visual editing — just the structural
-// viewer that matches the diff viewer's surface.
-//
-// Scope of this commit (3.2a):
-//   - Open/close/switch multiple SVG files
-//   - Concurrent-openFile guard
-//   - HEAD + working-copy content fetching via RPC
-//   - Dirty tracking (content-change-triggered via a
-//     MutationObserver on the rendered SVG — no editor yet,
-//     so we watch for externally-driven content updates)
-//   - Status LED (clean / dirty / new-file)
-//   - Save pipeline dispatching `file-saved` events
-//   - Keyboard shortcuts (Ctrl+S, Ctrl+W, Ctrl+PageUp/Down)
-//   - Side-by-side rendering — raw SVG injected via innerHTML
-//     into left and right containers. Left is always HEAD
-//     (read-only reference); right is working copy.
-//
-// Deferred to follow-up sub-phases:
-//   - 3.2b: Synchronized pan/zoom via svg-pan-zoom.
-//     Fit button. Mouse wheel zoom.
-//   - 3.2c: SvgEditor visual editing (select, drag, resize,
-//     vertex edit, inline text edit, multi-selection
-//     marquee, handle rendering, path command parsing).
-//   - 3.2d: Copy-as-PNG, context menu, presentation mode,
-//     SVG ↔ text diff mode toggle via toggle-svg-mode event.
-//   - 3.2e: Relative image resolution for PDF/PPTX-generated
-//     SVGs that reference sibling raster images.
-//
 // Governing spec: specs4/5-webapp/svg-viewer.md
 //
-// Architectural contracts pinned by this commit:
+// What this component does:
+//   - Tracks multiple open SVG files (open/close/switch)
+//     with a concurrent-openFile guard.
+//   - Fetches HEAD + working-copy content via Repo RPCs
+//     (`Repo.get_file_content`), renders them side by
+//     side — left pane is HEAD (read-only reference),
+//     right pane is the working copy.
+//   - Synchronises pan/zoom across the two panes via
+//     `svg-pan-zoom`, with a mutex guard to break
+//     feedback loops when one pane mirrors the other.
+//   - Hosts an `SvgEditor` on the right pane for visual
+//     editing (select, drag, resize, vertex edit, inline
+//     text edit, marquee, clipboard).
+//   - Resolves relative `<image href="...">` references
+//     in PDF/PPTX-generated SVGs by fetching sibling
+//     raster images via `Repo.get_file_base64` and
+//     rewriting the href in place.
+//   - Tracks dirty state per file, exposes a status LED
+//     mirroring the diff viewer's (clean / dirty / new),
+//     and dispatches `file-saved` events on save.
+//   - Handles keyboard shortcuts: Ctrl+S save, Ctrl+W
+//     close, Ctrl+PageUp/Down cycle, F11 presentation,
+//     Escape exit presentation, Ctrl+Shift+C copy PNG.
+//   - Presentation mode hides the left pane via CSS and
+//     refits the right pane to the new width. The left
+//     pane is collapsed (not `display: none`) so its
+//     `<defs>` gradients remain addressable by the
+//     browser — see the `.split.present .pane-left` CSS
+//     block for the full explanation.
+//   - Supports a context menu (right-click) with
+//     "Copy as PNG" and a toolbar toggle to switch to
+//     the Monaco text diff viewer via `toggle-svg-mode`.
 //
-//   - **Content is text, not base64.** SVG is XML. Fetch via
-//     `Repo.get_file_content` (same as the diff viewer does
-//     for text files). This matters — `Repo.get_file_base64`
-//     is for rendering images, not for editing their source.
+// Architectural contracts:
 //
-//   - **`innerHTML` injection, not Lit template interpolation.**
-//     Lit doesn't natively handle raw SVG string injection
-//     (it would HTML-escape the content). The component
-//     renders empty container divs and sets `innerHTML`
-//     manually in `updated()`. Same pattern the specs4
-//     document describes for the production viewer.
+//   - **Content is text, not base64.** SVG is XML. Fetch
+//     via `Repo.get_file_content` — same as the diff
+//     viewer for text files. `Repo.get_file_base64` is
+//     for rendering raster images, not editing source.
 //
-//   - **No lazy dirty tracking — save button always enabled
-//     for new files.** 3.2a has no editor, so the working-
-//     copy content can only change when an external caller
-//     mutates `this._files[i].modified` (e.g., a future
-//     SvgEditor commit). Until 3.2c lands, the viewer is
-//     effectively read-only — the save LED shows dirty only
-//     when the working-copy content differs from HEAD (as
-//     provided by the fetcher).
+//   - **`innerHTML` injection, not Lit interpolation.**
+//     Lit would HTML-escape raw SVG strings. The
+//     component renders empty container divs and sets
+//     `innerHTML` manually in `updated()`.
+//
+//   - **Right pane has `preserveAspectRatio="none"`** so
+//     the `SvgEditor` has sole viewBox authority. The
+//     left pane keeps the default ("xMidYMid meet") —
+//     it's a read-only reference with no editor math.
 //
 //   - **Status LED shape matches the diff viewer.** Same
-//     classes, same click-to-save affordance, same tooltip
-//     shape. Keeps the two viewers visually consistent so
-//     toggling between them doesn't surprise the user.
+//     classes, same click-to-save affordance. Toggling
+//     between viewers should not surprise the user.
 
 import { LitElement, css, html } from 'lit';
 
@@ -193,14 +188,34 @@ export class SvgViewer extends LitElement {
       height: 100%;
     }
 
-    /* Presentation mode — left pane hidden, right pane
-     * fills the full width. The split container stays in
-     * the DOM; CSS hides the left pane so the editor's
-     * SVG element isn't detached (which would destroy
-     * the SvgEditor's event listeners and selection
-     * state). */
+    /* Presentation mode — left pane collapsed to zero
+     * width, right pane fills the remaining space. We
+     * deliberately avoid display:none on the left pane:
+     * both panes inject the same SVG content, which
+     * means both contain <defs> with the same gradient
+     * IDs (e.g. a linearGradient with id "g-future").
+     * When the left pane has display:none, its subtree
+     * is pruned from rendering but its elements remain
+     * in the DOM and are still matched by document-wide
+     * ID lookups. Some browsers then resolve the right
+     * pane's fill="url(#g-future)" to the hidden left
+     * pane's gradient — which paints nothing — making
+     * every layer band render as a flat colourless
+     * rectangle in presentation mode.
+     *
+     * Collapsing via flex-basis + overflow:hidden +
+     * visibility:hidden keeps the left pane in the render
+     * tree (so its gradients remain addressable by the
+     * browser's renderer) while making it invisible and
+     * zero-width. The SvgEditor on the right pane stays
+     * mounted, selection state is preserved, and the
+     * gradient-resolution conflict is resolved. */
     .split.present .pane-left {
-      display: none;
+      flex: 0 0 0;
+      width: 0;
+      min-width: 0;
+      visibility: hidden;
+      border-left: none;
     }
     .split.present .pane-right {
       flex: 1 1 100%;
@@ -629,13 +644,14 @@ export class SvgViewer extends LitElement {
     const rightContainer =
       this.shadowRoot?.querySelector('.pane-right .svg-container');
     if (!rightContainer) return;
-    // In presentation mode the left pane is display:none.
-    // Skip its injection and pan-zoom init to avoid wasted
-    // work on a hidden element.
-    const isPresent = this._mode === _MODE_PRESENT;
-    const leftContainer = isPresent
-      ? null
-      : this.shadowRoot?.querySelector('.pane-left .svg-container');
+    // Both panes always receive their content — presentation
+    // mode is a CSS-only layout change (.split.present hides
+    // the left pane via display:none and flexes the right
+    // to 100%). The SVGs and their pan-zoom/editor
+    // instances stay mounted across the toggle.
+    const leftContainer = this.shadowRoot?.querySelector(
+      '.pane-left .svg-container',
+    );
     const leftContent = file.original || _EMPTY_SVG;
     const rightContent = file.modified || _EMPTY_SVG;
     // Track whether either side actually changed. If yes,
@@ -646,8 +662,21 @@ export class SvgViewer extends LitElement {
     // Skip reassignment when content hasn't changed —
     // innerHTML assignment forces a full SVG re-parse
     // which flashes the visual.
-    if (!isPresent && leftContent !== this._lastLeftContent) {
-      if (leftContainer) leftContainer.innerHTML = leftContent;
+    if (leftContent !== this._lastLeftContent) {
+      if (leftContainer) {
+        leftContainer.innerHTML = leftContent;
+        // Strip declared width/height so pan-zoom's fit
+        // computation uses the container's actual size
+        // rather than the SVG's intrinsic dimensions.
+        // Left pane keeps default preserveAspectRatio
+        // ("xMidYMid meet") — it's read-only, no editor
+        // coordinate math to protect from browser fitting.
+        const leftSvg = leftContainer.querySelector('svg');
+        if (leftSvg) {
+          leftSvg.removeAttribute('width');
+          leftSvg.removeAttribute('height');
+        }
+      }
       this._lastLeftContent = leftContent;
       changed = true;
     }
@@ -657,26 +686,28 @@ export class SvgViewer extends LitElement {
       changed = true;
     }
     if (changed) {
-      // Right panel gets preserveAspectRatio="none" so the
-      // SvgEditor has sole viewBox authority — otherwise
-      // the browser's aspect-ratio fitting fights with
-      // editor coordinate math. Applied via attribute on
-      // the root <svg> element. Left panel keeps the
-      // default (preserveAspectRatio="xMidYMid meet") since
+      // The right panel gets preserveAspectRatio="none"
+      // so the SvgEditor has sole viewBox authority —
+      // otherwise the browser's aspect-ratio fitting
+      // fights with editor coordinate math. The left
+      // panel keeps the default ("xMidYMid meet") since
       // it's a read-only reference.
+      //
+      // Declared width/height are stripped on both sides
+      // so the browser doesn't use the SVG's intrinsic
+      // dimensions — we want the CSS 100%/100% layout and
+      // pan-zoom's viewport transform to drive sizing.
       const rightSvg = rightContainer.querySelector('svg');
       if (rightSvg) {
         rightSvg.setAttribute('preserveAspectRatio', 'none');
+        rightSvg.removeAttribute('width');
+        rightSvg.removeAttribute('height');
       }
       // Dispose any prior editor before re-init — the old
       // editor's SVG reference is about to become stale.
       this._disposeEditor();
-      if (!isPresent && leftContainer) {
+      if (leftContainer) {
         this._initPanZoom(leftContainer, rightContainer);
-      } else {
-        // Presentation mode — no left panel to sync. Dispose
-        // any existing pan-zoom so stale refs don't linger.
-        this._disposePanZoom();
       }
       this._initEditor(rightSvg);
       // Resolve relative image references in both panels.
@@ -686,7 +717,7 @@ export class SvgViewer extends LitElement {
       // origin URL — which doesn't serve repo files — so
       // they silently fail. Fetch via Repo.get_file_base64
       // and rewrite in-place.
-      if (!isPresent && leftContainer) {
+      if (leftContainer) {
         this._resolveImageHrefs(leftContainer, file.path);
       }
       this._resolveImageHrefs(rightContainer, file.path);
@@ -759,11 +790,54 @@ export class SvgViewer extends LitElement {
       nextSibling = handleGroup.nextSibling;
       parent.removeChild(handleGroup);
     }
+    // Unwrap the svg-pan-zoom viewport group before
+    // serialising. svg-pan-zoom wraps all SVG children
+    // in <g class="svg-pan-zoom_viewport" transform="...">
+    // to apply its pan/zoom transform; if we serialise
+    // with the wrapper in place, the transform matrix
+    // and wrapper element get baked into file.modified.
+    // On next re-injection (e.g. entering presentation
+    // mode), pan-zoom wraps the already-wrapped content
+    // again, producing nested transforms that stack and
+    // visibly break the rendering — layer positions,
+    // gradients, and text all render at wrong scales.
+    // Collect viewport children, restore as direct
+    // children of the SVG root, serialise, then put the
+    // wrapper back so pan-zoom can continue operating.
+    const viewport = rightSvg.querySelector(
+      ':scope > g.svg-pan-zoom_viewport',
+    );
+    let viewportParent = null;
+    let viewportNext = null;
+    const viewportChildren = [];
+    if (viewport) {
+      viewportParent = viewport.parentNode;
+      viewportNext = viewport.nextSibling;
+      while (viewport.firstChild) {
+        const child = viewport.firstChild;
+        viewportChildren.push(child);
+        viewport.removeChild(child);
+        rightSvg.insertBefore(child, viewport);
+      }
+      rightSvg.removeChild(viewport);
+    }
     let html;
     try {
       html = rightContainer.innerHTML;
     } finally {
-      // Restore regardless of throw.
+      // Restore the viewport wrapper so pan-zoom's
+      // next operation finds its expected DOM shape.
+      if (viewport && viewportParent) {
+        for (const child of viewportChildren) {
+          viewport.appendChild(child);
+        }
+        if (viewportNext) {
+          viewportParent.insertBefore(viewport, viewportNext);
+        } else {
+          viewportParent.appendChild(viewport);
+        }
+      }
+      // Restore handle group regardless of throw.
       if (handleGroup && parent) {
         if (nextSibling) {
           parent.insertBefore(handleGroup, nextSibling);
@@ -942,6 +1016,27 @@ export class SvgViewer extends LitElement {
   }
 
   /**
+   * Initialise pan-zoom on the right panel only — used
+   * in presentation mode where the left panel is hidden.
+   * No sync callbacks since there's no partner panel to
+   * mirror. Tears down any existing instances first.
+   */
+  _initPanZoomRightOnly(rightContainer) {
+    this._disposePanZoom();
+    const rightSvg = rightContainer.querySelector('svg');
+    if (!rightSvg) return;
+    try {
+      this._panZoomRight = svgPanZoom(rightSvg, _PAN_ZOOM_OPTIONS);
+    } catch (err) {
+      console.warn(
+        '[svg-viewer] right-only pan/zoom init failed',
+        err,
+      );
+      this._panZoomRight = null;
+    }
+  }
+
+  /**
    * Destroy pan/zoom instances and null the refs. Safe
    * to call when instances don't exist — no-op.
    */
@@ -1113,15 +1208,29 @@ export class SvgViewer extends LitElement {
     this._mode =
       this._mode === _MODE_PRESENT ? _MODE_SELECT : _MODE_PRESENT;
     this._contextMenu = null;
-    // Content caches cleared so _injectSvgContent re-injects
-    // into the new layout. In presentation mode the left pane
-    // is display:none, so we skip its injection and pan-zoom
-    // init to avoid wasted work on a hidden element.
-    this._lastLeftContent = null;
-    this._lastRightContent = null;
-    // Re-inject after Lit commits the new template. The
-    // updated() hook's _injectSvgContent call will fire
-    // automatically because _mode is reactive.
+    // Mode toggle is CSS-only — .split.present hides the
+    // left pane and lets the right pane flex to 100%. The
+    // right pane's SVG, its pan-zoom instance, and its
+    // editor all stay mounted across the toggle. But the
+    // right-pane container does change width (from 50% to
+    // 100% of the split), and svg-pan-zoom's viewport
+    // transform was computed for the old width — it won't
+    // recompute on its own. Without a resize+fit call, the
+    // content stays at the narrower scale, painted against
+    // a now-stretched SVG element with preserveAspectRatio=
+    // "none". That mismatch is what makes gradient-filled
+    // layer bands render washed out (gradient stops spread
+    // across a stretched bbox) and layer text lose contrast
+    // in presentation mode. Wrap the refit in rAF so the
+    // CSS layout change has committed before we measure.
+    requestAnimationFrame(() => {
+      if (!this._panZoomRight) return;
+      try {
+        this._panZoomRight.resize();
+        this._panZoomRight.fit();
+        this._panZoomRight.center();
+      } catch (_) {}
+    });
   }
 
   // ---------------------------------------------------------------
