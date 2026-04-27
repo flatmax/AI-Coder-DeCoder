@@ -511,6 +511,19 @@ export class FilePicker extends LitElement {
      * add a `type: 'dir'` discriminator when they ship.
      */
     _contextMenu: { type: Object, state: true },
+    /**
+     * Git action disable flags. Tracked locally by
+     * listening to the same window events the app-shell
+     * uses (stream-chunk, stream-complete, commit-result,
+     * review-started, review-ended). Drives the disabled
+     * state on the three git buttons rendered in the sort
+     * row. The shell still owns the authoritative RPC
+     * dispatch; the picker fires a `git-action` window
+     * event on click and the shell handles.
+     */
+    _committing: { type: Boolean, state: true },
+    _reviewActive: { type: Boolean, state: true },
+    _streaming: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -585,6 +598,48 @@ export class FilePicker extends LitElement {
     .sort-btn .dir {
       margin-left: 0.15rem;
       opacity: 0.8;
+    }
+
+    /* Git actions — appear on the right side of the sort
+     * row. Auto-left margin pushes them against the right
+     * edge so they sit opposite the sort buttons without a
+     * wrapping flex item in between. Red tint on the
+     * destructive reset button matches the convention used
+     * elsewhere in the app. */
+    .picker-git-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
+      margin-left: auto;
+    }
+    .picker-git-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+      opacity: 0.7;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .picker-git-btn:hover:not([disabled]) {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.08);
+    }
+    .picker-git-btn.danger:hover:not([disabled]) {
+      background: rgba(248, 81, 73, 0.15);
+      border-color: rgba(248, 81, 73, 0.3);
+    }
+    .picker-git-btn.in-flight {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.12);
+      border-color: rgba(88, 166, 255, 0.3);
+    }
+    .picker-git-btn[disabled] {
+      opacity: 0.3;
+      cursor: not-allowed;
     }
 
     .tree-scroll {
@@ -1093,6 +1148,25 @@ export class FilePicker extends LitElement {
     this._onDocumentClickForMenu = this._onDocumentClickForMenu.bind(this);
     this._onDocumentKeyDownForMenu =
       this._onDocumentKeyDownForMenu.bind(this);
+    // Git action flags — updated from window events.
+    this._committing = false;
+    this._reviewActive = false;
+    this._streaming = false;
+    this._onStreamChunkGit = () => {
+      if (!this._streaming) this._streaming = true;
+    };
+    this._onStreamCompleteGit = () => {
+      this._streaming = false;
+    };
+    this._onCommitResultGit = () => {
+      this._committing = false;
+    };
+    this._onReviewStartedGit = () => {
+      this._reviewActive = true;
+    };
+    this._onReviewEndedGit = () => {
+      this._reviewActive = false;
+    };
     // Sort preferences — read persisted values with safe
     // defaults. A malformed localStorage entry (unknown mode,
     // non-'0'/'1' direction) falls back to defaults rather
@@ -1102,11 +1176,46 @@ export class FilePicker extends LitElement {
     this._sortAsc = loadedAsc;
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    // Mirror the shell's git-action gating so the buttons
+    // disable during commits, review mode, and streaming
+    // without needing a props pipeline through files-tab.
+    window.addEventListener('stream-chunk', this._onStreamChunkGit);
+    window.addEventListener(
+      'stream-complete', this._onStreamCompleteGit,
+    );
+    window.addEventListener(
+      'commit-result', this._onCommitResultGit,
+    );
+    window.addEventListener(
+      'review-started', this._onReviewStartedGit,
+    );
+    window.addEventListener(
+      'review-ended', this._onReviewEndedGit,
+    );
+  }
+
   // Tear down any open menu when the host detaches. Catches
   // mid-menu unmounts from tab switches and parent re-renders
   // so document listeners don't leak.
   disconnectedCallback() {
     this._closeContextMenu();
+    window.removeEventListener(
+      'stream-chunk', this._onStreamChunkGit,
+    );
+    window.removeEventListener(
+      'stream-complete', this._onStreamCompleteGit,
+    );
+    window.removeEventListener(
+      'commit-result', this._onCommitResultGit,
+    );
+    window.removeEventListener(
+      'review-started', this._onReviewStartedGit,
+    );
+    window.removeEventListener(
+      'review-ended', this._onReviewEndedGit,
+    );
     super.disconnectedCallback();
   }
 
@@ -1504,8 +1613,71 @@ export class FilePicker extends LitElement {
           '#',
           'Sort by size (click again to reverse)',
         )}
+        ${this._renderGitActions()}
       </div>
     `;
+  }
+
+  /**
+   * Render the three git action buttons — copy-diff,
+   * commit, reset-to-head — on the right side of the sort
+   * row. Each button dispatches a bubbling `git-action`
+   * window event that the app-shell catches and routes to
+   * the existing RPC handlers. Local state flags
+   * (_committing, _streaming, _reviewActive) drive the
+   * disabled states; the shell remains the single source
+   * of truth for the actual work.
+   */
+  _renderGitActions() {
+    const commitDisabled =
+      this._committing || this._reviewActive || this._streaming;
+    const resetDisabled = this._committing || this._streaming;
+    const commitTitle = this._reviewActive
+      ? 'Commit disabled during review'
+      : this._streaming
+        ? 'Commit disabled while AI is responding'
+        : this._committing
+          ? 'Committing…'
+          : 'Stage all changes and commit with an auto-generated message';
+    const resetTitle = this._streaming
+      ? 'Reset disabled while AI is responding'
+      : 'Reset to HEAD (discard all uncommitted changes)';
+    return html`
+      <div
+        class="picker-git-actions"
+        role="group"
+        aria-label="Git actions"
+      >
+        <button
+          class="picker-git-btn"
+          title="Copy working-tree diff to clipboard"
+          aria-label="Copy diff"
+          @click=${() => this._dispatchGitAction('copy-diff')}
+        >📋</button>
+        <button
+          class="picker-git-btn ${this._committing ? 'in-flight' : ''}"
+          ?disabled=${commitDisabled}
+          title=${commitTitle}
+          aria-label="Commit all changes"
+          @click=${() => this._dispatchGitAction('commit')}
+        >${this._committing ? '⏳' : '💾'}</button>
+        <button
+          class="picker-git-btn danger"
+          ?disabled=${resetDisabled}
+          title=${resetTitle}
+          aria-label="Reset to HEAD"
+          @click=${() => this._dispatchGitAction('reset')}
+        >⚠️</button>
+      </div>
+    `;
+  }
+
+  _dispatchGitAction(action) {
+    this.dispatchEvent(new CustomEvent('git-action', {
+      detail: { action },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   /**

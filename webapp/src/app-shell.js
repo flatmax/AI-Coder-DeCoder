@@ -485,10 +485,12 @@ export class AppShell extends JRPCClient {
       border: 1px solid rgba(240, 246, 252, 0.15);
       border-radius: 4px;
       color: var(--text-primary, #c9d1d9);
-      padding: 0.35rem 0.55rem;
-      font-size: 0.8125rem;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.9rem;
+      line-height: 1;
       cursor: pointer;
       opacity: 0.65;
+      white-space: nowrap;
       transition: opacity 120ms ease, background 120ms ease;
     }
     .crossref-btn:hover:not([disabled]) {
@@ -900,6 +902,23 @@ export class AppShell extends JRPCClient {
     // _fetchHistoryStatus call throws.
     this._onCompactionStatusRefresh =
       this._onCompactionStatusRefresh.bind(this);
+    // Git action button dispatch from the file picker
+    // header. The picker doesn't know the RPC call proxy,
+    // so it fires a bubbling `git-action` window event
+    // carrying {action: 'copy-diff'|'commit'|'reset'} and
+    // we route to the existing handlers.
+    this._onGitAction = this._onGitAction.bind(this);
+  }
+
+  _onGitAction(event) {
+    const action = event?.detail?.action;
+    if (action === 'copy-diff') {
+      this._onCopyDiff();
+    } else if (action === 'commit') {
+      this._onCommit();
+    } else if (action === 'reset') {
+      this._onResetToHead();
+    }
   }
 
   connectedCallback() {
@@ -1007,6 +1026,7 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'compaction-event', this._onCompactionStatusRefresh,
     );
+    window.addEventListener('git-action', this._onGitAction);
   }
 
   disconnectedCallback() {
@@ -1068,6 +1088,7 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'compaction-event', this._onCompactionStatusRefresh,
     );
+    window.removeEventListener('git-action', this._onGitAction);
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -3252,34 +3273,7 @@ export class AppShell extends JRPCClient {
                 : 'Cross-reference OFF — click to add the other index alongside'}
               aria-pressed=${this._crossRefEnabled}
               @click=${this._toggleCrossRef}
-            >🔀 ${this._crossRefEnabled ? 'Cross-ref ON' : 'Cross-ref'}</button>
-          </div>
-          <div class="header-git-actions" role="group"
-            aria-label="Git actions">
-            <button
-              class="git-action-btn"
-              ?disabled=${!this.call}
-              title="Copy working-tree diff to clipboard"
-              aria-label="Copy diff"
-              @click=${this._onCopyDiff}
-            >📋</button>
-            <button
-              class="git-action-btn ${this._committing ? 'in-flight' : ''}"
-              ?disabled=${!this.call || this._committing
-                || this._reviewActive || this._streaming
-                || !this._isLocalhost}
-              title=${this._commitButtonTitle()}
-              aria-label="Commit all changes"
-              @click=${this._onCommit}
-            >${this._committing ? '⏳' : '💾'}</button>
-            <button
-              class="git-action-btn danger"
-              ?disabled=${!this.call || this._committing
-                || this._streaming || !this._isLocalhost}
-              title=${this._resetButtonTitle()}
-              aria-label="Reset to HEAD"
-              @click=${this._onResetToHead}
-            >⚠️</button>
+            >🔀</button>
           </div>
           <button
             class="minimize-button"
