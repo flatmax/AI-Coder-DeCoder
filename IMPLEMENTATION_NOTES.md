@@ -51,6 +51,14 @@ Each layer depends only on layers below. Complete and test each layer before pro
 
 Moved to [specs4/impl-history/decisions.md](specs4/impl-history/decisions.md). New decisions continue numbering from D17 in this file.
 
+### D18 — Dropped svg-pan-zoom in favour of a paired SvgEditor
+
+Layers 5.11–5.20 shipped the SVG viewer with `svg-pan-zoom` running on both panes plus `SvgEditor` on the right pane for visual editing — two libraries, two coordinate systems, two viewBox authorities. The overlap produced shadow-DOM fragility, duplicated CTM inversion math, and a four-party viewBox sync dance that was prone to feedback loops.
+
+Post-Phase-3 refactor (commit `9770dc6`, impl-history entry 5.21): dropped `svg-pan-zoom`. `SvgEditor` gains a `readOnly` flag — when set, the editor handles pan/zoom/fit/wheel-zoom/middle-click-pan but skips every mutation path (selection, handles, marquee, text-edit, keyboard shortcuts, onChange). Both panes host editor instances; left is read-only. Each editor fires `onViewChange(viewBox)` on every viewBox write; the viewer mirrors writes between panes via `setViewBox(..., { silent: true })` guarded by a shared `_syncingViewBox` mutex. Full rationale in [specs4/impl-history/decisions.md § D18](specs4/impl-history/decisions.md#d18--dropped-svg-pan-zoom-in-favor-of-unified-svgeditor-on-both-panes).
+
+Spec updated in commit `7ef81d0` (`specs4/5-webapp/svg-viewer.md`). Impl-history at `specs4/impl-history/layer-5.md § 5.21` — the 5.11–5.20 entries are preserved as historical record; the refactor swaps the navigation substrate without touching the editing surface they document.
+
 ## Next tasks
 
 Layers 0–4 complete. Layer 5 is substantially delivered — core interaction loop (chat + selection + viewing + editing + search + review) fully functional. Remaining Layer 5 work, in order of readiness:
