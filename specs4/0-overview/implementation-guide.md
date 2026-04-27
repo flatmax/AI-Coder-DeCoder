@@ -144,11 +144,11 @@ Each change was made to enable a future parallel-agent mode (see [parallel-agent
 - **specs4 position:** Streaming state (content buffer, passive flag, streaming card) is keyed by request ID. Single-stream operation has at most one active key; multi-stream operation (parallel agents) produces N keyed states. Request IDs are the multiplexing primitive — the transport never assumes a singleton stream
 - **See:** [chat.md — Streaming State Keyed by Request ID](../5-webapp/chat.md#streaming-state-keyed-by-request-id), [streaming.md — Chunk Delivery Semantics](../3-llm/streaming.md#chunk-delivery-semantics)
 
-### Agent Conversations — Transient
+### Agent Conversations — Archived Separately
 
 - **specs3 position:** No position (parallel agents described only as future work)
-- **specs4 position:** Agent conversations are never persisted to JSONL, never included in user-facing history, never counted toward compaction thresholds. Only the original user request and the final assessor synthesis or applied edits persist
-- **See:** [history.md — Scope: User-Facing History Only](../3-llm/history.md#scope-user-facing-history-only)
+- **specs4 position:** In agent mode, the main LLM handles decomposition, agent-output review, iteration decisions, and synthesis — all within the same ContextManager that drives the user-facing chat. There is no separate planner or assessor role. Agents spawned in parallel by the main LLM each get their own ContextManager; their conversations are archived to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` so users can inspect what each agent did from the UI. The main LLM's own conversation is already in `history.jsonl` as the user message and the assistant response — no separate archive is needed. Agent conversations are never written to the main history, never counted toward compaction thresholds, and never used during session restore. Each record in the main history is tagged with a turn ID that correlates to any archive directory
+- **See:** [history.md — Agent Turn Archive](../3-llm/history.md#agent-turn-archive), [history.md — Turns](../3-llm/history.md#turns), [parallel-agents.md — Turn ID Propagation](../7-future/parallel-agents.md#turn-id-propagation)
 
 ### Indexes — Read-Only Snapshots Within a Request
 
@@ -179,7 +179,7 @@ Each change was made to enable a future parallel-agent mode (see [parallel-agent
 | Stability tracker | Per-mode (two total) | Per-context-manager (N possible) |
 | Single-stream guard | Any LLM request | User-initiated requests only |
 | Chunk routing | Singleton passive flag | Keyed by request ID |
-| Agent conversations | Unspecified | Transient, not persisted |
+| Agent conversations | Unspecified | Per-agent files archived to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`; main LLM has no separate archive (its conversation lives in main history) |
 | Index mutation | Procedural timing | Read-only snapshots within a request |
 | HUD breakdown | Session-global | Per-context-manager |
 | SVG viewer pan/zoom | `svg-pan-zoom` library + bespoke editor | Single bespoke editor on both panes; left in read-only mode |

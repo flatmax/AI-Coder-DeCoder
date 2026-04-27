@@ -325,7 +325,7 @@ Three problems surfaced in practice:
 | Stability tracker | Per-mode (two total) | Per-context-manager (N possible) |
 | Single-stream guard | Any LLM request | User-initiated requests only |
 | Chunk routing | Singleton passive flag | Keyed by request ID |
-| Agent conversations | Unspecified | Transient, not persisted |
+| Agent conversations | Unspecified | Per-agent files archived to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`; main LLM lives in main history |
 | Index mutation | Procedural timing | Read-only snapshots within a request |
 | HUD breakdown | Session-global | Per-context-manager |
 

@@ -10,22 +10,75 @@ Two coupled stores for conversation history: an in-memory working copy used for 
 - Lines that fail JSON parse on load are skipped with a warning (handles mid-write crashes)
 - In-memory store — the context manager's conversation history (see context-model)
 
-### Scope: User-Facing History Only
+### Scope: User-Facing History in the Main Store
 
-The persistent store holds only user-facing conversation — exchanges between the user and the primary LLM. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) generates additional internal conversations between the planner, agents, and assessor. These internal exchanges are **transient** — never persisted to JSONL, never included in the user-facing history, never counted toward compaction thresholds.
+The primary JSONL store (`history.jsonl` in the per-repo working directory) holds only user-facing conversation — exchanges between the user and the primary LLM. Agent-mode internal conversations (planner, per-agent turns, assessor reasoning) are persisted separately to a sibling archive rather than appended to the main store.
 
-What does get persisted from agent mode:
+### Turns
 
-- The original user request (as a user message)
-- The final assessor synthesis and/or applied edits (as a system event message or assistant message)
+Every user request is grouped into a **turn** — the unit of work from user message through the final assistant response. A turn ID is generated at the top of the streaming pipeline, stored on the user message record, and propagated to every downstream record produced by that request.
 
-What does not get persisted:
+Turns exist in both single-agent and agent modes:
 
-- Planner decomposition output
-- Per-agent conversation turns
-- Assessor intermediate reasoning
+- **Non-agent mode** — one turn = one user message + one assistant response from a single LLM call. No planner, agents, or assessor; no turn archive directory is created.
+- **Agent mode** — one turn = one user message + one assistant response, where the main LLM decomposed the work, spawned N agents to execute sub-tasks in parallel, observed their results, possibly iterated (more agents with different scope), and produced the final synthesis. All of the main LLM's reasoning — decomposition, review of agent output, iteration decisions, synthesis — lands in the assistant message's `content` field as it normally would; the main LLM has no separate conversation store. Only the agents get their own ContextManagers and their own archive files.
 
-Rationale — agent conversations are internal machinery serving one user intent. Persisting them would pollute the user's session history with scaffolding that is meaningless out of context and would inflate token counts on session reload. The user cares about what was accomplished, not how the agents coordinated.
+The main LLM's access to agent-spawning is a capability, not a mode the user toggles. A turn that did not need agents produces a normal assistant message via a single LLM call; a turn that did need agents produces an assistant message whose content may be longer and more structured, but shares the same schema. Whether a turn spawned agents is answered by checking whether `.ac-dc4/agents/{turn_id}/` exists.
+
+Agent ContextManagers inherit the turn ID from the user message that triggered them. Per-agent conversations are archived to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`. The main LLM's conversation is NOT archived separately — it's already in the main `history.jsonl` as the user message and the assistant response.
+
+Turn ID format — `turn_` prefix + epoch milliseconds + short random suffix, matching the session ID convention. Globally unique across sessions.
+
+### Main Store Records — Turn ID Field
+
+Every record in `history.jsonl` carries an optional `turn_id` field. User messages always carry it (generated at the top of the streaming pipeline). Assistant messages, system events, and compaction events inherit the turn ID from the user message that triggered them. Records predating this change lack the field — the loader tolerates its absence; the UI simply does not offer a "show agents" affordance for those records.
+
+### Agent Turn Archive
+
+When a turn spawns agents, each agent's conversation is persisted to a sibling archive under the per-repo working directory:
+
+```
+.ac-dc4/
+  history.jsonl                     — main conversation (unchanged schema except +turn_id)
+  agents/
+    {turn_id}/
+      agent-00.jsonl                — first agent's conversation
+      agent-01.jsonl                — second agent's conversation
+      ...
+```
+
+One directory per turn that spawned agents. One JSONL file per agent. The main store never merges with the archive; the archive is discovered only via turn ID lookup.
+
+Files in the archive use the same message schema as the main store (role, content, timestamp, optional metadata) plus a `turn_id` field matching the directory name. This lets the loader reuse the parsing path.
+
+The archive is created lazily — only when a turn actually spawns agents. Turns that did not spawn agents never touch the `agents/` directory. Re-iteration within a turn (main LLM spawns agents, reviews, spawns different agents with new scope) appends to the existing per-agent files rather than creating new directories — an agent-NN.jsonl file contains all iterations of agent NN within that turn, with iteration boundaries implicit in the conversation flow.
+
+### User-Visible Agent Browsing
+
+Agent archives are surfaced through an extension of the chat panel itself (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The chat panel remains the vertical spine of the session — the user message / assistant response pairs the user already knows. When the active turn spawned agents, an agent region fans out alongside the chat with one column per agent.
+
+The backend exposes one RPC to support this:
+
+- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
+
+No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and different turns become active.
+
+The archive view is read-only — users cannot edit archived records. Archived conversations are NOT used during session restore. Session restore reads only `history.jsonl` and produces the same in-memory context as before — the user continues where they left off, seeing only their own conversation, with agent archives fetched on demand when they scroll.
+
+### Disk Usage Monitoring
+
+The agent archive grows with every agent-mode turn. Per-turn size is variable (small decomposition tasks produce a few hundred KB; large refactors with 8 agents and long contexts can reach tens of MB).
+
+The system does not delete archived turns automatically. When the cumulative size of `.ac-dc4/agents/` crosses 1 GB, a one-time warning is surfaced to the user via the dialog header banner and a dismissible toast, with guidance on how to clear old archives (Settings → cleanup affordance, or direct removal of per-turn directories). The warning fires once per server lifetime; the user dismisses it and continues working. The check runs during startup and after each agent-mode turn completes, so heavy usage surfaces the warning promptly.
+
+Per-turn archive deletion is safe — no record in `history.jsonl` depends on the archive for correctness. Deleting `.ac-dc4/agents/{turn_id}/` simply removes the "show agents" affordance from any assistant message carrying that turn ID.
+
+### Backwards Compatibility
+
+- Records without `turn_id` load correctly; the UI does not offer the agent-archive affordance for them.
+- Archives for turns whose main-store record has been deleted (manual cleanup, file corruption) are orphaned — safe to keep, safe to remove. The UI ignores archives with no corresponding main-store record.
+- Upgrading from a version without turn IDs is a no-op — new turns get IDs, old turns stay ID-less.
+- Historical records that carry an `assessor_reasoning` field (from an earlier draft of this spec that treated the assessor as a distinct role) are loaded as plain assistant messages; the extra field is ignored. No migration is required.
 
 ## Message Schema
 
@@ -33,8 +86,10 @@ Rationale — agent conversations are internal machinery serving one user intent
 - Session ID — groups related messages
 - Timestamp — ISO 8601 UTC
 - Role — user or assistant
-- Content — full text
-- Optional: system event flag, image references (filenames in working-directory images folder), legacy image count (deprecated), files in context (user messages), files modified (assistant messages), edit results array
+- Content — full text — for agent-mode assistant messages, this contains the main LLM's full output across all its internal calls within the turn (decomposition, review, iteration decisions, synthesis)
+- Optional: system event flag, image references (filenames in working-directory images folder), legacy image count (deprecated), files in context (user messages), files modified (assistant messages), edit results array, turn ID (every record in a session produced after turn IDs were introduced)
+
+Agent-mode and non-agent-mode assistant messages share the same schema. The only runtime signal distinguishing them is the presence of `.ac-dc4/agents/{turn_id}/` on disk.
 
 ## Sessions
 
@@ -161,6 +216,12 @@ Rationale — agent conversations are internal machinery serving one user intent
 
 - Every persisted message has a unique ID
 - Session IDs are unique
+- Turn IDs are unique within a session and globally across sessions
 - Mid-stream crashes never corrupt JSONL structure — partial lines are skipped on load
 - Compaction purge of stability tracker is complete — no stale history entries remain
 - After auto-restore, the first get-current-state call returns messages from the previous session
+- The main `history.jsonl` never contains per-agent conversation records; those live only in the per-turn archive. The main LLM's own reasoning (decomposition, review, synthesis for agent-mode turns) is captured naturally in the assistant message's `content` field — there is no separate conversation store for the main LLM
+- Agent-mode and non-agent-mode assistant messages share the same schema; whether a turn spawned agents is answered by checking for `.ac-dc4/agents/{turn_id}/` on disk
+- Session restore reads only the main store; agent archives are load-on-demand for UI browsing
+- Archive directories are safe to delete at any time; removal of an archive never breaks main-store playback
+- The 1 GB disk-usage warning fires at most once per server lifetime; the user is never blocked from working, only informed

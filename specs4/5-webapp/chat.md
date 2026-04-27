@@ -217,6 +217,15 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
   - On mode change (code ↔ document)
 - Server returns mode-appropriate snippets; frontend does not distinguish between modes
 
+## Agent Archive Integration
+
+Turns in which the main LLM spawned agents have an associated archive of per-agent conversations (see [history.md](../3-llm/history.md#agent-turn-archive) and [agent-browser.md](agent-browser.md) for the UI spec).
+
+- The chat panel surfaces these via a right-side agent region that fans out from the chat for the active turn
+- A collapse tab on the right edge of the chat toggles the agent region open or closed; state persists per session
+- The chat itself IS the spine of every turn — it shows the user message and the assistant response. In agent-mode turns, the assistant response's `content` naturally includes the main LLM's decomposition narration, any review-and-iterate decisions, and the final synthesis, because all of that came from the same LLM's output stream. The chat renders it exactly as any other assistant message; no special card layout is needed for agent-mode turns
+- Assistant messages are schema-identical between agent-mode and non-agent-mode turns; the only distinguishing signal is the collapse tab, which appears whenever the active turn has an archive directory on disk
+
 ## Commit and Reset Flows
 
 ### Commit (Server-Driven)
@@ -303,3 +312,6 @@ Handler accepts events for both the current streaming request ID and the most re
 - Commit and reset messages persist to history as system event messages via the server, not client-side
 - Session-loaded handler resets streaming state before replacing the message list
 - Passive stream completion always prepends the user message from the result if present
+- Turns that did not spawn agents render identically to today — the agent region and collapse tab never appear
+- Agent-mode and non-agent-mode assistant messages share the same card layout; the only runtime signal of agent involvement is the collapse tab's presence for the active turn
+- The active turn (for agent region routing) is determined solely by chat scroll position; no separate navigation state exists
