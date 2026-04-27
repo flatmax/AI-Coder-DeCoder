@@ -28,7 +28,7 @@ Both directory names are in `.gitignore` so a developer running both implementat
 Specs4 documents the per-repo directory abstractly ("the per-repo working directory") without pinning the name, which is the right altitude for a behavioral spec. Specs3 correctly documents `.ac-dc/` because it describes the previous implementation. Neither suite needs updating for this rename.
 
 
-🟨🟨🟨 REPL unnecessary — let me also add the work plan
+unnecessary — let me also add the work plan
 
 Wait, I need to separate this into two edits — one for D18 and one for the work plan section. Let me redo.
 
@@ -144,11 +144,13 @@ Strike completed passes; add delivery commits; document any deviations.
 - Markdown preview, TeX preview, LSP, markdown link provider, status LED, panel labels (for loadPanel), content-change dirty tracking are all preserved.
 - The diff editor's single-instance reuse pattern is preserved — the rewrite changes the contents that feed the models, not the editor lifecycle.
 
-## Keyword enrichment UX completion plan — in progress
+## Keyword enrichment UX completion plan — **delivered**
 
-Layer 2.8.4 shipped the enrichment pipeline (scaffold, extraction, orchestrator integration) but left three cleanup items for a follow-up pass: tristate readiness signalling, frontend progress routing, and a one-shot unavailable-toast. This section tracks the follow-up work.
+All three steps shipped. Tristate `enrichment_status` on the backend (Step 1), floating progress overlay on the frontend (Step 2a), one-shot unavailable-toast (Step 2b). Plan detail archived to [specs4/impl-history/layer-2.md](specs4/impl-history/layer-2.md) under the Layer 2.8.4 section.
 
-Three sub-commits. Each lands with tests and an update to this plan marking it delivered.
+### Original plan (for reference)
+
+Layer 2.8.4 shipped the enrichment pipeline (scaffold, extraction, orchestrator integration) but left three cleanup items for a follow-up pass: tristate readiness signalling, frontend progress routing, and a one-shot unavailable-toast.
 
 ### Step 1 — Backend tristate `enrichment_status`
 
