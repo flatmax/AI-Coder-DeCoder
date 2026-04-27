@@ -27,9 +27,58 @@ Circular indicator showing the active file's state:
 - Fallback — plain text
 ### Monaco Worker Configuration
 Hybrid worker setup:
-- **Editor worker** — a real Worker from the Monaco package; required for diff computation. Without it, the editor renders but shows no line-level change indicators
-- **All other workers** — stubbed with no-op workers created from Blob URLs; covers language-service workers (TypeScript, JSON, CSS, HTML). Backend LSP covers the features these workers would provide
-The configuration must be installed before any Monaco module imports that create editors.
+- **Editor worker** — a real Worker from the Monaco package; required for diff computation, find widget, word-based autocomplete, and any editor-core service that dispatches to the `editorWorkerService` label. Without it, the diff editor renders and accepts edits, but `getLineChanges()` returns null forever — no red/green highlighting, no gutter markers, no overview-ruler ticks. The failure is silent.
+- **All other workers** — stubbed with no-op worker-like objects covering the `postMessage`/`addEventListener`/`terminate` surface. Covers language-service workers (TypeScript, JSON, CSS, HTML). Backend LSP covers the features these workers would provide.
+
+The configuration must be installed before any Monaco module imports that create editors. In practice this means the worker-environment install runs as a module-level side effect in the same file that imports Monaco, before any other module can get a reference to `monaco.editor`.
+
+#### Worker Loading Pattern
+The editor worker must be bundled by the build tool and returned as a real Worker instance. The pattern `new Worker(new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url), { type: 'module' })` — which appears in Monaco's own sample code — is unreliable under Vite's dep optimizer: the URL resolves at build time for bare specifiers but the resulting runtime fetch can return HTML or 404 after pre-bundling, Worker construction throws, the try/catch in the getter falls through to the stub, and diff output silently disappears. Syntax highlighting still works because Monarch tokenizers run on the main thread, which makes the failure hard to notice without devtools probing.
+
+The reliable pattern under Vite is a dedicated worker-entry module imported with the `?worker` suffix:
+
+```
+// monaco-worker.js — thin worker entry
+import 'monaco-editor/esm/vs/editor/editor.worker.js';
+
+// monaco-setup.js — import compiles the entry as a Worker
+import EditorWorker from './monaco-worker.js?worker';
+
+self.MonacoEnvironment = {
+  getWorker(_id, label) {
+    if (label === 'editorWorkerService') return new EditorWorker();
+    return /* no-op stub */;
+  },
+};
+```
+
+Reimplementations using non-Vite bundlers should follow that bundler's documented Web Worker pattern (webpack's `new Worker(new URL(...))` with `experiments.asyncWebAssembly`, esbuild's `--loader:.worker.js=file`, etc.) rather than the Monaco-sample pattern, for the same silent-failure reason.
+
+#### Monaco Module Entry
+Import Monaco from the **full editor entry** (`monaco-editor/esm/vs/editor/editor.main.js`), not the **API-only entry** (`monaco-editor/esm/vs/editor/editor.api.js`). The API entry exposes the programmatic surface (`createDiffEditor`, `languages.register`, etc.) but does not pull in Monaco's contribution modules — find widget, hover, folding, bracket matching, diff decoration renderer, word highlighter. Symptoms when the API entry is used by mistake:
+- `Ctrl+F` throws `Error: command 'actions.find' not found` because the find controller never registered its action.
+- Diff editing runs the diff algorithm correctly (the worker produces line changes) but the visible highlighting and gutter markers rely on contribution-layer rendering code that isn't loaded, so changes render invisibly.
+
+The cost of the full entry is that all built-in languages are bundled. Mitigate via the build tool's chunk-splitting if bundle size matters; the worker entry is a separate chunk regardless.
+
+#### Diagnostic Probe
+When diff highlighting does not appear, the following in devtools distinguishes the four failure modes:
+
+```
+const v = /* walk shadow roots to find <ac-diff-viewer> */;
+const e = v._editor;
+console.log('line changes:', e.getLineChanges());
+console.log('modified len:', e.getModifiedEditor().getValue().length);
+console.log('original len:', e.getOriginalEditor().getValue().length);
+const sr = v.shadowRoot;
+console.log('has .mtk:', [...sr.querySelectorAll('style')].some(s => s.textContent.includes('.mtk')));
+console.log('has line-insert:', [...sr.querySelectorAll('style')].some(s => s.textContent.includes('line-insert')));
+```
+
+- `line changes: null` → editor worker not running. Check the worker loading pattern and network tab for a failed worker fetch.
+- `line changes: []` → models have identical content. Check model creation.
+- `line changes: [...]` non-empty but `has line-insert: false` → diff-decoration CSS not in document.head. Check that the full `editor.main.js` entry is imported and that `editor.main.css` is imported as a side effect.
+- `line changes: [...]` non-empty and `has line-insert: true` → shadow-DOM style sync problem; see [Monaco Shadow DOM Integration](#monaco-shadow-dom-integration).
 ### MATLAB Syntax Highlighting
 - Custom tokenizer registered at module load time (before any editor instance is created)
 - Monaco has no built-in MATLAB language; registration must happen eagerly

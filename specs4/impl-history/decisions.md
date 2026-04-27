@@ -211,6 +211,73 @@ Cleanup: `disconnect()` closes the WebSocket (which exits the message loop and e
 
 Relevant in Layer 6 when the startup sequence may want a Python-side client for health checks, and in any future integration test that exercises the full jrpc-oo round-trip. Tests that mock the inner server never hit this — only tests using the real `JRPCClient`.
 
+### D17 — Monaco worker + module entry — two subtle failure modes
+
+The webapp's Monaco diff editor stopped rendering diff highlighting during Layer 5 Phase 3 work (commit `c69b01f`). Debugging surfaced two independent pitfalls that any reimplementation should avoid up front, both visible in devtools but neither raising an error.
+
+**Pitfall 1 — Worker loading pattern.** Monaco's official samples and earlier versions of this app used:
+
+```js
+new Worker(
+  new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url),
+  { type: 'module' }
+)
+```
+
+Under Vite's dep optimizer this resolves at build time but returns HTML or 404 at runtime for the bare specifier. Worker construction throws; the `try/catch` in `MonacoEnvironment.getWorker` falls through to a no-op stub; diff output silently disappears. `getLineChanges()` returns `null` forever, no red/green backgrounds, no gutter markers. Syntax highlighting keeps working because Monarch tokenizers run on the main thread, making the failure hard to spot without devtools probing.
+
+**Fix:** import the worker via Vite's `?worker` suffix, which delegates resolution to Vite's worker pipeline:
+
+```js
+// monaco-worker.js
+import 'monaco-editor/esm/vs/editor/editor.worker.js';
+
+// monaco-setup.js
+import EditorWorker from './monaco-worker.js?worker';
+// ...getWorker returns new EditorWorker()
+```
+
+Non-Vite bundlers should use their own documented worker-bundling pattern (webpack's `new Worker(new URL(...))` with `experiments.asyncWebAssembly`, esbuild's file loader, etc.) rather than the Monaco sample.
+
+**Pitfall 2 — Module entry.** Monaco's ESM package exposes two top-level entries:
+
+- `monaco-editor/esm/vs/editor/editor.api.js` — programmatic surface only
+- `monaco-editor/esm/vs/editor/editor.main.js` — programmatic surface **plus** all contribution modules and built-in languages
+
+The API entry is tempting because it looks smaller and lets you cherry-pick languages. But it omits the contribution modules — find widget, hover, folding, bracket matching, **diff decoration renderer**, word highlighter, color picker. Symptoms:
+
+- `Ctrl+F` throws `Error: command 'actions.find' not found`.
+- The diff algorithm runs correctly (`getLineChanges()` returns real data) but the highlighting, gutter markers, and overview-ruler ticks are rendered by contribution-layer code that never loaded, so changes appear invisible.
+
+**Fix:** import from `editor.main.js`. Size cost is manageable via build-config chunk-splitting; `editor.main.js` is a separate chunk from the worker entry regardless.
+
+**Diagnostic probe.** When diff highlighting doesn't work, run in devtools console:
+
+```js
+const v = /* walk shadow roots for <ac-diff-viewer> */;
+const e = v._editor;
+console.log('line changes:', e.getLineChanges());
+console.log('has .mtk:', [...v.shadowRoot.querySelectorAll('style')]
+  .some(s => s.textContent.includes('.mtk')));
+console.log('has line-insert:', [...v.shadowRoot.querySelectorAll('style')]
+  .some(s => s.textContent.includes('line-insert')));
+```
+
+Results:
+
+| line changes | has .mtk | has line-insert | Cause |
+|---|---|---|---|
+| `null` | true | false | Worker not running — Pitfall 1 |
+| non-empty | true | false | Contribution modules missing — Pitfall 2 |
+| non-empty | true | true | Shadow-DOM style sync problem |
+| `[]` | true | either | Models have identical content — model creation bug |
+
+Ctrl+F independently confirms Pitfall 2: if it throws `actions.find not found`, the API-only entry is in use.
+
+**Spec references.** The detailed worker-config recipe and diagnostic steps live in `specs4/5-webapp/diff-viewer.md § Monaco Worker Configuration` and `specs3/5-webapp/diff_viewer.md § Monaco Worker Configuration`. Both were updated alongside this decision.
+
+**Lesson.** Monaco's documented sample code isn't safe by default under modern bundlers. Reimplementations should treat the worker-loading pattern and module entry as build-tool-specific choices, not as copy-from-sample decisions. Both failure modes are silent; tests that only verify the editor mounts and accepts edits will pass with either bug in place.
+
 ### D10 — Architectural contracts preserved from day one
 
 `specs4/0-overview/implementation-guide.md#architectural-changes-from-specs3` lists changes in specs4 that are **contracts** — a reimplementer must preserve them even when specs3 describes an older pattern. Quick reference for Layer 1+ work:
