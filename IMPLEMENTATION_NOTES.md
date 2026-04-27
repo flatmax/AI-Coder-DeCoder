@@ -51,6 +51,17 @@ Each layer depends only on layers below. Complete and test each layer before pro
 
 Moved to [specs4/impl-history/decisions.md](specs4/impl-history/decisions.md). New decisions continue numbering from D17 in this file.
 
+## Next tasks
+
+Layers 0–4 complete. Layer 5 is substantially delivered — core interaction loop (chat + selection + viewing + editing + search + review) fully functional. Remaining Layer 5 work, in order of readiness:
+
+1. **Dialog polish** (next) — dragging, resizing, minimizing, position persistence to localStorage. Dialog is currently fixed left-docked at 50% width. Spec reference: `specs4/5-webapp/shell.md § Dialog Container`.
+2. **App shell polish** (next) — window resize handling (editor dimensions follow dialog + window resize; Monaco layout call chain), remaining global keyboard shortcuts (Alt+1..4 for tab switching, Alt+M for minimize toggle — Ctrl+Shift+F is already wired). State restoration cascade and file/viewport persistence are already delivered.
+3. **Doc Convert tab — commit 6** — commits 1–5 delivered the full interaction surface. Commit 6's scope is TBD; land after dialog/shell polish so the tab renders in a finished dialog chrome.
+4. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
+
+Beyond Layer 5: Layer 6 (deployment — build tooling, PyInstaller packaging, release pipeline) has not started. The webapp-dist bundling deferral (D7) and version baking for releases both land in Layer 6.
+
 ## Layer 0 — scaffolding — complete
 
 Historical detail archived to [specs4/impl-history/layer-0.md](specs4/impl-history/layer-0.md).
