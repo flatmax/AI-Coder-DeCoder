@@ -1648,6 +1648,7 @@ export class FilePicker extends LitElement {
         role="group"
         aria-label="Git actions"
       >
+        <span class="label">Git</span>
         <button
           class="picker-git-btn"
           title="Copy working-tree diff to clipboard"

@@ -3181,13 +3181,6 @@ export class AppShell extends JRPCClient {
             class="tab-button ${this.activeTab === 'settings' ? 'active' : ''}"
             @click=${() => this._switchTab('settings')}
           >⚙️ Settings</button>
-          ${this._docConvertAvailable ? html`
-            <button
-              class="tab-button ${this.activeTab === 'doc-convert' ? 'active' : ''}"
-              @click=${() => this._switchTab('doc-convert')}
-              title="Convert documents to markdown"
-            >📄 Convert</button>
-          ` : null}
           <div class="mode-toggle">
             <div class="mode-segmented" role="group"
               aria-label="Context mode">
@@ -3214,7 +3207,14 @@ export class AppShell extends JRPCClient {
                 : 'Cross-reference OFF — click to add the other index alongside'}
               aria-pressed=${this._crossRefEnabled}
               @click=${this._toggleCrossRef}
-            >🔀</button>
+            >🔀 ${this._crossRefEnabled ? 'Cross-ref ON' : 'Cross-ref'}</button>
+            ${this._docConvertAvailable ? html`
+              <button
+                class="tab-button ${this.activeTab === 'doc-convert' ? 'active' : ''}"
+                @click=${() => this._switchTab('doc-convert')}
+                title="Convert documents to markdown"
+              >📄 Convert</button>
+            ` : null}
           </div>
           <button
             class="minimize-button"
