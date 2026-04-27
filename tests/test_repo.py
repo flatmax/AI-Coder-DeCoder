@@ -2882,6 +2882,91 @@ class TestSearch:
         # context line.
         assert line1_match["context_after"] == []
 
+    def test_finds_matches_in_hyphenated_paths(self, repo: Repo) -> None:
+        """Paths containing hyphens don't confuse the output parser.
+
+        Regression test for a bug where ``_parse_grep_output`` would
+        split on the first ``:`` or ``-`` in the line, mistaking a
+        hyphen inside the filename (``chat-panel.js``,
+        ``file-picker.js``) for the path/linenum separator. Every
+        match in such a file was silently dropped.
+
+        The fix disambiguates by requiring the separator to be
+        followed by ``<digits><same-sep>`` — the pattern git grep
+        uses for ``path<sep>linenum<sep>text``. A hyphen inside a
+        path fails that check because the next character is a
+        letter, not a digit.
+        """
+        # File with a hyphenated basename and a hyphen inside its
+        # parent directory — exercises both positions where the
+        # broken parser would have split prematurely.
+        (repo.root / "webapp" / "src").mkdir(parents=True)
+        (repo.root / "webapp" / "src" / "chat-panel.js").write_text(
+            'title="Quick-insert snippets"\n'
+            "other content\n",
+            encoding="utf-8",
+        )
+        (repo.root / "webapp" / "src" / "file-picker.js").write_text(
+            "the quick brown fox\n",
+            encoding="utf-8",
+        )
+        _run_git(
+            repo.root,
+            "add",
+            "webapp/src/chat-panel.js",
+            "webapp/src/file-picker.js",
+        )
+        _run_git(repo.root, "commit", "-q", "-m", "add hyphenated files")
+
+        # Case-sensitive fixed-string search for the exact phrase.
+        results = repo.search_files(
+            "Quick-insert",
+            ignore_case=False,
+        )
+        files = {r["file"] for r in results}
+        assert "webapp/src/chat-panel.js" in files
+
+        # And a case-insensitive search hits both files — exercises
+        # the parser on multiple hits across multiple hyphenated
+        # paths.
+        results_ci = repo.search_files("quick", ignore_case=True)
+        files_ci = {r["file"] for r in results_ci}
+        assert "webapp/src/chat-panel.js" in files_ci
+        assert "webapp/src/file-picker.js" in files_ci
+
+    def test_context_lines_work_for_hyphenated_paths(
+        self, repo: Repo
+    ) -> None:
+        """Context lines are correctly attributed in hyphenated paths.
+
+        Extends the regression test to cover the parse path for
+        context lines (separator ``-`` instead of ``:``). With
+        context=1 and a match in the middle of a 3-line file,
+        both neighbours should appear as context.
+        """
+        (repo.root / "my-file.md").write_text(
+            "first line\n"
+            "target line\n"
+            "third line\n",
+            encoding="utf-8",
+        )
+        _run_git(repo.root, "add", "my-file.md")
+        _run_git(repo.root, "commit", "-q", "-m", "add hyphenated md")
+
+        results = repo.search_files("target", context_lines=1)
+        assert len(results) == 1
+        entry = results[0]
+        assert entry["file"] == "my-file.md"
+        assert len(entry["matches"]) == 1
+        match = entry["matches"][0]
+        assert match["line_num"] == 2
+        assert len(match["context_before"]) == 1
+        assert match["context_before"][0]["line_num"] == 1
+        assert "first" in match["context_before"][0]["line"]
+        assert len(match["context_after"]) == 1
+        assert match["context_after"][0]["line_num"] == 3
+        assert "third" in match["context_after"][0]["line"]
+
 
 # ---------------------------------------------------------------------------
 # Git subprocess helper

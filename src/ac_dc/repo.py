@@ -2696,12 +2696,20 @@ class Repo:
           match groups (ignored here).
 
         The separator character (``:`` or ``-``) between path and
-        linenum is also the match-vs-context indicator. Same
-        character also separates linenum from the text.
+        linenum is ALSO the match-vs-context indicator, and the
+        SAME character separates linenum from the text. This means
+        paths containing hyphens (``chat-panel.js``,
+        ``file-picker.js``, etc.) are deeply ambiguous — scanning
+        for the first ``:`` or ``-`` would split at the first
+        hyphen in the path, not at the path/linenum boundary.
 
-        Paths containing a ``:`` or ``-`` in awkward positions
-        would confuse the parse, but such paths are vanishingly
-        rare and already filtered by ``_validate_rel_path``.
+        Disambiguation: the real path/linenum boundary is always
+        followed by ``<digits><same-sep>``. We scan every
+        candidate separator in the line and accept the first one
+        whose continuation matches that pattern. This handles
+        hyphenated paths correctly because a hyphen inside the
+        path is followed by more path characters (letters, another
+        hyphen, a dot), never by ``<digits>-``.
 
         Strategy: three passes, each small and obvious.
 
@@ -2721,38 +2729,51 @@ class Repo:
         for line in raw.splitlines():
             if line == "--":
                 continue
-            # Find the first ':' or '-' — that's the separator
-            # between path and linenum (and tells us match vs
-            # context). We scan from the left.
+            # Find the first ``:`` or ``-`` whose continuation is
+            # ``<digits><same-sep>``. Candidates earlier in the
+            # line (e.g. a hyphen inside ``chat-panel.js``) fail
+            # the continuation check and get skipped.
             path_end = -1
             sep_char = ""
-            for idx, ch in enumerate(line):
-                if ch in (":", "-"):
-                    path_end = idx
-                    sep_char = ch
-                    break
-            if path_end <= 0:
-                # No separator or empty path — skip defensively.
+            text_start = -1
+            line_num = -1
+            scan = 0
+            while scan < len(line):
+                ch = line[scan]
+                if ch not in (":", "-"):
+                    scan += 1
+                    continue
+                # Candidate separator at position `scan`. Check the
+                # continuation: one or more digits, then the same
+                # separator character again.
+                digit_end = scan + 1
+                while digit_end < len(line) and line[digit_end].isdigit():
+                    digit_end += 1
+                if digit_end == scan + 1:
+                    # No digits followed the separator — not a
+                    # real path/linenum boundary.
+                    scan += 1
+                    continue
+                if digit_end >= len(line) or line[digit_end] != ch:
+                    # Digits not followed by a matching separator.
+                    scan += 1
+                    continue
+                # Valid boundary found.
+                path_end = scan
+                sep_char = ch
+                try:
+                    line_num = int(line[scan + 1:digit_end])
+                except ValueError:
+                    scan += 1
+                    continue
+                text_start = digit_end + 1
+                break
+            if path_end <= 0 or line_num < 0:
+                # No valid boundary or empty path — skip.
                 continue
             path = line[:path_end]
-            rest = line[path_end + 1:]
             is_match = sep_char == ":"
-            # rest starts with the line number followed by the same
-            # separator char, then the text.
-            i = 0
-            while i < len(rest) and rest[i].isdigit():
-                i += 1
-            if i == 0 or i >= len(rest):
-                continue
-            try:
-                line_num = int(rest[:i])
-            except ValueError:
-                continue
-            # The char at position i should match sep_char — if it
-            # doesn't, this isn't a real grep line, skip.
-            if rest[i] != sep_char:
-                continue
-            text = rest[i + 1:]
+            text = line[text_start:]
             parsed.append((path, line_num, is_match, text))
 
         # Group by file, preserving order.
