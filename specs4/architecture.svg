@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 960" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <title>AC⚡DC Architecture (specs4)</title>
+  <desc>Layered architecture diagram derived from specs4: Foundation → Indexing → LLM Engine → Features → Webapp, with Deployment and Future layers. Backend is a single Python process exposing jrpc-oo over WebSocket; the webapp is a Lit-based browser client.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#444"/>
+    </marker>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+    </marker>
+
+    <linearGradient id="g-foundation" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e3f2fd"/><stop offset="100%" stop-color="#bbdefb"/>
+    </linearGradient>
+    <linearGradient id="g-indexing" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e8f5e9"/><stop offset="100%" stop-color="#c8e6c9"/>
+    </linearGradient>
+    <linearGradient id="g-llm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff3e0"/><stop offset="100%" stop-color="#ffe0b2"/>
+    </linearGradient>
+    <linearGradient id="g-features" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fce4ec"/><stop offset="100%" stop-color="#f8bbd0"/>
+    </linearGradient>
+    <linearGradient id="g-webapp" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ede7f6"/><stop offset="100%" stop-color="#d1c4e9"/>
+    </linearGradient>
+    <linearGradient id="g-deploy" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eceff1"/><stop offset="100%" stop-color="#cfd8dc"/>
+    </linearGradient>
+    <linearGradient id="g-future" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fffde7"/><stop offset="100%" stop-color="#fff9c4"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .layer-title  { font-size: 15px; font-weight: 700; fill: #222; }
+    .layer-sub    { font-size: 11px; fill: #555; }
+    .comp         { fill: #fff; stroke: #555; stroke-width: 1; }
+    .comp-label   { font-size: 12px; fill: #111; font-weight: 600; }
+    .comp-sub     { font-size: 10px; fill: #444; }
+    .layer-box    { stroke: #666; stroke-width: 1.2; }
+    .edge         { stroke: #444; stroke-width: 1.4; fill: none; }
+    .edge-light   { stroke: #888; stroke-width: 1; fill: none; stroke-dasharray: 4 3; }
+    .pill         { fill: #fff; stroke: #333; stroke-width: 1; }
+    .title        { font-size: 22px; font-weight: 800; fill: #111; }
+    .subtitle     { font-size: 12px; fill: #555; }
+    .legend-text  { font-size: 11px; fill: #333; }
+  </style>
+
+  <!-- Title -->
+  <text class="title" x="40" y="36">AC⚡DC — Architecture (specs4)</text>
+  <text class="subtitle" x="40" y="55">
+    Single Python process · bidirectional JSON-RPC over WebSocket (jrpc-oo) · Lit browser webapp · per-repo <tspan font-family="monospace">.ac-dc4/</tspan> working dir
+  </text>
+
+  <!-- ===================== FUTURE (top) ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="80" width="1200" height="70" rx="10" fill="url(#g-future)"/>
+    <text class="layer-title" x="56" y="102">Layer 7 — Future</text>
+    <text class="layer-sub"   x="56" y="118">Speculative; invariants protect these paths today.</text>
+    <g>
+      <rect class="comp" x="980" y="92" width="240" height="50" rx="6"/>
+      <text class="comp-label" x="1100" y="112" text-anchor="middle">Parallel Agents</text>
+      <text class="comp-sub"   x="1100" y="128" text-anchor="middle">planner · agents · assessor · iteration loop</text>
+    </g>
+  </g>
+
+  <!-- ===================== WEBAPP ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="170" width="1200" height="170" rx="10" fill="url(#g-webapp)"/>
+    <text class="layer-title" x="56" y="192">Layer 5 — Webapp (Lit · Monaco · browser)</text>
+    <text class="layer-sub"   x="56" y="208">Shell owns the single WebSocket; tabs and viewers share one RPC proxy via a mixin.</text>
+
+    <!-- Shell -->
+    <rect class="comp" x="60" y="220" width="180" height="106" rx="6"/>
+    <text class="comp-label" x="150" y="240" text-anchor="middle">App Shell</text>
+    <text class="comp-sub"   x="150" y="256" text-anchor="middle">WebSocket owner</text>
+    <text class="comp-sub"   x="150" y="270" text-anchor="middle">draggable dialog</text>
+    <text class="comp-sub"   x="150" y="284" text-anchor="middle">startup overlay</text>
+    <text class="comp-sub"   x="150" y="298" text-anchor="middle">global shortcuts</text>
+    <text class="comp-sub"   x="150" y="312" text-anchor="middle">toasts · HUDs</text>
+
+    <!-- Tabs -->
+    <rect class="comp" x="260" y="220" width="150" height="106" rx="6"/>
+    <text class="comp-label" x="335" y="240" text-anchor="middle">Files Tab</text>
+    <text class="comp-sub"   x="335" y="258" text-anchor="middle">file picker</text>
+    <text class="comp-sub"   x="335" y="272" text-anchor="middle">context menus</text>
+    <text class="comp-sub"   x="335" y="286" text-anchor="middle">selection · exclusion</text>
+    <text class="comp-sub"   x="335" y="300" text-anchor="middle">review banner</text>
+
+    <rect class="comp" x="420" y="220" width="150" height="106" rx="6"/>
+    <text class="comp-label" x="495" y="240" text-anchor="middle">Chat Panel</text>
+    <text class="comp-sub"   x="495" y="258" text-anchor="middle">streaming messages</text>
+    <text class="comp-sub"   x="495" y="272" text-anchor="middle">edit-block cards</text>
+    <text class="comp-sub"   x="495" y="286" text-anchor="middle">search · history</text>
+    <text class="comp-sub"   x="495" y="300" text-anchor="middle">images · speech</text>
+
+    <rect class="comp" x="580" y="220" width="150" height="106" rx="6"/>
+    <text class="comp-label" x="655" y="240" text-anchor="middle">Context Tab</text>
+    <text class="comp-sub"   x="655" y="258" text-anchor="middle">budget sub-view</text>
+    <text class="comp-sub"   x="655" y="272" text-anchor="middle">cache sub-view</text>
+    <text class="comp-sub"   x="655" y="286" text-anchor="middle">rebuild · search</text>
+
+    <rect class="comp" x="740" y="220" width="150" height="106" rx="6"/>
+    <text class="comp-label" x="815" y="240" text-anchor="middle">Doc Convert</text>
+    <text class="comp-sub"   x="815" y="258" text-anchor="middle">status badges</text>
+    <text class="comp-sub"   x="815" y="272" text-anchor="middle">conversion flow</text>
+    <text class="comp-sub"   x="815" y="286" text-anchor="middle">progress events</text>
+
+    <rect class="comp" x="900" y="220" width="150" height="106" rx="6"/>
+    <text class="comp-label" x="975" y="240" text-anchor="middle">Settings Tab</text>
+    <text class="comp-sub"   x="975" y="258" text-anchor="middle">whitelisted configs</text>
+    <text class="comp-sub"   x="975" y="272" text-anchor="middle">save + reload</text>
+
+    <!-- Viewers -->
+    <rect class="comp" x="1060" y="220" width="160" height="50" rx="6"/>
+    <text class="comp-label" x="1140" y="240" text-anchor="middle">Diff Viewer</text>
+    <text class="comp-sub"   x="1140" y="258" text-anchor="middle">Monaco · MD/TeX preview · LSP</text>
+
+    <rect class="comp" x="1060" y="276" width="160" height="50" rx="6"/>
+    <text class="comp-label" x="1140" y="296" text-anchor="middle">SVG Viewer</text>
+    <text class="comp-sub"   x="1140" y="314" text-anchor="middle">pan/zoom · visual editor</text>
+  </g>
+
+  <!-- ===================== FEATURES ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="360" width="1200" height="110" rx="10" fill="url(#g-features)"/>
+    <text class="layer-title" x="56" y="382">Layer 4 — Features</text>
+    <text class="layer-sub"   x="56" y="398">Cross-cutting capabilities wired through the LLM service and RPC layer.</text>
+
+    <rect class="comp" x="60"   y="410" width="180" height="50" rx="6"/>
+    <text class="comp-label" x="150" y="430" text-anchor="middle">URL Content</text>
+    <text class="comp-sub"   x="150" y="448" text-anchor="middle">fetch · summarize · cache</text>
+
+    <rect class="comp" x="260"  y="410" width="180" height="50" rx="6"/>
+    <text class="comp-label" x="350" y="430" text-anchor="middle">Image Persistence</text>
+    <text class="comp-sub"   x="350" y="448" text-anchor="middle">paste · store · reattach</text>
+
+    <rect class="comp" x="460"  y="410" width="180" height="50" rx="6"/>
+    <text class="comp-label" x="550" y="430" text-anchor="middle">Code Review</text>
+    <text class="comp-sub"   x="550" y="448" text-anchor="middle">read-only · soft reset · diff</text>
+
+    <rect class="comp" x="660"  y="410" width="180" height="50" rx="6"/>
+    <text class="comp-label" x="750" y="430" text-anchor="middle">Doc Convert</text>
+    <text class="comp-sub"   x="750" y="448" text-anchor="middle">markitdown · PyMuPDF · LO · pptx</text>
+
+    <rect class="comp" x="860"  y="410" width="180" height="50" rx="6"/>
+    <text class="comp-label" x="950" y="430" text-anchor="middle">Collaboration</text>
+    <text class="comp-sub"   x="950" y="448" text-anchor="middle">admission · host promotion</text>
+
+    <rect class="comp" x="1060" y="410" width="160" height="50" rx="6"/>
+    <text class="comp-label" x="1140" y="430" text-anchor="middle">Settings Service</text>
+    <text class="comp-sub"   x="1140" y="448" text-anchor="middle">whitelist · hot reload</text>
+  </g>
+
+  <!-- ===================== LLM ENGINE ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="490" width="1200" height="160" rx="10" fill="url(#g-llm)"/>
+    <text class="layer-title" x="56" y="512">Layer 3 — LLM Engine</text>
+    <text class="layer-sub"   x="56" y="528">LLMService coordinates: context, history, prompt assembly, streaming, edits, modes, cache tiering.</text>
+
+    <rect class="comp" x="60"   y="540" width="190" height="100" rx="6"/>
+    <text class="comp-label" x="155" y="560" text-anchor="middle">LLMService</text>
+    <text class="comp-sub"   x="155" y="576" text-anchor="middle">chat_streaming · commit_all</text>
+    <text class="comp-sub"   x="155" y="590" text-anchor="middle">reset_to_head · review</text>
+    <text class="comp-sub"   x="155" y="604" text-anchor="middle">mode switch · cross-ref</text>
+    <text class="comp-sub"   x="155" y="618" text-anchor="middle">rebuild_cache</text>
+
+    <rect class="comp" x="270"  y="540" width="180" height="100" rx="6"/>
+    <text class="comp-label" x="360" y="560" text-anchor="middle">Context Manager</text>
+    <text class="comp-sub"   x="360" y="576" text-anchor="middle">history (in-memory)</text>
+    <text class="comp-sub"   x="360" y="590" text-anchor="middle">file / url / review ctx</text>
+    <text class="comp-sub"   x="360" y="604" text-anchor="middle">token budget · shed</text>
+    <text class="comp-sub"   x="360" y="618" text-anchor="middle">tiered assembly</text>
+
+    <rect class="comp" x="470"  y="540" width="180" height="100" rx="6"/>
+    <text class="comp-label" x="560" y="560" text-anchor="middle">Stability Tracker</text>
+    <text class="comp-sub"   x="560" y="576" text-anchor="middle">L0–L3 cache tiers</text>
+    <text class="comp-sub"   x="560" y="590" text-anchor="middle">N-value promotion</text>
+    <text class="comp-sub"   x="560" y="604" text-anchor="middle">ripple · anchoring</text>
+    <text class="comp-sub"   x="560" y="618" text-anchor="middle">ref-graph seeding</text>
+
+    <rect class="comp" x="670"  y="540" width="180" height="100" rx="6"/>
+    <text class="comp-label" x="760" y="560" text-anchor="middle">History Compactor</text>
+    <text class="comp-sub"   x="760" y="576" text-anchor="middle">topic boundary detect</text>
+    <text class="comp-sub"   x="760" y="590" text-anchor="middle">truncate / summarize</text>
+    <text class="comp-sub"   x="760" y="604" text-anchor="middle">system-event message</text>
+
+    <rect class="comp" x="870"  y="540" width="180" height="100" rx="6"/>
+    <text class="comp-label" x="960" y="560" text-anchor="middle">History Store</text>
+    <text class="comp-sub"   x="960" y="576" text-anchor="middle">JSONL per repo</text>
+    <text class="comp-sub"   x="960" y="590" text-anchor="middle">sessions · search</text>
+    <text class="comp-sub"   x="960" y="604" text-anchor="middle">auto-restore</text>
+
+    <rect class="comp" x="1070" y="540" width="150" height="46" rx="6"/>
+    <text class="comp-label" x="1145" y="560" text-anchor="middle">Edit Pipeline</text>
+    <text class="comp-sub"   x="1145" y="578" text-anchor="middle">anchor match · stage</text>
+
+    <rect class="comp" x="1070" y="594" width="150" height="46" rx="6"/>
+    <text class="comp-label" x="1145" y="614" text-anchor="middle">Token Counter</text>
+    <text class="comp-sub"   x="1145" y="632" text-anchor="middle">tiktoken · fallback</text>
+  </g>
+
+  <!-- ===================== INDEXING ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="670" width="1200" height="110" rx="10" fill="url(#g-indexing)"/>
+    <text class="layer-title" x="56" y="692">Layer 2 — Indexing</text>
+    <text class="layer-sub"   x="56" y="708">Read-only snapshots per request; mtime-based caches with sidecar persistence.</text>
+
+    <rect class="comp" x="60"   y="720" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="170" y="740" text-anchor="middle">Symbol Index</text>
+    <text class="comp-sub"   x="170" y="758" text-anchor="middle">tree-sitter · compact map · LSP</text>
+
+    <rect class="comp" x="300"  y="720" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="410" y="740" text-anchor="middle">Document Index</text>
+    <text class="comp-sub"   x="410" y="758" text-anchor="middle">markdown · SVG · doc map</text>
+
+    <rect class="comp" x="540"  y="720" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="650" y="740" text-anchor="middle">Keyword Enrichment</text>
+    <text class="comp-sub"   x="650" y="758" text-anchor="middle">KeyBERT · TF-IDF fallback</text>
+
+    <rect class="comp" x="780"  y="720" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="890" y="740" text-anchor="middle">Reference Graphs</text>
+    <text class="comp-sub"   x="890" y="758" text-anchor="middle">code refs · doc section refs</text>
+
+    <rect class="comp" x="1020" y="720" width="200" height="50" rx="6"/>
+    <text class="comp-label" x="1120" y="740" text-anchor="middle">Import Resolver</text>
+    <text class="comp-sub"   x="1120" y="758" text-anchor="middle">py · js/ts · c/c++</text>
+  </g>
+
+  <!-- ===================== FOUNDATION ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="800" width="1200" height="110" rx="10" fill="url(#g-foundation)"/>
+    <text class="layer-title" x="56" y="822">Layer 1 — Foundation</text>
+    <text class="layer-sub"   x="56" y="838">No dependencies; everything above builds on these.</text>
+
+    <rect class="comp" x="60"   y="850" width="200" height="50" rx="6"/>
+    <text class="comp-label" x="160" y="870" text-anchor="middle">Configuration</text>
+    <text class="comp-sub"   x="160" y="888" text-anchor="middle">bundled + user · hot reload</text>
+
+    <rect class="comp" x="280"  y="850" width="200" height="50" rx="6"/>
+    <text class="comp-label" x="380" y="870" text-anchor="middle">Repository</text>
+    <text class="comp-sub"   x="380" y="888" text-anchor="middle">git · per-path write lock</text>
+
+    <rect class="comp" x="500"  y="850" width="240" height="50" rx="6"/>
+    <text class="comp-label" x="620" y="870" text-anchor="middle">RPC Transport (jrpc-oo)</text>
+    <text class="comp-sub"   x="620" y="888" text-anchor="middle">WebSocket · bidirectional · services</text>
+
+    <rect class="comp" x="760"  y="850" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="870" y="870" text-anchor="middle">Logging + CLI</text>
+    <text class="comp-sub"   x="870" y="888" text-anchor="middle">structured stderr · argparse</text>
+
+    <rect class="comp" x="1000" y="850" width="220" height="50" rx="6"/>
+    <text class="comp-label" x="1110" y="870" text-anchor="middle">Per-repo <tspan font-family="monospace">.ac-dc4/</tspan></text>
+    <text class="comp-sub"   x="1110" y="888" text-anchor="middle">history · images · caches</text>
+  </g>
+
+  <!-- ===================== DEPLOYMENT (side) ===================== -->
+  <g>
+    <rect class="layer-box" x="40" y="920" width="1200" height="30" rx="8" fill="url(#g-deploy)"/>
+    <text class="layer-title" x="56" y="941">Layer 6 — Deployment</text>
+    <text class="layer-sub"   x="240" y="941">Vite build · static server · PyInstaller packaging · startup phases · graceful shutdown</text>
+  </g>
+
+  <!-- ===================== EDGES (dependencies) ===================== -->
+  <!-- Webapp → LLM Engine via RPC -->
+  <g stroke-linecap="round">
+    <!-- Shell/tabs → RPC Transport (down through features/llm to foundation conceptually) -->
+    <path class="edge" d="M 150 326 L 150 380 L 620 380 L 620 460" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 335 326 L 335 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 495 326 L 495 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 655 326 L 655 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 815 326 L 815 410" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 975 326 L 975 410" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 1140 326 L 1140 410" marker-end="url(#arrow)"/>
+
+    <!-- Features → LLM Engine (and Repository) -->
+    <path class="edge" d="M 150 460 L 155 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 350 460 L 360 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 550 460 L 560 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 750 460 L 760 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 950 460 L 960 540" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 1140 460 L 1145 540" marker-end="url(#arrow)"/>
+
+    <!-- LLM Engine → Indexing -->
+    <path class="edge" d="M 155 640 L 170 720" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 360 640 L 410 720" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 560 640 L 650 720" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 960 640 L 890 720" marker-end="url(#arrow)"/>
+
+    <!-- Indexing → Foundation (Repository + Config) -->
+    <path class="edge" d="M 170 770 L 160 850" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 410 770 L 380 850" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 650 770 L 620 850" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 890 770 L 870 850" marker-end="url(#arrow)"/>
+    <path class="edge" d="M 1120 770 L 1110 850" marker-end="url(#arrow)"/>
+
+    <!-- Cross: Edit Pipeline → Repository -->
+    <path class="edge" d="M 1145 640 C 1145 760, 400 790, 380 850" marker-end="url(#arrow)"/>
+    <!-- LLMService → History Store persists to .ac-dc4/ -->
+    <path class="edge-light" d="M 960 640 C 1100 700, 1150 780, 1110 850" marker-end="url(#arrow-light)"/>
+    <!-- RPC carries events server→browser -->
+    <path class="edge-light" d="M 620 850 C 620 500, 620 400, 620 326" marker-end="url(#arrow-light)"/>
+  </g>
+
+  <!-- ===================== LEGEND ===================== -->
+  <g transform="translate(60, 75)">
+    <rect class="pill" x="0" y="-18" width="540" height="22" rx="10"/>
+    <line x1="12" y1="-7" x2="40" y2="-7" class="edge"/>
+    <polygon points="40,-11 48,-7 40,-3" fill="#444"/>
+    <text class="legend-text" x="54" y="-3">dependency / call direction</text>
+    <line x1="240" y1="-7" x2="270" y2="-7" class="edge-light"/>
+    <polygon points="270,-11 278,-7 270,-3" fill="#888"/>
+    <text class="legend-text" x="286" y="-3">server → client event · cross-layer flow</text>
+  </g>
+</svg>

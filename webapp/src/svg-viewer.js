@@ -427,7 +427,19 @@ export class SvgViewer extends LitElement {
     const { path } = opts;
     const existing = this._files.findIndex((f) => f.path === path);
     if (existing !== -1 && existing === this._activeIndex) {
-      // Same-file open — no-op.
+      // Same-file open — state is unchanged, but the
+      // caller (app-shell's _onNavigateFile) relies on
+      // active-file-changed firing to flip viewer
+      // visibility from diff to SVG. Without this
+      // dispatch, clicking an SVG file that's already
+      // the SVG viewer's active file (e.g. from a prior
+      // session restore) leaves the SVG viewer hidden
+      // behind the diff viewer indefinitely. specs4/
+      // 5-webapp/shell.md § "Viewer Background" — "the
+      // viewer dispatches active-file-changed on every
+      // openFile call; the shell uses this to identify
+      // which viewer should be visible."
+      this._dispatchActiveFileChanged();
       return;
     }
     if (this._openingPath === path) return;

@@ -1442,6 +1442,26 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  filesModified(paths) {
+    // Backend signals disk changes (created, modified, or
+    // deleted files) after edit-pipeline apply, commits,
+    // and resets. The files tab listens for the hyphenated
+    // DOM event and reloads the file tree via RPC, which
+    // picks up new untracked files and refreshed git
+    // status badges.
+    //
+    // Note the event-name difference: the server-push hook
+    // is camelCase (`filesModified`) to match the existing
+    // `filesChanged` / `commitResult` naming convention;
+    // the DOM event is hyphenated (`files-modified`) to
+    // match what file-picker.md "Files Tab Orchestration"
+    // specifies and what files-tab.js already listens for.
+    window.dispatchEvent(new CustomEvent('files-modified', {
+      detail: { paths: Array.isArray(paths) ? paths : [] },
+    }));
+    return true;
+  }
+
   userMessage(data) {
     window.dispatchEvent(new CustomEvent('user-message', { detail: data }));
     return true;

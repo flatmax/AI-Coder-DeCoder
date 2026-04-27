@@ -3801,6 +3801,27 @@ class LLMService:
                 "filesChanged", list(self._selected_files)
             )
 
+        # Broadcast filesModified whenever apply wrote to disk,
+        # regardless of whether any auto-add happened. Without
+        # this, newly-created files (e.g., an LLM-authored
+        # architecture diagram) land in the working tree but
+        # the picker never reloads its tree — it has no signal
+        # that disk state changed. specs4/5-webapp/file-picker.md
+        # § "Files Tab Orchestration" pins this as the refresh
+        # trigger: the files tab listens for files-modified and
+        # re-fetches the tree via Repo.get_file_tree, which
+        # picks up untracked files and refreshed git-status
+        # badges.
+        #
+        # Fires for modify, create, and delete alike — the
+        # file tree RPC does the status parsing, so the
+        # browser just needs to know "reload now".
+        modified_paths = result.get("files_modified") or []
+        if modified_paths:
+            self._broadcast_event(
+                "filesModified", list(modified_paths)
+            )
+
         # Clear active-request flag BEFORE post-response work, so a
         # concurrent cancel check doesn't hold on to a stale ID.
         self._active_user_request = None
@@ -5802,6 +5823,15 @@ class LLMService:
                     "system_event_message": event_text,
                 },
             )
+
+            # Signal the picker to reload. A commit doesn't
+            # touch working-tree content but flips every
+            # staged file's status badge (S → clean), and
+            # previously-clean files may have become
+            # untracked if the commit wasn't `stage_all`.
+            # The picker's tree reload via Repo.get_file_tree
+            # is the only way to surface the new status.
+            self._broadcast_event("filesModified", [])
         except Exception as exc:
             logger.exception("Commit failed: %s", exc)
             await self._broadcast_event_async(
@@ -5878,6 +5908,14 @@ class LLMService:
                 content=event_text,
                 system_event=True,
             )
+
+        # Every staged / modified / untracked file reverted
+        # to HEAD or was deleted. The picker must reload to
+        # reflect the wholesale status change — without this,
+        # modified-file badges linger on files that are now
+        # clean on disk.
+        self._broadcast_event("filesModified", [])
+
         return {
             "status": "ok",
             "system_event_message": event_text,
