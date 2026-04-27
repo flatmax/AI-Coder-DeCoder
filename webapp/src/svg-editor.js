@@ -1084,6 +1084,70 @@ export class SvgEditor {
   }
 
   /**
+   * Notify the editor that the SVG's view transform has
+   * changed (pan, zoom, resize). Forces a re-render of
+   * the handle overlay so stroke width, dash length,
+   * and handle radius — all computed from the current
+   * CTM via `_screenDistToSvgDist` — recompute at the
+   * new zoom and stay visually constant in screen space.
+   *
+   * Safe to call when no element is selected; becomes a
+   * no-op. Called by the hosting viewer from its
+   * pan/zoom event callbacks.
+   *
+   * Doesn't re-measure the selected element's bbox (it
+   * scales with zoom automatically since it's in SVG
+   * user units), but the attributes of handle dots and
+   * bbox outline need refreshing because they were baked
+   * in user units computed at the previous zoom level.
+   */
+  notifyViewChanged() {
+    if (this._selectedSet.size === 0 && !this._textEdit) return;
+    this._renderHandles();
+    // If a text edit is in flight, rebuild its overlay
+    // so the foreignObject position, size, and font-size
+    // — all derived from the current CTM — refresh to
+    // match the new zoom. Preserve the in-progress
+    // textarea value and caret/selection so the user
+    // doesn't lose work mid-edit.
+    if (this._textEdit) {
+      const edit = this._textEdit;
+      const liveValue = edit.textarea.value;
+      let caretStart = liveValue.length;
+      let caretEnd = liveValue.length;
+      try {
+        caretStart = edit.textarea.selectionStart ?? caretStart;
+        caretEnd = edit.textarea.selectionEnd ?? caretEnd;
+      } catch (_) {}
+      this._teardownTextEditOverlay(edit);
+      const overlay = this._renderTextEditOverlay(
+        edit.element,
+        liveValue,
+      );
+      if (overlay) {
+        this._textEdit = {
+          element: edit.element,
+          originalContent: edit.originalContent,
+          foreignObject: overlay.foreignObject,
+          textarea: overlay.textarea,
+        };
+        try {
+          overlay.textarea.focus();
+          overlay.textarea.setSelectionRange?.(
+            caretStart,
+            caretEnd,
+          );
+        } catch (_) {}
+      } else {
+        // Rebuild failed (bbox unmeasurable after
+        // transform change) — drop the edit state to
+        // avoid an orphaned reference.
+        this._textEdit = null;
+      }
+    }
+  }
+
+  /**
    * Toggle an element in or out of the selection set.
    * Used by shift+click. When the element is already
    * selected, it's removed; when it isn't, it's added
@@ -1520,20 +1584,68 @@ export class SvgEditor {
    * textarea refs, or null when bbox computation fails.
    */
   _renderTextEditOverlay(element, content) {
-    let bbox;
-    try {
-      bbox = element.getBBox?.();
-    } catch (_) {
+    // Compute the bbox in SVG-root coords. Use the
+    // element's `getBoundingClientRect()` (the actual
+    // painted extent in screen pixels) rather than
+    // `getBBox()` (the geometric/glyph bbox in local
+    // coords).
+    //
+    // Why the difference matters: for `<text>` elements,
+    // `getBBox()` can return a width that's smaller than
+    // the painted text — it measures glyph bounds using
+    // font metrics that don't always match what the
+    // browser actually renders (especially with bold
+    // variants, font loading races, or fallback fonts).
+    // `getBoundingClientRect()` reflects the painted
+    // pixels: whatever the user sees is what we span.
+    //
+    // Convert the four screen corners through the root
+    // SVG's inverse CTM to get SVG-root coords, then
+    // build an axis-aligned bbox. Same pattern as
+    // `_elementBBoxInSvgRoot` but sourced from the
+    // paint rect rather than the geometric bbox.
+    const rect = element.getBoundingClientRect?.();
+    if (!rect || rect.width === 0 || rect.height === 0) {
       return null;
     }
-    if (!bbox) return null;
-    // Positioning padding. Ensures the textarea has
-    // room for the user's first keystroke without
-    // resizing or clipping.
-    const padX = 8;
-    const padY = 4;
-    const width = Math.max(bbox.width + padX * 2, 60);
-    const height = Math.max(bbox.height + padY * 2, 24);
+    const tl = this._screenToSvg(rect.left, rect.top);
+    const tr = this._screenToSvg(rect.right, rect.top);
+    const bl = this._screenToSvg(rect.left, rect.bottom);
+    const br = this._screenToSvg(rect.right, rect.bottom);
+    const xs = [tl.x, tr.x, bl.x, br.x];
+    const ys = [tl.y, tr.y, bl.y, br.y];
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const bbox = {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+    // Positioning padding. Small amount so the glyphs
+    // don't butt up against the textarea border, but
+    // not so much that the overlay dwarfs the text it's
+    // editing. Expressed in screen pixels and converted
+    // to SVG-root units so the visual padding stays
+    // consistent across zoom levels.
+    //
+    // No minimum width/height clamp: earlier revisions
+    // enforced a screen-pixel minimum to guarantee a
+    // usable textarea for tiny selections, but that
+    // makes the overlay dramatically larger than a
+    // typical body-text selection (see specs4 SVG
+    // viewer "topic boundary detect" scenario). The
+    // textarea is usable at any size — the user can
+    // always zoom in before editing if the text is
+    // genuinely too small.
+    const padScreenX = 2;
+    const padScreenY = 1;
+    const padX = this._screenDistToSvgDist(padScreenX);
+    const padY = this._screenDistToSvgDist(padScreenY);
+    const width = bbox.width + padX * 2;
+    const height = bbox.height + padY * 2;
     const ns = 'http://www.w3.org/2000/svg';
     const xhtmlNs = 'http://www.w3.org/1999/xhtml';
     const fo = document.createElementNS(ns, 'foreignObject');
@@ -1545,10 +1657,39 @@ export class SvgEditor {
     // re-select the text element if the user clicks
     // inside the textarea.
     fo.setAttribute('class', HANDLE_CLASS);
-    // Read font properties from the text element. Falls
-    // back to CSS defaults when unspecified.
-    const fontSize =
-      element.getAttribute('font-size') || '16';
+    // Font size: compute a value that, when rendered
+    // through the foreignObject's transform chain,
+    // produces glyphs matching the underlying text's
+    // painted height.
+    //
+    // The pan-zoom transform scales both the SVG text
+    // AND the foreignObject's CSS coordinate space by
+    // the same factor. So if the SVG text has effective
+    // font-size S (in user units) and the zoom scale is
+    // Z, its painted height is S×Z screen pixels.
+    // Setting the textarea's `font-size: S_css px`
+    // inside the foreignObject paints at S_css × Z
+    // screen pixels — same formula. So font-size in
+    // user units = painted height / zoom.
+    //
+    // We have the painted height directly from
+    // `rect.height` (screen pixels from
+    // getBoundingClientRect). Divide by zoom to get the
+    // user-unit font-size. Subtract a small CSS chrome
+    // allowance (padding + border) so glyphs don't clip
+    // against the textarea's border.
+    const ctm = this._svg.getScreenCTM?.();
+    const zoomScale = ctm && ctm.a ? Math.abs(ctm.a) : 1;
+    // Chrome in screen pixels: 1px padding top + 1px
+    // padding bottom + 1px border top + 1px border
+    // bottom = 4 screen pixels total. Subtract from
+    // painted height, then convert to user units.
+    const chromeScreen = 4;
+    const innerScreenHeight = Math.max(
+      rect.height - chromeScreen,
+      1,
+    );
+    const fontSize = String(innerScreenHeight / zoomScale);
     const fill = element.getAttribute('fill') || '#000';
     const textarea = document.createElementNS(xhtmlNs, 'textarea');
     textarea.value = content;
@@ -1556,6 +1697,22 @@ export class SvgEditor {
     // font from the text element, accent border so the
     // active edit is visually distinct from other
     // handles.
+    // Border width also scaled to screen pixels so the
+    // accent outline stays visually consistent. The CSS
+    // `px` unit inside foreignObject equals 1 SVG-root
+    // unit, so we pass SVG-unit values with a "px"
+    // suffix.
+    //
+    // `line-height: 1` is deliberate: SVG text renders
+    // with line-height equal to font-size (no extra
+    // leading), but HTML textareas default to ~1.2. If
+    // we leave the default, the textarea's glyphs render
+    // SMALLER than the underlying SVG text because the
+    // textarea packs a 1.2× line-box into the same
+    // height as the SVG text's 1.0× glyph extent. Setting
+    // line-height to 1 makes them match.
+    const borderWidth = this._screenDistToSvgDist(1);
+    const borderRadius = this._screenDistToSvgDist(2);
     textarea.setAttribute(
       'style',
       [
@@ -1567,12 +1724,13 @@ export class SvgEditor {
         `font-size: ${fontSize}px`,
         `color: ${fill}`,
         'background: rgba(255, 255, 255, 0.95)',
-        'border: 2px solid #4fc3f7',
-        'border-radius: 2px',
+        `border: ${borderWidth}px solid #4fc3f7`,
+        `border-radius: ${borderRadius}px`,
         'outline: none',
         'resize: none',
         'font-family: inherit',
-        'line-height: 1.2',
+        'line-height: 1',
+        'overflow: hidden',
       ].join('; '),
     );
     textarea.addEventListener('keydown', this._onTextEditKeyDown);

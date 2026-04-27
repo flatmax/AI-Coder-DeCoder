@@ -95,9 +95,14 @@ const _MODE_PRESENT = 'present';
  * the status LED visually and don't match the app's
  * design language).
  *
- * `dblClickZoomEnabled: true` — touchpads use two-finger
- * tap as a double-click equivalent; letting that zoom
- * feels natural.
+ * `dblClickZoomEnabled: false` — double-click is
+ * reserved for entering inline text edit on <text>
+ * elements (SvgEditor). Letting pan-zoom also consume
+ * double-clicks would race the editor: the user
+ * double-clicks a text element, the editor opens its
+ * textarea overlay, AND pan-zoom zooms the viewport,
+ * shifting the textarea off the text it's editing.
+ * Mouse wheel remains the primary zoom gesture.
  *
  * `fit: true, center: true` — on init, fit the SVG to
  * the panel and center it. Subsequent user interaction
@@ -107,7 +112,7 @@ const _PAN_ZOOM_OPTIONS = Object.freeze({
   panEnabled: true,
   controlIconsEnabled: false,
   zoomEnabled: true,
-  dblClickZoomEnabled: true,
+  dblClickZoomEnabled: false,
   mouseWheelZoomEnabled: true,
   preventMouseEventsDefault: true,
   zoomScaleSensitivity: 0.2,
@@ -1063,6 +1068,7 @@ export class SvgViewer extends LitElement {
   // ---------------------------------------------------------------
 
   _onLeftPan(newPan) {
+    this._notifyEditorViewChanged();
     if (this._syncingPanZoom) return;
     if (!this._panZoomRight) return;
     this._syncingPanZoom = true;
@@ -1075,6 +1081,7 @@ export class SvgViewer extends LitElement {
   }
 
   _onLeftZoom(newZoom) {
+    this._notifyEditorViewChanged();
     if (this._syncingPanZoom) return;
     if (!this._panZoomRight) return;
     this._syncingPanZoom = true;
@@ -1087,6 +1094,7 @@ export class SvgViewer extends LitElement {
   }
 
   _onRightPan(newPan) {
+    this._notifyEditorViewChanged();
     if (this._syncingPanZoom) return;
     if (!this._panZoomLeft) return;
     this._syncingPanZoom = true;
@@ -1099,6 +1107,7 @@ export class SvgViewer extends LitElement {
   }
 
   _onRightZoom(newZoom) {
+    this._notifyEditorViewChanged();
     if (this._syncingPanZoom) return;
     if (!this._panZoomLeft) return;
     this._syncingPanZoom = true;
@@ -1107,6 +1116,33 @@ export class SvgViewer extends LitElement {
     } catch (_) {
     } finally {
       this._syncingPanZoom = false;
+    }
+  }
+
+  /**
+   * Tell the SvgEditor that the view transform changed
+   * so it can re-render its selection handles with fresh
+   * screen-pixel-based sizing. Called from every pan /
+   * zoom callback. Safe to call when no editor is
+   * attached or no element is selected — the editor's
+   * `notifyViewChanged` is a no-op in those cases.
+   *
+   * Without this, the selection outline and handle dots
+   * — whose stroke width, dash length, and radius are
+   * computed from the current CTM at render time and
+   * then baked as SVG-unit attribute values — stay at
+   * the pre-zoom size and grow/shrink visually as the
+   * user zooms. Constant-screen-size handles are the
+   * expected vector-editor convention.
+   */
+  _notifyEditorViewChanged() {
+    if (this._editor) {
+      try {
+        this._editor.notifyViewChanged();
+      } catch (_) {
+        // Editor may be mid-teardown or in an invalid
+        // state; swallow rather than propagate.
+      }
     }
   }
 
@@ -1138,6 +1174,7 @@ export class SvgViewer extends LitElement {
     } finally {
       this._syncingPanZoom = false;
     }
+    this._notifyEditorViewChanged();
   }
 
   // ---------------------------------------------------------------
