@@ -437,19 +437,17 @@ export class AppShell extends JRPCClient {
       background: rgba(240, 246, 252, 0.05);
     }
 
-    /* Mode toggle — segmented code/doc buttons plus a
-     * separate cross-ref overlay toggle. Sits between
-     * the git actions group and the minimize button.
-     * No margin-left: auto here — the git-actions
-     * group's symmetric auto margins already push
-     * everything to the right of it against the
-     * minimize button per specs3 §Header Sections
-     * ("centered in the gap between the tab buttons
-     * and the right-side controls"). */
+    /* Mode toggle — segmented code/doc buttons plus the
+     * cross-ref overlay toggle. Sits on the right side
+     * of the header, with auto-left margin pushing it
+     * away from the tab buttons. Git action buttons have
+     * moved to the file picker sort row, so this group
+     * anchors itself directly. */
     .mode-toggle {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      margin-left: auto;
     }
     .mode-segmented {
       display: inline-flex;
@@ -504,47 +502,6 @@ export class AppShell extends JRPCClient {
       color: #d29922;
     }
     .crossref-btn[disabled] {
-      opacity: 0.3;
-      cursor: not-allowed;
-    }
-
-    /* Header git actions: symmetric auto margins center the
-     * group between flex siblings; mode toggle's auto-left push
-     * was removed so this centering holds. Danger variant
-     * (reset) tints red to distinguish from benign actions. */
-    .header-git-actions {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      margin-left: auto;
-      margin-right: auto;
-    }
-    .git-action-btn {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-primary, #c9d1d9);
-      padding: 0.35rem 0.5rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.95rem;
-      line-height: 1;
-      opacity: 0.75;
-      transition: opacity 120ms ease, background 120ms ease;
-    }
-    .git-action-btn:hover:not([disabled]) {
-      opacity: 1;
-      background: rgba(240, 246, 252, 0.08);
-    }
-    .git-action-btn.danger:hover:not([disabled]) {
-      background: rgba(248, 81, 73, 0.15);
-      border-color: rgba(248, 81, 73, 0.3);
-    }
-    .git-action-btn.in-flight {
-      opacity: 1;
-      background: rgba(88, 166, 255, 0.12);
-      border-color: rgba(88, 166, 255, 0.3);
-    }
-    .git-action-btn[disabled] {
       opacity: 0.3;
       cursor: not-allowed;
     }
@@ -3062,22 +3019,6 @@ export class AppShell extends JRPCClient {
         'error',
       );
     }
-  }
-
-  // ---------------------------------------------------------------
-  // Button title helpers
-  // ---------------------------------------------------------------
-
-  _commitButtonTitle() {
-    if (this._reviewActive) return 'Commit disabled during review';
-    if (this._streaming) return 'Commit disabled while AI is responding';
-    if (this._committing) return 'Committing…';
-    return 'Stage all changes and commit with an auto-generated message';
-  }
-
-  _resetButtonTitle() {
-    if (this._streaming) return 'Reset disabled while AI is responding';
-    return 'Reset to HEAD (discard all uncommitted changes)';
   }
 
   // ---------------------------------------------------------------
