@@ -17,6 +17,7 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 - Default webapp port selection and override
 - Remote timeouts (server-side and browser-side)
 - Protocol is plain `ws://` — no TLS (local tool)
+- Maximum WebSocket frame size is raised from the `websockets` library default (1 MiB) to 64 MiB so data-URI image payloads in chat args don't trip code 1009 disconnects. The limit still provides back-pressure against pathological payloads.
 
 ## Registering Services
 

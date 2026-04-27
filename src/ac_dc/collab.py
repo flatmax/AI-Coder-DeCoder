@@ -80,7 +80,7 @@ import uuid as uuid_module
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
-from jrpc_oo import JRPCServer
+from ac_dc.rpc import DEFAULT_MAX_MESSAGE_SIZE, MaxSizeJRPCServer
 
 if TYPE_CHECKING:
     import websockets.legacy.server
@@ -534,7 +534,7 @@ class Collab:
 # ---------------------------------------------------------------------------
 
 
-class CollabServer(JRPCServer):
+class CollabServer(MaxSizeJRPCServer):
     """JRPCServer subclass with admission screening.
 
     Construct like a normal :class:`JRPCServer`, but pass in a
@@ -559,11 +559,13 @@ class CollabServer(JRPCServer):
         remote_timeout: int = 60,
         collab: Optional[Collab] = None,
         ssl_context: Any = None,
+        max_size: int = DEFAULT_MAX_MESSAGE_SIZE,
     ) -> None:
         super().__init__(
             port=port,
             remote_timeout=remote_timeout,
             ssl_context=ssl_context,
+            max_size=max_size,
         )
         self._collab = collab if collab is not None else Collab()
         self._collab._server = self

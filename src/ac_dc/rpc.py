@@ -21,10 +21,11 @@ import logging
 import socket
 from typing import TYPE_CHECKING, Any, Coroutine
 
+import websockets
+from jrpc_oo import JRPCServer
+
 if TYPE_CHECKING:
     import concurrent.futures
-
-    from jrpc_oo import JRPCServer
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,17 @@ _PORT_SCAN_RANGE = 50
 # for slow operations (large symbol-index rebuilds, multi-MB diffs)
 # but short enough that a truly wedged remote doesn't stall forever.
 DEFAULT_REMOTE_TIMEOUT = 120.0
+
+# Maximum WebSocket message size in bytes. The underlying
+# ``websockets`` library defaults to 1 MiB, which is too small for
+# AC-DC: users routinely paste screenshots as data URIs inside
+# chat_streaming args, and a single 2-megapixel PNG base64-encoded
+# easily exceeds 1 MiB. When a frame exceeds the limit the server
+# closes with code 1009 and the browser silently reconnects,
+# dropping the user's message. 64 MiB is generous enough to cover
+# a handful of high-resolution screenshots per message while still
+# providing back-pressure against pathological payloads.
+DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +217,12 @@ class RpcServer:
         *,
         host: str = "127.0.0.1",
         remote_timeout: float = DEFAULT_REMOTE_TIMEOUT,
+        max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE,
     ) -> None:
         self._port = port
         self._host = host
         self._remote_timeout = remote_timeout
+        self._max_message_size = max_message_size
         self._inner: JRPCServer | None = None
         self._started = False
 
@@ -232,17 +246,15 @@ class RpcServer:
 
         Factory hook — Layer 4's collab subclass overrides this to
         plug in a connection-screening subclass of JRPCServer. The
-        base implementation returns a plain JRPCServer.
-
-        Imported lazily so callers that only touch
-        :func:`find_available_port` or :class:`EventLoopHandle`
-        don't pay the jrpc-oo import cost.
+        base implementation returns a :class:`MaxSizeJRPCServer`
+        that raises the ``websockets`` frame-size limit from the
+        1 MiB default to :data:`DEFAULT_MAX_MESSAGE_SIZE` —
+        necessary for data-URI image payloads in chat_streaming args.
         """
-        from jrpc_oo import JRPCServer
-
-        return JRPCServer(
+        return MaxSizeJRPCServer(
             port=self._port,
             remote_timeout=self._remote_timeout,
+            max_size=self._max_message_size,
         )
 
     async def start(self) -> None:
@@ -320,3 +332,50 @@ class RpcServer:
         # jrpc-oo's add_class signature is (instance, obj_name=None).
         # Forward ``name`` verbatim so the caller's override wins.
         self._inner.add_class(instance, name)
+
+
+# ---------------------------------------------------------------------------
+# Frame-size-aware JRPCServer subclass
+# ---------------------------------------------------------------------------
+
+
+class MaxSizeJRPCServer(JRPCServer):
+    """JRPCServer that raises the ``websockets`` frame-size limit.
+
+    Upstream :meth:`jrpc_oo.JRPCServer.start` hardcodes the
+    :func:`websockets.serve` call with no kwarg forwarding, so
+    subclassing is the only way to raise the frame-size limit
+    without patching jrpc-oo. See :data:`DEFAULT_MAX_MESSAGE_SIZE`
+    for the rationale behind the default.
+    """
+
+    def __init__(
+        self,
+        port: int = DEFAULT_SERVER_PORT,
+        remote_timeout: int = 60,
+        ssl_context: Any = None,
+        max_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+    ) -> None:
+        super().__init__(
+            port=port,
+            remote_timeout=remote_timeout,
+            ssl_context=ssl_context,
+        )
+        self._max_size = max_size
+
+    async def start(self) -> None:
+        self.ws_server = await websockets.serve(
+            self.handle_connection,
+            "0.0.0.0",
+            self.port,
+            ssl=self.ssl_context,
+            max_size=self._max_size,
+        )
+        protocol = "WSS" if self.ssl_context else "WS"
+        logger.info(
+            "JRPC Server started on port %d with %s protocol "
+            "(max_size=%d bytes)",
+            self.port,
+            protocol,
+            self._max_size,
+        )
