@@ -2296,32 +2296,56 @@ export class DiffViewer extends LitElement {
    * fallback timeout for identical-content files (which
    * never fire the event). specs4 calls this out
    * explicitly.
+   *
+   * In the single-file rewrite, openFile calls
+   * _showEditor which creates the editor asynchronously
+   * via updateComplete.then — so when openFile follows
+   * up with _scrollToSearchText or _scrollToLine, the
+   * editor may not exist yet. We poll across animation
+   * frames up to a 500ms ceiling waiting for it to
+   * appear, THEN attach the diff-ready listener. If the
+   * ceiling is reached without an editor, resolve so
+   * callers degrade gracefully (the scroll just won't
+   * happen — same as the pre-rewrite "no open file"
+   * path).
    */
   _waitForDiffReady() {
     return new Promise((resolve) => {
-      if (!this._editor) {
-        resolve();
-        return;
-      }
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        requestAnimationFrame(resolve);
-      };
-      try {
-        const disposable = this._editor.onDidUpdateDiff?.(() => {
-          try { disposable?.dispose(); } catch (_) {}
-          settle();
-        });
-        if (!disposable) {
-          // Mock editor without the event — fall through
-          // to timeout.
+      const maxWaitMs = 500;
+      const startedAt = performance.now();
+      const waitForEditor = () => {
+        if (this._editor) {
+          attachDiffReadyListener();
+          return;
         }
-      } catch (_) {
-        // Same fallback.
-      }
-      setTimeout(settle, _DIFF_READY_TIMEOUT_MS);
+        if (performance.now() - startedAt >= maxWaitMs) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(waitForEditor);
+      };
+      const attachDiffReadyListener = () => {
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          requestAnimationFrame(resolve);
+        };
+        try {
+          const disposable = this._editor.onDidUpdateDiff?.(() => {
+            try { disposable?.dispose(); } catch (_) {}
+            settle();
+          });
+          if (!disposable) {
+            // Mock editor without the event — fall
+            // through to timeout.
+          }
+        } catch (_) {
+          // Same fallback.
+        }
+        setTimeout(settle, _DIFF_READY_TIMEOUT_MS);
+      };
+      waitForEditor();
     });
   }
 
