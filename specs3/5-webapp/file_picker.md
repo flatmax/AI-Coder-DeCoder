@@ -20,7 +20,7 @@ The badge truncates long branch names with ellipsis (max 140px) and shows a tool
 **Directories**: Expandable toggle. Checkbox selects/deselects all children. Indeterminate when partially selected.
 
 **Files**: Checkbox for selection. Name click opens in diff viewer. Shows:
-- Line count (green < 130, orange 130–170, red > 170)
+- Line count (neutral color, no size thresholds)
 - Git status badge (M/S/U)
 - Diff stats (+N -N)
 

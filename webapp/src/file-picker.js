@@ -787,22 +787,6 @@ export class FilePicker extends LitElement {
       margin-left: 0.5rem;
       font-variant-numeric: tabular-nums;
     }
-    /* Line-count color thresholds: files over ~170 lines are
-     * painful to review / fit in a prompt, 130-170 is getting
-     * long. Green means comfortable, orange is a warning,
-     * red is "consider splitting". */
-    .lines-badge.lines-green {
-      color: #3fb950;
-      opacity: 0.8;
-    }
-    .lines-badge.lines-orange {
-      color: #d29922;
-      opacity: 0.9;
-    }
-    .lines-badge.lines-red {
-      color: #f85149;
-      opacity: 0.95;
-    }
 
     /* Git status badge — single letter M/S/U/D per file.
      * Only the highest-priority state shows (deleted wins
@@ -1916,10 +1900,7 @@ export class FilePicker extends LitElement {
             </span>`
           : ''}
         ${typeof node.lines === 'number' && node.lines > 0
-          ? html`<span
-              class="lines-badge ${this._linesColorClass(node.lines)}"
-              >${node.lines}</span
-            >`
+          ? html`<span class="lines-badge">${node.lines}</span>`
           : ''}
       </div>
       ${this._duplicating === node.path
@@ -2056,31 +2037,37 @@ export class FilePicker extends LitElement {
    * Look up diff stats for a file. Returns null when there
    * are no stats OR the entry has zero added + zero removed
    * (nothing worth rendering). Shape: `{added, removed}`.
+   *
+   * The backend (`Repo.get_file_tree`) emits per-file diff
+   * stats under the keys `additions` and `deletions`
+   * (matching `git diff --numstat`). The files-tab
+   * orchestrator wraps that dict in a Map unchanged, so
+   * we read those keys here. We also accept `added` /
+   * `removed` as fallbacks — earlier drafts used the
+   * shorter form and a future refactor of the orchestrator
+   * might convert on its side rather than ours.
    */
   _diffStatsFor(path) {
     const map = this.statusData?.diffStats;
     if (!map || typeof map.get !== 'function' || !path) return null;
     const entry = map.get(path);
     if (!entry || typeof entry !== 'object') return null;
-    const added = typeof entry.added === 'number' ? entry.added : 0;
-    const removed =
-      typeof entry.removed === 'number' ? entry.removed : 0;
-    if (added === 0 && removed === 0) return null;
-    return { added, removed };
+    const addedRaw =
+      typeof entry.additions === 'number'
+        ? entry.additions
+        : typeof entry.added === 'number'
+          ? entry.added
+          : 0;
+    const removedRaw =
+      typeof entry.deletions === 'number'
+        ? entry.deletions
+        : typeof entry.removed === 'number'
+          ? entry.removed
+          : 0;
+    if (addedRaw === 0 && removedRaw === 0) return null;
+    return { added: addedRaw, removed: removedRaw };
   }
 
-  /**
-   * Classify a line count into a color bucket. Thresholds
-   * picked for readability / prompt-fitting rather than any
-   * hard language rule — green files are comfortable, orange
-   * is getting long, red is "consider splitting". Defined as
-   * constants rather than inline so future tuning is local.
-   */
-  _linesColorClass(lines) {
-    if (lines > 170) return 'lines-red';
-    if (lines >= 130) return 'lines-orange';
-    return 'lines-green';
-  }
 
   /**
    * Build the hover tooltip for a file / directory row.

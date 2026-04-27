@@ -16,7 +16,7 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 ### File Nodes
 - Checkbox for selection (three states — see below)
 - Name click opens in the diff viewer (or SVG viewer for SVG files)
-- Line count badge colored by size — short (green), medium (amber), long (red)
+- Line count badge in neutral color (no size thresholds)
 - Git status badge — modified, staged, untracked, deleted
 - Diff stats for changed files (additions and deletions)
 ### Tooltip
