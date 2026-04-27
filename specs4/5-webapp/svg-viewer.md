@@ -1,6 +1,6 @@
 # SVG Viewer
 **Status:** stub
-Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Both panels use the same visual editor component — the left pane in read-only mode for reference navigation, the right pane editable. Pan and zoom act directly on the SVG viewBox and stay crisp at any zoom level. Both panels are synchronized: pan or zoom one and the other follows. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
+Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Both panels host instances of the same visual editor component — the left pane in read-only mode (pan, zoom, fit, wheel zoom, middle-click pan), the right pane fully editable. Each editor owns its own viewBox and fires an on-view-change callback on every write; the viewer mirrors writes to the sibling editor under a mutex so pan/zoom stays synchronized without feedback loops. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
 ## Routing
 The app shell inspects the file extension on every navigate-file event:
 | Extension | Viewer |
@@ -52,8 +52,10 @@ Both panels maintain synchronized viewports.
 - Both panels are editor instances that manipulate their own viewBox
 - Each editor fires an on-view-change callback after any viewBox write (from wheel zoom, pan, fit-content, or external set-view-box)
 - The viewer wires each editor's on-view-change to call the other editor's set-view-box
-- A mutex flag is held during the mirrored write so the callback on the receiving editor bails out without echoing back — breaks feedback loops
-- Programmatic viewBox writes from the viewer (e.g., fit button resetting both panes) also set the mutex so neither side ping-pongs
+- Mirror writes go through a silent variant of set-view-box that skips firing on-view-change on the sibling — the two editors' callbacks never cross
+- A shared mutex flag is held during the mirrored write as defense-in-depth; if a future code path ever emits on-view-change independently of set-view-box (e.g., a programmatic viewBox attribute write that bypasses the editor's API), the mutex still breaks the feedback loop
+- Initial fit-content during setup runs under the mutex too so the two panes' initial fits don't cascade through each other
+- The fit button runs the same pattern: both editors fit-content under the mutex, then a final explicit sync pushes the right editor's post-fit viewBox to the left so they're byte-exact afterwards (the two fits can differ by a fraction of a pixel against their separate container rects)
 ### Shadow DOM Compatibility
 - The editor operates on SVG elements obtained via shadow-root queries
 - All coordinate math uses native browser APIs (get-screen-CTM, create-SVG-point, matrix transforms) which work uniformly inside shadow DOM
@@ -334,12 +336,14 @@ Orchestrates the switch:
 ## Invariants
 
 - Only one viewer is visible at a time — the app shell enforces this via CSS class toggling
-- Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set
+- Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set, and the read-only flag is the sole source of truth for which pane-level mutations are allowed
+- The read-only editor never mutates any SVG element — only its own viewBox attribute for pan/zoom/fit, and never the handle overlay
+- Each editor is the sole authority for its own viewBox — no external code path writes the viewBox attribute directly
 - Handle elements are always excluded from hit-testing so clicking a handle never starts a drag on the underlying element
 - Both panels have their browser-side aspect-ratio preservation disabled so the editor's viewBox is the single source of truth for what's visible
 - Injection deduplication guarantees that rapid openFile calls for the same file never attach editors to stale content
-- View sync never produces infinite feedback loops — a mutex flag held during the mirrored viewBox write prevents ping-pong
-- The read-only editor never mutates any SVG element — only its own viewBox attribute for pan and zoom
+- View sync never produces infinite feedback loops — the silent-write flag on set-view-box prevents the callback from firing on the sibling, and the shared mutex provides defense-in-depth
+- The on-view-change callback receives the freshly-written viewBox, not a read-back from the attribute — callers can trust the value is authoritative at the moment of the write
 - Save commits any active text edit and removes handles before serializing — saved content is always clean
 - Mode-toggle race guard prevents active-file-changed events from disrupting an in-flight visual ↔ text switch
 - Copy-as-PNG clipboard write uses a promise-of-blob, not a resolved blob, to preserve user-gesture context across async scaling

@@ -465,6 +465,38 @@ Design points pinned by tests:
 
 3.2c.3b is complete. The path editing surface covers every SVG path command — M, L, H, V, C, S, Q, T, A, Z — with appropriate handle shapes (endpoints for all non-Z, plus control points for C/S/Q). 3.2c.3c will add inline text editing via foreignObject textarea on double-click.
 
+### 5.21 — Post-Phase-3 SvgEditor paired-editor refactor — **delivered** (commit `9770dc6`)
+
+Replaces the `svg-pan-zoom` library with a paired-editor model. See [D18](decisions.md#d18--dropped-svg-pan-zoom-in-favor-of-unified-svgeditor-on-both-panes) for the architectural rationale.
+
+**Before (5.11–5.20 as-shipped):** `svg-pan-zoom` instances ran on both panels for pan/zoom/fit; `SvgEditor` ran on the right pane only for visual editing. Two libraries, two coordinate systems, two viewBox authorities.
+
+**After (this commit):** Both panes host `SvgEditor` instances — left in read-only mode, right fully editable. Pan/zoom/fit live inside the editor; there's no longer a separate navigation library. Each editor fires `onViewChange(viewBox)` on every viewBox write; the viewer mirrors writes between panes via `setViewBox(..., { silent: true })` guarded by a `_syncingViewBox` mutex.
+
+- `webapp/src/svg-editor.js` — additions:
+  - Constructor accepts `readOnly: boolean` option. When set, `_onPointerDown` and `_onKeyDown` bail immediately after allowing pan/zoom/fit. Selection, handles, marquee, text-edit, and the `onChange` callback are all skipped.
+  - Constructor accepts `onViewChange(viewBox)` callback. Fired on every viewBox write — wheel zoom, pan drag, fit-content, programmatic `setViewBox`. The callback is the sole sync primitive; there is no longer a separate pan/zoom event surface.
+  - `setViewBox(x, y, width, height, { silent })` — writes the viewBox attribute and fires `onViewChange` unless `silent: true`. The silent flag is for mirror writes so the sibling's own viewChange doesn't re-fire and cascade.
+  - `fitContent({ silent })` — new option. The initial fit-on-setup path passes silent so the two panes' initial fits don't ping-pong through their respective callbacks.
+
+- `webapp/src/svg-viewer.js` — replaces pan/zoom infrastructure:
+  - `_panZoomLeft` / `_panZoomRight` / `_syncingPanZoom` removed. `_editorLeft` / `_editorRight` / `_syncingViewBox` replace them. `_editor` kept as a back-compat alias pointing at `_editorRight` so existing callers (tests, Phase 3.2c change handler) don't need path updates.
+  - `_initPanZoom` / `_disposePanZoom` renamed to `_initEditors` / `_disposeEditors`. Both panes get an editor instance wired to a `_onLeftViewChange` / `_onRightViewChange` handler that mirrors to the sibling via silent `setViewBox`.
+  - `preserveAspectRatio="none"` applied to BOTH panes (was right-pane only). The left pane's editor now drives its own viewBox; browser aspect-ratio fitting would fight the editor's coordinate math the same way it did on the right.
+  - Mirror path is belt-and-braces with two guards: the silent-write flag on `setViewBox` skips the sibling's viewChange entirely, AND the `_syncingViewBox` mutex prevents any remaining cascade if a future refactor adds a code path that emits viewChange independently of setViewBox. Either guard alone would suffice; both together make the sync provably loop-free.
+  - `_onFitClick` (fit button) now calls `fitContent()` on both editors under the mutex. No more calls to pan-zoom's `resize()` + `fit()` + `center()` sequence.
+
+- `webapp/src/svg-viewer.test.js` — rewritten:
+  - Module-level `vi.mock('svg-pan-zoom', ...)` removed. The editor class is pure DOM manipulation and runs fine under jsdom without mocking.
+  - "Pan/zoom initialization" / "Pan/zoom synchronization" / "Pan/zoom disposal" describe blocks deleted wholesale.
+  - "SvgEditor integration" block rewritten to cover both panes: both editors created, left is read-only, right is editable, back-compat alias, both panes have `preserveAspectRatio="none"`, both dispose on file close / switch / disconnect, change callback syncs modified content, handle group stripped from serialized content.
+  - New "ViewBox synchronization" describe block: left pan mirrors to right, right pan mirrors to left, mutex prevents feedback loops, sync is a no-op when partner editor is missing, initial fit clears the mutex.
+  - "Fit button" block rewritten to spy on `fitContent()` on both editors rather than the pan-zoom library's fit/center/resize.
+
+- `webapp/package.json` — `svg-pan-zoom` dependency removed.
+
+**Why keep the 5.11–5.12 and 5.15–5.20 entries?** They document what was built, tested, and committed at the time. The refactor doesn't invalidate the history — the drag/resize/vertex/path/text editing surface those entries describe is still in place, still covered by its tests, still the feature shape users see. The paired-editor change swaps the navigation substrate (pan-zoom library → editor read-only mode) without touching the editing surface. Future readers piecing together how selection math evolved should still see the full record; D18 is the pointer that tells them the navigation plumbing changed after-the-fact.
+
 ### 5.19 — Phase 3.2c.3b-ii SvgEditor path control-point edit (C/S/Q) — **delivered**
 
 Cubic and quadratic Bézier curve commands get draggable control-point handles in addition to the endpoint handles from 3.2c.3b-i. Each control point is independently draggable with dashed tangent lines showing the connection to its endpoint.
