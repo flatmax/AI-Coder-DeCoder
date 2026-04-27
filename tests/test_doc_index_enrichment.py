@@ -343,13 +343,88 @@ class TestQueueEnrichment:
         _write(repo_root / "c.md", "# C\n\n" + ("line\n" * 10))
         for name in ("a.md", "b.md", "c.md"):
             index_with_enricher.index_file(name)
-        # Mark b as enriched.
-        outline = index_with_enricher._all_outlines["b.md"]
-        for h in outline.all_headings_flat:
-            h.keywords = ["existing"]
+        # Enrich b — its cache entry gets tagged with the
+        # stub's model name.
+        source_b = "# B\n\n" + ("line\n" * 10)
+        index_with_enricher.enrich_single_file(
+            "b.md", source_text=source_b
+        )
         assert index_with_enricher.queue_enrichment() == [
             "a.md", "c.md"
         ]
+
+    def test_enriched_file_with_empty_keywords_not_requeued(
+        self,
+        repo_root: Path,
+    ) -> None:
+        """Regression: the "every restart re-enriches" bug.
+
+        An enricher can legitimately leave a heading with no
+        keywords — short sections, aggressive corpus-
+        frequency filtering, sections that strip to empty
+        after code removal. The cache's ``keyword_model``
+        tag is the authoritative "enrichment has run"
+        signal; absent per-heading keywords are a valid
+        terminal state, not a prompt to re-enrich.
+
+        This test uses a passthrough enricher that writes
+        the sidecar with the model tag but leaves every
+        heading's keyword list empty, then reconstructs the
+        index from disk and confirms ``queue_enrichment``
+        returns an empty list.
+
+        Without the fix, every restart would re-queue the
+        file, re-run the enricher (to the same empty
+        result), re-persist the sidecar, and the loop would
+        repeat on every boot.
+        """
+        source = "# Intro\n\n" + ("line\n" * 10)
+        _write(repo_root / "a.md", source)
+
+        # Enricher that records calls but never populates
+        # keywords — simulates the "every heading was
+        # filtered" outcome.
+        class _PassthroughEnricher:
+            model_name = "passthrough-model"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def enrich_outline(
+                self,
+                outline: Any,
+                source_text: str = "",
+                config: Any = None,
+            ) -> Any:
+                self.calls.append(outline.file_path)
+                # Deliberately do not touch keywords.
+                return outline
+
+        enricher_v1 = _PassthroughEnricher()
+        index_v1 = DocIndex(
+            repo_root=repo_root, enricher=enricher_v1
+        )
+        index_v1.index_file("a.md")
+        assert index_v1.queue_enrichment() == ["a.md"]
+        index_v1.enrich_single_file("a.md", source_text=source)
+        # Sanity: queue is now empty, enricher ran once.
+        assert index_v1.queue_enrichment() == []
+        assert enricher_v1.calls == ["a.md"]
+
+        # Simulate server restart: fresh index, same repo,
+        # same enricher model. Sidecar on disk should be
+        # reused; queue must stay empty.
+        enricher_v2 = _PassthroughEnricher()
+        index_v2 = DocIndex(
+            repo_root=repo_root, enricher=enricher_v2
+        )
+        index_v2.index_file("a.md")
+        # The critical assertion: queue_enrichment MUST NOT
+        # re-queue this file on restart. Prior behaviour
+        # returned ["a.md"] because every heading was still
+        # keyword-less.
+        assert index_v2.queue_enrichment() == []
+        assert enricher_v2.calls == []
 
 
 # ---------------------------------------------------------------------------

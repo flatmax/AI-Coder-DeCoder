@@ -125,6 +125,37 @@ class DocCache(BaseCache[DocOutline]):
     # Enhanced get — keyword model matching
     # ------------------------------------------------------------------
 
+    def get_keyword_model(
+        self, path: str | Path
+    ) -> str | None:
+        """Return the stored ``keyword_model`` tag for ``path``.
+
+        Returns None when the entry doesn't exist OR when it
+        exists but was stored without a model (i.e., structural
+        extraction only). Callers distinguish the two cases by
+        checking ``has(path)`` separately when needed.
+
+        Used by :meth:`DocIndex.queue_enrichment` to decide
+        whether an outline has already been through the
+        enricher. The per-heading keyword content is NOT a
+        reliable signal: the enricher legitimately produces
+        empty keyword lists for short sections below
+        ``min_section_chars``, for sections whose KeyBERT
+        candidates all fail the corpus-frequency filter, and
+        for sections that strip to empty text after code
+        removal. An enriched outline with no keywords on any
+        heading is a valid terminal state, not a prompt to
+        re-enrich.
+        """
+        key = self._normalise_path(path)
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        stored = entry.get("keyword_model")
+        if not isinstance(stored, str):
+            return None
+        return stored
+
     def get(  # type: ignore[override]
         self,
         path: str | Path,

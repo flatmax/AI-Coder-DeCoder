@@ -593,23 +593,58 @@ class DocIndex:
     def queue_enrichment(self) -> list[str]:
         """Return paths whose outlines need keyword enrichment.
 
-        Iterates the currently-loaded outlines and collects
-        those where :meth:`needs_enrichment` returns True.
-        Returns an empty list when no enricher is attached
-        (matches the optional-dependency contract) or when
-        every outline is already enriched.
+        A file needs enrichment when BOTH:
 
-        The returned list is sorted by path for deterministic
-        ordering — matters for tests and for the progress
-        events the caller emits per-file.
+        1. It has eligible units (headings or prose blocks) that
+           could receive keywords — :meth:`needs_enrichment`
+           returns True.
+        2. The cache's persisted entry for this path was NOT
+           stored with the current enricher's model name.
+
+        The second condition is the load-bearing one for the
+        "every restart re-enriches from scratch" bug. Per-
+        heading keyword presence alone is insufficient: the
+        enricher legitimately produces empty keyword lists for
+        short sections, for sections whose candidates fail the
+        corpus-frequency filter, and for all-code sections that
+        strip to empty. A persisted outline where none of the
+        eligible headings received keywords is a valid terminal
+        state — re-running the enricher against it on next
+        startup produces the same empty result, re-persists
+        the same sidecar, and the loop repeats every boot.
+
+        The cache's ``keyword_model`` tag is the authoritative
+        "enrichment has run" signal. If the sidecar was written
+        by :meth:`enrich_single_file`, the model name is
+        present. If a different model is configured now than
+        when the sidecar was written, the model-match rule
+        (consumer-side, via ``get(path, mtime, keyword_model)``)
+        already forces re-extraction of the structural outline,
+        which clears any prior keywords — so by the time we
+        reach this method, a mismatched-model path has been
+        through ``_parse_and_store`` and is in a fresh-
+        unenriched state with no sidecar model tag.
+
+        Returns an empty list when no enricher is attached
+        (matches the optional-dependency contract). The
+        returned list is sorted by path for deterministic
+        ordering.
         """
         if self._enricher is None:
             return []
-        return sorted(
-            path
-            for path, outline in self._all_outlines.items()
-            if self.needs_enrichment(outline)
-        )
+        current_model = self._enricher.model_name
+        result: list[str] = []
+        for path, outline in self._all_outlines.items():
+            if not self.needs_enrichment(outline):
+                continue
+            stored_model = self._cache.get_keyword_model(path)
+            if stored_model == current_model:
+                # Already enriched with the current model;
+                # absent keywords are the enricher's terminal
+                # answer, not a todo list.
+                continue
+            result.append(path)
+        return sorted(result)
 
     def enrich_single_file(
         self,
