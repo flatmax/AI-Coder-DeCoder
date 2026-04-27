@@ -150,7 +150,7 @@ export function buildHoverProvider(getActivePath, getCall) {
       if (!call) return null;
       let result;
       try {
-        result = await call['Repo.lsp_get_hover'](
+        result = await call['LLMService.lsp_get_hover'](
           path,
           position.lineNumber,
           position.column,
@@ -204,7 +204,7 @@ export function buildDefinitionProvider(monaco, getActivePath, getCall) {
       if (!call) return null;
       let result;
       try {
-        result = await call['Repo.lsp_get_definition'](
+        result = await call['LLMService.lsp_get_definition'](
           path,
           position.lineNumber,
           position.column,
@@ -256,7 +256,7 @@ export function buildReferenceProvider(monaco, getActivePath, getCall) {
       if (!call) return null;
       let result;
       try {
-        result = await call['Repo.lsp_get_references'](
+        result = await call['LLMService.lsp_get_references'](
           path,
           position.lineNumber,
           position.column,
@@ -325,7 +325,7 @@ export function buildCompletionProvider(monaco, getActivePath, getCall) {
       if (!call) return { suggestions: [] };
       let result;
       try {
-        result = await call['Repo.lsp_get_completions'](
+        result = await call['LLMService.lsp_get_completions'](
           path,
           position.lineNumber,
           position.column,

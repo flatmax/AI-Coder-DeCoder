@@ -202,7 +202,14 @@ class SymbolIndex:
         cached = self._cache.get(rel, mtime)
         if cached is not None:
             # Cache hit — identity preserved for callers
-            # that hold references.
+            # that hold references. Re-resolve imports
+            # every time though: resolved_target is set
+            # via setattr (not a real dataclass field) so
+            # it may not survive a cache round-trip, and
+            # the resolver's file set may have grown since
+            # the cache entry was written. Cheap in any
+            # case — it's a dict lookup per import.
+            self._resolve_imports_for_file(cached)
             self._all_symbols[rel] = cached
             return cached
 
@@ -630,8 +637,7 @@ class SymbolIndex:
             params = ", ".join(
                 (("*" if p.is_vararg else "**" if p.is_kwarg else "")
                  + p.name
-                 + (f": {p.type}" if p.type else "")
-                 + ("?" if p.is_optional else ""))
+                 + (f": {p.type_annotation}" if p.type_annotation else ""))
                 for p in sym.parameters
             )
             sig += f"({params})"
@@ -665,7 +671,54 @@ class SymbolIndex:
         if fs is None:
             return None
 
-        # Check call sites first — if the cursor is on a call
+        # Check imports FIRST — if the cursor is on an import
+        # line, the import is always the intended target
+        # regardless of whatever symbol's range happens to
+        # contain that line. (Imports nested inside a function
+        # body — a common pattern for circular-import avoidance
+        # — would otherwise be shadowed by the containing
+        # function's range and Go-to-Def would jump to the
+        # function's own definition instead.)
+        for imp in fs.imports:
+            if imp.line == line:
+                target = getattr(imp, "resolved_target", None)
+                if not target:
+                    continue
+                # Try to resolve each imported name to its
+                # actual definition inside the target file so
+                # Monaco scrolls to the class / function / var
+                # rather than the top of the file. Falls back
+                # to line 1 when names can't be matched (bare
+                # `import foo`, wildcard, or the symbol just
+                # isn't in the target's extracted symbols).
+                target_fs = self._all_symbols.get(target)
+                if target_fs is not None and imp.names:
+                    for wanted in imp.names:
+                        if not wanted or wanted == "*":
+                            continue
+                        for target_sym in target_fs.all_symbols_flat:
+                            if target_sym.name == wanted and target_sym.range:
+                                sl, sc, el, ec = target_sym.range
+                                return {
+                                    "file": target,
+                                    "range": {
+                                        "startLineNumber": max(1, sl + 1),
+                                        "startColumn": max(1, sc + 1),
+                                        "endLineNumber": max(1, el + 1),
+                                        "endColumn": max(1, ec + 1),
+                                    },
+                                }
+                return {
+                    "file": target,
+                    "range": {
+                        "startLineNumber": 1,
+                        "startColumn": 1,
+                        "endLineNumber": 1,
+                        "endColumn": 1,
+                    },
+                }
+
+        # Check call sites — if the cursor is on a call
         # that has a resolved target, jump there.
         sym, _ = self._find_symbol_at(path, line, col)
         if sym is not None:
@@ -698,21 +751,6 @@ class SymbolIndex:
                                 "endColumn": 1,
                             },
                         }
-
-        # Check imports — if cursor is on an import line, resolve it.
-        for imp in fs.imports:
-            if imp.line == line:
-                target = getattr(imp, "resolved_target", None)
-                if target:
-                    return {
-                        "file": target,
-                        "range": {
-                            "startLineNumber": 1,
-                            "startColumn": 1,
-                            "endLineNumber": 1,
-                            "endColumn": 1,
-                        },
-                    }
 
         # Local symbol — return its own definition.
         if sym is not None and sym.range:

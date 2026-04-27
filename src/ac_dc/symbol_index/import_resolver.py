@@ -236,20 +236,27 @@ class ImportResolver:
     def _python_module_to_path(self, module: str) -> str | None:
         """Convert a dotted Python module path to a repo file path.
 
-        Tries two candidates in order:
+        Tries candidates in order:
 
         1. ``foo/bar.py`` — the module as a plain .py file
         2. ``foo/bar/__init__.py`` — the module as a package
+        3. Same two under each common source-root prefix
+           (``src/``, ``lib/``) — handles src-layout projects
+           where ``ac_dc.cli`` lives at ``src/ac_dc/cli.py``.
         """
         if not module:
             return None
         base = module.replace(".", "/")
-        plain = f"{base}.py"
-        if plain in self._files:
-            return plain
-        pkg = f"{base}/__init__.py"
-        if pkg in self._files:
-            return pkg
+        candidates = [
+            f"{base}.py",
+            f"{base}/__init__.py",
+        ]
+        for prefix in ("src/", "lib/"):
+            candidates.append(f"{prefix}{base}.py")
+            candidates.append(f"{prefix}{base}/__init__.py")
+        for candidate in candidates:
+            if candidate in self._files:
+                return candidate
         return None
 
     # ------------------------------------------------------------------

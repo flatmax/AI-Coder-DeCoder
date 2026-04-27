@@ -172,6 +172,20 @@ async def _heavy_init(
                 None, repo.get_flat_file_list
             )
             file_list = [f for f in flat.split("\n") if f]
+            # Seed the import resolver's file set BEFORE
+            # per-file indexing so _resolve_imports_for_file
+            # can populate Import.resolved_target correctly.
+            # Without this, every resolver lookup during
+            # per-file indexing returns None (the resolver's
+            # file set is empty), every import gets
+            # resolved_target=None, and cross-file
+            # Go-to-Definition silently fails. The full
+            # index_repo path does this via set_files; the
+            # batched path here has to replicate it.
+            await loop.run_in_executor(
+                None,
+                lambda: symbol_index._resolver.set_files(file_list),
+            )
             batch_size = 20
             total = len(file_list)
             for i in range(0, total, batch_size):
@@ -187,6 +201,16 @@ async def _heavy_init(
                     f"Indexing repository... {min(i + batch_size, total)}/{total}",
                     pct,
                 )
+            # Resolve cross-file call-site targets now that every
+            # file's imports are in place. index_repo does this
+            # automatically; the batched path has to call it
+            # explicitly. Without it, call sites keep
+            # target_file=None and references / Go-to-Def on
+            # function calls fall back to symbol-name lookups
+            # that may miss the mark.
+            await loop.run_in_executor(
+                None, symbol_index._resolve_call_sites,
+            )
             # Build reference index after all files
             await loop.run_in_executor(
                 None,

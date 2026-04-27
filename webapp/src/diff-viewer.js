@@ -2074,28 +2074,27 @@ export class DiffViewer extends LitElement {
     const svc = modifiedEditor._codeEditorService;
     if (!svc || typeof svc.openCodeEditor !== 'function') return;
     this._editorServicePatched = true;
-    const origOpen = svc.openCodeEditor.bind(svc);
-    svc.openCodeEditor = async (input, source, sideBySide) => {
+    svc.openCodeEditor = async (input, source, _sideBySide) => {
+      // Monaco's contract: return the editor that will
+      // display the target. In the single-file no-cache
+      // model we swap the viewer's file in place via the
+      // app shell's navigate-file pipeline, then return
+      // the same `source` editor — once the swap's async
+      // chain settles, Monaco's follow-up selection /
+      // reveal apply to the new model in this same
+      // editor widget. Calling the original openCodeEditor
+      // here (the standalone build's fallback) throws
+      // because its returned opener has no openCodeEditor
+      // method — Monaco's _openReference would then call
+      // .openCodeEditor on undefined and crash.
       try {
         const uri = input?.resource;
         if (uri) {
-          // Strip leading slashes so repo-relative paths
-          // resolve correctly.
           let path = uri.path || '';
           if (path.startsWith('/')) path = path.slice(1);
           const line =
             input.options?.selection?.startLineNumber;
           if (path) {
-            // Dispatch navigate-file on the window so
-            // the app shell's pipeline (file-nav grid,
-            // collab broadcast, last-open persistence)
-            // runs — same channel the picker uses. In
-            // the single-file model this guarantees
-            // cross-file Go-to-Def behaves identically
-            // to every other file-open trigger; calling
-            // this.openFile directly would bypass the
-            // app shell and leave the grid / collab
-            // state inconsistent.
             window.dispatchEvent(
               new CustomEvent('navigate-file', {
                 detail: { path, line },
@@ -2107,7 +2106,7 @@ export class DiffViewer extends LitElement {
       } catch (err) {
         console.warn('[diff-viewer] cross-file nav failed', err);
       }
-      return origOpen(input, source, sideBySide);
+      return source || null;
     };
   }
 
