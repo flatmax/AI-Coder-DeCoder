@@ -838,10 +838,19 @@ export class SvgEditor {
    *   of `attach()`.
    * @param {object} options
    * @param {() => void} [options.onChange] — called after
-   *   any edit operation that modifies the SVG. Phase
-   *   3.2c.1 only fires this for delete operations.
+   *   any edit operation that modifies the SVG.
    * @param {() => void} [options.onSelectionChange] —
    *   called when the selected element changes.
+   * @param {(vb: {x:number,y:number,width:number,height:number}) => void} [options.onViewChange]
+   *   — called after any viewBox write (wheel zoom, pan,
+   *   fit, external setViewBox). Used by the enclosing
+   *   viewer to mirror viewport state to the other pane.
+   * @param {boolean} [options.readOnly] — when true, the
+   *   editor only performs pan/zoom on its own SVG. All
+   *   selection, handles, marquee, keyboard shortcuts,
+   *   double-click-to-edit, and mutation paths are
+   *   disabled. Used for the left (reference) pane in
+   *   the side-by-side viewer.
    */
   constructor(svg, options = {}) {
     if (!svg || svg.tagName?.toLowerCase() !== 'svg') {
@@ -852,6 +861,8 @@ export class SvgEditor {
     this._svg = svg;
     this._onChange = options.onChange || (() => {});
     this._onSelectionChange = options.onSelectionChange || (() => {});
+    this._onViewChange = options.onViewChange || (() => {});
+    this._readOnly = options.readOnly === true;
 
     /**
      * Primary selected element — the "active" element that
@@ -940,6 +951,32 @@ export class SvgEditor {
     this._textEdit = null;
 
     /**
+     * Active pan gesture. Null when not panning;
+     * populated on middle-click drag (both modes) or
+     * plain drag on empty space in read-only mode.
+     * Fields:
+     *   pointerId — captured pointer
+     *   startScreenX, startScreenY — pointer position in
+     *     screen coords at drag start
+     *   startViewBox — viewBox at drag start, in SVG
+     *     units. Each move computes a delta from the
+     *     initial press rather than compounding on the
+     *     previous move.
+     */
+    this._pan = null;
+
+    /**
+     * Suppress the onViewChange callback during
+     * programmatic viewBox writes where the caller
+     * doesn't want to notify (e.g., initial fit, or
+     * sync mirror writes from the partner editor).
+     * Incremented on enter, decremented on exit — nested
+     * suppression works. Public API callers can request
+     * suppression via `setViewBox(..., { silent: true })`.
+     */
+    this._suppressViewChange = 0;
+
+    /**
      * Undo stack — array of SVG innerHTML snapshots.
      * Newest at the end. Bounded to `_UNDO_MAX` entries;
      * oldest discarded on overflow. Cleared on detach.
@@ -963,6 +1000,7 @@ export class SvgEditor {
     this._onDoubleClick = this._onDoubleClick.bind(this);
     this._onTextEditKeyDown = this._onTextEditKeyDown.bind(this);
     this._onTextEditBlur = this._onTextEditBlur.bind(this);
+    this._onWheel = this._onWheel.bind(this);
 
     /** Whether `attach()` has been called. */
     this._attached = false;
@@ -988,13 +1026,23 @@ export class SvgEditor {
     this._svg.addEventListener('pointermove', this._onPointerMove);
     this._svg.addEventListener('pointerup', this._onPointerUp);
     this._svg.addEventListener('pointercancel', this._onPointerUp);
-    // Double-click for inline text editing. Uses the
-    // composed-aware `dblclick` so clicks targeting a
-    // tspan inside a text element still route here.
-    this._svg.addEventListener('dblclick', this._onDoubleClick);
-    // Keyboard events on document so Escape / Delete work
-    // regardless of which element has focus.
-    document.addEventListener('keydown', this._onKeyDown);
+    // Wheel zoom — active in both editable and read-only
+    // modes. Non-passive so preventDefault on the event
+    // suppresses the browser's default page-scroll.
+    this._svg.addEventListener('wheel', this._onWheel, { passive: false });
+    // The remaining listeners only apply to the editable
+    // mode. Read-only mode is pan/zoom-only; it doesn't
+    // select elements, doesn't open text-edit overlays,
+    // and doesn't respond to keyboard shortcuts.
+    if (!this._readOnly) {
+      // Double-click for inline text editing. Uses the
+      // composed-aware `dblclick` so clicks targeting a
+      // tspan inside a text element still route here.
+      this._svg.addEventListener('dblclick', this._onDoubleClick);
+      // Keyboard events on document so Escape / Delete work
+      // regardless of which element has focus.
+      document.addEventListener('keydown', this._onKeyDown);
+    }
   }
 
   /**
@@ -1011,6 +1059,9 @@ export class SvgEditor {
     // Cancel any in-flight marquee. Same reasoning —
     // orphaned rect + captured pointer otherwise.
     this._cancelMarquee();
+    // Cancel any in-flight pan. Same reasoning — the
+    // captured pointer would be orphaned otherwise.
+    this._cancelPan();
     // Cancel any in-flight text edit so the foreignObject
     // overlay doesn't orphan on the SVG and the element's
     // original content is restored.
@@ -1035,8 +1086,11 @@ export class SvgEditor {
       'pointercancel',
       this._onPointerUp,
     );
-    this._svg.removeEventListener('dblclick', this._onDoubleClick);
-    document.removeEventListener('keydown', this._onKeyDown);
+    this._svg.removeEventListener('wheel', this._onWheel);
+    if (!this._readOnly) {
+      this._svg.removeEventListener('dblclick', this._onDoubleClick);
+      document.removeEventListener('keydown', this._onKeyDown);
+    }
     this._clearSelection();
   }
 
@@ -1839,8 +1893,47 @@ export class SvgEditor {
   }
 
   _onPointerDown(event) {
+    // Middle-click drag pans in both editable and
+    // read-only modes. Matches the Inkscape / most-
+    // vector-editor convention. Pan begins immediately
+    // and doesn't interfere with selection gestures on
+    // the other buttons.
+    if (event.button === 1) {
+      event.stopPropagation();
+      event.preventDefault();
+      this._beginPan(event);
+      return;
+    }
     // Only react to primary button (left-click / touch).
     if (event.button !== 0 && event.pointerType === 'mouse') return;
+    // Suppress the browser's native drag behavior on
+    // `<image>` and `<text>` elements inside the SVG.
+    // Without this, clicking an embedded image starts an
+    // OS-level image drag that visually "detaches" the
+    // image from the canvas and fights our selection /
+    // pan gestures. Applied to every primary-button
+    // press so it covers read-only pan, editable pan,
+    // marquee, and element selection uniformly.
+    event.preventDefault();
+    // Read-only mode: left-click drag on empty space
+    // pans. There's no selection, no marquee, no handles
+    // — pan is the only useful gesture on the read-only
+    // pane besides wheel zoom. Hit-test is skipped since
+    // clicks on real elements are still just pan gestures
+    // (nothing to select).
+    //
+    // preventDefault suppresses the browser's native drag
+    // behavior on `<image>` and `<text>` elements — without
+    // it, dragging an embedded image in the reference pane
+    // initiates an OS-level image drag that fights our pan
+    // gesture. stopPropagation keeps the enclosing viewer
+    // from reacting too.
+    if (this._readOnly) {
+      event.stopPropagation();
+      event.preventDefault();
+      this._beginPan(event);
+      return;
+    }
     // Shift key takes priority over handle hit-test.
     // Shift+click is always "modify selection" (toggle
     // element in/out of set) or "start marquee" (on empty
@@ -1879,7 +1972,25 @@ export class SvgEditor {
     }
     const target = this._hitTest(event.clientX, event.clientY);
     if (!target) {
-      this._clearSelection();
+      // Plain drag on empty space in the editable pane
+      // starts a marquee. Matches the Illustrator-style
+      // convention where empty-space drag is "select
+      // region." Click-without-drag (below the marquee
+      // threshold) is a no-op on selection — the marquee
+      // never renders and end-marquee treats hadRect as
+      // false. So a plain click on empty space neither
+      // clears nor selects; user explicitly dismisses
+      // selection via Escape or by clicking an element
+      // that's already the sole selection.
+      //
+      // Deselection is available via Escape. We don't
+      // clear on empty-space click because that would
+      // destroy the selection every time the user
+      // mistakes a click for a tiny drag — less
+      // forgiving than letting Escape be the explicit
+      // gesture.
+      event.stopPropagation();
+      this._beginMarquee(event);
       return;
     }
     // Stop propagation so the SvgViewer's pan/zoom doesn't
@@ -2019,6 +2130,13 @@ export class SvgEditor {
   }
 
   _onPointerMove(event) {
+    // Pan takes precedence over every other gesture —
+    // once a pan is underway, subsequent pointer motion
+    // translates the viewBox until pointerup.
+    if (this._pan) {
+      this._updatePan(event);
+      return;
+    }
     // Marquee takes precedence — if we're marqueeing,
     // the same event stream is consumed by marquee
     // update rather than drag.
@@ -2056,6 +2174,13 @@ export class SvgEditor {
   }
 
   _onPointerUp(event) {
+    // Pan is finalized before any other gesture —
+    // it's a separate pointer interaction from drag /
+    // marquee.
+    if (this._pan) {
+      this._endPan(event);
+      return;
+    }
     // Marquee is finalized here too — it runs as a
     // separate pointer interaction from drag.
     if (this._marquee) {
@@ -2413,6 +2538,354 @@ export class SvgEditor {
     if (svgDist === 0) return 0;
     const per = this._screenDistToSvgDist(1);
     return per > 0 ? svgDist / per : svgDist;
+  }
+
+  // ---------------------------------------------------------------
+  // Viewport — pan, zoom, fit
+  // ---------------------------------------------------------------
+
+  /**
+   * Read the current viewBox as a {x, y, width, height}
+   * object. Falls back to a synthetic viewBox derived
+   * from width/height attributes if no viewBox is set.
+   */
+  _getViewBox() {
+    const attr = this._svg.getAttribute('viewBox');
+    if (attr) {
+      const parts = attr.trim().split(/[\s,]+/).map(Number);
+      if (parts.length >= 4 && parts.every(Number.isFinite)) {
+        return {
+          x: parts[0],
+          y: parts[1],
+          width: parts[2],
+          height: parts[3],
+        };
+      }
+    }
+    // Fallback: use the SVG's intrinsic width/height.
+    // Rare in practice — the viewer normalizes injected
+    // SVGs to always have a viewBox.
+    const w =
+      parseFloat(this._svg.getAttribute('width')) ||
+      this._svg.clientWidth ||
+      100;
+    const h =
+      parseFloat(this._svg.getAttribute('height')) ||
+      this._svg.clientHeight ||
+      100;
+    return { x: 0, y: 0, width: w, height: h };
+  }
+
+  /**
+   * Write the viewBox attribute and fire the
+   * `onViewChange` callback (unless suppressed).
+   * Internal workhorse for every viewport mutation —
+   * wheel zoom, pan, fit-content, public setViewBox.
+   */
+  _setViewBox(x, y, width, height) {
+    // Clamp to sane bounds. Width/height of zero would
+    // divide-by-zero in subsequent math and disappear
+    // the view entirely.
+    const w = Math.max(width, 1e-6);
+    const h = Math.max(height, 1e-6);
+    this._svg.setAttribute(
+      'viewBox',
+      `${x} ${y} ${w} ${h}`,
+    );
+    // Re-render handles / text-edit overlay so their
+    // screen-pixel-based sizing refreshes for the new
+    // zoom level. Same call used by `notifyViewChanged`
+    // from external pan/zoom.
+    try {
+      this.notifyViewChanged();
+    } catch (_) {}
+    // Fire the callback unless we're in a suppressed
+    // scope (mirror write from the partner editor, or
+    // explicit silent API use).
+    if (this._suppressViewChange === 0) {
+      try {
+        this._onViewChange({ x, y, width: w, height: h });
+      } catch (err) {
+        console.warn('[svg-editor] onViewChange threw', err);
+      }
+    }
+  }
+
+  /**
+   * Public API — set the viewBox explicitly. Used by
+   * the enclosing viewer to mirror viewport state
+   * between panes. Pass `{ silent: true }` to suppress
+   * the `onViewChange` callback for this write
+   * (required to prevent ping-pong when mirroring).
+   *
+   * @param {number} x
+   * @param {number} y
+   * @param {number} width
+   * @param {number} height
+   * @param {{ silent?: boolean }} [opts]
+   */
+  setViewBox(x, y, width, height, opts = {}) {
+    if (opts.silent) {
+      this._suppressViewChange += 1;
+      try {
+        this._setViewBox(x, y, width, height);
+      } finally {
+        this._suppressViewChange -= 1;
+      }
+    } else {
+      this._setViewBox(x, y, width, height);
+    }
+  }
+
+  /**
+   * Public API — read current viewBox. Returned object
+   * is a plain snapshot; caller mutations don't affect
+   * the SVG.
+   */
+  getViewBox() {
+    return this._getViewBox();
+  }
+
+  /**
+   * Public API — fit the SVG content to the container.
+   * Preference order:
+   *   1. If the SVG has an authored viewBox attribute
+   *      that was preserved from the source, use it as
+   *      the baseline (respects the artist's intent).
+   *   2. Otherwise fall back to `getBBox()` plus a small
+   *      margin.
+   * Either way, the shorter axis is expanded so the
+   * viewBox aspect ratio matches the container aspect
+   * ratio. With `preserveAspectRatio="none"` set on
+   * the SVG, this guarantees content renders without
+   * stretching.
+   *
+   * Pass `{ silent: true }` to suppress `onViewChange`
+   * for the resulting write — used during initial
+   * sync-coupling so the partner editor's initial fit
+   * doesn't echo back.
+   *
+   * @param {{ silent?: boolean }} [opts]
+   */
+  fitContent(opts = {}) {
+    let baseline = null;
+    // 1. Try authored viewBox.
+    const authored = this._getAuthoredViewBox();
+    if (authored) baseline = authored;
+    // 2. Fall back to getBBox().
+    if (!baseline) {
+      try {
+        const bb = this._svg.getBBox?.();
+        if (bb && bb.width > 0 && bb.height > 0) {
+          // Small margin — 3% on each side.
+          const mx = bb.width * 0.03;
+          const my = bb.height * 0.03;
+          baseline = {
+            x: bb.x - mx,
+            y: bb.y - my,
+            width: bb.width + mx * 2,
+            height: bb.height + my * 2,
+          };
+        }
+      } catch (_) {
+        // getBBox can throw in jsdom or on detached
+        // SVGs — fall through with null.
+      }
+    }
+    if (!baseline) {
+      // Final fallback: a sensible default that at
+      // least renders something.
+      baseline = { x: 0, y: 0, width: 100, height: 100 };
+    }
+    // Expand the shorter axis to match container AR so
+    // content renders without stretching under
+    // preserveAspectRatio="none".
+    const expanded = this._expandToContainerAspect(baseline);
+    if (opts.silent) {
+      this._suppressViewChange += 1;
+      try {
+        this._setViewBox(
+          expanded.x,
+          expanded.y,
+          expanded.width,
+          expanded.height,
+        );
+      } finally {
+        this._suppressViewChange -= 1;
+      }
+    } else {
+      this._setViewBox(
+        expanded.x,
+        expanded.y,
+        expanded.width,
+        expanded.height,
+      );
+    }
+  }
+
+  /**
+   * Read the authored viewBox if the viewer preserved
+   * one. The viewer stores it on the SVG element as a
+   * data attribute before normalization (so a later
+   * re-fit can return to the original authored extent
+   * instead of whatever the user panned/zoomed to).
+   * Returns null if no authored viewBox was captured.
+   */
+  _getAuthoredViewBox() {
+    const attr = this._svg.getAttribute('data-authored-viewbox');
+    if (!attr) return null;
+    const parts = attr.trim().split(/[\s,]+/).map(Number);
+    if (parts.length < 4 || !parts.every(Number.isFinite)) {
+      return null;
+    }
+    return {
+      x: parts[0],
+      y: parts[1],
+      width: parts[2],
+      height: parts[3],
+    };
+  }
+
+  /**
+   * Expand a viewBox on its shorter axis so its aspect
+   * ratio matches the container's aspect ratio. The
+   * content stays anchored to its centre so the
+   * original bounds remain visible.
+   */
+  _expandToContainerAspect(vb) {
+    const rect = this._svg.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return { ...vb };
+    }
+    const containerAR = rect.width / rect.height;
+    const vbAR = vb.width / vb.height;
+    if (Math.abs(containerAR - vbAR) < 1e-6) {
+      return { ...vb };
+    }
+    if (containerAR > vbAR) {
+      // Container is wider than content — expand width.
+      const newW = vb.height * containerAR;
+      return {
+        x: vb.x - (newW - vb.width) / 2,
+        y: vb.y,
+        width: newW,
+        height: vb.height,
+      };
+    }
+    // Container is taller than content — expand height.
+    const newH = vb.width / containerAR;
+    return {
+      x: vb.x,
+      y: vb.y - (newH - vb.height) / 2,
+      width: vb.width,
+      height: newH,
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // Pan gesture
+  // ---------------------------------------------------------------
+
+  _beginPan(event) {
+    const vb = this._getViewBox();
+    this._pan = {
+      pointerId: event.pointerId,
+      startScreenX: event.clientX,
+      startScreenY: event.clientY,
+      startViewBox: vb,
+    };
+    try {
+      this._svg.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  }
+
+  _updatePan(event) {
+    if (!this._pan) return;
+    if (event.pointerId !== this._pan.pointerId) return;
+    // Convert screen-pixel delta to viewBox-unit delta.
+    // Screen → SVG at origin vs at delta gives the
+    // correct scale regardless of current zoom.
+    const a = this._screenToSvg(
+      this._pan.startScreenX,
+      this._pan.startScreenY,
+    );
+    const b = this._screenToSvg(event.clientX, event.clientY);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const vb = this._pan.startViewBox;
+    // Subtract delta — dragging right should shift the
+    // viewBox LEFT so content appears to follow the
+    // pointer.
+    this._setViewBox(vb.x - dx, vb.y - dy, vb.width, vb.height);
+  }
+
+  _endPan(event) {
+    if (!this._pan) return;
+    if (event.pointerId !== this._pan.pointerId) return;
+    try {
+      this._svg.releasePointerCapture(event.pointerId);
+    } catch (_) {}
+    this._pan = null;
+  }
+
+  _cancelPan() {
+    if (!this._pan) return;
+    // Restore the original viewBox on cancel so
+    // mid-drag teardown doesn't leave the user looking
+    // at a partially-panned view.
+    const vb = this._pan.startViewBox;
+    this._setViewBox(vb.x, vb.y, vb.width, vb.height);
+    try {
+      this._svg.releasePointerCapture(this._pan.pointerId);
+    } catch (_) {}
+    this._pan = null;
+  }
+
+  // ---------------------------------------------------------------
+  // Wheel zoom
+  // ---------------------------------------------------------------
+
+  /**
+   * Wheel event handler. Zooms around the cursor
+   * position by rewriting the viewBox. Zoom factor
+   * derives from the wheel delta; repeated scrolls
+   * compound geometrically.
+   *
+   * Min and max zoom are expressed as viewBox
+   * width/height bounds relative to some reference
+   * size. We don't know the "natural" size a priori,
+   * so we clamp the post-zoom width/height to a
+   * generous range. Extreme zoom-in (pixel-scale
+   * inspection) and zoom-out (far beyond the content)
+   * both work.
+   */
+  _onWheel(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Sensitivity calibrated so a typical single notch
+    // is ~15% zoom change. Negative delta = zoom in.
+    const delta = event.deltaY;
+    if (!Number.isFinite(delta) || delta === 0) return;
+    const factor = Math.exp(delta * 0.0015);
+    const clampedFactor = Math.max(0.1, Math.min(factor, 10));
+    const vb = this._getViewBox();
+    // Anchor the zoom on the cursor position: the
+    // SVG-coord point under the cursor should stay
+    // fixed after the zoom. new_vb = cursor -
+    // (cursor - old_vb) * factor, applied per axis.
+    const cursor = this._screenToSvg(event.clientX, event.clientY);
+    const newWidth = vb.width * clampedFactor;
+    const newHeight = vb.height * clampedFactor;
+    // Clamp to generous bounds. Width/height of the
+    // original authored viewBox is the reference.
+    const authored = this._getAuthoredViewBox();
+    const refW = authored ? authored.width : vb.width;
+    const minW = refW * 0.01;
+    const maxW = refW * 100;
+    if (newWidth < minW || newWidth > maxW) return;
+    const newX = cursor.x - (cursor.x - vb.x) * clampedFactor;
+    const newY = cursor.y - (cursor.y - vb.y) * clampedFactor;
+    this._setViewBox(newX, newY, newWidth, newHeight);
   }
 
   // ---------------------------------------------------------------
