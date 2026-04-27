@@ -152,7 +152,7 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
   };
 });
 
-vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
+vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
   const monaco = {
     editor: {
       createDiffEditor: vi.fn((container, options) => {

@@ -23,7 +23,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => {
+vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
   // Richer stub than a bare vi.fn() — DiffViewer's
   // _createEditor calls setModel on the returned editor
   // and attaches content-change listeners. Without

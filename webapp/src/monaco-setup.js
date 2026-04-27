@@ -17,31 +17,45 @@
 // specs4/5-webapp/diff-viewer.md#monaco-worker-configuration
 // specs4/5-webapp/diff-viewer.md#matlab-syntax-highlighting
 
-// Use the full editor entry, not the bare API entry.
+// Import the editor "core" entry — API + contributions —
+// but NOT `basic-languages`.
 //
-// `editor.api.js` gives you the programmatic surface
-// (createDiffEditor, languages.register, etc.) but does
-// NOT pull in Monaco's *contribution* modules — the find
-// widget, hover provider, folding, bracket matching,
-// diff decoration renderer, word highlighter, colour
-// picker, and so on. Without those, two symptoms appear:
+// Background:
 //
-//   1. Ctrl-F throws `Error: command 'actions.find' not
-//      found` because the find controller never
-//      registered its action.
-//   2. Diff editing runs the diff algorithm correctly
-//      (the worker produces line changes), but the
-//      visible highlighting and gutter markers rely on
-//      contribution-layer rendering code that isn't
-//      loaded, so changes look invisible.
+//   * `editor.api.js` gives you the programmatic surface
+//     (createDiffEditor, languages.register, etc.) but
+//     no contribution modules (find widget, hover,
+//     folding, bracket matching, diff decoration
+//     renderer, word highlighter, colour picker, …).
+//     Without those, Ctrl-F throws `command 'actions.find'
+//     not found` and diff highlighting renders invisibly.
 //
-// `editor.main.js` imports editor.api.js PLUS all
-// contributions PLUS all built-in languages. The
-// built-in-language cost is the price for getting the
-// contributions in one import; Monaco's chunk is split
-// out via vite.config.js manualChunks so it doesn't
-// bloat the main bundle.
-import * as monaco from 'monaco-editor/esm/vs/editor/editor.main.js';
+//   * `editor.main.js` imports editor.api + all
+//     contributions + all built-in languages via
+//     `basic-languages/monaco.contribution.js`. The
+//     basic-languages contribution calls
+//     `monaco.languages.registerTokensProviderFactory(…)`,
+//     an API that does not exist in the core exports
+//     bundled with current `monaco-editor` versions, so
+//     module init throws `registerTokensProviderFactory
+//     is not a function` and nothing ever boots.
+//
+//   * `edcore.main.js` is Monaco's own "editor core
+//     without basic-languages" entry — it pulls in
+//     editor.api AND all the contribution modules the
+//     viewer needs (find, hover, folding, bracket
+//     matching, diff rendering, …) but skips the
+//     basic-languages bundle entirely. Built-in language
+//     tokenizers we care about (js, ts, python, etc.) are
+//     imported on demand elsewhere or provided by the
+//     server's LSP providers; the syntax-highlighting
+//     loss for languages we don't explicitly register is
+//     acceptable for an editor whose primary job is
+//     diffing.
+//
+// If this import path changes, also `rm -rf
+// node_modules/.vite` to flush the dep-bundle cache.
+import * as monaco from 'monaco-editor/esm/vs/editor/edcore.main.js';
 
 // Vite's `?worker` suffix — compiles monaco-worker.js
 // as a dedicated Web Worker and returns a constructor.

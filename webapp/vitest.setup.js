@@ -29,6 +29,26 @@
 import { vi } from 'vitest';
 import { LitElement } from 'lit';
 
+// Monaco's clipboard contribution (loaded transitively via
+// monaco-editor/esm/vs/editor/edcore.main.js → editor.all.js)
+// calls `document.queryCommandSupported(...)` at module
+// init. jsdom doesn't implement that legacy DOM API, so
+// module init throws `queryCommandSupported is not a
+// function` and any test file that imports Monaco — or a
+// component that imports Monaco (diff-viewer, app-shell) —
+// fails at collection time before any test body runs.
+//
+// We stub it as a constant `false` so Monaco takes the
+// "not supported, use keybinding fallback" branch. Only
+// installed if missing so real browsers in any future
+// test runner aren't overridden.
+if (
+  typeof document !== 'undefined' &&
+  typeof document.queryCommandSupported !== 'function'
+) {
+  document.queryCommandSupported = () => false;
+}
+
 /**
  * Minimal JRPCClient stub. Extends LitElement so consumer
  * code still gets Lit's reactive machinery. Lifecycle hooks

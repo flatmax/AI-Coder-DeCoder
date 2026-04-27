@@ -43,7 +43,7 @@ const { mockMonaco } = vi.hoisted(() => {
   return { mockMonaco: monaco };
 });
 
-vi.mock('monaco-editor/esm/vs/editor/editor.api.js', () => ({
+vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => ({
   default: mockMonaco,
   ...mockMonaco,
 }));
