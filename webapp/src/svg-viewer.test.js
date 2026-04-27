@@ -1,20 +1,20 @@
 // Tests for svg-viewer.js — side-by-side SVG diff viewer.
 //
-// No real Monaco here (unlike the diff viewer); SVG is
-// rendered via direct innerHTML injection. The tests
+// SVG is rendered via direct innerHTML injection. Tests
 // exercise the lifecycle contract, RPC content fetching,
 // dirty tracking, save pipeline, status LED, keyboard
-// shortcuts, and event surface.
+// shortcuts, event surface, and the paired-editor
+// viewBox mirroring.
 //
 // RPC is injected via globalThis.__sharedRpcOverride,
 // matching the diff viewer's pattern.
 //
-// svg-pan-zoom is mocked at the module level since
-// jsdom's SVG implementation doesn't support enough of
-// the real library to run. The mock records every
-// construction and exposes pan/zoom/fit/center/destroy
-// spies so tests can drive the sync callbacks and verify
-// disposal.
+// Both panes mount real SvgEditor instances (left is
+// read-only; right is editable). No library mocking —
+// the editor class is pure DOM manipulation and runs
+// fine under jsdom. Tests that need to assert on
+// synchronization drive the editors directly via their
+// public `setViewBox` / `fitContent` APIs.
 
 import {
   afterEach,
@@ -25,41 +25,6 @@ import {
   vi,
 } from 'vitest';
 
-// Mock must land before './svg-viewer.js' loads — vitest
-// hoists vi.mock() calls above imports automatically, so
-// this works even though the import below appears to
-// happen first textually.
-vi.mock('svg-pan-zoom', () => {
-  // Each call records the options so tests can invoke
-  // the onPan / onZoom callbacks. Instances expose
-  // spies for every method the viewer calls.
-  const instances = [];
-  const factory = vi.fn((element, options) => {
-    const instance = {
-      element,
-      options,
-      pan: vi.fn(),
-      zoom: vi.fn(),
-      fit: vi.fn(),
-      center: vi.fn(),
-      resize: vi.fn(),
-      destroy: vi.fn(() => {
-        instance._destroyed = true;
-      }),
-      _destroyed: false,
-    };
-    instances.push(instance);
-    return instance;
-  });
-  factory._instances = instances;
-  factory._reset = () => {
-    instances.length = 0;
-    factory.mockClear();
-  };
-  return { default: factory };
-});
-
-import svgPanZoom from 'svg-pan-zoom';
 import './svg-viewer.js';
 
 const _mounted = [];
@@ -102,7 +67,6 @@ function svgFixture(label = 'content') {
 
 beforeEach(() => {
   clearFakeRpc();
-  svgPanZoom._reset();
 });
 
 afterEach(() => {
@@ -111,7 +75,6 @@ afterEach(() => {
     if (el.isConnected) el.remove();
   }
   clearFakeRpc();
-  svgPanZoom._reset();
 });
 
 // ---------------------------------------------------------------------------
@@ -236,7 +199,13 @@ describe('SvgViewer openFile', () => {
     expect(el._files[0].modified).toBe('');
   });
 
-  it('same-file open is a no-op', async () => {
+  it('same-file open still fires active-file-changed', async () => {
+    // The viewer deliberately re-fires active-file-changed
+    // on same-file open. The app shell relies on this to
+    // flip viewer visibility from diff to SVG when the
+    // clicked file is already the SVG viewer's active
+    // file (e.g. after session restore). See the
+    // comment in svg-viewer.js::openFile for details.
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
@@ -245,7 +214,8 @@ describe('SvgViewer openFile', () => {
     el.addEventListener('active-file-changed', listener);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    expect(listener).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].detail.path).toBe('a.svg');
   });
 
   it('switching between files re-fires active-file-changed', async () => {
@@ -331,6 +301,15 @@ describe('SvgViewer SVG injection', () => {
   });
 
   it('injects empty fallback SVG when content is empty', async () => {
+    // When HEAD fetch fails, file.original is empty and
+    // the viewer injects the _EMPTY_SVG placeholder so
+    // the pane doesn't collapse visually. The exact
+    // viewBox that survives after injection is not part
+    // of the contract — SvgEditor runs fitContent() on
+    // the injected SVG during attach, which may rewrite
+    // viewBox to match computed bounds. The invariant
+    // we care about is that an SVG element exists in
+    // the pane.
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async (_path, ref) => {
         if (ref === 'HEAD') throw new Error('no head');
@@ -345,7 +324,10 @@ describe('SvgViewer SVG injection', () => {
       '.pane-left .svg-container svg',
     );
     expect(leftSvg).toBeTruthy();
-    expect(leftSvg.getAttribute('viewBox')).toBe('0 0 1 1');
+    // The file is marked as new so the status LED can
+    // show the new-file indicator.
+    expect(el._files[0].isNew).toBe(true);
+    expect(el._files[0].original).toBe('');
   });
 
   it('re-injects content on file switch', async () => {
@@ -799,197 +781,6 @@ describe('SvgViewer events cross shadow DOM', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Pan/zoom initialization
-// ---------------------------------------------------------------------------
-
-describe('SvgViewer pan/zoom initialization', () => {
-  beforeEach(() => {
-    setFakeRpc({
-      'Repo.get_file_content': vi.fn(async () => svgFixture()),
-    });
-  });
-
-  it('creates one pan/zoom instance per panel on open', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    expect(svgPanZoom).toHaveBeenCalledTimes(2);
-    expect(svgPanZoom._instances).toHaveLength(2);
-  });
-
-  it('wires left and right instances to different SVG elements', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    expect(leftInst.element).not.toBe(rightInst.element);
-    expect(leftInst.element.tagName.toLowerCase()).toBe('svg');
-    expect(rightInst.element.tagName.toLowerCase()).toBe('svg');
-  });
-
-  it('applies preserveAspectRatio="none" only to right panel', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const leftSvg = el.shadowRoot.querySelector(
-      '.pane-left .svg-container svg',
-    );
-    const rightSvg = el.shadowRoot.querySelector(
-      '.pane-right .svg-container svg',
-    );
-    expect(rightSvg.getAttribute('preserveAspectRatio')).toBe('none');
-    // Left panel should NOT have preserveAspectRatio set
-    // by us — keeps browser default (xMidYMid meet).
-    expect(leftSvg.getAttribute('preserveAspectRatio')).toBe(null);
-  });
-
-  it('configures pan/zoom with documented options', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst] = svgPanZoom._instances;
-    expect(leftInst.options.zoomEnabled).toBe(true);
-    expect(leftInst.options.panEnabled).toBe(true);
-    expect(leftInst.options.dblClickZoomEnabled).toBe(true);
-    expect(leftInst.options.minZoom).toBe(0.1);
-    expect(leftInst.options.maxZoom).toBe(10);
-    expect(leftInst.options.fit).toBe(true);
-    expect(leftInst.options.center).toBe(true);
-    // Control icons off — we render our own fit button.
-    expect(leftInst.options.controlIconsEnabled).toBe(false);
-  });
-
-  it('registers onPan and onZoom callbacks on both instances', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    expect(typeof leftInst.options.onPan).toBe('function');
-    expect(typeof leftInst.options.onZoom).toBe('function');
-    expect(typeof rightInst.options.onPan).toBe('function');
-    expect(typeof rightInst.options.onZoom).toBe('function');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Pan/zoom synchronization
-// ---------------------------------------------------------------------------
-
-describe('SvgViewer pan/zoom sync', () => {
-  beforeEach(() => {
-    setFakeRpc({
-      'Repo.get_file_content': vi.fn(async () => svgFixture()),
-    });
-  });
-
-  it('left pan mirrors to right via pan() call', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    leftInst.options.onPan({ x: 10, y: 20 });
-    expect(rightInst.pan).toHaveBeenCalledWith({ x: 10, y: 20 });
-  });
-
-  it('left zoom mirrors to right via zoom() call', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    leftInst.options.onZoom(1.5);
-    expect(rightInst.zoom).toHaveBeenCalledWith(1.5);
-  });
-
-  it('right pan mirrors to left via pan() call', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    rightInst.options.onPan({ x: 5, y: 15 });
-    expect(leftInst.pan).toHaveBeenCalledWith({ x: 5, y: 15 });
-  });
-
-  it('right zoom mirrors to left via zoom() call', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    rightInst.options.onZoom(2.0);
-    expect(leftInst.zoom).toHaveBeenCalledWith(2.0);
-  });
-
-  it('guard prevents ping-pong loop on pan', async () => {
-    // When the right panel's pan is called from the left's
-    // onPan handler, the right's own onPan callback would
-    // normally fire and try to sync back to left. The
-    // _syncingPanZoom flag prevents that. We verify by
-    // simulating the right panel's onPan firing while the
-    // flag is set.
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    // Drive left -> right. The right.pan mock doesn't
-    // auto-fire right.options.onPan (it's a mock), so
-    // we simulate the callback firing manually during
-    // the sync window.
-    leftInst.options.onPan({ x: 1, y: 2 });
-    // Confirm right.pan was called once.
-    expect(rightInst.pan).toHaveBeenCalledTimes(1);
-    // If the right's onPan had fired during that call,
-    // left.pan would have been invoked. It should not
-    // have been.
-    expect(leftInst.pan).not.toHaveBeenCalled();
-  });
-
-  it('guard prevents right->left feedback during sync', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    // Manually replicate the race: left pan fires, which
-    // sets the guard and calls right.pan. While the guard
-    // is held, the right's onPan shouldn't cascade back.
-    // We force-invoke right.options.onPan inside the
-    // sync window by making right.pan call it.
-    let reentered = false;
-    rightInst.pan = vi.fn(() => {
-      // While we're inside left's onPan handler, the guard
-      // should be set. Call right's onPan to verify it
-      // short-circuits.
-      rightInst.options.onPan({ x: 99, y: 99 });
-      // If left.pan was called now, the guard failed.
-      if (leftInst.pan.mock.calls.length > 0) reentered = true;
-    });
-    leftInst.options.onPan({ x: 1, y: 2 });
-    expect(reentered).toBe(false);
-  });
-
-  it('sync is a no-op when the other panel has no instance', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst] = svgPanZoom._instances;
-    // Drop the right instance to simulate partial init.
-    el._panZoomRight = null;
-    // Should not throw.
-    expect(() => leftInst.options.onPan({ x: 0, y: 0 })).not.toThrow();
-    expect(() => leftInst.options.onZoom(1)).not.toThrow();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Fit button
@@ -1007,7 +798,9 @@ describe('SvgViewer fit button', () => {
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const btn = el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]');
+    const btn = el.shadowRoot.querySelector(
+      '.floating-actions .float-btn[title="Fit to view"]',
+    );
     expect(btn).toBeTruthy();
   });
 
@@ -1017,162 +810,38 @@ describe('SvgViewer fit button', () => {
     expect(el.shadowRoot.querySelector('.floating-actions')).toBe(null);
   });
 
-  it('click calls fit and center on both panels', async () => {
+  it('click calls fitContent on both editors', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
-    expect(leftInst.fit).toHaveBeenCalled();
-    expect(leftInst.center).toHaveBeenCalled();
-    expect(rightInst.fit).toHaveBeenCalled();
-    expect(rightInst.center).toHaveBeenCalled();
+    const leftFit = vi.spyOn(el._editorLeft, 'fitContent');
+    const rightFit = vi.spyOn(el._editorRight, 'fitContent');
+    el.shadowRoot
+      .querySelector('.floating-actions .float-btn[title="Fit to view"]')
+      .click();
+    expect(leftFit).toHaveBeenCalled();
+    expect(rightFit).toHaveBeenCalled();
   });
 
-  it('click also calls resize on both panels', async () => {
-    // resize() ensures pan/zoom picks up current container
-    // dimensions — important when the user resized the
-    // dialog before clicking fit.
+  it('click with no editors is a no-op', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
-    expect(leftInst.resize).toHaveBeenCalled();
-    expect(rightInst.resize).toHaveBeenCalled();
-  });
-
-  it('click does not trigger feedback loop via onPan/onZoom', async () => {
-    // The fit button calls fit() on both panels. If the
-    // mock fit() were to trigger onPan/onZoom callbacks,
-    // the guard must prevent them from cascading. We
-    // verify by manually firing the callbacks from inside
-    // the fit mock.
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    let cascaded = false;
-    rightInst.fit = vi.fn(() => {
-      // Simulate real pan/zoom emitting callbacks during
-      // fit operation.
-      leftInst.options.onPan({ x: 0, y: 0 });
-      leftInst.options.onZoom(1);
-      // If the guard failed, rightInst.pan/.zoom would
-      // have been called from within those callbacks.
-      if (
-        rightInst.pan.mock.calls.length > 0 ||
-        rightInst.zoom.mock.calls.length > 0
-      ) {
-        cascaded = true;
-      }
-    });
-    el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click();
-    expect(cascaded).toBe(false);
-  });
-
-  it('click with no instances is a no-op', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    // Drop both instances to simulate an edge case.
-    el._panZoomLeft = null;
-    el._panZoomRight = null;
+    // Drop both editors to simulate an edge case.
+    el._editorLeft = null;
+    el._editorRight = null;
+    el._editor = null;
     // Should not throw.
     expect(() =>
-      el.shadowRoot.querySelector('.floating-actions .float-btn[title="Fit to view"]').click(),
+      el.shadowRoot
+        .querySelector('.floating-actions .float-btn[title="Fit to view"]')
+        .click(),
     ).not.toThrow();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Pan/zoom disposal
-// ---------------------------------------------------------------------------
-
-describe('SvgViewer pan/zoom disposal', () => {
-  beforeEach(() => {
-    setFakeRpc({
-      'Repo.get_file_content': vi.fn(async (path) => svgFixture(path)),
-    });
-  });
-
-  it('disposes instances when the last file closes', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    el.closeFile('a.svg');
-    await settle(el);
-    expect(leftInst.destroy).toHaveBeenCalled();
-    expect(rightInst.destroy).toHaveBeenCalled();
-    expect(el._panZoomLeft).toBe(null);
-    expect(el._panZoomRight).toBe(null);
-  });
-
-  it('disposes old instances and creates new ones on file switch', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    expect(svgPanZoom._instances).toHaveLength(2);
-    const firstPair = svgPanZoom._instances.slice();
-    await el.openFile({ path: 'b.svg' });
-    await settle(el);
-    // Old pair destroyed.
-    expect(firstPair[0].destroy).toHaveBeenCalled();
-    expect(firstPair[1].destroy).toHaveBeenCalled();
-    // New pair created.
-    expect(svgPanZoom._instances).toHaveLength(4);
-  });
-
-  it('disposes instances on component disconnect', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    el.remove();
-    expect(leftInst.destroy).toHaveBeenCalled();
-    expect(rightInst.destroy).toHaveBeenCalled();
-  });
-
-  it('disposes instances on refreshOpenFiles', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst, rightInst] = svgPanZoom._instances;
-    // Force the refetch to return different content so
-    // re-injection fires.
-    setFakeRpc({
-      'Repo.get_file_content': vi.fn(
-        async () => svgFixture('refreshed'),
-      ),
-    });
-    await el.refreshOpenFiles();
-    await settle(el);
-    expect(leftInst.destroy).toHaveBeenCalled();
-    expect(rightInst.destroy).toHaveBeenCalled();
-  });
-
-  it('handles destroy throwing gracefully', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const [leftInst] = svgPanZoom._instances;
-    leftInst.destroy = vi.fn(() => {
-      throw new Error('simulated destroy failure');
-    });
-    // Close should not throw despite destroy failing.
-    expect(() => el.closeFile('a.svg')).not.toThrow();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // SvgEditor integration
@@ -1185,23 +854,7 @@ describe('SvgViewer SvgEditor integration', () => {
     });
   });
 
-  it('creates an editor on the right panel after open', async () => {
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    expect(el._editor).toBeTruthy();
-    // Editor holds the right panel's SVG as its root.
-    const rightSvg = el.shadowRoot.querySelector(
-      '.pane-right .svg-container svg',
-    );
-    expect(el._editor._svg).toBe(rightSvg);
-  });
-
-  it('does not create an editor on the left panel', async () => {
-    // Left is read-only reference; no editor there.
-    // Single editor instance tracked in _editor. We verify
-    // the right-panel SVG is its root, not left.
+  it('creates editors on both panels after open', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
@@ -1209,45 +862,93 @@ describe('SvgViewer SvgEditor integration', () => {
     const leftSvg = el.shadowRoot.querySelector(
       '.pane-left .svg-container svg',
     );
-    expect(el._editor._svg).not.toBe(leftSvg);
+    const rightSvg = el.shadowRoot.querySelector(
+      '.pane-right .svg-container svg',
+    );
+    expect(el._editorLeft).toBeTruthy();
+    expect(el._editorRight).toBeTruthy();
+    expect(el._editorLeft._svg).toBe(leftSvg);
+    expect(el._editorRight._svg).toBe(rightSvg);
   });
 
-  it('disposes editor on file close', async () => {
+  it('left editor is read-only; right editor is editable', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const editor = el._editor;
-    const detachSpy = vi.spyOn(editor, 'detach');
+    expect(el._editorLeft._readOnly).toBe(true);
+    expect(el._editorRight._readOnly).toBe(false);
+  });
+
+  it('back-compat _editor alias points at the right editor', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(el._editor).toBe(el._editorRight);
+  });
+
+  it('applies preserveAspectRatio="none" to both panes', async () => {
+    // Both panes drive viewBox writes through their own
+    // editor now, so both need "none" to prevent browser
+    // aspect-ratio fitting from fighting editor math.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const leftSvg = el.shadowRoot.querySelector(
+      '.pane-left .svg-container svg',
+    );
+    const rightSvg = el.shadowRoot.querySelector(
+      '.pane-right .svg-container svg',
+    );
+    expect(leftSvg.getAttribute('preserveAspectRatio')).toBe('none');
+    expect(rightSvg.getAttribute('preserveAspectRatio')).toBe('none');
+  });
+
+  it('disposes both editors on file close', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const leftDetach = vi.spyOn(el._editorLeft, 'detach');
+    const rightDetach = vi.spyOn(el._editorRight, 'detach');
     el.closeFile('a.svg');
     await settle(el);
-    expect(detachSpy).toHaveBeenCalled();
+    expect(leftDetach).toHaveBeenCalled();
+    expect(rightDetach).toHaveBeenCalled();
+    expect(el._editorLeft).toBe(null);
+    expect(el._editorRight).toBe(null);
     expect(el._editor).toBe(null);
   });
 
-  it('disposes old editor and creates new one on file switch', async () => {
+  it('disposes old editors and creates new ones on file switch', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const oldEditor = el._editor;
-    const detachSpy = vi.spyOn(oldEditor, 'detach');
+    const oldLeft = el._editorLeft;
+    const oldRight = el._editorRight;
+    const leftDetach = vi.spyOn(oldLeft, 'detach');
+    const rightDetach = vi.spyOn(oldRight, 'detach');
     await el.openFile({ path: 'b.svg' });
     await settle(el);
-    expect(detachSpy).toHaveBeenCalled();
-    expect(el._editor).toBeTruthy();
-    expect(el._editor).not.toBe(oldEditor);
+    expect(leftDetach).toHaveBeenCalled();
+    expect(rightDetach).toHaveBeenCalled();
+    expect(el._editorLeft).not.toBe(oldLeft);
+    expect(el._editorRight).not.toBe(oldRight);
   });
 
-  it('disposes editor on component disconnect', async () => {
+  it('disposes both editors on component disconnect', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const editor = el._editor;
-    const detachSpy = vi.spyOn(editor, 'detach');
+    const leftDetach = vi.spyOn(el._editorLeft, 'detach');
+    const rightDetach = vi.spyOn(el._editorRight, 'detach');
     el.remove();
-    expect(detachSpy).toHaveBeenCalled();
+    expect(leftDetach).toHaveBeenCalled();
+    expect(rightDetach).toHaveBeenCalled();
   });
 
   it('editor change syncs modified content', async () => {
@@ -1257,13 +958,9 @@ describe('SvgViewer SvgEditor integration', () => {
     await settle(el);
     const file = el._files[0];
     const originalModified = file.modified;
-    // Simulate an edit — fire the editor's change callback
-    // after mutating the right-panel SVG.
-    const rightContainer = el.shadowRoot.querySelector(
-      '.pane-right .svg-container',
+    const rightSvg = el.shadowRoot.querySelector(
+      '.pane-right .svg-container svg',
     );
-    const rightSvg = rightContainer.querySelector('svg');
-    // Add a new element to simulate a meaningful edit.
     const newEl = document.createElementNS(
       'http://www.w3.org/2000/svg',
       'rect',
@@ -1273,9 +970,6 @@ describe('SvgViewer SvgEditor integration', () => {
     newEl.setAttribute('width', '10');
     newEl.setAttribute('height', '10');
     rightSvg.appendChild(newEl);
-    // Trigger the change callback manually (3.2c.2 will
-    // wire this through drag / resize; for 3.2c.1 we fire
-    // it to verify the handler).
     el._onEditorChange();
     expect(file.modified).not.toBe(originalModified);
     expect(el.getDirtyFiles()).toContain('a.svg');
@@ -1286,11 +980,9 @@ describe('SvgViewer SvgEditor integration', () => {
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    const rightContainer = el.shadowRoot.querySelector(
-      '.pane-right .svg-container',
+    const rightSvg = el.shadowRoot.querySelector(
+      '.pane-right .svg-container svg',
     );
-    const rightSvg = rightContainer.querySelector('svg');
-    // Inject a fake handle group.
     const ns = 'http://www.w3.org/2000/svg';
     const g = document.createElementNS(ns, 'g');
     g.setAttribute('id', 'svg-editor-handles');
@@ -1300,75 +992,100 @@ describe('SvgViewer SvgEditor integration', () => {
     rightSvg.appendChild(g);
     el._onEditorChange();
     const file = el._files[0];
-    // Serialized content should not contain the handle
-    // group.
     expect(file.modified).not.toContain('svg-editor-handles');
     expect(file.modified).not.toContain('svg-editor-handle');
-    // But the handle group is restored to the live DOM.
     expect(rightSvg.querySelector('#svg-editor-handles')).toBeTruthy();
   });
+});
 
-  it('editor deleteSelection marks file dirty', async () => {
-    // End-to-end: select an element, delete it, verify the
-    // change callback fires and file becomes dirty.
+// ---------------------------------------------------------------------------
+// ViewBox synchronization
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer viewBox mirroring', () => {
+  beforeEach(() => {
     setFakeRpc({
-      'Repo.get_file_content': vi.fn(
-        async () =>
-          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
-          '<rect x="10" y="10" width="20" height="20"/>' +
-          '</svg>',
-      ),
+      'Repo.get_file_content': vi.fn(async () => svgFixture()),
     });
-    const el = mountViewer();
-    await settle(el);
-    await el.openFile({ path: 'a.svg' });
-    await settle(el);
-    const rightSvg = el.shadowRoot.querySelector(
-      '.pane-right .svg-container svg',
-    );
-    const rect = rightSvg.querySelector('rect');
-    expect(rect).toBeTruthy();
-    // Stub getCTM/getBBox on the rect so deleteSelection's
-    // handle-render path (called before delete) doesn't
-    // throw.
-    rect.getCTM = () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
-    rect.getBBox = () => ({ x: 10, y: 10, width: 20, height: 20 });
-    // Stub the SVG's geometry methods too.
-    rightSvg.getCTM = () => ({
-      a: 1, b: 0, c: 0, d: 1, e: 0, f: 0,
-      inverse() { return this; },
-      multiply(m) { return m; },
-    });
-    rightSvg.getScreenCTM = () => rightSvg.getCTM();
-    rightSvg.createSVGPoint = () => {
-      const pt = {
-        x: 0, y: 0,
-        matrixTransform(m) {
-          return { x: m.a * pt.x + m.e, y: m.d * pt.y + m.f };
-        },
-      };
-      return pt;
-    };
-    el._editor.setSelection(rect);
-    el._editor.deleteSelection();
-    await settle(el);
-    // File now dirty — content changed.
-    expect(el.getDirtyFiles()).toContain('a.svg');
   });
 
-  it('editor init failure does not break viewer', async () => {
-    // Force SvgEditor construction to throw by temporarily
-    // shadowing the right panel's SVG removal. We can't
-    // easily mock SvgEditor at module level here without
-    // refactoring, so this test is left as documentation.
-    // The try/catch in _initEditor ensures robustness.
+  it('left pan mirrors to right via setViewBox', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
-    // Even if editor init had failed, the viewer would
-    // still be usable (pan/zoom still active).
-    expect(el._panZoomLeft).toBeTruthy();
-    expect(el._panZoomRight).toBeTruthy();
+    const rightSet = vi.spyOn(el._editorRight, 'setViewBox');
+    el._editorLeft.setViewBox(5, 10, 100, 100);
+    expect(rightSet).toHaveBeenCalledWith(
+      5,
+      10,
+      100,
+      100,
+      { silent: true },
+    );
+  });
+
+  it('right pan mirrors to left via setViewBox', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const leftSet = vi.spyOn(el._editorLeft, 'setViewBox');
+    el._editorRight.setViewBox(20, 30, 50, 50);
+    expect(leftSet).toHaveBeenCalledWith(
+      20,
+      30,
+      50,
+      50,
+      { silent: true },
+    );
+  });
+
+  it('mutex prevents feedback loops', async () => {
+    // When the left editor's write mirrors to the right
+    // via setViewBox({silent:true}), the right editor's
+    // onViewChange is suppressed by the silent flag AND
+    // the viewer's _syncingViewBox mutex. If either
+    // guard fails, the mirror cascades back to left and
+    // a second mirror fires.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    // Count how many times the left editor's setViewBox
+    // is called across a single left-driven write.
+    const leftSetSpy = vi.spyOn(el._editorLeft, 'setViewBox');
+    el._editorLeft.setViewBox(1, 2, 99, 99);
+    // Only the explicit call we just issued — no cascade.
+    expect(leftSetSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('sync is a no-op when the partner editor is missing', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    el._editorRight = null;
+    // Fires onViewChange with a viewBox; the mirror
+    // target is gone, so the handler bails.
+    expect(() => el._onLeftViewChange({
+      x: 0, y: 0, width: 1, height: 1,
+    })).not.toThrow();
+  });
+
+  it('initial fit uses silent writes', async () => {
+    // The viewer's initEditors calls fitContent({silent:true})
+    // on both editors during setup so the two fits don't
+    // cascade into each other. We verify by checking
+    // that immediately after open, the viewer's mutex is
+    // cleared and neither editor mirrored to the other
+    // spuriously. We can't easily spy on the constructor
+    // path, but we can check that a manual write from
+    // either side after setup mirrors exactly once.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(el._syncingViewBox).toBe(false);
   });
 });

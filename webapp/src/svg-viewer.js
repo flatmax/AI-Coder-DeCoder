@@ -58,8 +58,6 @@
 
 import { LitElement, css, html } from 'lit';
 
-import svgPanZoom from 'svg-pan-zoom';
-
 import { SharedRpc } from './rpc.js';
 import { SvgEditor } from './svg-editor.js';
 
@@ -83,44 +81,6 @@ const _EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></
  */
 const _MODE_SELECT = 'select';
 const _MODE_PRESENT = 'present';
-
-/**
- * Pan/zoom configuration shared by both panels. Matches
- * specs4/5-webapp/svg-viewer.md#synchronized-panzoom —
- * mouse wheel zoom, click-drag pan, zoom bounds.
- *
- * `controlIconsEnabled: false` — we render our own fit
- * button as a floating overlay rather than the library's
- * built-in control buttons (which would conflict with
- * the status LED visually and don't match the app's
- * design language).
- *
- * `dblClickZoomEnabled: false` — double-click is
- * reserved for entering inline text edit on <text>
- * elements (SvgEditor). Letting pan-zoom also consume
- * double-clicks would race the editor: the user
- * double-clicks a text element, the editor opens its
- * textarea overlay, AND pan-zoom zooms the viewport,
- * shifting the textarea off the text it's editing.
- * Mouse wheel remains the primary zoom gesture.
- *
- * `fit: true, center: true` — on init, fit the SVG to
- * the panel and center it. Subsequent user interaction
- * takes over.
- */
-const _PAN_ZOOM_OPTIONS = Object.freeze({
-  panEnabled: true,
-  controlIconsEnabled: false,
-  zoomEnabled: true,
-  dblClickZoomEnabled: false,
-  mouseWheelZoomEnabled: true,
-  preventMouseEventsDefault: true,
-  zoomScaleSensitivity: 0.2,
-  minZoom: 0.1,
-  maxZoom: 10,
-  fit: true,
-  center: true,
-});
 
 export class SvgViewer extends LitElement {
   static properties = {
@@ -372,27 +332,29 @@ export class SvgViewer extends LitElement {
     // a full SVG re-parse and visual flash.
     this._lastLeftContent = null;
     this._lastRightContent = null;
-    // svg-pan-zoom instances, one per panel. Initialised
-    // after SVG injection; disposed before every re-
-    // injection so Monaco doesn't retain references to
-    // detached DOM. Null when no file is open.
-    this._panZoomLeft = null;
-    this._panZoomRight = null;
-    // Guard against feedback loops when syncing pan/zoom
-    // between panels. Set before programmatically moving
-    // one panel to match the other; cleared after. Pure
-    // mutex pattern — same as markdown preview's scroll
-    // sync in 3.1b.
-    this._syncingPanZoom = false;
-    // SvgEditor instance attached to the right panel's SVG.
-    // Handles element selection, drag, resize, etc. Null
-    // when no file is open or when the SVG hasn't been
-    // injected yet. Disposed before re-injection so DOM
-    // references don't leak across file switches.
+    // Paired SvgEditor instances — one per panel. The
+    // left instance is read-only (navigation only); the
+    // right is fully editable. Both mirror their viewBox
+    // writes to the other via `onViewChange`. Null when
+    // no file is open. Disposed before every SVG re-
+    // injection so they never hold stale DOM refs.
+    this._editorLeft = null;
+    this._editorRight = null;
+    // Guard against feedback loops when syncing viewBox
+    // between panels. Set before programmatically writing
+    // to one editor to match the other; cleared after.
+    // Pure mutex pattern — same as markdown preview's
+    // scroll sync in 3.1b.
+    this._syncingViewBox = false;
+    // Back-compat alias. Some existing code (tests,
+    // `_onEditorChange`) references `_editor` directly;
+    // point it at the right (editable) pane.
     this._editor = null;
     // Bound editor change handler — syncs edited SVG back
     // to the file's modified content and recomputes dirty.
     this._onEditorChange = this._onEditorChange.bind(this);
+    this._onLeftViewChange = this._onLeftViewChange.bind(this);
+    this._onRightViewChange = this._onRightViewChange.bind(this);
     /**
      * Context menu state. Null when closed; `{x, y}` in
      * viewport coordinates when open. Only rendered when
@@ -403,10 +365,6 @@ export class SvgViewer extends LitElement {
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContextMenu = this._onContextMenu.bind(this);
     this._onContextDismiss = this._onContextDismiss.bind(this);
-    this._onLeftPan = this._onLeftPan.bind(this);
-    this._onLeftZoom = this._onLeftZoom.bind(this);
-    this._onRightPan = this._onRightPan.bind(this);
-    this._onRightZoom = this._onRightZoom.bind(this);
     this._onFitClick = this._onFitClick.bind(this);
   }
 
@@ -423,8 +381,7 @@ export class SvgViewer extends LitElement {
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
     document.removeEventListener('click', this._onContextDismiss);
-    this._disposeEditor();
-    this._disposePanZoom();
+    this._disposeEditors();
     super.disconnectedCallback();
   }
 
@@ -640,8 +597,7 @@ export class SvgViewer extends LitElement {
     if (this._activeIndex < 0) {
       this._lastLeftContent = null;
       this._lastRightContent = null;
-      this._disposeEditor();
-      this._disposePanZoom();
+      this._disposeEditors();
       return;
     }
     const file = this._files[this._activeIndex];
@@ -691,30 +647,40 @@ export class SvgViewer extends LitElement {
       changed = true;
     }
     if (changed) {
-      // The right panel gets preserveAspectRatio="none"
-      // so the SvgEditor has sole viewBox authority —
-      // otherwise the browser's aspect-ratio fitting
-      // fights with editor coordinate math. The left
-      // panel keeps the default ("xMidYMid meet") since
-      // it's a read-only reference.
+      // Both panes get `preserveAspectRatio="none"` now
+      // that each has its own SvgEditor driving viewBox
+      // writes. Without this, the browser's aspect-ratio
+      // fitting would fight the editor's coordinate math
+      // on any pane where the authored viewBox aspect
+      // differs from the container aspect — pan/zoom
+      // deltas would feel "sticky" as the browser
+      // silently re-fit on top of every write.
       //
-      // Declared width/height are stripped on both sides
-      // so the browser doesn't use the SVG's intrinsic
-      // dimensions — we want the CSS 100%/100% layout and
-      // pan-zoom's viewport transform to drive sizing.
+      // Declared width/height are stripped so the browser
+      // doesn't use the SVG's intrinsic dimensions — we
+      // want the CSS 100%/100% layout to drive sizing and
+      // the editor's viewBox writes to drive content
+      // framing.
       const rightSvg = rightContainer.querySelector('svg');
       if (rightSvg) {
         rightSvg.setAttribute('preserveAspectRatio', 'none');
         rightSvg.removeAttribute('width');
         rightSvg.removeAttribute('height');
       }
-      // Dispose any prior editor before re-init — the old
-      // editor's SVG reference is about to become stale.
-      this._disposeEditor();
-      if (leftContainer) {
-        this._initPanZoom(leftContainer, rightContainer);
+      const leftSvg = leftContainer
+        ? leftContainer.querySelector('svg')
+        : null;
+      if (leftSvg) {
+        leftSvg.setAttribute('preserveAspectRatio', 'none');
       }
-      this._initEditor(rightSvg);
+      // Dispose any prior editors before re-init — their
+      // SVG references are about to become stale.
+      this._disposeEditors();
+      // Create a read-only editor on the left and an
+      // editable editor on the right. Both sync viewBox
+      // via their `onViewChange` callbacks with the
+      // mirror-guard mutex preventing feedback loops.
+      this._initEditors(leftSvg, rightSvg);
       // Resolve relative image references in both panels.
       // PDF/PPTX-converted SVGs reference sibling raster
       // images via `<image href="01_slide_img1.png"/>`.
@@ -730,38 +696,80 @@ export class SvgViewer extends LitElement {
   }
 
   /**
-   * Attach an SvgEditor to the right panel's SVG. The
-   * editor shares the panel with the pan-zoom instance —
-   * pan-zoom handles viewport navigation (wheel zoom,
-   * drag-pan on empty space); the editor handles element
-   * selection. When the editor's hit-test returns a real
-   * element, its pointerdown handler stops propagation so
-   * pan-zoom doesn't start a pan. Empty-space clicks fall
-   * through and pan-zoom takes over.
+   * Attach an SvgEditor to each panel's SVG. The left
+   * instance runs in read-only mode — it handles only
+   * wheel zoom and middle/left-drag pan, never mutates
+   * content, never shows handles. The right instance is
+   * fully editable. Both call `_onLeftViewChange` /
+   * `_onRightViewChange` on every viewBox write; those
+   * handlers mirror the write to the other pane under
+   * the `_syncingViewBox` mutex to prevent feedback.
+   *
+   * After both editors attach, an initial fit-content
+   * runs on both with `silent: true` so the initial
+   * framing writes don't fire `onViewChange` (which
+   * would spuriously mirror across before the user has
+   * done anything).
    */
-  _initEditor(rightSvg) {
-    if (!rightSvg) return;
+  _initEditors(leftSvg, rightSvg) {
+    if (leftSvg) {
+      try {
+        this._editorLeft = new SvgEditor(leftSvg, {
+          readOnly: true,
+          onViewChange: this._onLeftViewChange,
+        });
+        this._editorLeft.attach();
+      } catch (err) {
+        console.warn('[svg-viewer] left editor init failed', err);
+        this._editorLeft = null;
+      }
+    }
+    if (rightSvg) {
+      try {
+        this._editorRight = new SvgEditor(rightSvg, {
+          onChange: this._onEditorChange,
+          onViewChange: this._onRightViewChange,
+        });
+        this._editorRight.attach();
+      } catch (err) {
+        console.warn('[svg-viewer] right editor init failed', err);
+        this._editorRight = null;
+      }
+    }
+    // Back-compat alias.
+    this._editor = this._editorRight;
+    // Initial fit — run under the mutex so the implicit
+    // mirror write between the two editors doesn't
+    // double-fire before the user touches anything. The
+    // `silent: true` option suppresses the `onViewChange`
+    // callback for the caller's write; the mutex
+    // additionally guards the mirror path in case fit
+    // triggers a cascade.
+    this._syncingViewBox = true;
     try {
-      this._editor = new SvgEditor(rightSvg, {
-        onChange: this._onEditorChange,
-      });
-      this._editor.attach();
-    } catch (err) {
-      console.warn('[svg-viewer] editor init failed', err);
-      this._editor = null;
+      if (this._editorLeft) this._editorLeft.fitContent({ silent: true });
+      if (this._editorRight) this._editorRight.fitContent({ silent: true });
+    } finally {
+      this._syncingViewBox = false;
     }
   }
 
   /**
-   * Detach and null the editor. Safe to call when no
-   * editor exists.
+   * Detach both editors and null their refs. Safe to
+   * call when no editors exist.
    */
-  _disposeEditor() {
-    if (!this._editor) return;
-    try {
-      this._editor.detach();
-    } catch (_) {
-      // Already detached or SVG disposed — harmless.
+  _disposeEditors() {
+    if (this._editorLeft) {
+      try {
+        this._editorLeft.detach();
+      } catch (_) {}
+      this._editorLeft = null;
+    }
+    if (this._editorRight) {
+      try {
+        this._editorRight.detach();
+      } catch (_) {}
+      this._editorRight = null;
     }
     this._editor = null;
   }
@@ -974,207 +982,103 @@ export class SvgViewer extends LitElement {
     return '';
   }
 
-  /**
-   * Initialise pan/zoom on both panels. Tears down any
-   * existing instances first so DOM references aren't
-   * retained across file switches.
-   *
-   * Both panels' pan/zoom instances are wired to mirror
-   * each other via `onPan`/`onZoom` callbacks. A
-   * `_syncingPanZoom` guard flag prevents ping-pong
-   * loops — when we programmatically move one panel to
-   * match the other, the callback on the moved panel
-   * fires but bails out because the flag is set.
-   *
-   * Initialisation is wrapped in try/catch — jsdom's
-   * SVG implementation doesn't support enough of the
-   * real library's feature set, so tests that mount
-   * real `svg-pan-zoom` against injected SVG would
-   * throw. Tests should mock the library at the module
-   * level; production runs fine.
-   */
-  _initPanZoom(leftContainer, rightContainer) {
-    this._disposePanZoom();
-    const leftSvg = leftContainer.querySelector('svg');
-    const rightSvg = rightContainer.querySelector('svg');
-    if (!leftSvg || !rightSvg) return;
-    try {
-      this._panZoomLeft = svgPanZoom(leftSvg, {
-        ..._PAN_ZOOM_OPTIONS,
-        onPan: this._onLeftPan,
-        onZoom: this._onLeftZoom,
-      });
-    } catch (err) {
-      console.warn('[svg-viewer] left pan/zoom init failed', err);
-      this._panZoomLeft = null;
-    }
-    try {
-      this._panZoomRight = svgPanZoom(rightSvg, {
-        ..._PAN_ZOOM_OPTIONS,
-        onPan: this._onRightPan,
-        onZoom: this._onRightZoom,
-      });
-    } catch (err) {
-      console.warn('[svg-viewer] right pan/zoom init failed', err);
-      this._panZoomRight = null;
-    }
-  }
+  // ---------------------------------------------------------------
+  // ViewBox sync callbacks
+  // ---------------------------------------------------------------
 
   /**
-   * Initialise pan-zoom on the right panel only — used
-   * in presentation mode where the left panel is hidden.
-   * No sync callbacks since there's no partner panel to
-   * mirror. Tears down any existing instances first.
+   * Left editor viewBox changed — mirror to right. The
+   * `_syncingViewBox` mutex guards against feedback:
+   * when we programmatically write to the right editor,
+   * its own `onViewChange` fires, but the mutex is set
+   * so the reciprocal mirror is skipped.
+   *
+   * The mirror write uses `silent: true` so the right
+   * editor's callback doesn't fire at all — belt and
+   * braces alongside the mutex.
    */
-  _initPanZoomRightOnly(rightContainer) {
-    this._disposePanZoom();
-    const rightSvg = rightContainer.querySelector('svg');
-    if (!rightSvg) return;
+  _onLeftViewChange(vb) {
+    if (this._syncingViewBox) return;
+    if (!this._editorRight) return;
+    this._syncingViewBox = true;
     try {
-      this._panZoomRight = svgPanZoom(rightSvg, _PAN_ZOOM_OPTIONS);
-    } catch (err) {
-      console.warn(
-        '[svg-viewer] right-only pan/zoom init failed',
-        err,
+      this._editorRight.setViewBox(
+        vb.x,
+        vb.y,
+        vb.width,
+        vb.height,
+        { silent: true },
       );
-      this._panZoomRight = null;
+    } catch (_) {
+    } finally {
+      this._syncingViewBox = false;
+    }
+  }
+
+  /** Right → left mirror. Symmetric with `_onLeftViewChange`. */
+  _onRightViewChange(vb) {
+    if (this._syncingViewBox) return;
+    if (!this._editorLeft) return;
+    this._syncingViewBox = true;
+    try {
+      this._editorLeft.setViewBox(
+        vb.x,
+        vb.y,
+        vb.width,
+        vb.height,
+        { silent: true },
+      );
+    } finally {
+      this._syncingViewBox = false;
     }
   }
 
   /**
-   * Destroy pan/zoom instances and null the refs. Safe
-   * to call when instances don't exist — no-op.
-   */
-  _disposePanZoom() {
-    if (this._panZoomLeft) {
-      try {
-        this._panZoomLeft.destroy();
-      } catch (_) {
-        // Already destroyed or underlying SVG detached —
-        // harmless.
-      }
-      this._panZoomLeft = null;
-    }
-    if (this._panZoomRight) {
-      try {
-        this._panZoomRight.destroy();
-      } catch (_) {}
-      this._panZoomRight = null;
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Pan/zoom sync callbacks
-  // ---------------------------------------------------------------
-
-  _onLeftPan(newPan) {
-    this._notifyEditorViewChanged();
-    if (this._syncingPanZoom) return;
-    if (!this._panZoomRight) return;
-    this._syncingPanZoom = true;
-    try {
-      this._panZoomRight.pan(newPan);
-    } catch (_) {
-    } finally {
-      this._syncingPanZoom = false;
-    }
-  }
-
-  _onLeftZoom(newZoom) {
-    this._notifyEditorViewChanged();
-    if (this._syncingPanZoom) return;
-    if (!this._panZoomRight) return;
-    this._syncingPanZoom = true;
-    try {
-      this._panZoomRight.zoom(newZoom);
-    } catch (_) {
-    } finally {
-      this._syncingPanZoom = false;
-    }
-  }
-
-  _onRightPan(newPan) {
-    this._notifyEditorViewChanged();
-    if (this._syncingPanZoom) return;
-    if (!this._panZoomLeft) return;
-    this._syncingPanZoom = true;
-    try {
-      this._panZoomLeft.pan(newPan);
-    } catch (_) {
-    } finally {
-      this._syncingPanZoom = false;
-    }
-  }
-
-  _onRightZoom(newZoom) {
-    this._notifyEditorViewChanged();
-    if (this._syncingPanZoom) return;
-    if (!this._panZoomLeft) return;
-    this._syncingPanZoom = true;
-    try {
-      this._panZoomLeft.zoom(newZoom);
-    } catch (_) {
-    } finally {
-      this._syncingPanZoom = false;
-    }
-  }
-
-  /**
-   * Tell the SvgEditor that the view transform changed
-   * so it can re-render its selection handles with fresh
-   * screen-pixel-based sizing. Called from every pan /
-   * zoom callback. Safe to call when no editor is
-   * attached or no element is selected — the editor's
-   * `notifyViewChanged` is a no-op in those cases.
-   *
-   * Without this, the selection outline and handle dots
-   * — whose stroke width, dash length, and radius are
-   * computed from the current CTM at render time and
-   * then baked as SVG-unit attribute values — stay at
-   * the pre-zoom size and grow/shrink visually as the
-   * user zooms. Constant-screen-size handles are the
-   * expected vector-editor convention.
-   */
-  _notifyEditorViewChanged() {
-    if (this._editor) {
-      try {
-        this._editor.notifyViewChanged();
-      } catch (_) {
-        // Editor may be mid-teardown or in an invalid
-        // state; swallow rather than propagate.
-      }
-    }
-  }
-
-  /**
-   * Fit button click handler. Resets both panels to
-   * fit+center. The sync guard is held across both
-   * operations so the fit call on one panel doesn't
-   * trigger mirror calls into the other — both are
-   * being explicitly reset.
+   * Fit button click handler. Calls `fitContent()` on
+   * both editors. The mutex is held across both calls
+   * so the first fit's `onViewChange` doesn't cascade
+   * and overwrite the second's pending fit. `silent: true`
+   * on both writes is belt-and-braces — with the mutex
+   * alone it would still work, but keeping the silent
+   * flag means a future refactor that drops the mutex
+   * won't regress.
    */
   _onFitClick() {
-    if (!this._panZoomLeft && !this._panZoomRight) return;
-    this._syncingPanZoom = true;
+    if (!this._editorLeft && !this._editorRight) return;
+    this._syncingViewBox = true;
     try {
-      if (this._panZoomLeft) {
+      if (this._editorLeft) {
         try {
-          this._panZoomLeft.resize();
-          this._panZoomLeft.fit();
-          this._panZoomLeft.center();
+          this._editorLeft.fitContent({ silent: true });
         } catch (_) {}
       }
-      if (this._panZoomRight) {
+      if (this._editorRight) {
         try {
-          this._panZoomRight.resize();
-          this._panZoomRight.fit();
-          this._panZoomRight.center();
+          this._editorRight.fitContent({ silent: true });
         } catch (_) {}
       }
     } finally {
-      this._syncingPanZoom = false;
+      this._syncingViewBox = false;
     }
-    this._notifyEditorViewChanged();
+    // After both fit calls settle, push the right editor's
+    // final viewBox onto the left so they're in exact sync
+    // (they may differ by a fraction of a pixel because
+    // each fit runs against its own container dimensions).
+    if (this._editorLeft && this._editorRight) {
+      this._syncingViewBox = true;
+      try {
+        const vb = this._editorRight.getViewBox();
+        this._editorLeft.setViewBox(
+          vb.x,
+          vb.y,
+          vb.width,
+          vb.height,
+          { silent: true },
+        );
+      } finally {
+        this._syncingViewBox = false;
+      }
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1261,11 +1165,9 @@ export class SvgViewer extends LitElement {
     // in presentation mode. Wrap the refit in rAF so the
     // CSS layout change has committed before we measure.
     requestAnimationFrame(() => {
-      if (!this._panZoomRight) return;
+      if (!this._editorRight) return;
       try {
-        this._panZoomRight.resize();
-        this._panZoomRight.fit();
-        this._panZoomRight.center();
+        this._editorRight.fitContent({ silent: true });
       } catch (_) {}
     });
   }

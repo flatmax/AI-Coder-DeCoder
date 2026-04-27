@@ -278,6 +278,41 @@ Ctrl+F independently confirms Pitfall 2: if it throws `actions.find not found`, 
 
 **Lesson.** Monaco's documented sample code isn't safe by default under modern bundlers. Reimplementations should treat the worker-loading pattern and module entry as build-tool-specific choices, not as copy-from-sample decisions. Both failure modes are silent; tests that only verify the editor mounts and accepts edits will pass with either bug in place.
 
+### D18 — Dropped svg-pan-zoom in favor of unified SvgEditor on both panes
+
+Layer 5.11–5.12 shipped the SVG viewer with `svg-pan-zoom` handling viewport navigation on both panes (pan, zoom, fit) while 5.13's `SvgEditor` ran on the right pane for visual editing. Two libraries, two coordinate systems, two viewBox authorities — the editor had to reach around pan-zoom's viewport transform to compute correct screen-to-SVG coordinates for handles.
+
+Three problems surfaced in practice:
+
+1. **Shadow-DOM fragility.** `svg-pan-zoom` reaches into the global document for event binding in several places. The webapp mounts viewers inside shadow DOM; event dispatch through the shadow boundary worked under Chromium but produced inconsistent hit-test results under other browsers and under jsdom.
+
+2. **Coordinate math duplication.** Both libraries needed to invert CTM to convert pointer events to SVG units. `SvgEditor` has its own `_screenToSvg` via `getScreenCTM` inversion; `svg-pan-zoom` has its own equivalent. Zoom-aware handle-size math lived in both places but had to agree, or selection handles would drift off their targets during zoom.
+
+3. **Viewport sync as a four-party dance.** `svg-pan-zoom`'s `onPan`/`onZoom` callbacks fired on every pointer move, mirroring to the sibling instance under a mutex. The editor's own viewBox writes (from fit-content, programmatic set) had to also trigger sync. Four code paths converged on one sync primitive; each bug in any path produced a feedback loop.
+
+**Resolution.** Dropped `svg-pan-zoom` entirely. `SvgEditor` gains a `readOnly` flag — when set, the editor skips selection, handles, marquee, keyboard shortcuts, text-edit, and the change callback, but keeps pan/zoom/fit. Both panes get an editor instance; the left is read-only. Each editor fires `onViewChange(viewBox)` on every viewBox write. The viewer wires each editor's `onViewChange` to mirror to the other via `setViewBox(..., { silent: true })`, guarded by a shared `_syncingViewBox` mutex so the initial fit-content during setup doesn't cascade.
+
+**What this buys:**
+
+- One coordinate system. Handles, pan, zoom, and the editor's own math share the same CTM inversion.
+- One viewBox authority per pane. The `preserveAspectRatio="none"` that was previously set only on the right pane now applies to both so the browser's built-in aspect fitting doesn't fight the editor's math on either side.
+- Read-only flag is belt-and-braces with the silent-write mutex — mirror writes go through a path that skips the sibling's onViewChange entirely, AND the mutex prevents any remaining cascade. Either guard alone would be sufficient; both together make the sync provably loop-free.
+
+**What this costs:**
+
+- Left pane's editor instance is bigger than a pan-zoom instance. The read-only path bails early in `_onPointerDown`, `_onKeyDown`, etc., so the extra cost is the instance allocation itself plus one event-listener set — both negligible.
+- `fitContent({ silent: true })` is a new option on the editor. Needed during setup so the initial fit on one pane doesn't cascade to the other via the mutex-then-onViewChange path.
+
+**Migration:**
+
+- `svg-pan-zoom` dependency removed from `webapp/package.json`.
+- `_panZoomLeft`, `_panZoomRight`, `_syncingPanZoom` gone. `_editorLeft`, `_editorRight`, `_syncingViewBox` replace them. `_editor` remains as a back-compat alias pointing at `_editorRight`.
+- `_initPanZoom` / `_disposePanZoom` → `_initEditors` / `_disposeEditors`.
+- Both panes get `preserveAspectRatio="none"` (was right-only).
+- Tests rewritten; no more module-level `vi.mock('svg-pan-zoom', ...)`.
+
+**Spec updates:** `specs4/5-webapp/svg-viewer.md` Overview + Synchronized Pan/Zoom sections. Impl-history: `specs4/impl-history/layer-5.md` gets a new sub-commit entry explaining the refactor without deleting the 5.11–5.12 historical record.
+
 ### D10 — Architectural contracts preserved from day one
 
 `specs4/0-overview/implementation-guide.md#architectural-changes-from-specs3` lists changes in specs4 that are **contracts** — a reimplementer must preserve them even when specs3 describes an older pattern. Quick reference for Layer 1+ work:
