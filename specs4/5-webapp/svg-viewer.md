@@ -1,6 +1,6 @@
 # SVG Viewer
 **Status:** stub
-Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Uses native SVG viewBox manipulation — stays crisp at any zoom level. Both panels are synchronized: pan or zoom one and the other follows. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
+Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Both panels use the same visual editor component — the left pane in read-only mode for reference navigation, the right pane editable. Pan and zoom act directly on the SVG viewBox and stay crisp at any zoom level. Both panels are synchronized: pan or zoom one and the other follows. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
 ## Routing
 The app shell inspects the file extension on every navigate-file event:
 | Extension | Viewer |
@@ -33,26 +33,31 @@ Internal multi-file tracking without a visible tab bar, same pattern as diff vie
 Two modes switchable programmatically:
 | Mode | Left panel | Right panel | Purpose |
 |---|---|---|---|
-| Select (default) | Pan/zoom navigation | Visual editor | Edit SVG elements by dragging, resizing, typing |
-| Pan | Pan/zoom navigation | Pan/zoom navigation | Navigate both panels without editing |
-| Present | Hidden | Visual editor, full width | Full-width editor with left panel hidden |
-Mode switch captures current editor content, disposes active handlers, reinitializes for new mode. The viewer starts in select mode and stays there in practice.
+| Select (default) | Read-only editor (navigation only) | Editable editor | Edit SVG elements by dragging, resizing, typing |
+| Present | Hidden | Editable editor, full width | Full-width editor with left panel hidden |
+- Both panels are instances of the same visual editor class — the left is constructed with a read-only flag that disables selection, handles, marquee, keyboard shortcuts, and double-click-to-edit. Only pan and zoom remain active on the left pane
+- Mode switch captures current editor content, disposes active handlers, reinitializes for new mode. The viewer starts in select mode and stays there in practice
 ## Synchronized Pan/Zoom
 Both panels maintain synchronized viewports.
-| Feature | Detail |
+| Input | Behavior |
 |---|---|
-| Mouse wheel | Zoom in/out |
-| Click-drag | Pan (pan mode) or move elements (select mode) |
-| Double-click | Zoom in at point (pan mode) or edit text (select mode) |
+| Mouse wheel | Zoom in/out centered on cursor |
+| Middle-click drag | Pan (both panels) |
+| Plain drag on empty space, left pane | Pan (read-only pane has no other use for plain drag) |
+| Plain drag on empty space, right pane | Start marquee selection (editable pane) |
+| Double-click on a text element, right pane | Enter inline text edit |
 | Pinch gesture | Zoom (touch devices) |
 | Min/max zoom | Constrained to sensible bounds |
 ### Synchronization
-- In pan mode, both panels use the pan/zoom library with bidirectional sync
-- In select mode, the left panel's pan/zoom viewport drives synchronization — when left is panned/zoomed, its viewBox is read and applied to the right panel's editor; when the user zooms in the editor (mouse wheel), the editor's zoom callback syncs back to the left panel
-- A guard flag prevents infinite callback loops
+- Both panels are editor instances that manipulate their own viewBox
+- Each editor fires an on-view-change callback after any viewBox write (from wheel zoom, pan, fit-content, or external set-view-box)
+- The viewer wires each editor's on-view-change to call the other editor's set-view-box
+- A mutex flag is held during the mirrored write so the callback on the receiving editor bails out without echoing back — breaks feedback loops
+- Programmatic viewBox writes from the viewer (e.g., fit button resetting both panes) also set the mutex so neither side ping-pongs
 ### Shadow DOM Compatibility
-- Pan/zoom library operates on SVG elements obtained via shadow-root queries
-- Initialization wrapped in a try/catch — if the library fails (isolation issues), SVGs are still visible and scrollable, just without interactive pan/zoom
+- The editor operates on SVG elements obtained via shadow-root queries
+- All coordinate math uses native browser APIs (get-screen-CTM, create-SVG-point, matrix transforms) which work uniformly inside shadow DOM
+- No third-party pan/zoom library is involved, eliminating a class of shadow-DOM isolation failures that previous designs had to guard against
 ## SVG Editing (Select Mode)
 Right panel uses the visual editor; left panel remains read-only for reference.
 ### Element Selection
@@ -130,10 +135,11 @@ Without this filtering, clicking a handle would re-hit-test to the underlying el
 - When a handle is dragged, the delta is applied to the original relative arg values so overall path shape is preserved
 - Serialization rounds to reasonable precision and joins commands with spaces
 ### Preserve Aspect Ratio Override
-- When right panel SVG is injected, it gets an explicit "preserve aspect ratio: none" attribute
-- Without this override, the browser applies default fitting on top of whatever viewBox the editor sets — producing a double-fitted display where editor viewBox changes don't match what the user sees
-- Disabling browser-side aspect handling makes the SVG viewBox the single source of truth for what's visible
-- Left (read-only) panel keeps the default aspect ratio preservation — the pan/zoom library manages its viewport via internal transform groups rather than viewBox manipulation, so browser aspect fitting is harmless there
+- Both panels get an explicit "preserve aspect ratio: none" attribute on the root SVG after injection
+- Without this override, the browser applies default fitting (letterboxing or pillarboxing) to make the viewBox fit the container while preserving aspect ratio — which means a screen pixel inside the SVG element's client rect does not map 1:1 to a viewBox unit along one axis
+- The editor's cursor-to-viewBox conversion uses the SVG's screen CTM, which correctly accounts for that browser-applied fitting; so strict correctness doesn't require this override
+- But disabling browser-side fitting makes the SVG viewBox the single source of truth for what's visible. The fit-content method is then responsible for ensuring the viewBox aspect ratio matches the container — by expanding the shorter axis — so content isn't stretched
+- Applying the override uniformly to both panels keeps coordinate math and fit logic symmetric across left and right
 ### Marquee Visual Feedback
 Marquee rectangle's appearance changes based on drag direction to signal the selection mode:
 | Direction | Fill | Stroke | Dash | Meaning |
@@ -159,9 +165,10 @@ Bottom-right corner holds a vertical stack of small floating buttons:
 | Fit | Fit content to view |
 ### Fit Button
 - Fits both panels so SVG content is fully visible within available space
+- Calls each editor's fit-content method; under the mutex so neither editor's on-view-change callback echoes into the other
 - Fitting respects the SVG's authored viewBox when one exists — many SVGs (especially those with font glyphs or clip paths in defs) produce misleading bounding-box results that don't reflect the intended visible area; the authored viewBox is the correct viewport
 - When no authored viewBox is present, falls back to computed bounding box with a small margin
-- ViewBox expanded on the shorter axis to match the container's aspect ratio, ensuring the browser's default preservation is effectively a no-op
+- ViewBox expanded on the shorter axis to match the container's aspect ratio so content isn't stretched horizontally or vertically even when the container's aspect ratio differs from the content's
 - Sanity check — if computed bounding-box area vastly exceeds the authored viewBox area (e.g., off-screen text from font glyph definitions), the authored viewBox is trusted instead
 ### Status LED
 Small circular indicator in the top-right, same behavior as diff viewer.
@@ -177,8 +184,8 @@ SVG content cannot be rendered via framework templates — framework doesn't nat
    - Width/height attributes removed (so SVG fills container)
    - Width/height styles set to fill container
    - ViewBox attribute added if missing (computed from original width/height before they are removed)
-   - For the editable right panel, "preserve aspect ratio: none" is set so the editor has full control over viewBox-based fitting
-4. Pan/zoom library initialized on injected SVG elements via animation frame
+   - Both panels get "preserve aspect ratio: none" so cursor-to-viewBox math is symmetric and the editor's fit-content output fully controls what's visible
+4. A new editor instance is constructed and attached on each panel — left pane in read-only mode, right pane editable. Editors initialize their viewBox via fit-content
 ### Injection Deduplication
 - A generation counter guards against duplicate injection
 - Both lifecycle update and openFile can trigger injection for the same file
@@ -231,7 +238,8 @@ All toolbar-level actions are accessible only via keyboard. Element-level shortc
 | Delete / Backspace | Editor | Delete selected element(s) |
 | Escape | Editor | Deselect / cancel text edit / cancel marquee |
 ## Resize Handling
-- Resize observer on the diff container calls pan/zoom resize on both panels when container dimensions change (dialog resize, browser window resize)
+- Resize observer on the diff container notifies both editors when container dimensions change (dialog resize, browser window resize)
+- Each editor re-runs fit-content so the viewBox aspect ratio re-matches the new container aspect ratio; otherwise content would be stretched until the next explicit fit
 ## Integration with Existing Systems
 ### App Shell
 - Both viewers are children of the background layer
@@ -326,10 +334,12 @@ Orchestrates the switch:
 ## Invariants
 
 - Only one viewer is visible at a time — the app shell enforces this via CSS class toggling
+- Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set
 - Handle elements are always excluded from hit-testing so clicking a handle never starts a drag on the underlying element
-- The right panel always has its aspect-ratio preservation disabled so the editor's viewBox is authoritative
-- Injection deduplication guarantees that rapid openFile calls for the same file never initialize pan/zoom on stale content
-- Pan/zoom sync never produces infinite feedback loops — a guard flag breaks the cycle
+- Both panels have their browser-side aspect-ratio preservation disabled so the editor's viewBox is the single source of truth for what's visible
+- Injection deduplication guarantees that rapid openFile calls for the same file never attach editors to stale content
+- View sync never produces infinite feedback loops — a mutex flag held during the mirrored viewBox write prevents ping-pong
+- The read-only editor never mutates any SVG element — only its own viewBox attribute for pan and zoom
 - Save commits any active text edit and removes handles before serializing — saved content is always clean
 - Mode-toggle race guard prevents active-file-changed events from disrupting an in-flight visual ↔ text switch
 - Copy-as-PNG clipboard write uses a promise-of-blob, not a resolved blob, to preserve user-gesture context across async scaling

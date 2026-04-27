@@ -1,8 +1,10 @@
 # SVG Viewer
 
+> **Architecture supersession note (specs4):** This document was written against a design that used the `svg-pan-zoom` library on both panels. That design was superseded. The current architecture uses a single bespoke editor class on both panels — the left pane constructed in read-only mode for pan/zoom navigation only, the right pane editable. No third-party pan/zoom library is involved. The authoritative architecture is in `specs4/5-webapp/svg-viewer.md`; this document's details about `svg-pan-zoom`, viewport-group unwrap gymnastics, and library callback semantics do not apply. Coordinate math, hit-testing, handle rendering, marquee semantics, path-command parsing, and the text-mode toggle all transfer to the new design unchanged.
+
 ## Overview
 
-A side-by-side SVG diff viewer for `.svg` files. Replaces the Monaco diff editor when an SVG file is opened. Uses `svg-pan-zoom` for native SVG viewBox manipulation — stays crisp at any zoom level. Both panels are synchronized: pan or zoom one and the other follows.
+A side-by-side SVG diff viewer for `.svg` files. Replaces the Monaco diff editor when an SVG file is opened. Both panels use the same bespoke editor class operating directly on the SVG `viewBox` — stays crisp at any zoom level. Both panels are synchronized: pan or zoom one and the other follows.
 
 ## Routing
 

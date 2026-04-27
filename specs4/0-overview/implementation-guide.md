@@ -162,6 +162,13 @@ Each change was made to enable a future parallel-agent mode (see [parallel-agent
 - **specs4 position:** Breakdown RPC targets a specific context manager, defaulting to the user-facing one. Single-agent operation looks identical to specs3 because there's only one context manager. Multi-agent operation can report per-agent breakdowns without transport-level changes
 - **See:** [viewers-hud.md — Per-Context-Manager Breakdown](../5-webapp/viewers-hud.md#per-context-manager-breakdown)
 
+### SVG Viewer — Unified Bespoke Editor on Both Panels
+
+- **specs3 position:** Two systems coexist — `svg-pan-zoom` library on the left pane (always) and on the right pane (pan mode), plus the bespoke `SvgEditor` on the right pane (select mode). Sync bridges between the library's transform-group model and the editor's viewBox model
+- **specs4 position:** One bespoke editor class on both panes. Left pane constructed with a read-only flag that disables selection, handles, marquee, keyboard shortcuts, and double-click-to-edit — only pan and zoom remain active. Right pane is the full editable editor. No pan/zoom library involved. The two editors are sync-coupled by mirroring viewBox writes through `setViewBox` under a ping-pong mutex
+- **Why:** Removes the viewport-group unwrap gymnastics needed to serialize clean SVG, removes the library/editor coordinate-math mismatch, removes the gesture conflict where library pan intercepts empty-space drag before the editor can start a marquee. "Pan mode" ceases to be a distinct mode — pan is a pointer gesture (middle-click, or plain drag on the read-only pane) that always works
+- **See:** [svg-viewer.md — Interaction Modes, Synchronization, Invariants](../5-webapp/svg-viewer.md#interaction-modes)
+
 ### Summary Table
 
 | Area | specs3 | specs4 |
@@ -175,6 +182,7 @@ Each change was made to enable a future parallel-agent mode (see [parallel-agent
 | Agent conversations | Unspecified | Transient, not persisted |
 | Index mutation | Procedural timing | Read-only snapshots within a request |
 | HUD breakdown | Session-global | Per-context-manager |
+| SVG viewer pan/zoom | `svg-pan-zoom` library + bespoke editor | Single bespoke editor on both panes; left in read-only mode |
 
 **What this means for the reimplementer:** The specs3 descriptions are accurate for the previous implementation's behavior, but the specs4 contracts are stricter. Implement the specs4 invariants from the start. They cost nothing in single-agent operation and mean the foundation does not need to be refactored when agent mode is added. Conversely, if you follow specs3 literally on these points, you will later discover the foundation layers need reshaping to support agent mode — exactly the situation specs4's abstraction raise was meant to prevent.
 
