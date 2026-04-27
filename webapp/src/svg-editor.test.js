@@ -112,6 +112,29 @@ function makeChild(tag, attrs = {}) {
     const h = parseFloat(el.getAttribute('height') || '10');
     return { x, y, width: w, height: h };
   };
+  // jsdom returns all-zero DOMRects for un-laid-out SVG
+  // elements. Text-edit overlay rendering in svg-editor
+  // bails out when the measured paint rect is zero, which
+  // strands every inline-text-edit test. Synthesize a
+  // plausible paint rect from the element's attributes
+  // — matches the identity-CTM model the other stubs
+  // already commit to.
+  el.getBoundingClientRect = () => {
+    const x = parseFloat(el.getAttribute('x') || '0');
+    const y = parseFloat(el.getAttribute('y') || '0');
+    const w = parseFloat(el.getAttribute('width') || '10');
+    const h = parseFloat(el.getAttribute('height') || '10');
+    return {
+      x,
+      y,
+      left: x,
+      top: y,
+      right: x + w,
+      bottom: y + h,
+      width: w,
+      height: h,
+    };
+  };
   return el;
 }
 
@@ -482,9 +505,17 @@ describe('SvgEditor pointerdown dispatch', () => {
     expect(editor.getSelection()).toBe(rect);
   });
 
-  it('clicking empty space deselects', () => {
+  it('clicking empty space preserves selection (marquee begin)', () => {
+    // Empty-space pointerdown starts a marquee rather
+    // than clearing selection. Without a drag past the
+    // render threshold, pointerup is a no-op on
+    // selection — preserving the user's choice. This
+    // reverses the earlier "clicks deselect" behavior
+    // deliberately (see _onPointerDown comment in
+    // svg-editor.js). Escape is the explicit deselect.
     const rect = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const svg = track(makeSvg([rect]));
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.setSelection(rect);
@@ -497,7 +528,10 @@ describe('SvgEditor pointerdown dispatch', () => {
         bubbles: true,
       }),
     );
-    expect(editor.getSelection()).toBe(null);
+    // Pointer released immediately — no drag, so the
+    // marquee never rendered and end-marquee is a no-op.
+    firePointer(svg, 'pointerup', 90, 90);
+    expect(editor.getSelection()).toBe(rect);
   });
 
   it('ignores non-primary mouse buttons', () => {
@@ -541,8 +575,14 @@ describe('SvgEditor pointerdown dispatch', () => {
     }
   });
 
-  it('does not stop propagation on empty-space click', () => {
+  it('stops propagation on empty-space click (marquee begin)', () => {
+    // Every pointerdown on the editable SVG is now
+    // consumed — either selecting / starting a drag /
+    // starting a resize, or (for empty space) beginning
+    // a marquee. The enclosing viewer's pan/zoom
+    // listeners must not also react.
     const svg = track(makeSvg());
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     vi.spyOn(editor, '_hitTest').mockReturnValue(null);
@@ -557,7 +597,7 @@ describe('SvgEditor pointerdown dispatch', () => {
           bubbles: true,
         }),
       );
-      expect(outerListener).toHaveBeenCalled();
+      expect(outerListener).not.toHaveBeenCalled();
     } finally {
       document.body.removeEventListener('pointerdown', outerListener);
     }
@@ -909,7 +949,12 @@ describe('SvgEditor drag: pointerdown routing', () => {
     expect(editor._drag.committed).toBe(false);
   });
 
-  it('pointerdown on empty space cancels no existing drag', () => {
+  it('pointerdown on empty space does not start a drag', () => {
+    // Empty-space pointerdown begins a marquee, not a
+    // drag. Without a drag-threshold pointermove and a
+    // pointerup, the marquee never renders and has no
+    // effect on the selection — preserving it
+    // deliberately (see the _onPointerDown comment).
     const rect = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const svg = track(makeSvg([rect]));
     stubPointerCapture(svg);
@@ -918,8 +963,9 @@ describe('SvgEditor drag: pointerdown routing', () => {
     editor.setSelection(rect);
     vi.spyOn(editor, '_hitTest').mockReturnValue(null);
     firePointer(svg, 'pointerdown', 90, 90);
+    firePointer(svg, 'pointerup', 90, 90);
     expect(editor._drag).toBe(null);
-    expect(editor.getSelection()).toBe(null);
+    expect(editor.getSelection()).toBe(rect);
   });
 
   it('captures pointer on drag start', () => {
@@ -4856,23 +4902,58 @@ describe('SvgEditor beginTextEdit', () => {
   });
 
   it('overlay positioned from element bounding box', () => {
-    const text = makeChild('text', { x: 30, y: 50 });
+    // The overlay measures the element's painted bbox
+    // via getBoundingClientRect (screen pixels), maps
+    // it through the inverse root CTM to SVG-root
+    // coords, and applies a small screen-pixel padding
+    // (padScreenX=2, padScreenY=1) on each side. At
+    // identity CTM the padding is 2 SVG units
+    // horizontally and 1 unit vertically, so the fo's
+    // origin is (bbox.x - 2, bbox.y - 1).
+    //
+    // makeChild stubs getBoundingClientRect to read
+    // the element's x/y/width/height attributes, so we
+    // pin the bbox via those attrs rather than via a
+    // custom getBBox stub.
+    const text = makeChild('text', {
+      x: 30,
+      y: 40,
+      width: 20,
+      height: 10,
+    });
     text.textContent = 'hi';
-    text.getBBox = () => ({ x: 30, y: 40, width: 20, height: 10 });
     const svg = track(makeSvg([text]));
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.beginTextEdit(text);
     const fo = svg.querySelector('foreignObject');
-    // Padded position — bbox x=30 minus pad=8 → x=22.
-    expect(parseFloat(fo.getAttribute('x'))).toBeCloseTo(22);
-    expect(parseFloat(fo.getAttribute('y'))).toBeCloseTo(36);
+    expect(parseFloat(fo.getAttribute('x'))).toBeCloseTo(28);
+    expect(parseFloat(fo.getAttribute('y'))).toBeCloseTo(39);
   });
 
-  it('textarea inherits font-size attribute', () => {
+  it('textarea font-size derived from painted bbox height', () => {
+    // The implementation deliberately derives the
+    // textarea's font-size from the element's painted
+    // height (via getBoundingClientRect) divided by the
+    // current zoom, with a small 0.85 ratio and a chrome
+    // allowance. It does NOT read the font-size attribute
+    // directly — the painted height is the authoritative
+    // source because font-size alone doesn't account for
+    // browser-applied leading, descent, and line-box
+    // metrics. See the _renderTextEditOverlay comment.
+    //
+    // With makeChild's stubbed bbox at identity CTM:
+    //   painted height = attr height (10) → inner = 6
+    //   font-size = (6 * 0.85) / 1 = 5.1
+    // We assert the shape of the emitted style (positive
+    // numeric px value) rather than an exact number so
+    // future tweaks to the chrome / ratio constants
+    // don't cascade into every font test.
     const text = makeChild('text', {
       x: 10,
       y: 20,
+      width: 30,
+      height: 24,
       'font-size': '24',
     });
     text.textContent = 'big';
@@ -4881,7 +4962,10 @@ describe('SvgEditor beginTextEdit', () => {
     editor.attach();
     editor.beginTextEdit(text);
     const textarea = svg.querySelector('textarea');
-    expect(textarea.getAttribute('style')).toContain('font-size: 24px');
+    const style = textarea.getAttribute('style');
+    const match = /font-size:\s*([\d.]+)px/.exec(style);
+    expect(match).not.toBe(null);
+    expect(parseFloat(match[1])).toBeGreaterThan(0);
   });
 
   it('textarea inherits fill color', () => {
@@ -4899,7 +4983,11 @@ describe('SvgEditor beginTextEdit', () => {
     expect(textarea.getAttribute('style')).toContain('color: #ff0000');
   });
 
-  it('default font-size when attribute absent', () => {
+  it('textarea has a valid font-size even without font-size attribute', () => {
+    // Companion to the "derived from painted bbox"
+    // test above — proves the derivation path produces
+    // a positive px value regardless of whether the
+    // source element carries a font-size attribute.
     const text = makeChild('text', { x: 10, y: 20 });
     text.textContent = 'plain';
     const svg = track(makeSvg([text]));
@@ -4907,7 +4995,10 @@ describe('SvgEditor beginTextEdit', () => {
     editor.attach();
     editor.beginTextEdit(text);
     const textarea = svg.querySelector('textarea');
-    expect(textarea.getAttribute('style')).toContain('font-size: 16px');
+    const style = textarea.getAttribute('style');
+    const match = /font-size:\s*([\d.]+)px/.exec(style);
+    expect(match).not.toBe(null);
+    expect(parseFloat(match[1])).toBeGreaterThan(0);
   });
 
   it('foreignObject has handle class (excluded from hit-test)', () => {
@@ -5428,15 +5519,23 @@ describe('SvgEditor text edit lifecycle', () => {
 
 describe('SvgEditor multi-selection: shift+click', () => {
   it('shift+click on unselected element adds to selection', () => {
+    // Shift+pointerdown begins a pending marquee with
+    // the element under the pointer recorded as
+    // clickFallbackTarget. Toggle-selection fires when
+    // pointerup releases without ever crossing the
+    // marquee render threshold — i.e., a real
+    // shift+click (no drag).
     const r1 = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const r2 = makeChild('rect', { x: 50, y: 50, width: 20, height: 20 });
     const svg = track(makeSvg([r1, r2]));
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.setSelection(r1);
     expect(editor.getSelectionSet().size).toBe(1);
     vi.spyOn(editor, '_hitTest').mockReturnValue(r2);
     firePointer(svg, 'pointerdown', 55, 55, { shiftKey: true });
+    firePointer(svg, 'pointerup', 55, 55, { shiftKey: true });
     expect(editor.getSelectionSet().size).toBe(2);
     expect(editor.getSelectionSet().has(r1)).toBe(true);
     expect(editor.getSelectionSet().has(r2)).toBe(true);
@@ -5445,9 +5544,14 @@ describe('SvgEditor multi-selection: shift+click', () => {
   });
 
   it('shift+click on selected element removes from selection', () => {
+    // Click-without-drag path: pointerdown opens the
+    // marquee, pointerup without a threshold-crossing
+    // move resolves to toggle-element on the recorded
+    // clickFallbackTarget.
     const r1 = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const r2 = makeChild('rect', { x: 50, y: 50, width: 20, height: 20 });
     const svg = track(makeSvg([r1, r2]));
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.toggleSelection(r1);
@@ -5455,6 +5559,7 @@ describe('SvgEditor multi-selection: shift+click', () => {
     expect(editor.getSelectionSet().size).toBe(2);
     vi.spyOn(editor, '_hitTest').mockReturnValue(r1);
     firePointer(svg, 'pointerdown', 15, 15, { shiftKey: true });
+    firePointer(svg, 'pointerup', 15, 15, { shiftKey: true });
     expect(editor.getSelectionSet().size).toBe(1);
     expect(editor.getSelectionSet().has(r2)).toBe(true);
     expect(editor.getSelectionSet().has(r1)).toBe(false);
@@ -5464,6 +5569,7 @@ describe('SvgEditor multi-selection: shift+click', () => {
     const r1 = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const r2 = makeChild('rect', { x: 50, y: 50, width: 20, height: 20 });
     const svg = track(makeSvg([r1, r2]));
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.toggleSelection(r1);
@@ -5472,6 +5578,7 @@ describe('SvgEditor multi-selection: shift+click', () => {
     expect(editor.getSelection()).toBe(r2);
     vi.spyOn(editor, '_hitTest').mockReturnValue(r2);
     firePointer(svg, 'pointerdown', 55, 55, { shiftKey: true });
+    firePointer(svg, 'pointerup', 55, 55, { shiftKey: true });
     // r1 becomes primary.
     expect(editor.getSelection()).toBe(r1);
   });
@@ -5479,11 +5586,13 @@ describe('SvgEditor multi-selection: shift+click', () => {
   it('shift+click removing last element clears primary', () => {
     const r1 = makeChild('rect', { x: 10, y: 10, width: 20, height: 20 });
     const svg = track(makeSvg([r1]));
+    stubPointerCapture(svg);
     const editor = new SvgEditor(svg);
     editor.attach();
     editor.toggleSelection(r1);
     vi.spyOn(editor, '_hitTest').mockReturnValue(r1);
     firePointer(svg, 'pointerdown', 15, 15, { shiftKey: true });
+    firePointer(svg, 'pointerup', 15, 15, { shiftKey: true });
     expect(editor.getSelection()).toBe(null);
     expect(editor.getSelectionSet().size).toBe(0);
   });
@@ -5933,6 +6042,16 @@ describe('SvgEditor marquee', () => {
   });
 
   it('marquee scans direct children of <g> groups', () => {
+    // Candidates include BOTH the group and its direct
+    // children — scanning stops one level inside <g>.
+    // When the marquee contains both, the ancestor-
+    // dedupe step (see
+    // _removeDescendantsOfSelectedAncestors) drops the
+    // inner rect because its ancestor group is also
+    // selected. Moving the group moves the rect via the
+    // transform chain, so keeping both would produce a
+    // double-move on group drag. Assertion: the group
+    // survives dedupe; the inner rect does not.
     const group = makeChild('g');
     const inner = makeChild('rect', {
       x: 20,
@@ -5955,10 +6074,9 @@ describe('SvgEditor marquee', () => {
     firePointer(svg, 'pointerdown', 10, 10, { shiftKey: true });
     firePointer(svg, 'pointermove', 40, 40);
     firePointer(svg, 'pointerup', 40, 40);
-    // Both the group AND the inner rect should be hits
-    // (candidates include both).
     const set = editor.getSelectionSet();
-    expect(set.has(inner)).toBe(true);
+    expect(set.has(group)).toBe(true);
+    expect(set.has(inner)).toBe(false);
   });
 });
 

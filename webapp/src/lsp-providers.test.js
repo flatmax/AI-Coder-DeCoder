@@ -93,7 +93,7 @@ function makeFakeModel({ wordRange } = {}) {
 }
 
 function makeFakeRpc(handlers) {
-  // handlers: {'Repo.lsp_get_hover': async fn, ...}
+  // handlers: {'LLMService.lsp_get_hover': async fn, ...}
   return handlers;
 }
 
@@ -194,7 +194,7 @@ describe('buildHoverProvider', () => {
   it('returns null when no active path', async () => {
     const provider = buildHoverProvider(
       () => '',
-      () => ({ 'Repo.lsp_get_hover': vi.fn() }),
+      () => ({ 'LLMService.lsp_get_hover': vi.fn() }),
     );
     const result = await provider.provideHover(
       makeFakeModel(),
@@ -221,7 +221,7 @@ describe('buildHoverProvider', () => {
       .mockResolvedValue({ contents: 'info' });
     const provider = buildHoverProvider(
       () => 'src/foo.py',
-      () => ({ 'Repo.lsp_get_hover': rpcFn }),
+      () => ({ 'LLMService.lsp_get_hover': rpcFn }),
     );
     await provider.provideHover(makeFakeModel(), {
       lineNumber: 42,
@@ -234,7 +234,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({
+        'LLMService.lsp_get_hover': async () => ({
           contents: 'def foo(x: int) -> str',
         }),
       }),
@@ -252,7 +252,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({
+        'LLMService.lsp_get_hover': async () => ({
           contents: ['signature', 'docstring'],
         }),
       }),
@@ -270,7 +270,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({
+        'LLMService.lsp_get_hover': async () => ({
           contents: ['text', '', 'more'],
         }),
       }),
@@ -288,7 +288,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({
+        'LLMService.lsp_get_hover': async () => ({
           contents: ['', null, 42],
         }),
       }),
@@ -304,7 +304,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => null,
+        'LLMService.lsp_get_hover': async () => null,
       }),
     );
     const result = await provider.provideHover(
@@ -318,7 +318,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({ other: 'field' }),
+        'LLMService.lsp_get_hover': async () => ({ other: 'field' }),
       }),
     );
     const result = await provider.provideHover(
@@ -332,7 +332,7 @@ describe('buildHoverProvider', () => {
     const provider = buildHoverProvider(
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_hover': async () => ({
+        'LLMService.lsp_get_hover': async () => ({
           'uuid-remote-1': { contents: 'hover' },
         }),
       }),
@@ -354,7 +354,7 @@ describe('buildHoverProvider', () => {
       const provider = buildHoverProvider(
         () => 'src/foo.py',
         () => ({
-          'Repo.lsp_get_hover': async () => {
+          'LLMService.lsp_get_hover': async () => {
             throw new Error('network down');
           },
         }),
@@ -385,7 +385,7 @@ describe('buildDefinitionProvider', () => {
     const provider = buildDefinitionProvider(
       monaco,
       () => '',
-      () => ({ 'Repo.lsp_get_definition': vi.fn() }),
+      () => ({ 'LLMService.lsp_get_definition': vi.fn() }),
     );
     const result = await provider.provideDefinition(
       makeFakeModel(),
@@ -412,7 +412,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           file: 'src/bar.py',
           range: {
             startLineNumber: 10,
@@ -441,7 +441,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           file: 'src/bar.py',
           range: {
             start_line: 10,
@@ -469,7 +469,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           file: 'src/bar.py',
           range: {
             startLineNumber: 0,
@@ -497,7 +497,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           range: { startLineNumber: 1 },
         }),
       }),
@@ -514,7 +514,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           file: 'src/bar.py',
         }),
       }),
@@ -531,7 +531,7 @@ describe('buildDefinitionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_definition': async () => ({
+        'LLMService.lsp_get_definition': async () => ({
           'uuid-1': {
             file: 'src/bar.py',
             range: {
@@ -560,7 +560,7 @@ describe('buildDefinitionProvider', () => {
         monaco,
         () => 'src/foo.py',
         () => ({
-          'Repo.lsp_get_definition': async () => {
+          'LLMService.lsp_get_definition': async () => {
             throw new Error('fail');
           },
         }),
@@ -590,7 +590,7 @@ describe('buildReferenceProvider', () => {
     const provider = buildReferenceProvider(
       monaco,
       () => '',
-      () => ({ 'Repo.lsp_get_references': vi.fn() }),
+      () => ({ 'LLMService.lsp_get_references': vi.fn() }),
     );
     const result = await provider.provideReferences(
       makeFakeModel(),
@@ -604,7 +604,7 @@ describe('buildReferenceProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_references': async () => null,
+        'LLMService.lsp_get_references': async () => null,
       }),
     );
     const result = await provider.provideReferences(
@@ -623,7 +623,7 @@ describe('buildReferenceProvider', () => {
         monaco,
         () => 'src/foo.py',
         () => ({
-          'Repo.lsp_get_references': async () => ({ not: 'array' }),
+          'LLMService.lsp_get_references': async () => ({ not: 'array' }),
         }),
       );
       const result = await provider.provideReferences(
@@ -642,7 +642,7 @@ describe('buildReferenceProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_references': async () => [
+        'LLMService.lsp_get_references': async () => [
           {
             file: 'src/a.py',
             range: {
@@ -678,7 +678,7 @@ describe('buildReferenceProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_references': async () => [
+        'LLMService.lsp_get_references': async () => [
           { file: 'a.py', range: { startLineNumber: 1 } },
           { file: 'b.py' }, // missing range
           { range: { startLineNumber: 1 } }, // missing file
@@ -704,7 +704,7 @@ describe('buildReferenceProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_references': async () => [],
+        'LLMService.lsp_get_references': async () => [],
       }),
     );
     const result = await provider.provideReferences(
@@ -723,7 +723,7 @@ describe('buildReferenceProvider', () => {
         monaco,
         () => 'src/foo.py',
         () => ({
-          'Repo.lsp_get_references': async () => {
+          'LLMService.lsp_get_references': async () => {
             throw new Error('fail');
           },
         }),
@@ -762,7 +762,7 @@ describe('buildCompletionProvider', () => {
     const provider = buildCompletionProvider(
       monaco,
       () => '',
-      () => ({ 'Repo.lsp_get_completions': vi.fn() }),
+      () => ({ 'LLMService.lsp_get_completions': vi.fn() }),
     );
     const result = await provider.provideCompletionItems(
       makeFakeModel(),
@@ -776,7 +776,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => null,
+        'LLMService.lsp_get_completions': async () => null,
       }),
     );
     const result = await provider.provideCompletionItems(
@@ -791,7 +791,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'print', kind: 2 },
           { label: 'parse', kind: 2, detail: 'def parse()' },
         ],
@@ -815,7 +815,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'foo', kind: 2 },
         ],
       }),
@@ -840,7 +840,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'foo', kind: 2 },
         ],
       }),
@@ -863,7 +863,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'MyClass', kind: 5 },
         ],
       }),
@@ -880,7 +880,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           {
             label: 'print()',
             kind: 2,
@@ -903,7 +903,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'x', kind: 999 },
           { label: 'y', kind: 'not-a-number' },
           { label: 'z', kind: -5 },
@@ -924,7 +924,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           {
             label: 'foo',
             kind: 2,
@@ -947,7 +947,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'good', kind: 2 },
           null,
           { kind: 2 }, // missing label
@@ -982,7 +982,7 @@ describe('buildCompletionProvider', () => {
       monaco,
       () => 'src/foo.py',
       () => ({
-        'Repo.lsp_get_completions': async () => [
+        'LLMService.lsp_get_completions': async () => [
           { label: 'direct', kind: 2 },
         ],
       }),
@@ -1004,7 +1004,7 @@ describe('buildCompletionProvider', () => {
         monaco,
         () => 'src/foo.py',
         () => ({
-          'Repo.lsp_get_completions': async () => {
+          'LLMService.lsp_get_completions': async () => {
             throw new Error('fail');
           },
         }),
@@ -1138,7 +1138,7 @@ describe('installLspProviders', () => {
     const getPath = vi.fn(() => 'src/test.py');
     const rpcFn = vi.fn().mockResolvedValue({ contents: 'x' });
     const getCall = vi.fn(() => ({
-      'Repo.lsp_get_hover': rpcFn,
+      'LLMService.lsp_get_hover': rpcFn,
     }));
     installLspProviders(monaco, getPath, getCall);
     // Exercise the hover provider to verify the
