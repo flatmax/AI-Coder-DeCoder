@@ -45,6 +45,7 @@ Both panels maintain synchronized viewports.
 | Middle-click drag | Pan (both panels) |
 | Plain drag on empty space, left pane | Pan (read-only pane has no other use for plain drag) |
 | Plain drag on empty space, right pane | Start marquee selection (editable pane) |
+| Shift+drag over any element, right pane | Start marquee selection (preserves selection under the pointer) |
 | Double-click on a text element, right pane | Enter inline text edit |
 | Pinch gesture | Zoom (touch devices) |
 | Min/max zoom | Constrained to sensible bounds |
@@ -67,14 +68,15 @@ Right panel uses the visual editor; left panel remains read-only for reference.
 - Click empty space or press Escape to deselect
 - Clicking a tspan resolves to its parent text element — tspan never selected independently
 ### Multi-Selection
-Hold Shift and click or drag to multi-select:
+Hold Shift and click or drag to multi-select. Shift overrides element hit-testing so the gesture works anywhere, including over already-selected or unselected elements — without Shift, a click on an element is always interpreted as element select/move:
 | Interaction | Behavior |
 |---|---|
 | Shift+click on selected element | Immediately remove from multi-selection |
-| Shift+click on unselected element | Immediately add to multi-selection, begin marquee tracking |
-| Shift+click on empty space | Begin marquee selection |
-| Shift+drag top-left to bottom-right (forward) | Containment mode — solid border, selects only elements fully inside |
-| Shift+drag any other direction (reverse) | Crossing mode — dashed border, selects any elements that touch or intersect |
+| Shift+click on unselected element | Immediately add to multi-selection |
+| Shift+click on empty space | Begin marquee selection (threshold-gated) |
+| Shift+drag from anywhere (empty space or over elements) | Begin marquee selection immediately |
+| Forward drag (top-left to bottom-right) | Containment mode — solid border, selects only elements fully inside |
+| Any other drag direction | Crossing mode — dashed border, selects any elements that touch or intersect |
 - Marquee hit testing checks direct children of the root SVG and one level of children inside groups; deeper nesting not scanned
 - Shift+click toggles elements immediately without waiting for pointer-up
 - Multi-selected elements can be dragged as a group
@@ -224,7 +226,7 @@ Mirrors the diff viewer's interface so the app shell can treat both uniformly:
 - Close file — close a tab, dispose pan/zoom, update active index
 - Get dirty files — returns list for save-all coordination
 ## Keyboard Shortcuts
-All toolbar-level actions are accessible only via keyboard. Element-level shortcuts are handled by the visual editor internally and only apply in select mode when the editor has focus.
+All toolbar-level actions are accessible only via keyboard. Element-level shortcuts are handled by the visual editor internally and only fire when focus is outside input/textarea/contenteditable elements — so the chat textarea, file picker filter, settings editor, etc. receive their own keystrokes without interference. Escape is the one exception: it clears SVG selection regardless of focus location.
 | Shortcut | Scope | Action |
 |---|---|---|
 | Ctrl+PageDown / PageUp | Viewer | Next / previous tab |
@@ -347,3 +349,4 @@ Orchestrates the switch:
 - Save commits any active text edit and removes handles before serializing — saved content is always clean
 - Mode-toggle race guard prevents active-file-changed events from disrupting an in-flight visual ↔ text switch
 - Copy-as-PNG clipboard write uses a promise-of-blob, not a resolved blob, to preserve user-gesture context across async scaling
+- Document-level keyboard shortcuts (Ctrl+C/V/D/Z, Delete, Backspace) defer to the focused editable field when any input, textarea, select, or contenteditable element is the event target — only Escape is exempt

@@ -349,6 +349,62 @@ function _parseNum(value) {
 }
 
 /**
+ * Whether a keydown event originates inside an editable
+ * field where the editor's shortcuts would be unwelcome.
+ * Covers native input / textarea / select elements plus
+ * any element marked contenteditable.
+ *
+ * Uses `composedPath()` rather than `event.target` so
+ * shadow-DOM retargeting doesn't hide the real origin.
+ * When a keydown fires inside a component's shadow root
+ * (e.g., the chat panel's <textarea>), a listener on
+ * `document` sees `event.target` as the shadow host
+ * (e.g., <ac-chat-panel>) rather than the textarea.
+ * `composedPath()` returns the full path through every
+ * shadow boundary, with the real target first.
+ *
+ * The editor's document-level keydown listener sees
+ * EVERY keystroke on the page. Without this guard,
+ * Ctrl+C / V / D / Z and Delete / Backspace get
+ * hijacked by the editor even when the user is typing
+ * somewhere else.
+ *
+ * The editor's own inline text-edit textarea is NOT
+ * caught by this check — its keydown handler
+ * (`_onTextEditKeyDown`) calls `stopPropagation` so
+ * the document listener never sees the event.
+ */
+function _isEditableTarget(event) {
+  if (!event) return false;
+  // Prefer composedPath so shadow-DOM retargeting
+  // doesn't hide a textarea inside a component.
+  const path = typeof event.composedPath === 'function'
+    ? event.composedPath()
+    : null;
+  if (path && path.length > 0) {
+    for (const node of path) {
+      if (!node || !node.tagName) continue;
+      const tag = node.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        return true;
+      }
+      if (node.isContentEditable) return true;
+    }
+    return false;
+  }
+  // Fallback when composedPath is unavailable (older
+  // environments, test doubles).
+  const target = event.target;
+  if (!target) return false;
+  const tag = target.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+    return true;
+  }
+  if (target.isContentEditable) return true;
+  return false;
+}
+
+/**
  * Parse a polyline/polygon `points` attribute into an
  * array of [x, y] pairs. SVG accepts both comma-separated
  * and whitespace-separated coordinates, and mixes of the
@@ -1227,6 +1283,18 @@ export class SvgEditor {
     } else {
       this._selectedSet.add(resolved);
       this._selected = resolved;
+      // Dedupe ancestor / descendant overlap so the new
+      // addition doesn't create a double-move hazard.
+      // Same rule as marquee — if an ancestor is now
+      // selected, drop its descendants; if a descendant
+      // of an already-selected ancestor was added, drop
+      // the descendant.
+      this._removeDescendantsOfSelectedAncestors(this._selectedSet);
+      // Primary may have been dropped if it was a
+      // descendant of an already-selected ancestor.
+      if (!this._selectedSet.has(this._selected)) {
+        this._selected = this._selectedSet.values().next().value || null;
+      }
     }
     this._renderHandles();
     this._onSelectionChange();
@@ -1490,9 +1558,11 @@ export class SvgEditor {
       }
       case 'text': {
         if (el.hasAttribute('transform')) {
+          // Prepend — see the main drag dispatch for
+          // why this order matters with scaled groups.
           const base = (el.getAttribute('transform') || '').trim();
           const t = `translate(${dx} ${dy})`;
-          el.setAttribute('transform', base ? `${base} ${t}` : t);
+          el.setAttribute('transform', base ? `${t} ${base}` : t);
         } else {
           const x = _parseNum(el.getAttribute('x'));
           const y = _parseNum(el.getAttribute('y'));
@@ -1504,9 +1574,11 @@ export class SvgEditor {
       default: {
         // Fallback — use transform translate for paths,
         // groups, polygons, polylines, and anything else.
+        // Prepend so the translate operates in parent
+        // coords (see main drag dispatch for rationale).
         const base = (el.getAttribute('transform') || '').trim();
         const t = `translate(${dx} ${dy})`;
-        el.setAttribute('transform', base ? `${base} ${t}` : t);
+        el.setAttribute('transform', base ? `${t} ${base}` : t);
         break;
       }
     }
@@ -1935,19 +2007,29 @@ export class SvgEditor {
       return;
     }
     // Shift key takes priority over handle hit-test.
-    // Shift+click is always "modify selection" (toggle
-    // element in/out of set) or "start marquee" (on empty
-    // space). Without this ordering, a shift+click on a
-    // selected element with handles visible would start a
-    // resize drag instead of toggling selection.
+    // Shift+click is always "modify selection" — either
+    // toggle-element (on click-without-drag) or marquee
+    // (on drag). We begin a marquee unconditionally on
+    // shift+pointerdown; the pointerup handler falls
+    // back to toggle-element when the marquee never
+    // crossed its render threshold AND the pointer was
+    // over an element at start. This way shift+drag
+    // anywhere (empty space OR over an element) begins
+    // a marquee, while shift+click on an element still
+    // toggles it cleanly.
+    //
+    // Without this ordering, a shift+click on a
+    // selected element with handles visible would start
+    // a resize drag instead of affecting selection.
     if (event.shiftKey) {
+      event.stopPropagation();
       const shiftTarget = this._hitTest(event.clientX, event.clientY);
-      if (!shiftTarget) {
-        event.stopPropagation();
-        this._beginMarquee(event);
-      } else {
-        event.stopPropagation();
-        this.toggleSelection(shiftTarget);
+      this._beginMarquee(event);
+      if (this._marquee) {
+        // Remember the element under the pointer so the
+        // click-without-drag path can fall back to
+        // toggle-selection on pointerup.
+        this._marquee.clickFallbackTarget = shiftTarget;
       }
       return;
     }
@@ -2007,11 +2089,42 @@ export class SvgEditor {
     //      Drag requires a second click — matches the
     //      click-to-select-first, click-to-drag
     //      convention and prevents accidental drags.
-    if (this._selectedSet.has(target)) {
+    //
+    // For case 1 we also accept clicks that landed on a
+    // descendant of a selected ancestor. The
+    // ancestor-dedupe step (see
+    // `_removeDescendantsOfSelectedAncestors`) drops
+    // group descendants from the set when their parent
+    // group is also selected, so a naive `has(target)`
+    // check would miss clicks on the rendered children.
+    // Walk up the parent chain — if any ancestor is in
+    // the set, the click hits the group-drag path.
+    if (
+      this._selectedSet.has(target) ||
+      this._ancestorInSelection(target)
+    ) {
       this._beginDrag(event);
     } else {
       this.setSelection(target);
     }
+  }
+
+  /**
+   * Check whether any ancestor of `el` (up to but not
+   * including the root SVG) is in the current selection
+   * set. Used by pointerdown to route clicks on
+   * non-selected descendants of selected groups to the
+   * group-drag path rather than the replace-selection
+   * path.
+   */
+  _ancestorInSelection(el) {
+    if (!el) return false;
+    let cur = el.parentNode;
+    while (cur && cur !== this._svg) {
+      if (this._selectedSet.has(cur)) return true;
+      cur = cur.parentNode;
+    }
+    return false;
   }
 
   /**
@@ -2359,7 +2472,16 @@ export class SvgEditor {
     } catch (_) {}
     this._marquee = null;
     if (!hadRect) {
-      // Shift+click without drag — no-op on selection.
+      // Shift+click without drag.
+      // - If the press was on an element, fall back to
+      //   toggle-element (preserves the old shift+click
+      //   toggle semantics).
+      // - If the press was on empty space, no-op on
+      //   selection (matches "shift+click empty space"
+      //   convention — it doesn't clear, doesn't add).
+      if (m.clickFallbackTarget) {
+        this.toggleSelection(m.clickFallbackTarget);
+      }
       return;
     }
     // Compute the final selection set: baseline ∪ hits.
@@ -2368,11 +2490,33 @@ export class SvgEditor {
     const hits = this._marqueeHitTest(bbox, forward);
     const next = new Set(m.originalSet);
     for (const el of hits) next.add(el);
+    // Dedupe ancestor / descendant overlap — when a
+    // group AND its descendants both land in the set,
+    // the descendants are redundant. Moving the group
+    // moves them automatically; writing each
+    // descendant's positional attributes on top of that
+    // doubles the effective delta (the child moves both
+    // because its x/y changed AND because its ancestor
+    // translated). Remove descendants when an ancestor
+    // is also selected.
+    this._removeDescendantsOfSelectedAncestors(next);
     // Pick a primary. If the baseline was non-empty, keep
     // its primary; otherwise use the first hit.
     let primary = this._selected;
     if (!primary || !next.has(primary)) {
       primary = hits.length > 0 ? hits[0] : null;
+      // If the first hit was itself dropped by the
+      // ancestor dedupe, walk forward to find one that
+      // survived.
+      if (primary && !next.has(primary)) {
+        primary = null;
+        for (const h of hits) {
+          if (next.has(h)) {
+            primary = h;
+            break;
+          }
+        }
+      }
     }
     this._selectedSet = next;
     this._selected = primary;
@@ -2396,6 +2540,38 @@ export class SvgEditor {
       this._svg.releasePointerCapture(m.pointerId);
     } catch (_) {}
     this._marquee = null;
+  }
+
+  /**
+   * Remove entries from a selection set when an ancestor
+   * is also in the set. A group move translates every
+   * descendant via the transform chain; if a descendant's
+   * own positional attributes are also mutated by the
+   * drag, it ends up moving by 2× the delta (once from
+   * its own attribute update, once from the ancestor's
+   * transform). Dedupe before drag dispatch so the drag
+   * writes exactly one position for each visually-moved
+   * element.
+   *
+   * Mutates the set in place. O(n²) in the number of
+   * selected elements — fine for typical multi-selection
+   * sizes (tens of items). If this ever becomes a hot
+   * path, switch to a single DOM walk that marks
+   * "selected ancestor above me" bottom-up.
+   */
+  _removeDescendantsOfSelectedAncestors(set) {
+    const toRemove = [];
+    for (const el of set) {
+      let parent = el.parentNode;
+      while (parent && parent !== this._svg) {
+        if (set.has(parent)) {
+          toRemove.push(el);
+          break;
+        }
+        parent = parent.parentNode;
+      }
+    }
+    for (const el of toRemove) set.delete(el);
   }
 
   /**
@@ -2893,10 +3069,61 @@ export class SvgEditor {
   // ---------------------------------------------------------------
 
   /**
+   * Capture the parent-chain transform that maps the
+   * element's local coordinate space to the SVG root.
+   * Returns a `{sx, sy}` object giving how many local-
+   * space units equal one SVG-root unit along each axis.
+   *
+   * For an element at the SVG root with no ancestor
+   * transforms, {sx: 1, sy: 1}. For an element inside
+   * `<g transform="scale(2)">`, {sx: 0.5, sy: 0.5} —
+   * a 1-unit drag in root space corresponds to 0.5
+   * local units, which rendered through the scale(2)
+   * produces 1 root unit of visual movement.
+   *
+   * Critically this is the PARENT's CTM, not the
+   * element's own. The element's own transform attribute
+   * (if any) is applied AFTER positional attributes, so
+   * positional attribute writes should be in the parent's
+   * space, not the element's.
+   *
+   * Read-only math — no attribute writes. Called at drag
+   * start; the resulting scale is stored in the snapshot.
+   */
+  _captureLocalScale(el) {
+    const parent = el.parentNode;
+    if (!parent || parent === this._svg) {
+      return { sx: 1, sy: 1 };
+    }
+    const parentCtm = parent.getCTM?.();
+    const svgCtm = this._svg.getCTM?.();
+    if (!parentCtm || !svgCtm) return { sx: 1, sy: 1 };
+    // Compose inverse(parent) * svgRoot to get the
+    // root-to-parent-local transform. The (a, d) entries
+    // give per-axis scaling (ignoring rotation/shear —
+    // which drag-as-translate in local space doesn't
+    // cleanly support anyway). For pure-translate ancestor
+    // chains (a=1, d=1) this returns {sx: 1, sy: 1} as
+    // expected; for scaled groups it returns the inverse
+    // scale.
+    const svgToParent = parentCtm.inverse().multiply(svgCtm);
+    const sx = Math.abs(svgToParent.a) || 1;
+    const sy = Math.abs(svgToParent.d) || 1;
+    return { sx, sy };
+  }
+
+  /**
    * Capture the current positional attributes of an
    * element into a snapshot that can be used as the
    * origin for a drag operation. Returns null when the
    * element doesn't match any supported dispatch case.
+   *
+   * Every snapshot also carries a `localScale: {sx, sy}`
+   * field — the conversion factor from SVG-root units
+   * to the element's local coordinate space, used by
+   * `_applyDragDeltaToEntry` to emit correct local
+   * coordinates when the element lives inside a scaled
+   * `<g>`.
    *
    * The snapshot shape depends on the element type:
    *   - rect/image/use → {x, y}
@@ -2916,12 +3143,14 @@ export class SvgEditor {
   _captureDragAttributes(el) {
     if (!el || !el.tagName) return null;
     const tag = el.tagName.toLowerCase();
+    const localScale = this._captureLocalScale(el);
     switch (tag) {
       case 'rect':
       case 'image':
       case 'use':
         return {
           kind: 'xy',
+          localScale,
           x: _parseNum(el.getAttribute('x')),
           y: _parseNum(el.getAttribute('y')),
         };
@@ -2929,12 +3158,14 @@ export class SvgEditor {
       case 'ellipse':
         return {
           kind: 'cxcy',
+          localScale,
           cx: _parseNum(el.getAttribute('cx')),
           cy: _parseNum(el.getAttribute('cy')),
         };
       case 'line':
         return {
           kind: 'line',
+          localScale,
           x1: _parseNum(el.getAttribute('x1')),
           y1: _parseNum(el.getAttribute('y1')),
           x2: _parseNum(el.getAttribute('x2')),
@@ -2944,6 +3175,7 @@ export class SvgEditor {
       case 'polygon':
         return {
           kind: 'points',
+          localScale,
           points: _parsePoints(el.getAttribute('points')),
         };
       case 'text': {
@@ -2952,14 +3184,25 @@ export class SvgEditor {
         // transform attribute, use that (preserves
         // existing transform like rotate()); otherwise
         // use x/y.
+        //
+        // For the transform branch we use localScale
+        // computed against the element itself's parent —
+        // prepending a translate operates in that parent's
+        // coord space and localScale isn't needed (the
+        // prepended translate is applied last, in parent
+        // space). We still include localScale in the
+        // snapshot for shape uniformity; the 'transform'
+        // branch in `_applyDragDeltaToEntry` ignores it.
         if (el.hasAttribute('transform')) {
           return {
             kind: 'transform',
+            localScale,
             transform: el.getAttribute('transform') || '',
           };
         }
         return {
           kind: 'xy',
+          localScale,
           x: _parseNum(el.getAttribute('x')),
           y: _parseNum(el.getAttribute('y')),
         };
@@ -2968,6 +3211,7 @@ export class SvgEditor {
       case 'g':
         return {
           kind: 'transform',
+          localScale,
           transform: el.getAttribute('transform') || '',
         };
       default:
@@ -3000,43 +3244,81 @@ export class SvgEditor {
    * snapshot). Extracted from `_applyDragDelta` so the
    * per-element logic stays in one place; the outer
    * method just iterates.
+   *
+   * `dx` and `dy` are in SVG-root coordinate units. For
+   * positional-attribute branches (xy, cxcy, line,
+   * points), the attribute values are in the element's
+   * LOCAL coordinate space — if the element sits inside
+   * `<g transform="scale(2)">`, one local unit equals
+   * two root units visually. We divide dx/dy by the
+   * captured localScale to emit the correct local-space
+   * delta, so the rendered element moves by exactly
+   * dx/dy in root units regardless of ancestor transforms.
+   *
+   * The 'transform' branch doesn't need the correction
+   * because prepended translates operate in the parent's
+   * coordinate space, which is where dx/dy are already
+   * expressed once the parent chain unwinds.
    */
   _applyDragDeltaToEntry(entry, dx, dy) {
     const el = entry.el;
     const o = entry.originAttrs;
+    const scale = o.localScale || { sx: 1, sy: 1 };
+    const localDx = dx / scale.sx;
+    const localDy = dy / scale.sy;
     switch (o.kind) {
       case 'xy':
-        el.setAttribute('x', String(o.x + dx));
-        el.setAttribute('y', String(o.y + dy));
+        el.setAttribute('x', String(o.x + localDx));
+        el.setAttribute('y', String(o.y + localDy));
         break;
       case 'cxcy':
-        el.setAttribute('cx', String(o.cx + dx));
-        el.setAttribute('cy', String(o.cy + dy));
+        el.setAttribute('cx', String(o.cx + localDx));
+        el.setAttribute('cy', String(o.cy + localDy));
         break;
       case 'line':
-        el.setAttribute('x1', String(o.x1 + dx));
-        el.setAttribute('y1', String(o.y1 + dy));
-        el.setAttribute('x2', String(o.x2 + dx));
-        el.setAttribute('y2', String(o.y2 + dy));
+        el.setAttribute('x1', String(o.x1 + localDx));
+        el.setAttribute('y1', String(o.y1 + localDy));
+        el.setAttribute('x2', String(o.x2 + localDx));
+        el.setAttribute('y2', String(o.y2 + localDy));
         break;
       case 'points': {
         const shifted = o.points
-          .map(([x, y]) => `${x + dx},${y + dy}`)
+          .map(([x, y]) => `${x + localDx},${y + localDy}`)
           .join(' ');
         el.setAttribute('points', shifted);
         break;
       }
       case 'transform': {
-        // Append a translate(dx, dy) to the existing
-        // transform. Browsers parse a chain of transforms
-        // left-to-right; our translate is applied after
-        // any existing transforms, which is what the user
-        // intends (the drag should move the rendered
-        // element by dx/dy regardless of its existing
-        // rotation/scale).
+        // Prepend a translate(dx, dy) to the existing
+        // transform. SVG applies transform chains
+        // right-to-left in element-local space: an
+        // APPENDED translate would be applied FIRST
+        // (before the element's own scale/rotate),
+        // meaning a scaled group would move the element
+        // by (scale * dx, scale * dy) — faster or slower
+        // than the pointer depending on the group's scale
+        // factor. Prepending puts our translate LAST in
+        // application order, operating in the PARENT's
+        // coordinate space. The element then moves by
+        // exactly (dx, dy) in SVG root coords, matching
+        // the pointer 1:1 regardless of any intermediate
+        // scale or rotation.
+        //
+        // Use dx/dy (root-space) directly here — NOT
+        // localDx/localDy. Prepended translates run in
+        // the parent's space; the chain of ancestor
+        // transforms then maps that parent space up to
+        // SVG root. If every ancestor is a simple
+        // translate, parent space equals root space and
+        // the two are identical. If ancestors scale, the
+        // scaling applies to the ORIGINAL transform chain
+        // (which stays on the right of our prepend) —
+        // our prepended translate runs after all of that
+        // in the parent's direct space, so dx/dy in root
+        // units are what we want.
         const base = o.transform.trim();
         const delta = `translate(${dx} ${dy})`;
-        const combined = base ? `${base} ${delta}` : delta;
+        const combined = base ? `${delta} ${base}` : delta;
         el.setAttribute('transform', combined);
         break;
       }
@@ -3646,6 +3928,25 @@ export class SvgEditor {
 
   _onKeyDown(event) {
     if (!this._attached) return;
+    // The listener is on `document`, so every keystroke
+    // in the page fires here — including keystrokes in
+    // the chat textarea, file picker filter, search
+    // input, and any other editable field. Without this
+    // guard, Ctrl+C/V/D/Z and Delete/Backspace would
+    // hijack keystrokes the user intends for those
+    // fields. The editor's own inline text-edit
+    // textarea is handled by `_onTextEditKeyDown` which
+    // stopPropagation's before we see the event, so it
+    // isn't affected.
+    //
+    // Test: is the event target an input/textarea/
+    // contenteditable element? If so, defer to that
+    // element's default handling. Escape is the one
+    // exception — escape should still clear SVG
+    // selection even when focus is elsewhere.
+    if (event.key !== 'Escape' && _isEditableTarget(event)) {
+      return;
+    }
     if (event.key === 'Escape') {
       if (this._selected) {
         event.preventDefault();
