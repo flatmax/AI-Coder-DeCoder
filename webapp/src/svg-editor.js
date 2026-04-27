@@ -1809,14 +1809,51 @@ export class SvgEditor {
     // Chrome in screen pixels: 1px padding top + 1px
     // padding bottom + 1px border top + 1px border
     // bottom = 4 screen pixels total. Subtract from
-    // painted height, then convert to user units.
+    // painted height before converting to user units.
+    //
+    // Additional fudge factor: getBoundingClientRect on
+    // SVG text returns a box that includes leading above
+    // the cap-height and descent below the baseline.
+    // HTML textareas render glyphs using a CSS line-box
+    // that measures from ascent to descent — a different
+    // metric. When we size the textarea's font to match
+    // the SVG text's painted height, the textarea's
+    // actual glyphs end up visibly taller (because the
+    // SVG's "painted height" included leading, but the
+    // textarea treats our font-size as pure ascent+descent
+    // and then adds its own chrome).
+    //
+    // 0.85 is an empirical ratio that lands the textarea
+    // glyphs at visually the same height as the SVG text
+    // glyphs across common fonts. Fine-tunes the match
+    // better than any combination of line-height and
+    // padding tweaks alone.
     const chromeScreen = 4;
     const innerScreenHeight = Math.max(
       rect.height - chromeScreen,
       1,
     );
-    const fontSize = String(innerScreenHeight / zoomScale);
+    const fontSize = String((innerScreenHeight * 0.85) / zoomScale);
     const fill = element.getAttribute('fill') || '#000';
+    // Inherit font-family and font-weight from the SVG
+    // text so glyph metrics match. Without this, the
+    // textarea falls back to the host document's default
+    // (often a serif / system font different from the
+    // SVG's declared font-family), producing glyphs at
+    // the same height but different width and weight.
+    // Try attributes first (SVG 1.1), then computed style
+    // (handles CSS-styled SVG text from stylesheets).
+    let fontFamily = element.getAttribute('font-family');
+    let fontWeight = element.getAttribute('font-weight');
+    try {
+      const computed = window.getComputedStyle?.(element);
+      if (!fontFamily && computed?.fontFamily) {
+        fontFamily = computed.fontFamily;
+      }
+      if (!fontWeight && computed?.fontWeight) {
+        fontWeight = computed.fontWeight;
+      }
+    } catch (_) {}
     const textarea = document.createElementNS(xhtmlNs, 'textarea');
     textarea.value = content;
     // Inline styles — fills the foreignObject, inherits
@@ -1839,26 +1876,31 @@ export class SvgEditor {
     // line-height to 1 makes them match.
     const borderWidth = this._screenDistToSvgDist(1);
     const borderRadius = this._screenDistToSvgDist(2);
-    textarea.setAttribute(
-      'style',
-      [
-        'width: 100%',
-        'height: 100%',
-        'box-sizing: border-box',
-        'margin: 0',
-        `padding: ${padY}px ${padX}px`,
-        `font-size: ${fontSize}px`,
-        `color: ${fill}`,
-        'background: rgba(255, 255, 255, 0.95)',
-        `border: ${borderWidth}px solid #4fc3f7`,
-        `border-radius: ${borderRadius}px`,
-        'outline: none',
-        'resize: none',
-        'font-family: inherit',
-        'line-height: 1',
-        'overflow: hidden',
-      ].join('; '),
-    );
+    const styleParts = [
+      'width: 100%',
+      'height: 100%',
+      'box-sizing: border-box',
+      'margin: 0',
+      `padding: ${padY}px ${padX}px`,
+      `font-size: ${fontSize}px`,
+      `color: ${fill}`,
+      'background: rgba(255, 255, 255, 0.95)',
+      `border: ${borderWidth}px solid #4fc3f7`,
+      `border-radius: ${borderRadius}px`,
+      'outline: none',
+      'resize: none',
+      'line-height: 1',
+      'overflow: hidden',
+    ];
+    if (fontFamily) {
+      styleParts.push(`font-family: ${fontFamily}`);
+    } else {
+      styleParts.push('font-family: inherit');
+    }
+    if (fontWeight) {
+      styleParts.push(`font-weight: ${fontWeight}`);
+    }
+    textarea.setAttribute('style', styleParts.join('; '));
     textarea.addEventListener('keydown', this._onTextEditKeyDown);
     textarea.addEventListener('blur', this._onTextEditBlur);
     fo.appendChild(textarea);
