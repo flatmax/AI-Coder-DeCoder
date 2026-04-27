@@ -17,12 +17,43 @@
 // specs4/5-webapp/diff-viewer.md#monaco-worker-configuration
 // specs4/5-webapp/diff-viewer.md#matlab-syntax-highlighting
 
-// Use the explicit ESM entry path. Bare 'monaco-editor'
-// fails Vite's dep resolver because Monaco's package.json
-// doesn't declare a clean main/module/exports entry for
-// programmatic consumers — the conventional import path
-// is the editor.api module.
-import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
+// Use the full editor entry, not the bare API entry.
+//
+// `editor.api.js` gives you the programmatic surface
+// (createDiffEditor, languages.register, etc.) but does
+// NOT pull in Monaco's *contribution* modules — the find
+// widget, hover provider, folding, bracket matching,
+// diff decoration renderer, word highlighter, colour
+// picker, and so on. Without those, two symptoms appear:
+//
+//   1. Ctrl-F throws `Error: command 'actions.find' not
+//      found` because the find controller never
+//      registered its action.
+//   2. Diff editing runs the diff algorithm correctly
+//      (the worker produces line changes), but the
+//      visible highlighting and gutter markers rely on
+//      contribution-layer rendering code that isn't
+//      loaded, so changes look invisible.
+//
+// `editor.main.js` imports editor.api.js PLUS all
+// contributions PLUS all built-in languages. The
+// built-in-language cost is the price for getting the
+// contributions in one import; Monaco's chunk is split
+// out via vite.config.js manualChunks so it doesn't
+// bloat the main bundle.
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.main.js';
+
+// Vite's `?worker` suffix — compiles monaco-worker.js
+// as a dedicated Web Worker and returns a constructor.
+// Calling `new EditorWorker()` yields a Worker instance
+// with the correct URL already resolved. Reliable
+// across dev, preview, and production builds; replaces
+// the previous `new URL('bare-specifier', import.meta
+// .url)` pattern which silently failed under Vite's
+// dep optimizer (Worker construction threw, the
+// try/catch fell through to a stub, and Monaco's diff
+// algorithm silently produced no output).
+import EditorWorker from './monaco-worker.js?worker';
 
 // Monaco's CSS is NOT pulled in by the editor.api.js entry
 // — that module only exposes the programmatic API. Without
@@ -47,25 +78,19 @@ import 'monaco-editor/min/vs/editor/editor.main.css';
 /**
  * Install Monaco's worker environment on `self`.
  *
- * The primary install site is `./monaco-env.js` which is
- * imported at the top of this file and runs before
- * Monaco is imported. That's the path that matters in
- * production — Monaco reads `self.MonacoEnvironment`
- * during its own init, so the env module must run first.
- *
- * This function is a defensive re-installer. Tests that
- * isolate globals between files (Vitest does this in
- * some configurations) may see `self.MonacoEnvironment`
- * wiped after the env module's top-level code has
- * already run and won't re-run. Calling this function
- * from a test or a late-loading module re-installs the
- * same config.
+ * Monaco reads `self.MonacoEnvironment.getWorker` during
+ * its own module init — specifically the first time it
+ * needs a worker. Because this module imports Monaco at
+ * the top (via editor.main.js) and calls this function
+ * as a side effect at the bottom, the env is installed
+ * before any editor is constructed.
  *
  * Idempotent when `self.MonacoEnvironment` is already
- * set to a truthy value; overwrites any previous install
- * otherwise. The test suite calls this explicitly and
- * asserts that `self.MonacoEnvironment.getWorker` is a
- * function after the call.
+ * set. Tests that isolate globals between files can call
+ * this explicitly to re-install after the global is
+ * wiped; the test suite asserts
+ * `self.MonacoEnvironment.getWorker` is a function
+ * after the call.
  */
 export function installMonacoWorkerEnvironment() {
   const target =
@@ -78,28 +103,32 @@ export function installMonacoWorkerEnvironment() {
   if (target.MonacoEnvironment) return;
   target.MonacoEnvironment = {
     getWorker(_workerId, label) {
+      // Only the `editorWorkerService` worker matters
+      // for diff computation, find/replace, word-based
+      // autocomplete, and other editor-core services.
+      // Return the real Vite-bundled worker for it.
       if (label === 'editorWorkerService') {
         try {
-          return new Worker(
-            new URL(
-              'monaco-editor/esm/vs/editor/editor.worker.js',
-              import.meta.url,
-            ),
-            { type: 'module' },
-          );
+          return new EditorWorker();
         } catch (err) {
+          // In test environments (jsdom) Web Workers
+          // aren't available. Fall through to the stub
+          // so test code that touches the editor
+          // doesn't crash — diff highlighting won't
+          // work in tests, but tests that need it
+          // should mock the editor anyway.
           console.error(
             '[monaco-setup] editor worker creation failed — ' +
-              'diff highlighting will not work. Check Vite worker ' +
-              'config and CSP for blob:/worker-src restrictions.',
+              'diff highlighting will not work.',
             err,
           );
         }
       }
-      // Fallback no-op worker-like object. Non-critical
-      // workers (e.g. language-service pings) get this
-      // stub so Monaco doesn't hang waiting for a
-      // worker that will never exist.
+      // Fallback no-op worker-like object for non-
+      // critical workers (language services we don't
+      // use: JSON, TypeScript LSP, CSS, HTML — their
+      // features either degrade gracefully or we
+      // provide our own via lsp-providers.js).
       return {
         postMessage: () => {},
         addEventListener: () => {},
@@ -445,13 +474,21 @@ export function registerLatexLanguage() {
   });
 }
 
-// Register MATLAB + LaTeX at module load as side effects.
-// Worker env was already installed by ./monaco-env.js
-// (imported above) before Monaco itself loaded; that's
-// the path that matters in production. The explicit
-// call here is a defensive re-install for test
-// environments where Vitest isolates globals between
-// files — it idempotents if already set.
+// Side-effect initialisation at module load.
+//
+// Order matters:
+//   1. installMonacoWorkerEnvironment — sets
+//      self.MonacoEnvironment.getWorker so Monaco can
+//      spawn the editor worker when it needs to. Must
+//      run before any editor is constructed.
+//   2. registerMatlabLanguage / registerLatexLanguage —
+//      register custom Monarch tokenizers. Must run
+//      before any editor is constructed with language
+//      'matlab' or 'latex'; editor instances capture
+//      providers at construction.
+//
+// All three are idempotent so test suites that re-
+// import this module don't double-register or throw.
 installMonacoWorkerEnvironment();
 registerMatlabLanguage();
 registerLatexLanguage();
