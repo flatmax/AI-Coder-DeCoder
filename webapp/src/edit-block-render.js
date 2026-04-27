@@ -260,12 +260,55 @@ export function renderStatusBadge(status) {
  * contain characters that would otherwise inject markup
  * (backticks in tests, angle brackets in pathological cases).
  *
+ * When `oldText` is non-empty, a `data-edit-anchor` attribute
+ * carries its first non-blank line. The chat panel's
+ * delegated click handler picks this up and dispatches
+ * `navigate-file` with `{path, searchText}` — the diff
+ * viewer's existing `_scrollToSearchText` logic then lands
+ * the user at the edit location in the opened file.
+ *
+ * Create blocks (empty oldText) get a path with no anchor;
+ * clicking just opens the new file without scrolling.
+ *
  * @param {string} filePath
+ * @param {string} [oldText] — edit block's old-text buffer,
+ *   used to derive the scroll anchor
  * @returns {string}
  */
-export function renderFilePath(filePath) {
+export function renderFilePath(filePath, oldText) {
   const safe = typeof filePath === 'string' ? filePath : '';
-  return `<span class="edit-file-path">${escapeHtml(safe)}</span>`;
+  const anchor = _firstNonBlankLine(oldText);
+  const anchorAttr = anchor
+    ? ` data-edit-anchor="${escapeHtml(anchor)}"`
+    : '';
+  return (
+    `<span class="edit-file-path" ` +
+    `data-edit-path="${escapeHtml(safe)}"` +
+    `${anchorAttr} ` +
+    `role="button" tabindex="0" ` +
+    `title="Open ${escapeHtml(safe)} in diff viewer">` +
+    escapeHtml(safe) +
+    `</span>`
+  );
+}
+
+/**
+ * Extract the first non-blank line from a buffer. Trims and
+ * caps at 200 chars so excessively long lines don't produce
+ * huge attribute values. Returns an empty string for empty
+ * or all-whitespace input — the caller uses the empty string
+ * to suppress the `data-edit-anchor` attribute entirely.
+ */
+function _firstNonBlankLine(text) {
+  if (typeof text !== 'string' || text === '') return '';
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed) {
+      return trimmed.length > 200 ? trimmed.slice(0, 200) : trimmed;
+    }
+  }
+  return '';
 }
 
 /**
@@ -421,7 +464,7 @@ export function renderEditCard(segment, result) {
   const parts = [
     `<div class="edit-block-card ${meta.cssClass}">`,
     `<div class="edit-card-header">`,
-    renderFilePath(segment.filePath || '(unknown path)'),
+    renderFilePath(segment.filePath || '(unknown path)', segment.oldText),
     renderStatusBadge(status),
     `</div>`,
     renderEditBody(segment),

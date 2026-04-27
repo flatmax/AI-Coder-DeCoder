@@ -44,14 +44,18 @@ describe('renderMarkdown', () => {
     expect(html).toContain('code');
   });
 
-  it('always emits a copy button on fenced code blocks', () => {
+  it('always emits a floating copy button on fenced code blocks', () => {
     // The chat panel owns the delegated click handler;
-    // every block must carry the target class so the
-    // handler has something to match. CSS fades the button
-    // in on hover to avoid streaming flicker.
+    // every block must carry the `.code-copy-btn` class so
+    // the handler has something to match. CSS fades the
+    // button in on hover to avoid streaming flicker during
+    // markdown re-renders. The icon is an inline SVG rather
+    // than an emoji so it scales cleanly and adopts
+    // `currentColor` for theming.
     const html = renderMarkdown('```\nfoo\n```');
-    expect(html).toContain('class="copy-code-button"');
-    expect(html).toContain('📋');
+    expect(html).toContain('class="code-copy-btn"');
+    expect(html).toContain('<svg class="code-copy-icon"');
+    expect(html).toContain('aria-label="Copy code"');
   });
 
   it('emits a language label when a language is specified', () => {

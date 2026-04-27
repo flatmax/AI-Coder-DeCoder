@@ -722,6 +722,64 @@ export class ChatPanel extends RpcMixin(LitElement) {
       overflow-x: auto;
       margin: 0.75rem 0;
     }
+    /* Code block chrome — floating copy button at top-right,
+     * small language pill. Positioned absolute within the
+     * pre element so they float over content rather than
+     * pushing it. Button hidden by default (opacity 0) and
+     * fades in on hover — avoids streaming flicker when
+     * markdown re-renders mid-chunk. */
+    .md-content pre.code-block {
+      position: relative;
+    }
+    .md-content pre.code-block .code-lang {
+      position: absolute;
+      top: 0.35rem;
+      right: 2.5rem;
+      font-size: 0.6875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary, #8b949e);
+      opacity: 0.5;
+      font-family: inherit;
+      pointer-events: none;
+      user-select: none;
+    }
+    .md-content pre.code-block .code-copy-btn {
+      position: absolute;
+      top: 0.3rem;
+      right: 0.3rem;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(22, 27, 34, 0.85);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-secondary, #8b949e);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 120ms ease, color 120ms ease,
+        background 120ms ease, border-color 120ms ease;
+    }
+    .md-content pre.code-block:hover .code-copy-btn,
+    .md-content pre.code-block .code-copy-btn:focus-visible {
+      opacity: 1;
+    }
+    .md-content pre.code-block .code-copy-btn:hover {
+      color: var(--text-primary, #c9d1d9);
+      background: rgba(240, 246, 252, 0.1);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
+    .md-content pre.code-block .code-copy-btn.copied {
+      color: #7ee787;
+      border-color: rgba(126, 231, 135, 0.4);
+      opacity: 1;
+    }
+    .md-content pre.code-block .code-copy-icon {
+      display: block;
+    }
     .md-content code {
       background: rgba(13, 17, 23, 0.6);
       border-radius: 3px;
@@ -1055,6 +1113,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      cursor: pointer;
+      padding: 0.1rem 0.25rem;
+      margin: -0.1rem -0.25rem;
+      border-radius: 3px;
+      transition: background 120ms ease;
+    }
+    .edit-file-path:hover {
+      background: rgba(88, 166, 255, 0.12);
+      text-decoration: underline;
     }
     .edit-status-badge {
       display: inline-flex;
@@ -3847,12 +3914,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   /**
    * Single click listener on the messages container —
-   * event delegation for file mention clicks. Dispatches
-   * `file-mention-click` with `{path}` detail when a
-   * `.file-mention` element is clicked. The event bubbles
-   * up through the shadow DOM boundary (composed: true)
-   * so the files-tab orchestrator can listen at its level
-   * and toggle file selection.
+   * event delegation for three kinds of target:
+   *
+   *   1. `.file-mention` inside assistant prose — toggle
+   *      file selection + navigate to diff viewer. The
+   *      span carries `data-file="<path>"`.
+   *   2. `.code-copy-btn` inside a rendered code block —
+   *      copy the sibling `<code>`'s textContent to the
+   *      clipboard and flash a ✓ indicator. The button
+   *      may be the actual click target or a click may
+   *      land on the inner SVG/path, so we walk up via
+   *      `.closest()`.
+   *   3. `.edit-file-path` inside an edit-block card —
+   *      navigate to the file in the diff viewer,
+   *      scrolling to the edit anchor. The element
+   *      carries `data-edit-path` and optionally
+   *      `data-edit-anchor` (first line of old text).
    *
    * Delegation pattern rather than per-span handlers so
    * lit-html's template diffing doesn't need to track
@@ -3862,8 +3939,44 @@ export class ChatPanel extends RpcMixin(LitElement) {
    */
   _onMessagesClick(event) {
     const target = event.target;
-    if (!target || !target.classList) return;
-    if (!target.classList.contains('file-mention')) return;
+    if (!target || typeof target.closest !== 'function') return;
+
+    // Copy-code button. Handled first so a copy button
+    // nested inside some exotic parent structure doesn't
+    // fall through to other handlers.
+    const copyBtn = target.closest('.code-copy-btn');
+    if (copyBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      this._handleCodeCopy(copyBtn);
+      return;
+    }
+
+    // Edit-block file path — navigate with anchor text.
+    const editPath = target.closest('.edit-file-path');
+    if (editPath) {
+      const path = editPath.getAttribute('data-edit-path');
+      if (path) {
+        event.preventDefault();
+        event.stopPropagation();
+        const anchor = editPath.getAttribute('data-edit-anchor') || '';
+        window.dispatchEvent(
+          new CustomEvent('navigate-file', {
+            detail: {
+              path,
+              ...(anchor ? { searchText: anchor } : {}),
+            },
+            bubbles: false,
+          }),
+        );
+      }
+      return;
+    }
+
+    // File mention inside prose.
+    if (!target.classList || !target.classList.contains('file-mention')) {
+      return;
+    }
     const path = target.getAttribute('data-file');
     if (!path) return;
     event.preventDefault();
@@ -3875,6 +3988,53 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+  }
+
+  /**
+   * Copy the contents of the `<code>` element inside the
+   * same `<pre>` as the clicked button. Flashes a ✓ via
+   * a temporary `.copied` class for 1.5s, with a toast
+   * on failure. Uses `navigator.clipboard.writeText` with
+   * the same defensive fallbacks as `_copyMessageText`.
+   *
+   * The button and its sibling `<code>` are both inside
+   * the same `.code-block` `<pre>` per the markdown
+   * renderer's output shape. Walking up to `.code-block`
+   * and back down to `code` is the cleanest way to find
+   * the content regardless of DOM depth.
+   */
+  async _handleCodeCopy(copyBtn) {
+    const pre = copyBtn.closest('pre.code-block');
+    if (!pre) return;
+    const codeEl = pre.querySelector('code');
+    if (!codeEl) return;
+    const text = codeEl.textContent || '';
+    if (!text) return;
+    try {
+      if (
+        navigator.clipboard &&
+        typeof navigator.clipboard.writeText === 'function'
+      ) {
+        await navigator.clipboard.writeText(text);
+        // Flash ✓ by swapping the icon content for 1.5s.
+        // We preserve the original innerHTML so the SVG
+        // icon comes back cleanly.
+        const originalHtml = copyBtn.innerHTML;
+        copyBtn.textContent = '✓';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.classList.remove('copied');
+          copyBtn.innerHTML = originalHtml;
+        }, 1500);
+      } else {
+        this._emitToast('Clipboard not available', 'warning');
+      }
+    } catch (err) {
+      this._emitToast(
+        `Copy failed: ${err?.message || 'permission denied'}`,
+        'warning',
+      );
+    }
   }
 
   // ---------------------------------------------------------------
