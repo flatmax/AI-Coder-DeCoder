@@ -520,6 +520,17 @@ async def run(
     server.add_service(settings)
     server.add_service(doc_convert)
 
+    # Wire the post-write callback — every successful file
+    # write/create/rename on Repo triggers
+    # LLMService._on_doc_file_written, which decides (based
+    # on extension, mode, and cross-ref state) whether to
+    # invalidate the doc-index cache entry, re-extract the
+    # outline, and schedule keyword enrichment. Matches the
+    # specs4/2-indexing/document-index.md § Triggers contract
+    # for "LLM edits" and "user edits in viewer" — both paths
+    # go through Repo.write_file, so one hook covers both.
+    repo._post_write_callback = llm_service._on_doc_file_written
+
     await server.start()
     logger.info("WebSocket server started on ws://%s:%d", bind_host, server_port)
 

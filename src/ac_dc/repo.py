@@ -47,7 +47,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,21 @@ class Repo:
         # to enforce specs4/4-features/collaboration.md's
         # "participants can browse but not mutate" policy.
         self._collab: Any = None
+        # Post-write callback — set by main.py to
+        # ``LLMService._on_doc_file_written``. Fired after every
+        # successful write/create/rename that produces a file at
+        # a path. The callback decides whether the path is
+        # interesting (doc-index-eligible, correct mode) and
+        # kicks off invalidation + re-extract + enrichment.
+        # Fired outside the per-path write lock so a slow
+        # enrichment scheduler can't block further writes.
+        # Never raises back into the caller — the callback
+        # wraps its own work in try/except so a bug in the
+        # enrichment path can't turn a successful write into
+        # a write-then-error for the user.
+        self._post_write_callback: (
+            "Callable[[str], None] | None"
+        ) = None
 
     def _check_localhost_only(self) -> dict[str, Any] | None:
         """Return an error dict when the caller is non-localhost.
@@ -397,6 +412,34 @@ class Repo:
             lock = asyncio.Lock()
             self._write_locks[key] = lock
         return lock
+
+    def _fire_post_write(self, path: str | Path) -> None:
+        """Invoke the post-write callback, swallowing any exception.
+
+        Fired by every successful write / create / rename path
+        after the filesystem operation commits and after the
+        per-path write lock releases. The callback on the other
+        side is responsible for deciding whether the path is
+        interesting (extension match, current mode) — we
+        unconditionally forward every path so the callback's
+        gating logic is the single source of truth.
+
+        Errors are logged and swallowed. A bug in the callback
+        (indexing failure, enrichment crash) must not turn a
+        successful write into a user-visible write error. The
+        user saved their file successfully; that contract is
+        preserved regardless of what happens downstream.
+        """
+        callback = self._post_write_callback
+        if callback is None:
+            return
+        try:
+            callback(self._normalise_rel_path(path))
+        except Exception as exc:
+            logger.warning(
+                "Post-write callback raised for %s: %s",
+                path, exc,
+            )
 
     # ------------------------------------------------------------------
     # Subprocess helper
@@ -658,6 +701,7 @@ class Repo:
                 absolute.write_text(content, encoding="utf-8", errors="replace")
             except OSError as exc:
                 raise RepoError(f"Failed to write {path}: {exc}") from exc
+        self._fire_post_write(path)
         return {"status": "ok"}
 
     async def create_file(
@@ -714,6 +758,7 @@ class Repo:
                 raise RepoError(f"File already exists: {path}") from exc
             except OSError as exc:
                 raise RepoError(f"Failed to create {path}: {exc}") from exc
+        self._fire_post_write(path)
         return {"status": "ok"}
 
     async def delete_file(self, path: str | Path) -> dict[str, str]:
@@ -1034,6 +1079,7 @@ class Repo:
             # target the new path.
             self._write_locks.pop(src_rel, None)
 
+        self._fire_post_write(new_path)
         return {"status": "ok"}
 
     async def rename_directory(

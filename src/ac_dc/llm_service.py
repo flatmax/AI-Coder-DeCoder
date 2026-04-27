@@ -1349,6 +1349,168 @@ class LLMService:
             rel_path, source_text=source_text
         )
 
+    def _on_doc_file_written(self, rel_path: str) -> None:
+        """Post-write hook — invalidate + re-extract + enqueue.
+
+        Wired to :attr:`Repo._post_write_callback` by
+        ``main.py``. Fires after every successful write,
+        create, or rename. This method decides whether the
+        path is interesting and whether the current mode
+        cares about doc-index freshness.
+
+        Gating rules (spec: specs4/2-indexing/
+        document-index.md § Triggers — "LLM edits a doc
+        file" and "User edits in viewer"):
+
+        1. Path extension must be registered with the doc
+           index (``.md`` today; ``.svg`` when Layer 2.8.3
+           lands).
+        2. Service must be in doc mode OR cross-reference
+           must be enabled. In code mode without cross-ref,
+           doc outlines are never consulted, so refreshing
+           them on save is wasted work. This also avoids
+           enrichment load when the user is purely doing
+           code work and happens to touch a markdown file.
+        3. Doc index background build must have completed
+           (``_doc_index_ready``). If it's still running,
+           the background pass will re-walk and pick up
+           this file's new mtime naturally — triggering a
+           second pass now would race with the ongoing one.
+
+        When gates pass:
+
+        - Invalidate the cache sidecar (drops keyword tag
+          so structure-only lookup forces a re-parse).
+        - Call ``index_file`` — this picks up the new
+          mtime and produces an unenriched outline, which
+          becomes immediately available for tier assembly
+          and cross-reference rendering.
+        - Schedule enrichment via the aux executor. The
+          schedule call requires a running event loop; we
+          only have one when called from an event-loop
+          thread. The RPC entry points
+          (:meth:`Repo.write_file` etc.) are awaited from
+          the event-loop thread, so the callback fires
+          there too — safe to call ``ensure_future``.
+
+        Never raises — the caller (``Repo._fire_post_write``)
+        already swallows exceptions, but defensive wrapping
+        here surfaces a clearer log message tied to the
+        enrichment layer rather than a generic repo-layer
+        "callback failed" entry.
+        """
+        try:
+            # Extension gate — cheap, first.
+            extension = self._doc_index._extension_of(rel_path)
+            if extension not in self._doc_index._extractors:
+                return
+            # Mode gate. Doc mode always cares; code mode
+            # only cares when cross-reference is pulling
+            # doc outlines into prompts.
+            if (
+                self._context.mode != Mode.DOC
+                and not self._cross_ref_enabled
+            ):
+                return
+            # Readiness gate. If the background build is
+            # still walking, let it finish; it'll pick up
+            # the new mtime on its own.
+            if not self._doc_index_ready:
+                return
+            # Invalidate + re-extract. index_file handles
+            # the cache miss (we just invalidated) and
+            # produces a structural outline from the new
+            # content. repo_files=None is fine — markdown
+            # extraction doesn't use the repo set today.
+            self._doc_index.invalidate_file(rel_path)
+            keyword_model = (
+                self._enricher.model_name
+                if self._enricher is not None
+                else None
+            )
+            outline = self._doc_index.index_file(
+                rel_path,
+                keyword_model=keyword_model,
+            )
+            if outline is None:
+                # Extraction failed (unlikely for a file
+                # we just wrote, but defensive). Nothing
+                # more to do.
+                return
+            # Schedule enrichment. Only meaningful when
+            # we have an enricher AND the outline has
+            # enrichable units. DocIndex.enrich_single_file
+            # degrades to a no-op otherwise, so we don't
+            # gate here — ensure_future is cheap.
+            if self._enricher is None:
+                return
+            if not self._doc_index.needs_enrichment(outline):
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Callback fired from a thread without a
+                # running loop (shouldn't happen via
+                # Repo.write_file, but guard defensively).
+                # The next chat turn's _stream_chat will
+                # call queue_enrichment and pick this file
+                # up; no harm in skipping immediate
+                # enrichment here.
+                logger.debug(
+                    "Doc file %s written outside event loop; "
+                    "enrichment deferred to next chat turn",
+                    rel_path,
+                )
+                return
+            # Fire-and-forget enrichment on the aux
+            # executor. The coroutine reads the file,
+            # runs the enricher, replaces the cache
+            # entry. Matches the post-LLM-edit deferred
+            # enrichment pattern.
+            asyncio.ensure_future(
+                self._enrich_written_file(rel_path),
+                loop=loop,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Doc-file post-write hook failed for %s: %s",
+                rel_path, exc,
+            )
+
+    async def _enrich_written_file(self, rel_path: str) -> None:
+        """Enrich a single file in the aux executor.
+
+        Coroutine wrapper so the post-write hook can
+        ``ensure_future`` without constructing a lambda.
+        Delegates to :meth:`_enrich_one_file_sync` which
+        reads the file and runs the enricher on the
+        worker thread (enricher is GIL-bound; the sync
+        helper batches the read + extract so both happen
+        on the same thread).
+        """
+        if self._main_loop is None:
+            # No loop captured yet — shouldn't happen
+            # when called from ensure_future, but
+            # defensive. Fall back to the current
+            # running loop.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+        else:
+            loop = self._main_loop
+        try:
+            await loop.run_in_executor(
+                self._aux_executor,
+                self._enrich_one_file_sync,
+                rel_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Deferred enrichment failed for %s: %s",
+                rel_path, exc,
+            )
+
     async def _send_doc_index_progress(
         self,
         stage: str,
