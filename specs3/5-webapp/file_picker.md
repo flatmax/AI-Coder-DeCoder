@@ -126,8 +126,19 @@ Files have three context states controlled via the file picker checkbox:
 Excluded files display:
 - File name with strikethrough and muted opacity (0.45)
 - Checkbox at reduced opacity (0.5)
-- Small `✕` badge in the badges area
 - Tooltip: "Excluded from index — Shift+click to re-include"
+
+The `✕` badge is reserved for the partial-exclusion case on directories (see below). Fully-excluded rows rely on the strikethrough alone — adding a badge alongside it would duplicate the signal.
+
+Directory rows reflect descendant exclusion state so the tree shows exclusion at a glance without having to expand every folder:
+
+| Descendant state | Directory row treatment |
+|------------------|-------------------------|
+| All descendant files excluded | Name strikethrough + muted opacity (0.45), checkbox at reduced opacity (0.5), no badge, tooltip "All files excluded from index — Shift+click to re-include all" |
+| Some descendants excluded | `✕` badge at reduced opacity (no strikethrough on name), tooltip "Some files excluded from index" |
+| None excluded | Normal styling, no badge |
+
+A directory with zero descendant files is treated as "none excluded" — empty directories cannot be in an excluded state.
 
 The checkbox tooltip adapts to exclusion state: `"Click to select · Shift+click to exclude from index"` (default) or `"Click to select · Shift+click to include in index"` (when already excluded). This appears on every file and directory checkbox via the `title` attribute.
 

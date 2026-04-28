@@ -68,7 +68,12 @@ Files have three context states controlled via the picker checkbox:
 - Shift+click on a directory — toggles exclusion for all children
 - Regular click to select directory children — un-excludes any excluded children
 ### Visual Treatment
-- Excluded files — strikethrough and muted opacity, reduced checkbox opacity, small excluded badge, tooltip explaining shift+click to re-include
+- Excluded files — strikethrough and muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include. No badge — the strikethrough alone carries the signal.
+- Directory rows reflect descendant exclusion state so the tree surfaces exclusion without requiring every folder to be expanded:
+  - All descendant files excluded — strikethrough, muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include all. No badge.
+  - Some descendants excluded — `✕` badge at reduced opacity (no strikethrough), tooltip indicating partial exclusion. The badge is the distinguishing signal for this state alone, where strikethrough would be misleading.
+  - None excluded — normal styling
+- A directory with zero descendant files is treated as "none excluded"
 - Checkbox tooltip adapts to exclusion state — prompts differ for default vs excluded files
 ### Context Menu
 - File and directory context menus include include/exclude items as an alternative to shift+click

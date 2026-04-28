@@ -854,6 +854,22 @@ export class FilePicker extends LitElement {
     .row.is-file.is-excluded .checkbox {
       opacity: 0.5;
     }
+    /* Directory exclusion treatment — mirrors the file
+     * rules for "all descendants excluded", plus a softer
+     * partial state that shows a dimmed badge but leaves
+     * the name intact. Users scanning a collapsed tree
+     * can tell at a glance whether a subtree is fully,
+     * partially, or not excluded. */
+    .row.is-dir.all-excluded .name {
+      text-decoration: line-through;
+      opacity: 0.45;
+    }
+    .row.is-dir.all-excluded .checkbox {
+      opacity: 0.5;
+    }
+    .row.is-dir.some-excluded .excluded-badge {
+      opacity: 0.5;
+    }
     .excluded-badge {
       flex-shrink: 0;
       display: inline-flex;
@@ -1775,10 +1791,25 @@ export class FilePicker extends LitElement {
     const isOpen = expanded.has(node.path);
     const hasChildren = (node.children || []).length > 0;
     const indentPx = depth * 16;
-    const tooltip = this._tooltipFor(node);
+    const allExcluded = this._allDescendantsExcluded(node);
+    const someExcluded =
+      !allExcluded && this._someDescendantsExcluded(node);
+    const tooltip = this._tooltipForDir(node, {
+      allExcluded,
+      someExcluded,
+    });
+    const rowClasses = [
+      'row',
+      'is-dir',
+      allExcluded ? 'all-excluded' : '',
+      someExcluded ? 'some-excluded' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const badgeTitle = 'Some files excluded from index';
     return html`
       <div
-        class="row is-dir"
+        class=${rowClasses}
         style="padding-left: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onDirClick(e, node)}
@@ -1801,6 +1832,14 @@ export class FilePicker extends LitElement {
           aria-label="Select all files in ${node.name}"
         />
         <span class="name">${node.name || '(root)'}</span>
+        ${someExcluded
+          ? html`<span
+              class="excluded-badge"
+              title=${badgeTitle}
+              aria-label=${badgeTitle}
+              >✕</span
+            >`
+          : ''}
       </div>
       ${isOpen
         ? html`
@@ -1873,14 +1912,6 @@ export class FilePicker extends LitElement {
           title=${checkboxTitle}
         />
         <span class="name">${node.name}</span>
-        ${isExcluded
-          ? html`<span
-              class="excluded-badge"
-              title="Excluded from index"
-              aria-label="Excluded from index"
-              >✕</span
-            >`
-          : ''}
         ${status
           ? html`<span
               class="status-badge status-${status.kind}"
@@ -2097,6 +2128,25 @@ export class FilePicker extends LitElement {
     return isExcluded ? `${base} (excluded)` : base;
   }
 
+  /**
+   * Tooltip for directory rows. Same base format as
+   * `_tooltipFor` but with distinct suffixes for the
+   * three exclusion states — none (no suffix), some,
+   * all. Users hovering a collapsed folder can see
+   * the aggregate state without expanding it.
+   */
+  _tooltipForDir(node, { allExcluded = false, someExcluded = false } = {}) {
+    const base = this._tooltipFor(node);
+    if (!base) return '';
+    if (allExcluded) {
+      return `${base} — all files excluded from index, Shift+click to re-include all`;
+    }
+    if (someExcluded) {
+      return `${base} — some files excluded from index`;
+    }
+    return base;
+  }
+
   // ---------------------------------------------------------------
   // Selection helpers
   // ---------------------------------------------------------------
@@ -2132,6 +2182,34 @@ export class FilePicker extends LitElement {
       (p) => this.selectedFiles.has(p),
     );
     return selected.length > 0 && selected.length < descendants.length;
+  }
+
+  /**
+   * True when every file under `node` is excluded AND
+   * there is at least one file (empty directories are
+   * "not excluded" by definition — there's nothing there
+   * to exclude).
+   */
+  _allDescendantsExcluded(node) {
+    const descendants = this._collectDescendantFiles(node);
+    if (descendants.length === 0) return false;
+    return descendants.every((p) => this.excludedFiles.has(p));
+  }
+
+  /**
+   * True when at least one but not all descendants are
+   * excluded — the directory is in a partial-exclusion
+   * state. Mirrors `_someDescendantsSelected` so the
+   * all/some/none pattern is symmetric for both
+   * selection and exclusion.
+   */
+  _someDescendantsExcluded(node) {
+    const descendants = this._collectDescendantFiles(node);
+    if (descendants.length === 0) return false;
+    const excluded = descendants.filter((p) =>
+      this.excludedFiles.has(p),
+    );
+    return excluded.length > 0 && excluded.length < descendants.length;
   }
 
   // ---------------------------------------------------------------
