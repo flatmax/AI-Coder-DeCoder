@@ -755,7 +755,7 @@ export class FilePicker extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      padding: 0.15rem 0.5rem 0.15rem calc(var(--row-indent, 0px) + 2.8rem);
+      padding: 0.15rem 0.5rem 0.15rem calc(var(--row-indent, 0px) + 0.9rem);
       cursor: pointer;
       white-space: nowrap;
       user-select: none;
@@ -870,8 +870,9 @@ export class FilePicker extends LitElement {
      * within it so numbers hug the checkbox side. */
     .diff-stats.diff-stats-pre {
       position: absolute;
-      left: calc(var(--row-indent, 0px) + 0.15rem);
-      width: 2.5rem;
+      right: auto;
+      left: calc(var(--row-indent, 0px) - 1.6rem);
+      width: 2.4rem;
       justify-content: flex-end;
       margin: 0;
       pointer-events: none;
