@@ -35,6 +35,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Code renderer override — language label, copy button, syntax highlighting
 - All other block elements use marked defaults (no preview-specific logic)
 - Math extension — display and inline expressions rendered via KaTeX with parse-failure fallback
+- Applies to user and assistant messages equally — users type markdown-literate text (matching what the LLM receives), so the UI renders it the same way. The renderer handles escaping internally, so passing user content through it is safe against HTML injection
 ### Syntax Highlighting
 - Explicit language registration for common languages (JavaScript, TypeScript, Python, JSON, Bash, CSS, HTML, YAML, C, C++, diff, markdown)
 - Fenced blocks with recognized language are highlighted directly

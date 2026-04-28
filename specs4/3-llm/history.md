@@ -113,7 +113,8 @@ Agent-mode and non-agent-mode assistant messages share the same schema. The only
 ## Retrieval Path Asymmetry
 
 - Context-loading retrieval returns only role/content (plus reconstructed images)
-- Browser display retrieval returns full message dicts with all metadata
+- Browser display retrieval returns full message dicts with all metadata, including the on-disk `image_refs` filenames AND a reconstructed `images` array of base64 data URIs alongside them — so the history browser can render thumbnails without a second RPC
+- Image reconstruction is best-effort: missing files on disk are silently skipped rather than failing the call, and legacy records carrying a non-list `images` field (old integer-count shape) yield no reconstructed array
 - Metadata (files, edit results, image refs) exists only in JSONL after a session reload
 
 ## Message Persistence Ordering

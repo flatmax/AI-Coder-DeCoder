@@ -119,7 +119,7 @@ Each chunk carries full accumulated content (not deltas). First chunk sets `stre
 
 ### Markdown Rendering
 
-Assistant messages are rendered via `renderMarkdown()` from `webapp/src/utils/markdown.js`, which uses a dedicated `Marked` instance (`markedChat`) with `highlight.js` for syntax highlighting. This is a **separate instance** from the one used by the diff viewer's Markdown preview (`markedSourceMap`) — the two do not share any renderer state.
+User and assistant messages are both rendered via `renderMarkdown()` from `webapp/src/utils/markdown.js`, which uses a dedicated `Marked` instance (`markedChat`) with `highlight.js` for syntax highlighting. This is a **separate instance** from the one used by the diff viewer's Markdown preview (`markedSourceMap`) — the two do not share any renderer state. The renderer handles escaping internally, so passing user content through it is safe against HTML injection; system event messages also go through the same renderer for consistent formatting.
 
 **Chat renderer overrides:** Only the `code()` renderer method is overridden. All other block elements (headings, paragraphs, lists, tables, blockquotes) use marked's built-in defaults. This keeps the chat renderer simple and immune to regressions from preview-specific logic.
 

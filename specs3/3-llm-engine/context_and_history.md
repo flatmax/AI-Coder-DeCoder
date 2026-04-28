@@ -264,7 +264,9 @@ The two retrieval methods return different data shapes:
 | `get_session_messages_for_context` | `[{role, content}]` only | Loading into context manager |
 | `get_session_messages` / `history_get_session` | Full message dicts with all metadata | History browser display |
 
-The context retrieval path strips all metadata (`files`, `files_modified`, `edit_results`, `image_refs`) and returns only `{role, content}` plus a reconstructed `_images` field. This means metadata like which files were in context or which edits were applied is not available after a session reload — it exists only in the persistent JSONL records.
+The context retrieval path strips all metadata (`files`, `files_modified`, `edit_results`, `image_refs`) and returns only `{role, content}` plus a reconstructed `images` field. This means metadata like which files were in context or which edits were applied is not available after a session reload — it exists only in the persistent JSONL records.
+
+The full-metadata path preserves `image_refs` (filenames on disk) and also adds a reconstructed `images` array of base64 data URIs alongside them. This lets the history browser render thumbnails directly from the RPC response without a second call. Reconstruction is best-effort — missing files on disk are silently skipped, and legacy records with a non-list `images` field (old integer count) yield no reconstructed array.
 
 ### Message Persistence Ordering
 

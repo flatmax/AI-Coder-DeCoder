@@ -2665,12 +2665,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * stream orphaned. Unlike new-session, the modal itself
    * is harmless to open; the gate is on the "load" action
    * inside the modal, which the user reaches intentionally.
-   * But we gate the opening too so the button state is
-   * consistent with new-session and there's no
-   * inconsistency if the user tries to load while streaming.
+   * Opening the browser itself is read-only — the user
+   * can scan past sessions while waiting for a stream to
+   * complete. The actual load action (inside the modal)
+   * is gated separately on rpc-connected state, and
+   * sessionChanged during an in-flight stream is rare
+   * enough that the user accepting that risk is fine.
    */
   _onOpenHistory() {
-    if (this._streaming) return;
     this._historyOpen = true;
   }
 
@@ -4540,7 +4542,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
                   </button>
                   <button
                     class="action-button history-button"
-                    ?disabled=${!this.rpcConnected || this._streaming}
+                    ?disabled=${!this.rpcConnected}
                     @click=${this._onOpenHistory}
                     aria-label="Open history browser"
                     title="Browse past sessions"
