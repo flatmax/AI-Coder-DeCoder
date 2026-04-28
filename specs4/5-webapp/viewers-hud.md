@@ -121,7 +121,16 @@ Clicking an item name opens a modal showing the full index block for that file:
 4. Error if neither index has data
 Response includes a mode field indicating which index provided the content, so the frontend can apply appropriate formatting.
 #### Fuzzy Search
-Character-by-character matching against item names. Hides non-matching items and tiers with no matching items.
+Character-subsequence matching — characters in the query must appear in order within the target but need not be contiguous. Typing `ctx` matches `context.py`, `ContextManager`, `src/ac_dc/context/manager.py`. Case-insensitive. Shares the same algorithm as the file picker's tree filter so users see consistent behavior across surfaces.
+
+- Filter input visible only in the Cache sub-view; empty query shows everything
+- Matches against the item's displayed path, falling back to its key name
+- Measured items are filtered individually; unmeasured items (aggregated into the "N pre-indexed …" summary line) have no per-item name and survive as long as their tier does
+- Tiers with zero measured matches and zero unmeasured items are hidden entirely — the filtered view focuses on hits
+- A "No items match …" placeholder appears when every tier is hidden
+- Filter auto-expands all surviving tiers during an active search — the user's persisted expand/collapse state is preserved and restored when the filter is cleared
+- Per-session only; not persisted to localStorage — a stale filter from a previous session would confuse more than it helps
+- Composes independently with sort, refresh, stale-detection, and the rebuild button
 #### Sort Toggle
 Size / Name toggle button switches between sorting tier contents by token count descending (default) or alphabetically. Active mode persisted to localStorage.
 #### Defaults

@@ -12,6 +12,7 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
+import { fuzzyMatch } from './file-picker.js';
 
 /** localStorage key for the active sub-view. */
 const _SUBVIEW_KEY = 'ac-dc-context-subview';
@@ -112,6 +113,19 @@ export class ContextTab extends RpcMixin(LitElement) {
      * "file I thought was in context isn't" cases.
      */
     _budgetFilesExpanded: { type: Boolean, state: true },
+    /**
+     * Fuzzy-match filter query for the Cache sub-view. Empty
+     * string means no filter (show all tiers and items).
+     * Character-subsequence matching (same algorithm as the
+     * file picker) — typing ``ctx`` matches ``context.py``,
+     * ``ContextManager``, ``src/ac_dc/context/manager.py``.
+     * Case-insensitive. Applies to the item's displayed path
+     * or name; tiers whose measured items all get filtered
+     * out AND have no unmeasured items are hidden entirely.
+     * Not persisted — per-session state; a filter left over
+     * from a previous session is more confusing than useful.
+     */
+    _cacheFilter: { type: String, state: true },
   };
 
   static styles = css`
@@ -181,6 +195,41 @@ export class ContextTab extends RpcMixin(LitElement) {
     .refresh-btn:disabled {
       opacity: 0.4;
       cursor: not-allowed;
+    }
+    .filter-input {
+      flex: 1;
+      min-width: 6rem;
+      max-width: 16rem;
+      padding: 0.25rem 0.5rem;
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.75rem;
+    }
+    .filter-input:focus {
+      outline: none;
+      border-color: var(--accent-primary, #58a6ff);
+    }
+    .filter-clear {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary, #8b949e);
+      cursor: pointer;
+      padding: 0 0.25rem;
+      font-size: 0.875rem;
+      line-height: 1;
+    }
+    .filter-clear:hover {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .no-matches {
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+      font-size: 0.8125rem;
     }
 
     .content {
@@ -648,6 +697,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._cacheExpanded = this._loadCacheExpanded();
     this._mapModal = null;
     this._budgetFilesExpanded = this._loadBudgetFilesExpanded();
+    this._cacheFilter = '';
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -1005,6 +1055,26 @@ export class ContextTab extends RpcMixin(LitElement) {
             @click=${() => this._setSubview('cache')}
           >Cache</button>
         </div>
+        ${this._subview === 'cache'
+          ? html`
+              <input
+                type="text"
+                class="filter-input"
+                placeholder="Filter items (fuzzy match)…"
+                .value=${this._cacheFilter}
+                @input=${(e) => { this._cacheFilter = e.target.value; }}
+                aria-label="Filter cache items"
+              />
+              ${this._cacheFilter
+                ? html`<button
+                    class="filter-clear"
+                    @click=${() => { this._cacheFilter = ''; }}
+                    title="Clear filter"
+                    aria-label="Clear filter"
+                  >×</button>`
+                : ''}
+            `
+          : ''}
         <div class="toolbar-spacer"></div>
         ${this._stale ? html`<span class="stale-badge">● stale</span>` : ''}
         <button
@@ -1218,10 +1288,23 @@ export class ContextTab extends RpcMixin(LitElement) {
     }
     const d = this._data;
     const cacheRate = d.provider_cache_rate ?? d.cache_hit_rate ?? 0;
-    const blocks = Array.isArray(d.blocks) ? d.blocks : [];
+    const rawBlocks = Array.isArray(d.blocks) ? d.blocks : [];
     const promotions = Array.isArray(d.promotions) ? d.promotions : [];
     const demotions = Array.isArray(d.demotions) ? d.demotions : [];
     const hasChanges = promotions.length > 0 || demotions.length > 0;
+    const filterQuery = this._cacheFilter.trim();
+    // Apply filter to each tier's contents. A tier survives
+    // when at least one measured item matches; unmeasured
+    // items (aggregate count) are kept visible as long as
+    // the tier itself survives, since they have no per-item
+    // name to match against. Tiers with nothing surviving
+    // drop out entirely so the display focuses on hits.
+    const blocks = filterQuery
+      ? rawBlocks
+          .map((block) => this._filterTierBlock(block, filterQuery))
+          .filter((block) => block !== null)
+      : rawBlocks;
+    const noMatches = filterQuery && blocks.length === 0;
 
     return html`
       <div class="cache-actions">
@@ -1262,7 +1345,11 @@ export class ContextTab extends RpcMixin(LitElement) {
           `
         : ''}
 
-      ${blocks.map((block) => this._renderCacheTier(block))}
+      ${noMatches
+        ? html`<div class="no-matches">
+            No items match “${filterQuery}”
+          </div>`
+        : blocks.map((block) => this._renderCacheTier(block))}
 
       <div class="cache-footer">
         <span>${d.model || '—'}</span>
@@ -1271,10 +1358,47 @@ export class ContextTab extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * Filter a tier block's contents against a fuzzy query.
+   *
+   * Returns a new block with only matching measured items in
+   * its ``contents`` array. Unmeasured items (``tokens === 0``)
+   * are kept verbatim — they're aggregated into a summary
+   * line rather than shown individually, so there's no name
+   * to match against; dropping them based on a filter that
+   * can't see them would be surprising.
+   *
+   * Matches against ``path`` first (the displayed label when
+   * present) and falls back to ``name`` (the key). Returns
+   * null when the tier has zero measured matches AND zero
+   * unmeasured items — the caller filters those out so
+   * empty tiers don't clutter a filtered view.
+   */
+  _filterTierBlock(block, query) {
+    const contents = Array.isArray(block.contents) ? block.contents : [];
+    const measured = contents.filter((c) => (c.tokens || 0) > 0);
+    const unmeasured = contents.filter((c) => (c.tokens || 0) === 0);
+    const matches = measured.filter((item) => {
+      const label = item.path || item.name || '';
+      return fuzzyMatch(label, query);
+    });
+    if (matches.length === 0 && unmeasured.length === 0) {
+      return null;
+    }
+    return { ...block, contents: [...matches, ...unmeasured] };
+  }
+
   _renderCacheTier(block) {
     const name = block.name || 'unknown';
     const color = _TIER_COLORS[name] || _TIER_COLORS.active;
-    const expanded = this._cacheExpanded.has(name);
+    // Auto-expand filtered tiers — when the user is
+    // searching, the expected behaviour is "show me the
+    // matches", not "show me the matches if I remembered
+    // to expand this tier first". The persisted expanded
+    // set is preserved; this override is scoped to the
+    // filtered render.
+    const filtering = this._cacheFilter.trim() !== '';
+    const expanded = filtering || this._cacheExpanded.has(name);
     const contents = Array.isArray(block.contents) ? block.contents : [];
 
     // Split into measured (tokens > 0) and unmeasured.
