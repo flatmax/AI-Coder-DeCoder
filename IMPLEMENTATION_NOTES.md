@@ -77,9 +77,9 @@ Four commits, in order. Each is a standalone change with its own tests. Strike t
 
 `diff-viewer.js` gained `relayout()` (calls `this._editor.layout()`, no-op in empty state, swallows throws from detached DOM). `svg-viewer.js` gained `relayout()` (calls `fitContent({silent: true})` on both editors under the `_syncingViewBox` mutex, then pushes the right pane's final viewBox onto the left so the two panes stay exactly synced across the resize). `app-shell.js` wires both — new `_scheduleViewerRelayout()` helper with a dedicated `_viewerRelayoutRAF` handle (separate from `_resizeRAF` so window-resize and drag-resize don't cancel each other's pending frames), called from `_handleWindowResize` and from `_onPointerMove` during dialog resize. Test coverage in `diff-viewer.test.js § DiffViewer relayout` (4 tests — editor-layout call, empty-state no-op, survives Monaco throw, post-swap editor identity) and `svg-viewer.test.js § SvgViewer relayout` (5 tests — fit-both + silent flag, empty-state no-op, mutex held, survives one-side throw, right-to-left sync). `specs4/5-webapp/shell.md § Window Resize Handling` documents the hook. `app-shell.test.js` extends its resize tests to cover the viewer-relayout path.
 
-### Commit B — Alt+1..4 / Alt+M keyboard shortcuts ← **next up**
+### ~~Commit B — Alt+1..4 / Alt+M keyboard shortcuts~~ (delivered `e5dcf14`)
 
-Small, additive. `specs4/5-webapp/shell.md § Global Keyboard Shortcuts` spec'd these but they were never wired. Ctrl+Shift+F is already in place; these are the last three shortcuts.
+Wired `_onGlobalKeyDown` on `document` bubble-phase. Alt+1/2/3/4 route through `_switchTab`, Alt+4 gated on `_docConvertAvailable` (no-op when markitdown isn't installed, but still `preventDefault` so browser chrome shortcuts can't grab the keystroke). Alt+M toggles minimize. Guards against Ctrl/Meta/Shift modifiers — Alt+Shift+digit is macOS symbol entry, Ctrl+Alt+digit is a GNOME workspace binding; leaving those alone avoids collision. `preventDefault` fires on every handled path. Bubble phase is fine because no child component intercepts Alt+digit/M, keeping this handler independent from the grid's capture-phase Alt+Arrow handler. 15 tests in `app-shell.test.js § global keyboard shortcuts` cover each shortcut, the doc-convert gate, modifier exclusion, unmapped-key passthrough, localStorage persistence for both tab switch and minimize, and disconnect cleanup.
 
 **Scope:**
 
@@ -96,7 +96,7 @@ Small, additive. `specs4/5-webapp/shell.md § Global Keyboard Shortcuts` spec'd 
 
 - `webapp/src/app-shell.test.js` — new describe block `global keyboard shortcuts` with tests for each: Alt+1..3 switches tab, Alt+4 switches when available, Alt+4 no-ops when doc-convert unavailable, Alt+M toggles minimize, preventDefault fires for all five.
 
-### Commit C — File picker left-panel resizer
+### Commit C — File picker left-panel resizer ← **next up**
 
 Spec'd in `specs4/5-webapp/file-picker.md § Left Panel Resizer` but not implemented. `files-tab.js` holds the width as a reactive property with only CSS constraints; no splitter DOM exists today.
 

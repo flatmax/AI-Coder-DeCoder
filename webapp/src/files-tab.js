@@ -76,6 +76,56 @@ import { RpcMixin } from './rpc-mixin.js';
 import './file-picker.js';
 import './chat-panel.js';
 
+// ---------------------------------------------------------------
+// Left-panel resizer constants
+// ---------------------------------------------------------------
+//
+// Spec'd in specs4/5-webapp/file-picker.md § Left Panel Resizer.
+// Minimum width prevents the picker from collapsing below the
+// point where tree rows become unreadable (file names truncate
+// hard, context-menu buttons start overlapping). Maximum is
+// expressed as 50% of the host width so the chat pane always
+// retains half the dialog. Collapsed state shrinks the picker
+// to a thin affordance strip — the stored _pickerWidthPx
+// survives so double-click-to-expand restores the user's prior
+// width rather than snapping to a default.
+
+const _PICKER_WIDTH_KEY = 'ac-dc-picker-width';
+const _PICKER_COLLAPSED_KEY = 'ac-dc-picker-collapsed';
+const _PICKER_MIN_WIDTH = 180;
+const _PICKER_COLLAPSED_WIDTH = 24;
+const _PICKER_DEFAULT_WIDTH = 280;
+
+/**
+ * Read the persisted picker width from localStorage, falling
+ * back to the default when storage is empty or the stored
+ * value is malformed (non-numeric, below minimum). The value
+ * is clamped to the minimum on load so a stored value that's
+ * somehow below the current minimum doesn't propagate into
+ * the first render.
+ */
+function _loadPickerWidth() {
+  try {
+    const raw = localStorage.getItem(_PICKER_WIDTH_KEY);
+    if (!raw) return _PICKER_DEFAULT_WIDTH;
+    const n = parseInt(raw, 10);
+    if (Number.isNaN(n) || n < _PICKER_MIN_WIDTH) {
+      return _PICKER_DEFAULT_WIDTH;
+    }
+    return n;
+  } catch (_) {
+    return _PICKER_DEFAULT_WIDTH;
+  }
+}
+
+function _loadPickerCollapsed() {
+  try {
+    return localStorage.getItem(_PICKER_COLLAPSED_KEY) === 'true';
+  } catch (_) {
+    return false;
+  }
+}
+
 /**
  * Recursively flatten a file-tree node into a list of
  * repo-relative file paths. Used to produce the flat list
@@ -218,11 +268,23 @@ const EMPTY_TREE = {
 export class FilesTab extends RpcMixin(LitElement) {
   static properties = {
     /**
-     * Left-panel width as a ratio (0 = all picker, 1 = all
-     * chat). Defaulted so each pane has a reasonable share of
-     * the tab. Persistent drag-resize lands in Phase 3.
+     * Picker-pane width in pixels. Applied as an inline
+     * style on .picker-pane so the flex layout can
+     * respect it without every render re-computing. Drag
+     * commits write back to this property; mid-drag
+     * inline mutations bypass it for smooth tracking
+     * (same pattern as app-shell's dialog resize).
      */
     _pickerWidthPx: { type: Number, state: true },
+    /**
+     * Collapsed state — when true, the picker renders at
+     * _PICKER_COLLAPSED_WIDTH regardless of the stored
+     * _pickerWidthPx. Double-click on the splitter
+     * toggles this. The stored width survives so
+     * expanding restores the user's prior size rather
+     * than snapping to a default.
+     */
+    _pickerCollapsed: { type: Boolean, state: true },
     /**
      * Reflects the last-seen tree so the picker's initial
      * render has something to work with. We use a reactive
@@ -243,12 +305,29 @@ export class FilesTab extends RpcMixin(LitElement) {
 
     .picker-pane {
       flex-shrink: 0;
+      /* min-width and max-width are enforced in the
+       * splitter drag handler against the host's live
+       * dimensions; the CSS floor + ceiling here are
+       * belt-and-braces for non-drag paths (window
+       * resize pushing the pane out of bounds). The
+       * JS clamp is authoritative because it knows
+       * the 50%-of-host rule at pointermove time. */
       min-width: 180px;
       max-width: 50%;
       border-right: 1px solid rgba(240, 246, 252, 0.1);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      transition: width 120ms ease;
+    }
+    /* When a drag is in progress, suppress the transition
+     * so width tracking stays 1:1 with the pointer. Lit
+     * reactive state flips this class. */
+    .picker-pane.dragging {
+      transition: none;
+    }
+    .picker-pane.collapsed {
+      min-width: 0;
     }
 
     .chat-pane {
@@ -257,6 +336,44 @@ export class FilesTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+    }
+
+    /* Splitter — 4px vertical strip between picker and
+     * chat panes. The visual divider is the .picker-pane
+     * border-right; this strip is purely the hit zone.
+     * Hover highlights a subtle accent so users can
+     * discover the drag affordance. */
+    .splitter {
+      flex: 0 0 4px;
+      cursor: col-resize;
+      background: transparent;
+      position: relative;
+      transition: background 120ms ease;
+    }
+    .splitter:hover {
+      background: rgba(88, 166, 255, 0.35);
+    }
+    .splitter.collapsed {
+      /* In collapsed mode the splitter grows into an
+       * affordance strip with a glyph hint at its
+       * centre, making the "click to restore" target
+       * bigger than a 4px line. */
+      flex: 0 0 20px;
+      cursor: pointer;
+      background: rgba(240, 246, 252, 0.04);
+    }
+    .splitter.collapsed:hover {
+      background: rgba(88, 166, 255, 0.15);
+    }
+    .splitter-affordance {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: rgba(240, 246, 252, 0.5);
+      font-size: 0.75rem;
+      user-select: none;
+      pointer-events: none;
     }
 
     ac-file-picker {
@@ -300,10 +417,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     // the filter bar. The picker's `reviewState` prop
     // renders the banner only when `active === true`.
     this._reviewState = null;
-    // Default picker width. Phase 3 wires a draggable handle
-    // and localStorage persistence.
-    this._pickerWidthPx = 280;
+    // Picker width + collapsed state. Hydrated synchronously
+    // in the constructor (not connectedCallback) so first
+    // paint doesn't flash the default before jumping to the
+    // persisted value — same reasoning as app-shell's
+    // dialog-state hydration.
+    this._pickerWidthPx = _loadPickerWidth();
+    this._pickerCollapsed = _loadPickerCollapsed();
     this._treeLoaded = false;
+    // Splitter drag state. Null when idle; populated during
+    // an active drag with the origin coords and the picker's
+    // width at drag start. Kept out of reactive properties
+    // so mid-drag style mutations don't trigger re-renders.
+    this._splitterDrag = null;
     // True once `_pushChildProps` has successfully reached
     // both children. Guards the `updated()` retry path
     // against re-pushing on every subsequent Lit update.
@@ -407,6 +533,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onNewFileCommitted = this._onNewFileCommitted.bind(this);
     this._onNewDirectoryCommitted =
       this._onNewDirectoryCommitted.bind(this);
+    // Splitter handlers. Bound so the document-level
+    // pointermove / pointerup listeners match the
+    // same function references for add/remove.
+    this._onSplitterPointerDown =
+      this._onSplitterPointerDown.bind(this);
+    this._onSplitterPointerMove =
+      this._onSplitterPointerMove.bind(this);
+    this._onSplitterPointerUp =
+      this._onSplitterPointerUp.bind(this);
+    this._onSplitterDoubleClick =
+      this._onSplitterDoubleClick.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -456,6 +593,16 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onReviewStarted,
     );
     window.removeEventListener('review-ended', this._onReviewEnded);
+    // If a splitter drag was in progress at unmount (hot
+    // reload, tab switch under load), release the
+    // document-scope listeners. Without this, pointermove
+    // events continue firing into the detached handler.
+    document.removeEventListener(
+      'pointermove', this._onSplitterPointerMove,
+    );
+    document.removeEventListener(
+      'pointerup', this._onSplitterPointerUp,
+    );
     super.disconnectedCallback();
   }
 
@@ -2344,6 +2491,160 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Splitter — drag and double-click
+  // ---------------------------------------------------------------
+
+  /**
+   * Maximum width the picker pane is allowed to reach.
+   * Computed from the host element's current width so it
+   * tracks window / dialog resizes. Callers read this at
+   * drag time rather than caching, so an ongoing drag
+   * respects a resize that happens mid-drag.
+   *
+   * Falls back to an arbitrary large value if the host
+   * isn't measurable yet (shouldn't happen in practice —
+   * the user can't drag a splitter that isn't rendered).
+   */
+  _maxPickerWidth() {
+    const rect = this.getBoundingClientRect?.();
+    if (!rect || !rect.width) return 10000;
+    return Math.floor(rect.width / 2);
+  }
+
+  /**
+   * Begin a splitter drag. Snapshots the origin pointer
+   * X and the picker's current width, then attaches
+   * document-level pointermove / pointerup listeners so
+   * we track the drag even when the pointer leaves the
+   * splitter element itself.
+   *
+   * Skips non-primary buttons (right-click, middle-click)
+   * and expanded-from-collapsed edge cases where the
+   * drag base width would be meaningless — in collapsed
+   * mode the splitter is clickable but not draggable.
+   */
+  _onSplitterPointerDown(event) {
+    if (event.button !== 0) return;
+    if (this._pickerCollapsed) return;
+    event.preventDefault();
+    this._splitterDrag = {
+      startX: event.clientX,
+      originWidth: this._pickerWidthPx,
+    };
+    document.addEventListener(
+      'pointermove', this._onSplitterPointerMove,
+    );
+    document.addEventListener(
+      'pointerup', this._onSplitterPointerUp,
+    );
+  }
+
+  /**
+   * Pointer move during drag. Mutates the picker pane's
+   * inline width style directly rather than through the
+   * reactive property — Lit's render cycle is expensive
+   * enough that per-pointermove re-renders produce
+   * visible lag on slower machines. Commits to
+   * `_pickerWidthPx` on pointerup.
+   *
+   * Clamp to [_PICKER_MIN_WIDTH, host-width/2] so the
+   * picker never goes below the readable threshold or
+   * pushes the chat pane below half the dialog.
+   */
+  _onSplitterPointerMove(event) {
+    if (!this._splitterDrag) return;
+    const dx = event.clientX - this._splitterDrag.startX;
+    const next = Math.max(
+      _PICKER_MIN_WIDTH,
+      Math.min(
+        this._maxPickerWidth(),
+        this._splitterDrag.originWidth + dx,
+      ),
+    );
+    const pane = this.shadowRoot?.querySelector('.picker-pane');
+    if (pane) {
+      pane.style.width = `${next}px`;
+    }
+  }
+
+  /**
+   * Commit the drag. Reads the final width from the
+   * inline style (the pointermove path wrote there for
+   * smooth tracking) and writes it back to the reactive
+   * property so subsequent renders honour it. Persists
+   * to localStorage so the width survives a reload.
+   *
+   * Below-threshold drags (no pointermove fired between
+   * down and up, so the pane's inline style is still
+   * empty) skip the read and leave state unchanged.
+   */
+  _onSplitterPointerUp() {
+    document.removeEventListener(
+      'pointermove', this._onSplitterPointerMove,
+    );
+    document.removeEventListener(
+      'pointerup', this._onSplitterPointerUp,
+    );
+    if (!this._splitterDrag) return;
+    this._splitterDrag = null;
+    const pane = this.shadowRoot?.querySelector('.picker-pane');
+    if (!pane) return;
+    const styleWidth = parseInt(pane.style.width, 10);
+    if (Number.isNaN(styleWidth)) return;
+    this._pickerWidthPx = styleWidth;
+    this._savePickerWidth();
+  }
+
+  /**
+   * Toggle collapsed state on double-click. In collapsed
+   * mode the picker renders at _PICKER_COLLAPSED_WIDTH
+   * (just wide enough for an affordance glyph); the
+   * stored _pickerWidthPx is untouched so expanding
+   * restores the user's prior size.
+   *
+   * The first click of a double-click would normally
+   * start a drag via _onSplitterPointerDown. That drag
+   * is cancelled here because we null `_splitterDrag`
+   * and remove the document listeners — the second
+   * click's pointerdown would attach fresh listeners but
+   * the intervening double-click event fires first
+   * (browsers fire dblclick after the second mouseup).
+   */
+  _onSplitterDoubleClick(event) {
+    event.preventDefault();
+    // Cancel any in-flight drag. The first click of the
+    // double-click opened a drag; we release its
+    // listeners so the state doesn't leak.
+    if (this._splitterDrag) {
+      document.removeEventListener(
+        'pointermove', this._onSplitterPointerMove,
+      );
+      document.removeEventListener(
+        'pointerup', this._onSplitterPointerUp,
+      );
+      this._splitterDrag = null;
+    }
+    this._pickerCollapsed = !this._pickerCollapsed;
+    this._saveCollapsed();
+  }
+
+  _savePickerWidth() {
+    try {
+      localStorage.setItem(
+        _PICKER_WIDTH_KEY, String(this._pickerWidthPx),
+      );
+    } catch (_) {}
+  }
+
+  _saveCollapsed() {
+    try {
+      localStorage.setItem(
+        _PICKER_COLLAPSED_KEY, String(this._pickerCollapsed),
+      );
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------
 
@@ -2379,10 +2680,23 @@ export class FilesTab extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
 
   render() {
+    // Effective picker width — collapsed mode overrides
+    // the stored _pickerWidthPx with a thin affordance
+    // strip. Stored width survives so expand-via-
+    // double-click restores the user's prior size.
+    const pickerWidth = this._pickerCollapsed
+      ? _PICKER_COLLAPSED_WIDTH
+      : this._pickerWidthPx;
+    const paneClasses = this._pickerCollapsed
+      ? 'picker-pane collapsed'
+      : 'picker-pane';
+    const splitterClasses = this._pickerCollapsed
+      ? 'splitter collapsed'
+      : 'splitter';
     return html`
       <div
-        class="picker-pane"
-        style="width: ${this._pickerWidthPx}px"
+        class=${paneClasses}
+        style="width: ${pickerWidth}px"
       >
         <ac-file-picker
           .tree=${this._latestTree}
@@ -2402,6 +2716,21 @@ export class FilesTab extends RpcMixin(LitElement) {
           @exit-review=${this._onExitReview}
         ></ac-file-picker>
       </div>
+      <div
+        class=${splitterClasses}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label=${this._pickerCollapsed
+          ? 'Expand file picker'
+          : 'Resize file picker'}
+        title=${this._pickerCollapsed
+          ? 'Double-click to expand'
+          : 'Drag to resize, double-click to collapse'}
+        @pointerdown=${this._onSplitterPointerDown}
+        @dblclick=${this._onSplitterDoubleClick}
+      >${this._pickerCollapsed
+        ? html`<span class="splitter-affordance">▸</span>`
+        : ''}</div>
       <div class="chat-pane">
         <ac-chat-panel
           @file-mention-click=${this._onFileMentionClick}

@@ -134,10 +134,12 @@ Files have three context states controlled via the picker checkbox:
 
 ## Left Panel Resizer
 
-- Vertical resizer separates the file picker from the chat panel
-- Draggable handle with collapse toggle
-- Width constrained to a reasonable range
-- Width and collapsed state persisted to localStorage
+- Vertical 4px splitter between the file picker and chat panel, widening to a ~20px affordance strip with a `▸` glyph when the picker is collapsed
+- Drag to resize: width clamped to [180px, 50% of the host width]. Minimum prevents the picker from collapsing below readable size; maximum keeps the chat pane at least half the dialog
+- Double-click to toggle collapsed state. Collapsed renders at a fixed ~24px affordance width regardless of the stored drag width; the stored width survives so expand restores the user's prior size
+- Width persists to `ac-dc-picker-width` in localStorage; collapsed flag persists to `ac-dc-picker-collapsed`
+- Malformed stored values fall back to a sensible default rather than rendering at a sub-readable size
+- In collapsed mode the splitter is a click target for expand (via double-click); pointerdown does not start a drag since the origin width would be meaningless
 
 ## Review Mode Banner
 
