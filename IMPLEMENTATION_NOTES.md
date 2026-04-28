@@ -100,20 +100,9 @@ Wired `_onGlobalKeyDown` on `document` bubble-phase. Alt+1/2/3/4 route through `
 
 Shipped the splitter. `files-tab.js` gained `_PICKER_*` constants (min 180, collapsed 24, default 280), localStorage hydration helpers for both width and collapsed state, a new `_pickerCollapsed` reactive property, pointerdown/move/up drag handlers with clamping to `[180, hostWidth/2]`, and a double-click handler that toggles collapsed state while preserving the stored drag width. Mid-drag inline-style mutations bypass Lit's re-render cycle; commit on pointerup writes the final width back to the reactive property and to `ac-dc-picker-width`. Pointerdown in collapsed mode no-ops (originWidth would be meaningless) — double-click is the only way out. Splitter widens from 4px to ~20px in collapsed mode with a `▸` glyph affordance so the click target is findable. ARIA separator role + contextual tooltip matches the spec. 16 tests in `files-tab.test.js § FilesTab left-panel resizer` cover rendering order, drag bounds, persistence, collapse toggle, malformed-storage fallbacks for both keys, disconnect-during-drag cleanup. `specs4/5-webapp/file-picker.md § Left Panel Resizer` firmed up from vague bullet points to concrete numbers and the two localStorage keys.
 
-### Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome ← **next up**
+### ~~Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome~~ (delivered `c586d59`)
 
-Pure docs, no code. `app-shell.test.js` already pins the dialog drag/resize/minimize/persistence behaviour as test invariants, but `specs4/5-webapp/shell.md § Dialog Container` is still a stub that doesn't document:
-
-- Three-handle geometry (right / bottom / corner)
-- Min-size constants (300 × 200)
-- `_DIALOG_VISIBLE_MARGIN` off-screen recovery rule (100px visible on both axes)
-- Drag threshold (5px)
-- "Bottom/corner resize auto-undocks" behaviour
-- The four localStorage keys (`ac-dc-active-tab`, `ac-dc-minimized`, `ac-dc-dialog-width`, `ac-dc-dialog-pos`)
-
-**Scope:** expand the Dialog Container section with a subsection per topic, matching the depth of specs3's `5-webapp/app_shell_and_dialog.md § Resize Handles` and `§ Position Persistence`. No code changes.
-
-Lands last so the spec reflects the final code surface after A–C. Can also land first if a reader needs spec context — the text doesn't depend on A–C changes.
+Expanded `specs4/5-webapp/shell.md § Dialog Container` from four bullets into eight subsections: Layout Modes, Resize Handles (with the three-row table pinning the right/bottom/corner asymmetry), Minimum Dimensions (300 × 200 with the JS-vs-CSS clamp rationale), Dragging (header-as-handle, button-skip, 5px threshold), Off-Screen Recovery (the 100px visible-margin rule with explicit clamp ranges), Proportional Rescaling (window-resize handling split by mode), and Persistence (four-key table with types, purposes, and defensive fallbacks). All values drawn from `app-shell.js` constants. Pure documentation — no code changes. Closes out the four-commit UI polish sequence.
 
 ### Out of scope
 
