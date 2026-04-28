@@ -15,16 +15,8 @@
 // (setupDone, setupSkip, remoteDisconnected, remoteIsUp),
 // and exposes `addClass` and `call` as no-ops.
 //
-// Two mock paths registered because different test files
-// may import through different entry points:
-//   - `@flatmax/jrpc-oo/dist/bundle.js` — what app-shell.js
-//     actually imports (the UMD bundle)
-//   - `@flatmax/jrpc-oo/jrpc-client.js` — legacy path still
-//     used by some stray imports; kept as a belt-and-braces
-//     alias
-//
-// Registered via `vi.mock` in setup files; vitest hoists
-// these globally across all test files.
+// Mock registered via `vi.mock` in this setup file; vitest
+// hoists it globally across all test files.
 
 import { vi } from 'vitest';
 import { LitElement } from 'lit';
@@ -75,8 +67,4 @@ class JRPCClient extends LitElement {
 vi.mock('@flatmax/jrpc-oo/dist/bundle.js', () => ({
   JRPCClient,
   default: { JRPCClient },
-}));
-
-vi.mock('@flatmax/jrpc-oo/jrpc-client.js', () => ({
-  JRPCClient,
 }));

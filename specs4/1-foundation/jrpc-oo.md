@@ -21,26 +21,21 @@ dependencies = [
 npm install @flatmax/jrpc-oo
 ```
 
-> **Important — Vite configuration:**  `@flatmax/jrpc-oo` relies on the
-> `jrpc` package which uses a UMD/CJS global (`JRPC`).  Vite's dependency
-> optimizer (esbuild) will mangle this during pre-bundling, causing
+> **Important — import path:**  `@flatmax/jrpc-oo` ships a UMD bundle
+> that assigns a global (`JRPC`).  Importing via the package root
+> or via `jrpc-client.js` can trigger bundler quirks (esbuild dep
+> pre-bundling in dev, Rollup CJS-emulation in prod) that produce
 > `Uncaught ReferenceError: JRPC is not defined` at runtime.
 >
-> You **must** exclude the package from `optimizeDeps`:
+> Import via the **explicit bundle path** instead:
 >
 > ```js
-> // vite.config.js
-> export default defineConfig({
->   optimizeDeps: {
->     exclude: ['@flatmax/jrpc-oo'],
->   },
-> });
+> import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 > ```
 >
-> This lets the browser resolve the ESM import chain natively through
-> Vite's dev server instead of esbuild pre-bundling it.
->
-> After changing the config, clear the Vite cache:
+> With this import, no special Vite config is required — no
+> `optimizeDeps.exclude` entry, no Rollup source-rewrite plugin.
+> If imports fail after an upstream version bump, clear the dev cache:
 > ```bash
 > rm -rf node_modules/.vite
 > ```
@@ -87,7 +82,7 @@ Every public method on objects passed to `add_class()` is auto-discovered and ex
 The client is a LitElement custom element. You create it, set the `serverURI`, append it to the DOM (which triggers the WebSocket connection), and use `setupDone` to know when it's ready.
 
 ```javascript
-import { JRPCClient } from '@flatmax/jrpc-oo/jrpc-client.js';
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 
 class MyClient extends JRPCClient {
     connectedCallback() {
@@ -293,38 +288,33 @@ A Lit component `<pxie-app>` that:
 
 ### Vite Configuration
 
-`@flatmax/jrpc-oo` depends on `jrpc` (a UMD/CJS package that exposes a
-global `JRPC`).  Vite's esbuild-based dependency optimizer converts CJS
-to ESM during pre-bundling, which breaks the global assignment and causes:
+`@flatmax/jrpc-oo` ships a UMD bundle that exposes a browser global
+(`JRPC`) and also includes CJS branch code (`typeof module !==
+'undefined'`, `require('crypto')`). Different import paths trigger
+different bundler behaviour:
 
-```
-Uncaught ReferenceError: JRPC is not defined
-```
+- **Package root** (`import ... from '@flatmax/jrpc-oo'`) — resolves
+  through `package.json` exports/main, which in dev pulls esbuild
+  pre-bundling and in prod pulls Rollup's CJS-emulation shim. Either
+  path can make the UMD take the wrong branch, producing
+  `Uncaught ReferenceError: JRPC is not defined`.
+- **Explicit bundle path** (`import ... from
+  '@flatmax/jrpc-oo/dist/bundle.js'`) — skipped by pre-bundling and
+  handled as plain ESM by both dev server and Rollup. No special
+  config needed.
 
-**Fix:** exclude the package from Vite's `optimizeDeps` so the browser
-resolves the ESM import chain natively via Vite's dev server:
+**Recommendation:** always import via the explicit bundle path:
 
 ```js
-// vite.config.js
-import { defineConfig } from 'vite';
-
-export default defineConfig({
-  optimizeDeps: {
-    exclude: ['@flatmax/jrpc-oo'],
-  },
-});
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 ```
 
-After any change to `optimizeDeps`, clear the cache:
+No `optimizeDeps.exclude` entry, Rollup plugin, or alias is required.
+If imports start failing after an upstream version bump, flush the dev
+cache:
 
 ```bash
 rm -rf node_modules/.vite
-```
-
-**Import path:** always use the explicit file path, not the bare package name:
-
-```js
-import { JRPCClient } from '@flatmax/jrpc-oo/jrpc-client.js';
 ```
 
 ---
@@ -500,3 +490,4 @@ Log `Object.keys(this.server)` and `Object.keys(this.call)` inside `setupDone()`
 | **Calling methods (all remotes)** | `this.call['ClassName.method'](args).then(result => ...)` — resolves to `{uuid: value}` |
 | **Lifecycle** | `setupDone()` = connected and ready; `remoteDisconnected(uuid)` = server gone |
 | **Keep alive** | `await asyncio.Event().wait()` after starting the server; handle `SIGINT`/`SIGTERM` for clean shutdown |
+| **Import path** | Use `@flatmax/jrpc-oo/dist/bundle.js` — no Vite config needed |
