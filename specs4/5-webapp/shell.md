@@ -89,10 +89,80 @@ All dispatch to window-level custom events that the relevant child components li
 
 ## Dialog Container
 
-- Left-docked by default, resizable and draggable, collapsible to header-only
-- Holds tabs — chat, context, settings, optionally doc convert
-- Position, size, minimize state, and active tab persisted to localStorage
-- Size and position change proportionally on window resize
+The dialog is a draggable, resizable foreground panel hosting the tab bar and tab bodies. It sits above the viewer background layer (z-index 10 vs 0–1) so it always renders on top regardless of what the viewer's internal positioning does. Left-docked by default; first drag or first bottom/corner resize undocks it into an explicit rectangle.
+
+### Layout Modes
+
+Two mutually-exclusive modes:
+
+- **Docked** — top, left, bottom anchored to the viewport edges; width is a percentage (with an optional stored override in pixels). This is the default on first run and stays in effect until the user drags the header or bottom/corner-resizes.
+- **Undocked** (floating) — all four edges set from a stored pixel rectangle. The CSS `bottom: 0` anchor is disabled; shadow gives visual separation from the viewer background. Produced by dragging the header past the drag threshold, or by resizing from the bottom / corner handle.
+
+Minimize applies to both modes — collapses the dialog to the header row only, hiding the body, the reconnect banner (if visible), and the compaction capacity bar. Resize handles on the bottom and corner are also hidden when minimized since they'd be meaningless (no body to resize). Minimized state is preserved across reload in both modes.
+
+### Resize Handles
+
+Three handles — invisible hit zones at the edges that grow a subtle accent line on hover:
+
+| Handle | Location | Axis | Behaviour |
+|---|---|---|---|
+| Right | Right edge, 8px hit zone extending 4px past the border | Horizontal | Adjusts width only. In docked mode, writes the new width to `ac-dc-dialog-width` and stays docked. In undocked mode, writes to the full undocked rectangle. |
+| Bottom | Bottom edge, 8px hit zone | Vertical | Adjusts height only. **Always undocks** — the docked mode's height comes from `bottom: 0`, so expressing a smaller height requires an explicit rectangle. |
+| Corner | Bottom-right, 14×14px hit zone | Both | Adjusts width and height simultaneously. Always undocks for the same reason. |
+
+The right handle's behaviour is asymmetric: while docked, only `ac-dc-dialog-width` is persisted, leaving the undocked rectangle alone. This lets a user widen the docked dialog without committing to floating mode.
+
+Mid-drag the `.dialog.resizing` class is active, suppressing the width transition so the pane tracks the pointer 1:1. The class is removed on pointerup.
+
+### Minimum Dimensions
+
+- Width: **300px**
+- Height: **200px**
+
+Below 300 wide the tab buttons wrap to a second row; below 200 tall the body collapses to an unusable slit. The resize handlers clamp against these floors at the JS level — CSS `min-width` / `min-height` aren't applied because flexbox interactions with the docked-mode percentage width cause occasional drift.
+
+### Dragging
+
+The dialog header is the drag handle — `cursor: grab` on the background, `cursor: grabbing` during an active drag. Buttons inside the header (tab buttons, mode toggle, minimize) override the cursor and don't initiate drags; the header's pointerdown handler skips when `event.target.closest('button')` matches.
+
+**Drag threshold: 5px.** Below this, a header pointerdown + pointerup pair is treated as a click (no-op today, since minimize has its own button). Above the threshold, the `.dialog.dragging` class activates, the dialog undocks if still docked, and subsequent pointermove events track the pointer by applying the stored delta to the drag-start rectangle.
+
+The threshold prevents accidental undocks from imprecise clicks — users clicking the header edge without meaning to drag shouldn't see the dialog jump into floating mode.
+
+### Off-Screen Recovery
+
+Both during drag and at restore time, the dialog is constrained so that **at least 100px remains visible on both the X and Y axes**. Specifically:
+
+- During drag: the new left is clamped to `[100 - width, viewportWidth - 100]`, the new top to `[0, viewportHeight - 100]`. The left can go negative (part of the dialog hanging off the left edge) as long as 100px sticks out into the viewport; the top cannot go negative because the header must remain reachable as the drag handle.
+- At restore: a stored position where fewer than 100px would be visible — typically after a monitor disconnect or resolution change that stranded the dialog off-screen — is discarded and the dialog reverts to docked mode. Valid-but-too-big rectangles are clamped to viewport dimensions rather than rejected.
+
+The margin is a "findable handle" guarantee: however the user maimed their window, the dialog always has a visible edge they can grab to drag it back into view.
+
+### Proportional Rescaling
+
+On window resize:
+
+- **Docked** — CSS handles it. If the stored docked width exceeds the new viewport minus the visible-margin safety, the width is re-clamped and persisted.
+- **Undocked** — position is re-validated against the new viewport. If the stored rectangle still satisfies the visible-margin rule, it's left alone. Only out-of-bounds rectangles are clamped back into view.
+
+Resize handling is throttled to one call per animation frame. Rapid resize events (drag the window corner, laptop lid reopen) can fire dozens of times per frame; without throttling the reflow math produces visible jank.
+
+### Persistence
+
+Four localStorage keys, all repo-scoped implicitly via the URL-derived WebSocket port (the dialog state is frontend-only, but the user's chrome preferences are stable across repo switches):
+
+| Key | Type | Purpose |
+|---|---|---|
+| `ac-dc-active-tab` | string | Last-selected tab — one of `files`, `context`, `settings`, `doc-convert`. Unknown values fall back to `files`. A stored `search` value (from a pre-integrated-search-tab build) also falls back to `files`. |
+| `ac-dc-minimized` | string `"true"` / `"false"` | Minimize state. |
+| `ac-dc-dialog-width` | string (integer px) | Docked-mode width override. Absent until the user resizes the right edge while docked. Ignored while undocked. |
+| `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle. Absent until the user drags the header past the drag threshold or resizes from the bottom / corner. |
+
+Keys are read synchronously in the constructor (not in `connectedCallback`) so first paint doesn't flash the defaults before jumping to the stored values.
+
+Width and position are independent — resizing the right edge while docked writes only `ac-dc-dialog-width`, leaving any stored undocked rectangle alone. This is deliberate: a user who occasionally floats the dialog shouldn't lose their preferred floating geometry just because they widened the docked view in between.
+
+Malformed values (non-JSON, wrong shape, width below minimum, finite-number check fails) are treated as absent. Invalid keys don't propagate into the UI state.
 
 ## Mode Toggle
 

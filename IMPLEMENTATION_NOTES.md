@@ -96,25 +96,11 @@ Wired `_onGlobalKeyDown` on `document` bubble-phase. Alt+1/2/3/4 route through `
 
 - `webapp/src/app-shell.test.js` — new describe block `global keyboard shortcuts` with tests for each: Alt+1..3 switches tab, Alt+4 switches when available, Alt+4 no-ops when doc-convert unavailable, Alt+M toggles minimize, preventDefault fires for all five.
 
-### Commit C — File picker left-panel resizer ← **next up**
+### ~~Commit C — File picker left-panel resizer~~ (delivered `f9a9856`)
 
-Spec'd in `specs4/5-webapp/file-picker.md § Left Panel Resizer` but not implemented. `files-tab.js` holds the width as a reactive property with only CSS constraints; no splitter DOM exists today.
+Shipped the splitter. `files-tab.js` gained `_PICKER_*` constants (min 180, collapsed 24, default 280), localStorage hydration helpers for both width and collapsed state, a new `_pickerCollapsed` reactive property, pointerdown/move/up drag handlers with clamping to `[180, hostWidth/2]`, and a double-click handler that toggles collapsed state while preserving the stored drag width. Mid-drag inline-style mutations bypass Lit's re-render cycle; commit on pointerup writes the final width back to the reactive property and to `ac-dc-picker-width`. Pointerdown in collapsed mode no-ops (originWidth would be meaningless) — double-click is the only way out. Splitter widens from 4px to ~20px in collapsed mode with a `▸` glyph affordance so the click target is findable. ARIA separator role + contextual tooltip matches the spec. 16 tests in `files-tab.test.js § FilesTab left-panel resizer` cover rendering order, drag bounds, persistence, collapse toggle, malformed-storage fallbacks for both keys, disconnect-during-drag cleanup. `specs4/5-webapp/file-picker.md § Left Panel Resizer` firmed up from vague bullet points to concrete numbers and the two localStorage keys.
 
-**Scope:**
-
-- `webapp/src/files-tab.js` —
-  - Add a `.splitter` div between `.picker-pane` and `.chat-pane`. Styled as a 4px-wide vertical strip with `cursor: col-resize` and a hover highlight (matches the dialog resize handle aesthetic from app-shell).
-  - Add `_onSplitterPointerDown`, `_onSplitterPointerMove`, `_onSplitterPointerUp` handlers using the same pattern as app-shell's dialog resize (snapshot on down, mutate during move, commit on up).
-  - Persist width to `ac-dc-picker-width` localStorage key. Hydrate in constructor so first paint doesn't flash the default.
-  - Collapse toggle — spec calls for it but leaves the interaction unspecified. Use double-click on the splitter to toggle between current width and a collapsed width (e.g. 24px, wide enough to show a `▸` affordance to restore). Persist collapsed state to `ac-dc-picker-collapsed` localStorage key.
-  - Width constrained to `min: 180px`, `max: 50%` of the host width.
-- `specs4/5-webapp/file-picker.md` — firm up "Width constrained to a reasonable range" to "Width constrained to 180px min, 50% max" and document the double-click-to-collapse interaction.
-
-**Test contracts:**
-
-- `webapp/src/files-tab.test.js` — new describe block `left-panel resizer`: splitter renders, drag updates width and persists, below-minimum drag clamps, above-max drag clamps, double-click toggles collapse, collapsed state persists, hydrate from localStorage on mount, malformed localStorage falls back to default.
-
-### Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome
+### Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome ← **next up**
 
 Pure docs, no code. `app-shell.test.js` already pins the dialog drag/resize/minimize/persistence behaviour as test invariants, but `specs4/5-webapp/shell.md § Dialog Container` is still a stub that doesn't document:
 
