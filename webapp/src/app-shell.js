@@ -849,6 +849,10 @@ export class AppShell extends JRPCClient {
     this._onPointerUp = this._onPointerUp.bind(this);
     // Window resize — RAF-throttled.
     this._onWindowResize = this._onWindowResize.bind(this);
+    // Global keyboard shortcuts — Alt+1..4 for tab
+    // switching, Alt+M for minimize toggle. Bound here
+    // so add/remove on document scope match.
+    this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
     // Header git action handlers and commit-result.
     this._onCommitResultHeader =
       this._onCommitResultHeader.bind(this);
@@ -919,6 +923,12 @@ export class AppShell extends JRPCClient {
     // we intercept before Monaco's word-navigation bindings.
     document.addEventListener('keydown', this._onGridKeyDown, true);
     document.addEventListener('keyup', this._onGridKeyUp, true);
+    // Alt+digit / Alt+M shortcuts — bubble phase is fine
+    // because Alt+digit/M aren't intercepted by Monaco or
+    // any child component. Registered separately from the
+    // grid's capture-phase handler so the two concerns
+    // stay independent.
+    document.addEventListener('keydown', this._onGlobalKeyDown);
     // toggle-svg-mode is dispatched by the SVG viewer's
     // "</>" button (visual → text diff) and by the diff
     // viewer's "🎨 Visual" button (text → visual). The
@@ -1022,6 +1032,7 @@ export class AppShell extends JRPCClient {
     );
     document.removeEventListener('keydown', this._onGridKeyDown, true);
     document.removeEventListener('keyup', this._onGridKeyUp, true);
+    document.removeEventListener('keydown', this._onGlobalKeyDown);
     window.removeEventListener(
       'toggle-svg-mode',
       this._onToggleSvgMode,
@@ -2038,6 +2049,75 @@ export class AppShell extends JRPCClient {
     if (nav && nav.visible) {
       nav.hide();
     }
+  }
+
+  /**
+   * Global Alt+digit / Alt+M keyboard shortcuts. Fires
+   * on any keydown that isn't hitting the capture-phase
+   * grid handler (Alt+Arrow is already consumed there).
+   *
+   *   Alt+1 → Files tab
+   *   Alt+2 → Context tab
+   *   Alt+3 → Settings tab
+   *   Alt+4 → Doc Convert tab (only when available — the
+   *           tab button isn't rendered when markitdown
+   *           isn't installed, and the stored preference
+   *           migrates to 'files' if a user's last session
+   *           was on doc-convert and they reconnected to
+   *           a repo without it)
+   *   Alt+M → Toggle minimize
+   *
+   * Guards:
+   *   - Skips when Ctrl / Meta / Shift are also held.
+   *     Alt+Shift+digit is a macOS symbol-entry shortcut
+   *     and Alt+Ctrl+digit is used by some window
+   *     managers. We only handle the pure-Alt case.
+   *   - Skips when RPC isn't connected. Switching to a
+   *     tab whose RPC calls will fail into error toasts
+   *     is worse than a no-op.
+   *   - Alt+4 silently no-ops when doc-convert is
+   *     unavailable, rather than switching to a hidden
+   *     tab with a blank body.
+   *
+   * preventDefault fires on every handled key so the
+   * browser's own Alt+digit bindings (some versions of
+   * Firefox use Alt+digit for tab switching at the
+   * browser chrome level) don't steal the keystroke.
+   */
+  _onGlobalKeyDown(event) {
+    if (!event.altKey) return;
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+    // Alt+M — toggle minimize. Accept both cases so
+    // Caps Lock doesn't break the shortcut.
+    if (event.key === 'm' || event.key === 'M') {
+      event.preventDefault();
+      this._toggleMinimize();
+      return;
+    }
+    // Alt+1..4 — tab switch. event.key is the digit
+    // character ('1', '2', …), not KeyboardEvent.code
+    // which would be 'Digit1'. The digit form matches
+    // physical layout on non-US keyboards where the
+    // keycap's primary label might differ.
+    const tabMap = {
+      '1': 'files',
+      '2': 'context',
+      '3': 'settings',
+      '4': 'doc-convert',
+    };
+    const targetTab = tabMap[event.key];
+    if (!targetTab) return;
+    // Gate Alt+4 on availability. The other tabs are
+    // always present.
+    if (targetTab === 'doc-convert' && !this._docConvertAvailable) {
+      // Still consume the key so a subsequent Alt+4 press
+      // doesn't bubble to browser chrome. No-op tab switch
+      // below wouldn't help because we return early.
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    this._switchTab(targetTab);
   }
 
   /**

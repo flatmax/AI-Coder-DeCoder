@@ -1627,4 +1627,216 @@ describe('AppShell', () => {
       }
     });
   });
+
+  // ---------------------------------------------------------------
+  // Global keyboard shortcuts — Alt+1..4 / Alt+M
+  // ---------------------------------------------------------------
+  //
+  // specs4/5-webapp/shell.md § Global Keyboard Shortcuts
+  // pins the Alt+digit tab switch and Alt+M minimize
+  // toggle. Alt+Arrow is covered by its own describe
+  // block ("Alt+Arrow debounce") — that handler is
+  // registered capture-phase on the file-nav grid;
+  // these shortcuts use bubble-phase on document.
+
+  describe('global keyboard shortcuts', () => {
+    /**
+     * Dispatch a keydown on document with the given
+     * options. Matches how the browser delivers real
+     * key events: target is document.body (or
+     * wherever focus is), bubbling, cancelable.
+     */
+    function fireKey(opts) {
+      const ev = new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        ...opts,
+      });
+      document.dispatchEvent(ev);
+      return ev;
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+    });
+    afterEach(() => {
+      localStorage.clear();
+    });
+
+    it('Alt+1 switches to files tab', async () => {
+      const shell = mountShell();
+      shell.activeTab = 'context';
+      await shell.updateComplete;
+      fireKey({ key: '1', altKey: true });
+      expect(shell.activeTab).toBe('files');
+    });
+
+    it('Alt+2 switches to context tab', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      fireKey({ key: '2', altKey: true });
+      expect(shell.activeTab).toBe('context');
+    });
+
+    it('Alt+3 switches to settings tab', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      fireKey({ key: '3', altKey: true });
+      expect(shell.activeTab).toBe('settings');
+    });
+
+    it('Alt+4 switches to doc-convert when available', async () => {
+      const shell = mountShell();
+      shell._docConvertAvailable = true;
+      await shell.updateComplete;
+      fireKey({ key: '4', altKey: true });
+      expect(shell.activeTab).toBe('doc-convert');
+    });
+
+    it('Alt+4 no-ops when doc-convert is unavailable', async () => {
+      const shell = mountShell();
+      shell._docConvertAvailable = false;
+      shell.activeTab = 'context';
+      await shell.updateComplete;
+      fireKey({ key: '4', altKey: true });
+      // Tab unchanged — the stored preference stays on
+      // whatever it was. A silent consume is preferable
+      // to switching to a hidden tab with no body.
+      expect(shell.activeTab).toBe('context');
+    });
+
+    it('Alt+4 consumes the keystroke even when unavailable', async () => {
+      // preventDefault must fire so the browser's own
+      // Alt+4 binding (Firefox tab-switch) doesn't steal
+      // the keystroke when our tab is hidden.
+      const shell = mountShell();
+      shell._docConvertAvailable = false;
+      await shell.updateComplete;
+      const ev = fireKey({ key: '4', altKey: true });
+      expect(ev.defaultPrevented).toBe(true);
+    });
+
+    it('Alt+M toggles minimize', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      expect(shell._minimized).toBe(false);
+      fireKey({ key: 'm', altKey: true });
+      expect(shell._minimized).toBe(true);
+      fireKey({ key: 'm', altKey: true });
+      expect(shell._minimized).toBe(false);
+    });
+
+    it('Alt+M accepts uppercase M (Caps Lock safe)', async () => {
+      // Users with Caps Lock on would otherwise see the
+      // shortcut silently fail. Both cases map to the
+      // same action.
+      const shell = mountShell();
+      await shell.updateComplete;
+      fireKey({ key: 'M', altKey: true });
+      expect(shell._minimized).toBe(true);
+    });
+
+    it('preventDefault fires on handled shortcuts', async () => {
+      // Each handled shortcut must call preventDefault
+      // so browser chrome shortcuts (Firefox uses
+      // Alt+digit for tab switching) don't intercept.
+      const shell = mountShell();
+      shell._docConvertAvailable = true;
+      await shell.updateComplete;
+      for (const key of ['1', '2', '3', '4', 'm']) {
+        const ev = fireKey({ key, altKey: true });
+        expect(ev.defaultPrevented).toBe(true);
+      }
+    });
+
+    it('plain digits without Alt are ignored', async () => {
+      // Typing '1' inside the chat textarea shouldn't
+      // switch tabs.
+      const shell = mountShell();
+      shell.activeTab = 'context';
+      await shell.updateComplete;
+      const ev = fireKey({ key: '1' });
+      expect(shell.activeTab).toBe('context');
+      expect(ev.defaultPrevented).toBe(false);
+    });
+
+    it('Alt+Shift+1 is ignored', async () => {
+      // Alt+Shift+digit on macOS is a symbol-entry
+      // shortcut ("¡" for Alt+Shift+1). Consuming it
+      // would break symbol entry for users who type in
+      // Spanish / other layouts that rely on it.
+      const shell = mountShell();
+      shell.activeTab = 'context';
+      await shell.updateComplete;
+      const ev = fireKey({
+        key: '1', altKey: true, shiftKey: true,
+      });
+      expect(shell.activeTab).toBe('context');
+      expect(ev.defaultPrevented).toBe(false);
+    });
+
+    it('Ctrl+Alt+1 is ignored', async () => {
+      // Ctrl+Alt+digit is bound by some window managers
+      // (GNOME workspace switching). Leave it alone.
+      const shell = mountShell();
+      shell.activeTab = 'context';
+      await shell.updateComplete;
+      const ev = fireKey({
+        key: '1', altKey: true, ctrlKey: true,
+      });
+      expect(shell.activeTab).toBe('context');
+      expect(ev.defaultPrevented).toBe(false);
+    });
+
+    it('Alt+5 and other unmapped digits are ignored', async () => {
+      const shell = mountShell();
+      shell.activeTab = 'files';
+      await shell.updateComplete;
+      const ev = fireKey({ key: '5', altKey: true });
+      expect(shell.activeTab).toBe('files');
+      expect(ev.defaultPrevented).toBe(false);
+    });
+
+    it('Alt+letter other than M is ignored', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      const ev = fireKey({ key: 'a', altKey: true });
+      expect(shell._minimized).toBe(false);
+      expect(ev.defaultPrevented).toBe(false);
+    });
+
+    it('tab switch persists to localStorage', async () => {
+      // Regression — _switchTab already persists, but
+      // verify the shortcut path doesn't bypass it.
+      const shell = mountShell();
+      await shell.updateComplete;
+      fireKey({ key: '3', altKey: true });
+      expect(localStorage.getItem('ac-dc-active-tab'))
+        .toBe('settings');
+    });
+
+    it('minimize toggle persists to localStorage', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      fireKey({ key: 'm', altKey: true });
+      expect(localStorage.getItem('ac-dc-minimized')).toBe('true');
+    });
+
+    it('listener removed on disconnect', async () => {
+      // After the shell unmounts, document-level Alt+1
+      // presses must not mutate its state (and must not
+      // throw).
+      const shell = mountShell();
+      shell.activeTab = 'files';
+      await shell.updateComplete;
+      shell.remove();
+      // State captured before unmount; the post-unmount
+      // event shouldn't change it.
+      const before = shell.activeTab;
+      expect(() =>
+        fireKey({ key: '2', altKey: true }),
+      ).not.toThrow();
+      expect(shell.activeTab).toBe(before);
+    });
+  });
 });

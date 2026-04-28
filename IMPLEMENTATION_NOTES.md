@@ -73,24 +73,11 @@ Beyond Layer 5: Layer 6 (deployment — build tooling, PyInstaller packaging, re
 
 Four commits, in order. Each is a standalone change with its own tests. Strike through the heading and add a one-line delivery note with the commit hash after each lands.
 
-### Commit A — Viewer relayout on dialog/window resize
+### ~~Commit A — Viewer relayout on dialog/window resize~~ (delivered `7213ba4`)
 
-Real bug, not polish. Monaco caches its layout internally; when the dialog or window resizes, the visible viewer area behind the dialog changes but the Monaco editor's scrollbars, minimap positions, and word-wrap stay at stale dimensions until the user clicks into the editor. The SVG viewer's `SvgEditor` pair has a similar issue — `preserveAspectRatio="none"` means the viewBox doesn't auto-fit when container dimensions change.
+`diff-viewer.js` gained `relayout()` (calls `this._editor.layout()`, no-op in empty state, swallows throws from detached DOM). `svg-viewer.js` gained `relayout()` (calls `fitContent({silent: true})` on both editors under the `_syncingViewBox` mutex, then pushes the right pane's final viewBox onto the left so the two panes stay exactly synced across the resize). `app-shell.js` wires both — new `_scheduleViewerRelayout()` helper with a dedicated `_viewerRelayoutRAF` handle (separate from `_resizeRAF` so window-resize and drag-resize don't cancel each other's pending frames), called from `_handleWindowResize` and from `_onPointerMove` during dialog resize. Test coverage in `diff-viewer.test.js § DiffViewer relayout` (4 tests — editor-layout call, empty-state no-op, survives Monaco throw, post-swap editor identity) and `svg-viewer.test.js § SvgViewer relayout` (5 tests — fit-both + silent flag, empty-state no-op, mutex held, survives one-side throw, right-to-left sync). `specs4/5-webapp/shell.md § Window Resize Handling` documents the hook. `app-shell.test.js` extends its resize tests to cover the viewer-relayout path.
 
-**Scope:**
-
-- `webapp/src/diff-viewer.js` — add a public `relayout()` method. Walks `this._editor` (when non-null) and calls `editor.layout()`. No-op when empty state.
-- `webapp/src/svg-viewer.js` — add a public `relayout()` method. Calls `fitContent({ silent: true })` on both `_editorLeft` and `_editorRight` under the `_syncingViewBox` mutex. No-op when no file is open.
-- `webapp/src/app-shell.js` — `_handleWindowResize` calls both viewers' `relayout()` after the clamp logic. `_onPointerMove` during dialog resize ALSO calls them, RAF-throttled through a new `_scheduleViewerRelayout()` helper (separate timer from `_resizeRAF` so window-resize and drag-resize don't cancel each other).
-- `specs4/5-webapp/shell.md § Window Resize Handling` — add a sentence documenting "Viewer relayout hooks are called on every dialog-resize frame and every window-resize frame, both RAF-throttled."
-
-**Test contracts:**
-
-- `webapp/src/diff-viewer.test.js` — one test: `relayout() calls layout() on the active editor; no-op in empty state`.
-- `webapp/src/svg-viewer.test.js` — one test: `relayout() calls fitContent on both editors under the sync mutex`.
-- `webapp/src/app-shell.test.js § window resize` — extend `throttles handler to one call per animation frame` to also assert both viewers' relayout was called. New test: `dialog resize during pointermove calls viewer relayout on each throttled frame`.
-
-### Commit B — Alt+1..4 / Alt+M keyboard shortcuts
+### Commit B — Alt+1..4 / Alt+M keyboard shortcuts ← **next up**
 
 Small, additive. `specs4/5-webapp/shell.md § Global Keyboard Shortcuts` spec'd these but they were never wired. Ctrl+Shift+F is already in place; these are the last three shortcuts.
 
