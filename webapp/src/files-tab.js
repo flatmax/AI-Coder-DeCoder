@@ -1444,6 +1444,17 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._dispatchDirAction(action, path, detail.name);
       return;
     }
+    if (type === 'root') {
+      // Root-row actions reuse the directory-action
+      // dispatcher — the action IDs (new-file /
+      // new-directory) and their handlers are
+      // identical; the only difference is that the
+      // root's path is the empty string, which
+      // `_dispatchNewFile` / `_dispatchNewDirectory`
+      // already handle as "create at repo root".
+      this._dispatchDirAction(action, path, detail.name);
+      return;
+    }
     // Unknown type — ignore. Either a future type or a
     // malformed event; neither should reach any
     // handler.

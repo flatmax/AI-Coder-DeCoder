@@ -325,6 +325,29 @@ const _CONTEXT_MENU_DIR_ITEMS = [
   },
 ];
 
+// Menu items for the root row. The root is the
+// repository itself — no rename, stage-all, or
+// exclude affordances make sense there (the user
+// would be operating on the whole repo, which is
+// always out-of-scope for the picker's per-file
+// model). Only the "create new entry at repo root"
+// actions are exposed, reusing the same dispatch
+// path and action IDs as the directory menu so
+// files-tab routes them through the existing
+// new-file / new-directory handlers.
+const _CONTEXT_MENU_ROOT_ITEMS = [
+  {
+    action: CTX_ACTION_NEW_FILE,
+    label: 'New file…',
+    icon: '📄',
+  },
+  {
+    action: CTX_ACTION_NEW_DIR,
+    label: 'New directory…',
+    icon: '📁',
+  },
+];
+
 // Viewport margin — the menu is kept this many pixels
 // from every window edge. Enough to show the box-shadow
 // glow without clipping on high-DPI displays.
@@ -1547,11 +1570,46 @@ export class FilePicker extends LitElement {
         class="row is-root"
         role="treeitem"
         title=${repoName || 'repository'}
+        @contextmenu=${this._onRootContextMenu}
       >
         <span class="name">${repoName || 'repository'}</span>
         ${pill}
       </div>
     `;
+  }
+
+  /**
+   * Open the root-row context menu. Parallel to
+   * `_onDirContextMenu` / `_onFileContextMenu` but uses
+   * `type: 'root'` so the renderer picks the
+   * repo-specific item catalog. Targets the empty-string
+   * parent path — the same convention `beginCreateFile`
+   * already uses for root-level creation, and the same
+   * string `files-tab._dispatchNewFile` forwards.
+   */
+  _onRootContextMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._contextMenu !== null) {
+      this._closeContextMenu();
+    }
+    this._contextMenu = {
+      type: 'root',
+      path: '',
+      name: (this.tree && this.tree.name) || '',
+      x: event.clientX,
+      y: event.clientY,
+    };
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForMenu,
+      true,
+    );
   }
 
   /**
@@ -2851,9 +2909,11 @@ export class FilePicker extends LitElement {
 
   _renderMenuItems(ctx) {
     const catalog =
-      ctx.type === 'dir'
-        ? _CONTEXT_MENU_DIR_ITEMS
-        : _CONTEXT_MENU_FILE_ITEMS;
+      ctx.type === 'root'
+        ? _CONTEXT_MENU_ROOT_ITEMS
+        : ctx.type === 'dir'
+          ? _CONTEXT_MENU_DIR_ITEMS
+          : _CONTEXT_MENU_FILE_ITEMS;
     const items = [];
     for (const entry of catalog) {
       if (entry === null) {

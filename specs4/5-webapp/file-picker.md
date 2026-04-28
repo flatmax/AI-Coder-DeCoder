@@ -94,6 +94,13 @@ Files have three context states controlled via the picker checkbox:
 - New file (inline input)
 - New directory (inline input) — creates a placeholder file inside since git does not track empty directories
 - Exclude from index / include in index
+
+### Root Items
+Right-clicking the repo-name row opens a reduced menu scoped to operations that make sense at the repository level:
+- New file (inline input) — creates at repo root
+- New directory (inline input) — creates at repo root
+
+Stage-all / unstage-all / rename / exclude-all are deliberately absent — the root is the repository itself, not a per-directory operand. Root-level new-file and new-directory use the same action IDs as the directory menu so the orchestrator routes through the same dispatcher.
 ### Inline Input Pattern
 - Rename, new file, new directory operations render an inline text input at the correct indentation level (not a browser prompt)
 - Input appears immediately below the target node (for rename) or as a child of the directory (for new file/dir)
