@@ -3789,6 +3789,12 @@ class LLMService:
         full_content = ""
         cancelled = False
         finish_reason: str | None = None
+        request_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
         try:
             # File context sync — remove deselected files, load
             # selected ones. Defensive: skip files that don't exist
@@ -3902,7 +3908,12 @@ class LLMService:
             # Run the LLM call in the stream executor.
             assert self._main_loop is not None
             loop = self._main_loop
-            full_content, cancelled, finish_reason = await loop.run_in_executor(
+            (
+                full_content,
+                cancelled,
+                finish_reason,
+                request_usage,
+            ) = await loop.run_in_executor(
                 self._stream_executor,
                 self._run_completion_sync,
                 request_id, messages, loop,
@@ -3946,6 +3957,7 @@ class LLMService:
             cancelled=cancelled,
             error=error,
             finish_reason=finish_reason if error is None else None,
+            request_usage=request_usage,
         )
 
         # Fire completion event.
@@ -4130,6 +4142,7 @@ class LLMService:
         cancelled: bool,
         error: str | None,
         finish_reason: str | None = None,
+        request_usage: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Parse the response, apply edits, build the result dict.
 
@@ -4177,12 +4190,21 @@ class LLMService:
         ]
 
         # Default result — apply step skipped.
+        # token_usage carries per-request counts from the
+        # provider. The frontend's TokenHUD reads this for its
+        # "This Request" section. Falls through to an all-zero
+        # dict when the caller didn't supply usage (error/early-
+        # exit paths) — renders as all-zero rather than undefined
+        # so the HUD shape stays stable.
+        usage_dict = dict(request_usage) if request_usage else {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
         result: dict[str, Any] = {
             "response": full_content,
-            "token_usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-            },
+            "token_usage": usage_dict,
             "edit_blocks": edit_blocks_summary,
             "shell_commands": parse_result.shell_commands,
             "passed": 0,
@@ -4355,18 +4377,43 @@ class LLMService:
         request_id: str,
         messages: list[dict[str, Any]],
         loop: asyncio.AbstractEventLoop,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, str | None, dict[str, int]]:
         """Blocking LLM call — runs in a worker thread.
 
-        Returns ``(full_content, was_cancelled)``. Schedules chunk
-        callbacks onto the main event loop via
-        ``run_coroutine_threadsafe``.
+        Returns ``(full_content, was_cancelled, finish_reason,
+        usage_dict)``. Schedules chunk callbacks onto the main
+        event loop via ``run_coroutine_threadsafe``.
+
+        ``usage_dict`` carries the per-request token counts as a
+        plain dict with the keys the RPC contract expects
+        (``prompt_tokens``, ``completion_tokens``,
+        ``cache_read_tokens``, ``cache_write_tokens``). The worker
+        extracts from whatever shape the provider returned (dict
+        or attribute-style object) and normalises here so the
+        event-loop thread never has to touch the provider's
+        native types. Session-total accumulation uses the same
+        normalised view.
+
+        Empty dict when the provider reported no usage (rare but
+        possible with some providers on cancellation) — the
+        frontend renders that as all-zero, which is honest.
         """
+        empty_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
         try:
             import litellm
         except ImportError:
             logger.error("litellm not available; streaming disabled")
-            return ("litellm is not installed on this server", False)
+            return (
+                "litellm is not installed on this server",
+                False,
+                None,
+                dict(empty_usage),
+            )
 
         full_content = ""
         was_cancelled = False
@@ -4390,7 +4437,12 @@ class LLMService:
             )
         except Exception as exc:
             logger.exception("litellm.completion raised")
-            return (f"LLM call failed: {exc}", False, None)
+            return (
+                f"LLM call failed: {exc}",
+                False,
+                None,
+                dict(empty_usage),
+            )
 
         usage: dict[str, Any] | None = None
         finish_reason: str | None = None
@@ -4436,6 +4488,38 @@ class LLMService:
         if usage is not None:
             self._accumulate_usage(usage)
 
+        # Normalise usage into a plain dict for the return
+        # value. Mirrors the provider-variant handling in
+        # _accumulate_usage so the event-loop thread receives
+        # a shape it can serialise to JSON directly without
+        # touching attribute-style provider objects.
+        request_usage = dict(empty_usage)
+        if usage is not None:
+            def _get(name: str) -> int:
+                if isinstance(usage, dict):
+                    val = usage.get(name)
+                else:
+                    val = getattr(usage, name, None)
+                try:
+                    return int(val) if val is not None else 0
+                except (TypeError, ValueError):
+                    return 0
+
+            request_usage["prompt_tokens"] = _get("prompt_tokens")
+            request_usage["completion_tokens"] = _get(
+                "completion_tokens"
+            )
+            # Provider field names vary; accept the most common
+            # pair and pick whichever reported a non-zero value.
+            request_usage["cache_read_tokens"] = max(
+                _get("cache_read_input_tokens"),
+                _get("cache_read_tokens"),
+            )
+            request_usage["cache_write_tokens"] = max(
+                _get("cache_creation_input_tokens"),
+                _get("cache_creation_tokens"),
+            )
+
         # Log non-natural finish reasons at WARNING so operators
         # can diagnose truncation without grep-spelunking through
         # debug logs. Natural stops (``stop``/``end_turn``) log
@@ -4453,7 +4537,7 @@ class LLMService:
                     finish_reason,
                 )
 
-        return full_content, was_cancelled, finish_reason
+        return full_content, was_cancelled, finish_reason, request_usage
 
     def _accumulate_usage(self, usage: Any) -> None:
         """Fold a per-request usage record into session totals."""
@@ -4858,19 +4942,93 @@ class LLMService:
                 pass
         legend_tokens = self._counter.count(legend) if legend else 0
 
-        # Symbol map tokens.
+        # Symbol map tokens + per-file details for the Budget
+        # expand. Mode-aware: code mode iterates the symbol
+        # index's ``_all_symbols``, doc mode iterates the doc
+        # index's ``_all_outlines``. Selected files and
+        # user-excluded files are filtered out — their content
+        # flows via ``file:`` entries (or is dropped entirely
+        # for excluded paths), so including them in the map
+        # details would double-count.
         symbol_map = ""
         symbol_map_files = 0
-        if self._symbol_index is not None:
-            try:
-                exclude = set(self._selected_files)
-                symbol_map = self._symbol_index.get_symbol_map(
-                    exclude_files=exclude
+        symbol_map_details: list[dict[str, Any]] = []
+        selected_set = set(self._selected_files)
+        excluded_set = set(
+            getattr(self, "_excluded_index_files", None) or ()
+        )
+        try:
+            if self._context.mode == Mode.DOC:
+                # Doc mode primary: iterate doc outlines.
+                all_paths = list(
+                    self._doc_index._all_outlines.keys()
                 )
-                symbol_map_files = len(self._symbol_index._all_symbols)
-            except Exception:
-                pass
-        symbol_map_tokens = self._counter.count(symbol_map) if symbol_map else 0
+                symbol_map_files = len(all_paths)
+                for path in all_paths:
+                    if path in selected_set or path in excluded_set:
+                        continue
+                    block = self._doc_index.get_file_doc_block(path)
+                    if not block:
+                        continue
+                    name = (
+                        path.rsplit("/", 1)[-1]
+                        if "/" in path
+                        else path
+                    )
+                    symbol_map_details.append({
+                        "name": name,
+                        "path": path,
+                        "tokens": self._counter.count(block),
+                    })
+                # Aggregate map for the Budget bar — use the
+                # formatter's output rather than summing
+                # per-file details (the formatter adds alias
+                # headers and separators).
+                symbol_map = self._doc_index.get_doc_map(
+                    exclude_files=selected_set | excluded_set
+                )
+            else:
+                # Code mode primary: iterate symbol index.
+                if self._symbol_index is not None:
+                    all_paths = list(
+                        self._symbol_index._all_symbols.keys()
+                    )
+                    symbol_map_files = len(all_paths)
+                    for path in all_paths:
+                        if (
+                            path in selected_set
+                            or path in excluded_set
+                        ):
+                            continue
+                        block = (
+                            self._symbol_index.get_file_symbol_block(
+                                path
+                            )
+                        )
+                        if not block:
+                            continue
+                        name = (
+                            path.rsplit("/", 1)[-1]
+                            if "/" in path
+                            else path
+                        )
+                        symbol_map_details.append({
+                            "name": name,
+                            "path": path,
+                            "tokens": self._counter.count(block),
+                        })
+                    symbol_map = self._symbol_index.get_symbol_map(
+                        exclude_files=selected_set | excluded_set
+                    )
+        except Exception as exc:
+            # Defensive — malformed index state shouldn't
+            # prevent breakdown rendering. Log at debug.
+            logger.debug(
+                "Symbol map details enumeration failed: %s", exc
+            )
+        symbol_map_tokens = (
+            self._counter.count(symbol_map) if symbol_map else 0
+        )
 
         # File tokens — per-file detail.
         file_details: list[dict[str, Any]] = []
@@ -4887,9 +5045,45 @@ class LLMService:
                     "tokens": tokens,
                 })
 
-        # URL tokens.
+        # URL tokens + per-URL details for the Budget expand.
+        # Read from the URL service's in-memory fetched dict
+        # (session-scoped) so the details reflect the URLs that
+        # will contribute to the next request, matching what the
+        # chip UI shows. Error records are skipped — their
+        # ``format_for_prompt()`` returns the empty string, and
+        # including them with zero tokens would confuse the
+        # Budget UI (a "0 tokens" URL still renders a row).
         url_details: list[dict[str, Any]] = []
         url_tokens = 0
+        try:
+            from ac_dc.url_service.detection import (
+                display_name as _url_display_name,
+            )
+            for content in self._url_service.get_fetched_urls():
+                if content.error:
+                    continue
+                rendered = content.format_for_prompt()
+                if not rendered:
+                    continue
+                tokens = self._counter.count(rendered)
+                url_details.append({
+                    "name": _url_display_name(content.url),
+                    "url": content.url,
+                    "tokens": tokens,
+                })
+        except Exception as exc:
+            # Defensive — a malformed URLContent shouldn't
+            # prevent the whole breakdown from rendering. Log
+            # at debug so operators can find it if needed.
+            logger.debug(
+                "URL details enumeration failed: %s", exc
+            )
+        # Aggregate url_tokens from the existing url_context on
+        # the context manager. This matches what the assembler
+        # injects into prompts, which may differ from the sum
+        # of per-URL details (different formatting rules). The
+        # Budget UI's bar uses url_tokens; the details list is
+        # informational.
         url_context = self._context.get_url_context()
         if url_context:
             joined = "\n---\n".join(url_context)
@@ -4991,6 +5185,7 @@ class LLMService:
                 "legend": legend_tokens,
                 "symbol_map": symbol_map_tokens,
                 "symbol_map_files": symbol_map_files,
+                "symbol_map_details": symbol_map_details,
                 "files": files_tokens,
                 "file_count": len(file_details),
                 "file_details": file_details,

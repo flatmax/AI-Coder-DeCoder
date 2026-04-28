@@ -191,6 +191,65 @@ export class TokenHud extends RpcMixin(LitElement) {
       font-size: 0.625rem;
       color: var(--text-secondary, #8b949e);
     }
+    .tier-subitems {
+      margin-left: 0.75rem;
+      margin-bottom: 0.4rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      padding-left: 0.4rem;
+      border-left: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .tier-subitem {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.7rem;
+    }
+    .tier-subitem-icon {
+      flex-shrink: 0;
+      width: 0.875rem;
+      text-align: center;
+    }
+    .tier-subitem-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-secondary, #8b949e);
+    }
+    .tier-subitem-bar {
+      flex-shrink: 0;
+      width: 30px;
+      height: 2px;
+      background: rgba(240, 246, 252, 0.08);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+    .tier-subitem-bar-fill {
+      height: 100%;
+      border-radius: 1px;
+    }
+    .tier-subitem-n {
+      flex-shrink: 0;
+      font-size: 0.6rem;
+      color: var(--text-secondary, #8b949e);
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      min-width: 2rem;
+      text-align: right;
+    }
+    .tier-subitem-tokens {
+      flex-shrink: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: #7ee787;
+      font-size: 0.65rem;
+    }
+    .tier-subitem-unmeasured {
+      font-size: 0.7rem;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
 
     .request-grid {
       display: grid;
@@ -541,8 +600,67 @@ export class TokenHud extends RpcMixin(LitElement) {
               ? html`<span class="tier-cached">🔒</span>`
               : ''}
           </div>
+          ${this._renderTierSubItems(b, color)}
         `;
       })}
+    `;
+  }
+
+  // Per-spec: each tier shows sub-items below its bar with
+  // icon, name, N/threshold label, stability bar, tokens.
+  // Measured items (tokens > 0) render individually; unmeasured
+  // items collapse into a "N pre-indexed …" summary line —
+  // mirrors the Cache sub-view's contract so the HUD and the
+  // Context tab read the same way.
+  _renderTierSubItems(b, color) {
+    const contents = Array.isArray(b.contents) ? b.contents : [];
+    if (contents.length === 0) return '';
+    const measured = contents.filter((c) => (c.tokens || 0) > 0);
+    const unmeasuredCount = contents.length - measured.length;
+    const mode = this._data?.mode;
+    return html`
+      <div class="tier-subitems">
+        ${measured.map((item) => this._renderTierSubItem(item, color))}
+        ${unmeasuredCount > 0
+          ? html`<div class="tier-subitem-unmeasured">
+              📦 ${unmeasuredCount} pre-indexed
+              ${mode === 'doc' ? 'documents' : 'symbols'}
+            </div>`
+          : ''}
+      </div>
+    `;
+  }
+
+  _renderTierSubItem(item, color) {
+    const icon = _TYPE_ICONS[item.type] || '📋';
+    const hasN = typeof item.n === 'number'
+      && typeof item.threshold === 'number';
+    const nPct = hasN && item.threshold > 0
+      ? Math.min(100, (item.n / item.threshold) * 100)
+      : 0;
+    const displayName = item.path || item.name || '—';
+    return html`
+      <div class="tier-subitem">
+        <span class="tier-subitem-icon">${icon}</span>
+        <span class="tier-subitem-name" title=${displayName}>
+          ${displayName}
+        </span>
+        ${hasN
+          ? html`
+              <div class="tier-subitem-bar"
+                   title="N=${item.n}/${item.threshold}">
+                <div
+                  class="tier-subitem-bar-fill"
+                  style="width: ${nPct}%; background: ${color};"
+                ></div>
+              </div>
+              <span class="tier-subitem-n">${item.n}/${item.threshold}</span>
+            `
+          : ''}
+        <span class="tier-subitem-tokens">
+          ${_fmtTokens(item.tokens || 0)}
+        </span>
+      </div>
     `;
   }
 

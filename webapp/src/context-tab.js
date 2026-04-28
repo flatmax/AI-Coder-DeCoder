@@ -20,8 +20,21 @@ const _SUBVIEW_KEY = 'ac-dc-context-subview';
 /** localStorage key for expanded tiers in the cache sub-view. */
 const _CACHE_EXPANDED_KEY = 'ac-dc-cache-expanded';
 
-/** localStorage key for the Files category expanded state in Budget view. */
-const _BUDGET_FILES_EXPANDED_KEY = 'ac-dc-budget-files-expanded';
+/**
+ * localStorage key for the set of expanded category rows in the
+ * Budget sub-view. Stored as a JSON-serialised array of category
+ * keys (e.g., ``["files", "symbol_map"]``). Replaces the earlier
+ * files-only boolean so Symbol Map and URLs can also expand.
+ */
+const _BUDGET_EXPANDED_KEY = 'ac-dc-budget-expanded';
+
+/**
+ * localStorage key for the Cache sub-view sort mode.
+ * Values: 'size' (default, descending token count) or 'name'
+ * (alphabetical). Pinned by specs4/5-webapp/viewers-hud.md §
+ * "Sort Toggle".
+ */
+const _CACHE_SORT_KEY = 'ac-dc-cache-sort';
 
 /** Tier colors for the cache sub-view. */
 const _TIER_COLORS = {
@@ -102,17 +115,18 @@ export class ContextTab extends RpcMixin(LitElement) {
      */
     _mapModal: { type: Object, state: true },
     /**
-     * Whether the Files category in Budget view is expanded to
-     * show per-file detail. When true, the Files row renders
-     * each selected file's path and token count below the
-     * aggregate bar. Persisted to localStorage so users who
-     * habitually audit their context don't have to re-expand
-     * every session. Defaults to true — the whole point of
-     * looking at the Budget view is to see what's in context,
-     * and aggregate-only display made it hard to diagnose
-     * "file I thought was in context isn't" cases.
+     * Set of expanded category keys in the Budget sub-view.
+     * Keys are the category identifiers emitted by
+     * ``_renderBudget`` — ``"symbol_map"``, ``"files"``,
+     * ``"urls"``. System and History are non-expandable in the
+     * spec and never appear in this set. Persisted to
+     * localStorage so the user's audit preferences survive
+     * across sessions. Defaults to ``{"files"}`` — the most
+     * commonly-expanded category and the one users most often
+     * want to see to diagnose "file I thought was in context
+     * isn't" cases.
      */
-    _budgetFilesExpanded: { type: Boolean, state: true },
+    _budgetExpanded: { type: Object, state: true },
     /**
      * Fuzzy-match filter query for the Cache sub-view. Empty
      * string means no filter (show all tiers and items).
@@ -126,6 +140,15 @@ export class ContextTab extends RpcMixin(LitElement) {
      * from a previous session is more confusing than useful.
      */
     _cacheFilter: { type: String, state: true },
+    /**
+     * Cache sub-view sort mode — ``'size'`` (default,
+     * descending token count) or ``'name'`` (alphabetical by
+     * displayed path). Applies to each tier's measured items;
+     * unmeasured items aggregate into a single summary line
+     * that's unaffected by sort. Persisted to localStorage so
+     * the user's choice survives across sessions.
+     */
+    _sortMode: { type: String, state: true },
   };
 
   static styles = css`
@@ -195,6 +218,21 @@ export class ContextTab extends RpcMixin(LitElement) {
     .refresh-btn:disabled {
       opacity: 0.4;
       cursor: not-allowed;
+    }
+    .sort-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.7rem;
+      font-family: inherit;
+      white-space: nowrap;
+    }
+    .sort-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
     }
     .filter-input {
       flex: 1;
@@ -696,8 +734,9 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._rebuilding = false;
     this._cacheExpanded = this._loadCacheExpanded();
     this._mapModal = null;
-    this._budgetFilesExpanded = this._loadBudgetFilesExpanded();
+    this._budgetExpanded = this._loadBudgetExpanded();
     this._cacheFilter = '';
+    this._sortMode = this._loadSortMode();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
@@ -1013,29 +1052,59 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._saveCacheExpanded();
   }
 
-  _loadBudgetFilesExpanded() {
+  _loadBudgetExpanded() {
     try {
-      const raw = localStorage.getItem(_BUDGET_FILES_EXPANDED_KEY);
-      // Default true — aggregate-only Files row made it
-      // hard to see what the LLM actually sees. Only
-      // respect an explicit "false" to keep it collapsed.
-      if (raw === 'false') return false;
+      const raw = localStorage.getItem(_BUDGET_EXPANDED_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
     } catch (_) {}
-    return true;
+    // Default: Files expanded, Symbol Map and URLs collapsed.
+    // Files is the most commonly-audited category (users
+    // regularly check what's in context); Symbol Map and URLs
+    // are diagnostic and default to collapsed so the Budget
+    // view stays readable at a glance.
+    return new Set(['files']);
   }
 
-  _saveBudgetFilesExpanded() {
+  _saveBudgetExpanded() {
     try {
       localStorage.setItem(
-        _BUDGET_FILES_EXPANDED_KEY,
-        this._budgetFilesExpanded ? 'true' : 'false',
+        _BUDGET_EXPANDED_KEY,
+        JSON.stringify([...this._budgetExpanded]),
       );
     } catch (_) {}
   }
 
-  _toggleBudgetFiles() {
-    this._budgetFilesExpanded = !this._budgetFilesExpanded;
-    this._saveBudgetFilesExpanded();
+  _toggleBudgetCategory(key) {
+    const next = new Set(this._budgetExpanded);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    this._budgetExpanded = next;
+    this._saveBudgetExpanded();
+  }
+
+  _loadSortMode() {
+    try {
+      const v = localStorage.getItem(_CACHE_SORT_KEY);
+      if (v === 'name') return 'name';
+    } catch (_) {}
+    return 'size';
+  }
+
+  _saveSortMode() {
+    try {
+      localStorage.setItem(_CACHE_SORT_KEY, this._sortMode);
+    } catch (_) {}
+  }
+
+  _toggleSortMode() {
+    this._sortMode = this._sortMode === 'size' ? 'name' : 'size';
+    this._saveSortMode();
   }
 
   // ---------------------------------------------------------------
@@ -1073,6 +1142,14 @@ export class ContextTab extends RpcMixin(LitElement) {
                     aria-label="Clear filter"
                   >×</button>`
                 : ''}
+              <button
+                class="sort-btn"
+                @click=${() => this._toggleSortMode()}
+                title="Toggle sort mode — currently sorting by ${
+                  this._sortMode === 'size' ? 'token count' : 'name'
+                }"
+                aria-label="Toggle sort mode"
+              >⬇ ${this._sortMode === 'size' ? 'Size' : 'Name'}</button>
             `
           : ''}
         <div class="toolbar-spacer"></div>
@@ -1178,13 +1255,41 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   _renderCategoryRow(c, maxCat) {
-    // Files is the only category with per-entry detail worth
-    // surfacing inline. Render it as a clickable expander row
-    // followed by a nested file list when expanded. Every
-    // other category renders as a plain non-interactive row.
+    // Three categories have per-entry detail worth surfacing
+    // inline: Symbol Map, Files, URLs. Each renders as a
+    // clickable expander row followed by a nested detail list
+    // when expanded. System and History are plain
+    // non-interactive rows — they have no per-item breakdown.
     const color = _COLORS[c.key] || '#8b949e';
     const tokenPct = maxCat > 0 ? (c.tokens / maxCat) * 100 : 0;
-    if (c.key !== 'files') {
+    const bd = this._data?.breakdown || {};
+    // Per-category detail resolution. Each expandable category
+    // keys into a different slot on the breakdown payload; the
+    // rendered rows share a common shape (``{name, path?, tokens}``)
+    // so the detail-list template below is uniform.
+    const detailSources = {
+      symbol_map: {
+        list: bd.symbol_map_details,
+        emptyHint: 'No symbol map detail available',
+        expandHint: 'Click to expand symbol map per-file breakdown',
+        collapseHint: 'Click to collapse symbol map breakdown',
+      },
+      files: {
+        list: bd.file_details,
+        emptyHint: 'No file detail available',
+        expandHint: 'Click to expand file list',
+        collapseHint: 'Click to collapse file list',
+      },
+      urls: {
+        list: bd.url_details,
+        emptyHint: 'No URL detail available',
+        expandHint: 'Click to expand URL list',
+        collapseHint: 'Click to collapse URL list',
+      },
+    };
+    const source = detailSources[c.key];
+    if (!source) {
+      // Non-expandable categories (system, history).
       return html`
         <div class="category-row">
           <span class="category-name">${c.label}</span>
@@ -1198,22 +1303,20 @@ export class ContextTab extends RpcMixin(LitElement) {
         </div>
       `;
     }
-    const expanded = this._budgetFilesExpanded;
-    const fileDetails =
-      this._data?.breakdown?.file_details;
-    const hasDetails =
-      Array.isArray(fileDetails) && fileDetails.length > 0;
+    const details = source.list;
+    const hasDetails = Array.isArray(details) && details.length > 0;
+    const expanded = this._budgetExpanded.has(c.key);
     return html`
       <div
         class="category-row category-row-expandable"
         role="button"
         aria-expanded=${expanded}
         title=${hasDetails
-          ? (expanded
-              ? 'Click to collapse file list'
-              : 'Click to expand file list')
-          : 'No file detail available'}
-        @click=${hasDetails ? () => this._toggleBudgetFiles() : undefined}
+          ? (expanded ? source.collapseHint : source.expandHint)
+          : source.emptyHint}
+        @click=${hasDetails
+          ? () => this._toggleBudgetCategory(c.key)
+          : undefined}
       >
         <span class="category-toggle">
           ${hasDetails ? (expanded ? '▼' : '▶') : ''}
@@ -1230,12 +1333,17 @@ export class ContextTab extends RpcMixin(LitElement) {
       ${expanded && hasDetails
         ? html`
             <div class="file-detail-list">
-              ${fileDetails.map(
-                (f) => html`
-                  <div class="file-detail-row" title=${f.path}>
-                    <span class="file-detail-path">${f.path}</span>
+              ${details.map(
+                (item) => html`
+                  <div
+                    class="file-detail-row"
+                    title=${item.path || item.url || item.name}
+                  >
+                    <span class="file-detail-path">
+                      ${item.path || item.url || item.name}
+                    </span>
                     <span class="file-detail-tokens">
-                      ${_fmtTokens(f.tokens)}
+                      ${_fmtTokens(item.tokens)}
                     </span>
                   </div>
                 `,
@@ -1405,6 +1513,23 @@ export class ContextTab extends RpcMixin(LitElement) {
     const measured = contents.filter((c) => (c.tokens || 0) > 0);
     const unmeasuredCount = contents.length - measured.length;
 
+    // Apply sort mode. 'size' (default) sorts by descending
+    // token count; 'name' sorts alphabetically by the
+    // displayed label (path preferred, key name as fallback).
+    // Unmeasured items aren't included here — they aggregate
+    // into a single summary line that isn't affected by sort.
+    // Returning a sorted copy (not mutating the backend
+    // payload) so repeated renders with the same data stay
+    // idempotent.
+    const sortedMeasured = [...measured].sort((a, b) => {
+      if (this._sortMode === 'name') {
+        const an = (a.path || a.name || '').toLowerCase();
+        const bn = (b.path || b.name || '').toLowerCase();
+        return an.localeCompare(bn);
+      }
+      return (b.tokens || 0) - (a.tokens || 0);
+    });
+
     return html`
       <div class="tier-group">
         <div
@@ -1424,7 +1549,7 @@ export class ContextTab extends RpcMixin(LitElement) {
         ${expanded
           ? html`
               <div class="tier-body">
-                ${measured.map((item) =>
+                ${sortedMeasured.map((item) =>
                   this._renderCacheItem(item, block, color),
                 )}
                 ${unmeasuredCount > 0

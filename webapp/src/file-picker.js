@@ -2007,6 +2007,14 @@ export class FilePicker extends LitElement {
               >${status.letter}</span
             >`
           : ''}
+        ${isExcluded
+          ? html`<span
+              class="excluded-badge"
+              title="Excluded from index"
+              aria-label="Excluded from index"
+              >✕</span
+            >`
+          : ''}
         ${typeof node.lines === 'number' && node.lines > 0
           ? html`<span class="lines-badge">${node.lines}</span>`
           : ''}
