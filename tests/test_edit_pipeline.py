@@ -544,6 +544,7 @@ class TestApplyReport:
         assert report.not_in_context == 0
         assert report.files_modified == []
         assert report.files_auto_added == []
+        assert report.files_created == []
 
     async def test_counts_sum_to_results_length(
         self, pipeline: EditPipeline, repo_dir: Path
@@ -587,6 +588,197 @@ class TestApplyReport:
         )
         # First-seen order — b, a, c.
         assert report.files_modified == ["b.py", "a.py", "c.py"]
+
+
+# ---------------------------------------------------------------------------
+# Created files — files_created field
+# ---------------------------------------------------------------------------
+
+
+class TestFilesCreated:
+    """ApplyReport.files_created captures successful create blocks.
+
+    Distinct from ``files_auto_added`` (which flags modifies to
+    unselected files) so the service layer can apply different
+    follow-up policies:
+
+    - Auto-adds from modifies trigger a retry-prompt on the
+      frontend ("please retry the edit for …")
+    - Creates do not — the create already succeeded
+
+    The test coverage pins: successful creates populate the
+    field, failed/dry-run creates don't, modifies never
+    populate it regardless of outcome, and the list is
+    order-preserving + deduplicated.
+    """
+
+    async def test_successful_create_populates_files_created(
+        self, pipeline: EditPipeline
+    ) -> None:
+        """One successful create → one entry in files_created."""
+        block = _create("new.py", "print('hi')\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.passed == 1
+        assert report.files_created == ["new.py"]
+
+    async def test_multiple_creates_preserve_order(
+        self, pipeline: EditPipeline
+    ) -> None:
+        """Creates in files_created match the order they were applied."""
+        blocks = [
+            _create("zebra.py", "z\n"),
+            _create("alpha.py", "a\n"),
+            _create("middle.py", "m\n"),
+        ]
+        report = await pipeline.apply_edits(
+            blocks, in_context_files=set()
+        )
+        assert report.passed == 3
+        # First-seen order — the order the LLM emitted them.
+        assert report.files_created == [
+            "zebra.py", "alpha.py", "middle.py"
+        ]
+
+    async def test_failed_create_does_not_populate(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Create that conflicts with existing → no entry added."""
+        # Seed a file that'll cause the create to fail.
+        (repo_dir / "exists.py").write_text("original\n")
+        block = _create("exists.py", "replacement\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.failed == 1
+        assert report.files_created == []
+
+    async def test_already_applied_create_does_not_populate(
+        self,
+        pipeline: EditPipeline,
+        repo_dir: Path,
+    ) -> None:
+        """Create whose content is already present → no entry added.
+
+        Already-applied is idempotent success — the file wasn't
+        newly created this turn, so the service layer
+        shouldn't re-add it to selection (it was presumably
+        added on the turn it actually landed).
+        """
+        (repo_dir / "existing.py").write_text("hello\n")
+        block = _create("existing.py", "hello\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.already_applied == 1
+        assert report.files_created == []
+
+    async def test_dry_run_create_does_not_populate(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Dry-run validated creates → no entry added.
+
+        Dry run doesn't write to disk; the file doesn't exist
+        yet, so adding it to the selection would fail the next
+        real request's file-existence filter.
+        """
+        block = _create("planned.py", "content\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set(), dry_run=True
+        )
+        assert report.results[0].status == EditStatus.VALIDATED
+        assert report.files_created == []
+        # Also not in files_modified — dry-run writes nothing.
+        assert report.files_modified == []
+
+    async def test_modify_does_not_populate_files_created(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Successful modifies land in files_modified, not files_created."""
+        (repo_dir / "a.py").write_text("hello\n")
+        block = _modify("a.py", "hello", "goodbye")
+        report = await pipeline.apply_edits(
+            [block], in_context_files={"a.py"}
+        )
+        assert report.passed == 1
+        assert report.files_modified == ["a.py"]
+        assert report.files_created == []
+
+    async def test_not_in_context_modify_does_not_populate(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Not-in-context modifies go to files_auto_added, not files_created.
+
+        The distinction matters because of the retry-prompt
+        policy downstream — auto-added drives a retry, created
+        does not.
+        """
+        (repo_dir / "a.py").write_text("content\n")
+        block = _modify("a.py", "content", "updated")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.not_in_context == 1
+        assert report.files_auto_added == ["a.py"]
+        assert report.files_created == []
+
+    async def test_mixed_create_and_modify(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """One response with both a create and a modify — each in its own list."""
+        (repo_dir / "existing.py").write_text("old\n")
+        blocks = [
+            _create("new.py", "fresh\n"),
+            _modify("existing.py", "old", "new"),
+        ]
+        report = await pipeline.apply_edits(
+            blocks, in_context_files={"existing.py"}
+        )
+        assert report.passed == 2
+        assert report.files_created == ["new.py"]
+        assert report.files_modified == [
+            "new.py", "existing.py",
+        ]
+
+    async def test_create_appears_in_both_files_modified_and_files_created(
+        self, pipeline: EditPipeline
+    ) -> None:
+        """Create blocks update both files_modified AND files_created.
+
+        files_modified is a superset — it tracks "disk was
+        touched by this batch". files_created is a subset
+        specifically marking newly-created paths so the
+        service layer can apply create-specific follow-up.
+        """
+        block = _create("new.py", "content\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert "new.py" in report.files_modified
+        assert "new.py" in report.files_created
+
+    async def test_duplicate_create_paths_deduplicated(
+        self, pipeline: EditPipeline
+    ) -> None:
+        """A second create for the same path (already_applied) isn't re-added.
+
+        The second block hits the already-applied branch, which
+        doesn't populate files_created. Only the first
+        successful APPLIED run adds the path.
+        """
+        blocks = [
+            _create("new.py", "content\n"),
+            _create("new.py", "content\n"),  # re-run
+        ]
+        report = await pipeline.apply_edits(
+            blocks, in_context_files=set()
+        )
+        # First succeeded, second was already_applied.
+        assert report.passed == 1
+        assert report.already_applied == 1
+        # Path appears once in files_created.
+        assert report.files_created == ["new.py"]
 
 
 # ---------------------------------------------------------------------------

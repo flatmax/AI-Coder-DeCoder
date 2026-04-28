@@ -140,6 +140,15 @@ Each result includes: file path, status, human-readable message, machine-readabl
 - Broadcast file change via the standard callback
 - Include system note in completion result listing auto-added files
 
+## Created File Handling
+
+- Successful create blocks auto-add the new file to the selected files list
+- Broadcast file change via the standard callback so the picker checkbox reflects the new selection
+- The completion result lists created files separately from not-in-context auto-adds — the frontend distinguishes the two
+- No retry prompt is generated for creates — the create already succeeded, there is nothing to retry
+- Dry-run creates (validated but not written) do not auto-add — nothing was written to disk
+- Failed creates (conflict with an existing file, write error) do not auto-add
+
 ## Auto-Populated Retry Prompts
 
 - When not-in-context edits are detected, auto-populate chat textarea with retry prompt naming added files
@@ -147,6 +156,7 @@ Each result includes: file path, status, human-readable message, machine-readabl
 - When ambiguous-anchor failures are detected, auto-populate prompt asking for more unique context
 - When old-text-mismatch failures occur on in-context files, prompt asks the LLM to re-read the file content and retry
 - Multiple retry prompts can collide — latter one overwrites earlier one in textarea (acceptable — user can edit)
+- Created files do not generate a retry prompt — they auto-add to selection but the create already succeeded
 
 ## Why Not Auto-Retry
 
@@ -195,6 +205,8 @@ In single-agent operation, only one apply pipeline invocation runs at a time. Th
 
 - An anchor that matches zero or multiple locations always fails; never silently applied
 - Create blocks (empty old section) are always attempted regardless of context membership
+- Successful create blocks always auto-add the new file to the selected files list
+- Auto-added files from not-in-context modifies and from creates are tracked separately in the completion result; only not-in-context modifies drive retry prompts
 - File modifications are confined to files within the repository root
 - A failed edit never partially writes — the file is left unchanged
 - Sequential edits on the same file preserve the order in which the LLM produced them

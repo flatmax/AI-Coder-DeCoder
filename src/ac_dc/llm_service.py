@@ -3966,11 +3966,15 @@ class LLMService:
         )
 
         # Broadcast filesChanged if the apply step auto-added
-        # files (not-in-context edits). Clients update their
-        # file picker to reflect the new selection so the user
-        # sees which files were added for retry on the next
-        # request.
-        if result.get("files_auto_added"):
+        # files (not-in-context edits) or created new ones.
+        # Clients update their file picker to reflect the new
+        # selection so the user sees which files were added —
+        # for retry on the next request (auto-added) or for
+        # iteration (newly created).
+        if (
+            result.get("files_auto_added")
+            or result.get("files_created")
+        ):
             self._broadcast_event(
                 "filesChanged", list(self._selected_files)
             )
@@ -4215,6 +4219,7 @@ class LLMService:
             "files_modified": [],
             "edit_results": [],
             "files_auto_added": [],
+            "files_created": [],
             "user_message": user_message,
             "finish_reason": finish_reason,
         }
@@ -4261,13 +4266,28 @@ class LLMService:
             )
             return result
 
-        # Auto-add files from not-in-context edits to the
-        # selection so the next request has them in context.
-        # The frontend receives this via the filesChanged
+        # Auto-add files to the selection so the next request
+        # has them in context. Two sources:
+        #
+        # - files_auto_added — modifies where the LLM guessed
+        #   at old-text from the index block; user will retry
+        #   (auto-populated retry prompt on the frontend).
+        # - files_created — brand-new files the LLM just wrote;
+        #   no retry needed, but the user expects them to
+        #   appear in the selection so they can iterate.
+        #
+        # The frontend receives the union via the filesChanged
         # broadcast (fired by the caller after streamComplete).
-        if report.files_auto_added:
+        # Only files_auto_added drives the retry-prompt; that
+        # gating happens on the frontend, which reads the two
+        # lists separately from the result payload.
+        paths_to_add = list(report.files_auto_added) + [
+            p for p in report.files_created
+            if p not in report.files_auto_added
+        ]
+        if paths_to_add:
             added: list[str] = []
-            for path in report.files_auto_added:
+            for path in paths_to_add:
                 if path not in self._selected_files:
                     self._selected_files.append(path)
                     added.append(path)
@@ -4351,6 +4371,7 @@ class LLMService:
         result["not_in_context"] = report.not_in_context
         result["files_modified"] = list(report.files_modified)
         result["files_auto_added"] = list(report.files_auto_added)
+        result["files_created"] = list(report.files_created)
 
         return result
 

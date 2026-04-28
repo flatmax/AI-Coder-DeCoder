@@ -2,6 +2,10 @@
 
 **Status:** Active — target specification for a clean-room reimplementation of AC⚡DC.
 
+## Companion Tree: `specs-reference/`
+
+A companion directory at the repo top level holds implementation detail that specs4 deliberately leaves unspecified — byte-level formats, numeric constants, persistent storage schemas, RPC argument shapes, dependency quirks. The two trees mirror each other: when implementing from `specs4/{path}/{name}.md`, also load `specs-reference/{path}/{name}.md` if it exists. Missing twins mean the specs4 spec is self-sufficient. See `specs-reference/README.md` for the full convention.
+
 ## What AC⚡DC Is
 
 An AI-assisted code editing tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with an LLM, and apply structured file edits — all with intelligent prompt caching to minimize LLM costs. The tool also supports documentation work (markdown, SVG) via a dedicated document mode.

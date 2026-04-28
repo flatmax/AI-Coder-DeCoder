@@ -2290,6 +2290,242 @@ class TestStreamingWithEdits:
         assert result["edit_blocks"][0]["is_create"] is True
         assert result["files_modified"] == ["new.py"]
 
+    async def test_create_block_auto_adds_to_selection(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Successful create adds the new file to the selection.
+
+        Pinned by specs4/3-llm/edit-protocol.md § "Created
+        File Handling": creates auto-add so the next turn has
+        the new file's content in context and the user sees it
+        in the picker.
+        """
+        response = (
+            f"new.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"print('hi')\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="create"
+        )
+        await asyncio.sleep(0.3)
+
+        # File added to selected-files list.
+        assert "new.py" in service.get_selected_files()
+
+        # Result surfaces the created file separately from
+        # auto-added modifies — the frontend uses this split
+        # to decide whether to fire a retry prompt (creates
+        # don't).
+        result = self._last_complete_result(event_cb)
+        assert result["files_created"] == ["new.py"]
+        assert result["files_auto_added"] == []
+
+    async def test_created_file_content_loaded_into_file_context(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Created file's content is loaded so the next turn sees it.
+
+        Without this the LLM would see the file path in the
+        selected list but the file context wouldn't have the
+        content — the next turn's prompt assembly would either
+        re-read from disk on-demand or silently drop the file.
+        Pinning explicit loading ensures consistency with how
+        auto-added modify targets are handled.
+        """
+        response = (
+            f"helper.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"def helper(): pass\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="create helper"
+        )
+        await asyncio.sleep(0.3)
+
+        # File context has the content.
+        assert service._file_context.has_file("helper.py")
+        content = service._file_context.get_content("helper.py")
+        assert content is not None
+        assert "def helper()" in content
+
+    async def test_create_broadcasts_files_changed(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Successful create fires filesChanged after streamComplete.
+
+        Collaborator clients rely on this broadcast to refresh
+        their picker checkbox state. Without it, the server's
+        selection mutates but remote clients still see the
+        pre-create selection.
+        """
+        response = (
+            f"new.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"x = 1\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="create"
+        )
+        await asyncio.sleep(0.3)
+
+        # filesChanged fires AFTER streamComplete, carrying the
+        # new selection.
+        event_names = [name for name, _ in event_cb.events]
+        complete_idx = event_names.index("streamComplete")
+        post_complete = event_names[complete_idx + 1:]
+        assert "filesChanged" in post_complete
+
+        # Payload includes the newly-created file.
+        files_changed_events = [
+            args for name, args in event_cb.events
+            if name == "filesChanged"
+        ]
+        assert files_changed_events
+        last_payload = files_changed_events[-1][0]
+        assert "new.py" in last_payload
+
+    async def test_create_adds_to_selection_without_duplication(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Path already in selection isn't duplicated by create auto-add.
+
+        Edge case: the LLM creates a file that's somehow
+        already in the selection (unlikely in practice, but
+        defensive against list-as-set mutation bugs).
+        """
+        # Pre-create the file so the create path hits
+        # already_applied. This is the cleanest way to exercise
+        # the "path might already be in selection" case without
+        # needing an out-of-band manipulation.
+        (repo_dir / "existing.py").write_text("pre-existing\n")
+        service.set_selected_files(["existing.py"])
+
+        response = (
+            f"existing.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"pre-existing\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="re-create"
+        )
+        await asyncio.sleep(0.3)
+
+        # Already-applied doesn't populate files_created (so
+        # no auto-add attempt), and existing selection stays
+        # unchanged.
+        selected = service.get_selected_files()
+        assert selected.count("existing.py") == 1
+
+    async def test_create_and_not_in_context_modify_mixed(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Response with one create and one not-in-context modify.
+
+        Both files should land in the selection via their
+        respective auto-add paths. The result separates them
+        so the frontend knows a retry prompt is warranted for
+        the modify but not for the create.
+        """
+        # An existing file, not selected, so a modify against
+        # it goes through the not-in-context path.
+        (repo_dir / "old.py").write_text("original\n")
+
+        response = (
+            # Create block.
+            f"new.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"created\n{self.END_MARK}\n"
+            # Modify block for a file not in selection.
+            f"\nold.py\n{self.EDIT_MARK}\n"
+            f"original\n{self.REPL_MARK}\n"
+            f"modified\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="mixed"
+        )
+        await asyncio.sleep(0.3)
+
+        result = self._last_complete_result(event_cb)
+        # Separated by source — create in files_created,
+        # not-in-context modify in files_auto_added.
+        assert result["files_created"] == ["new.py"]
+        assert result["files_auto_added"] == ["old.py"]
+
+        # Both landed in the selection.
+        selected = service.get_selected_files()
+        assert "new.py" in selected
+        assert "old.py" in selected
+
+    async def test_create_in_review_mode_skipped(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Review mode is read-only — creates don't apply, don't auto-add.
+
+        Pinned by specs4/3-llm/edit-protocol.md § "Review
+        Mode Read-Only": the entire apply step is skipped, so
+        no files are created on disk and no auto-add happens.
+        Regression guard against a future refactor that
+        special-cases creates into the review path.
+        """
+        service._review_active = True
+        response = (
+            f"new.py\n{self.EDIT_MARK}\n"
+            f"{self.REPL_MARK}\n"
+            f"content\n{self.END_MARK}\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="create during review"
+        )
+        await asyncio.sleep(0.3)
+
+        # File not written.
+        assert not (repo_dir / "new.py").exists()
+        # Selection not mutated.
+        assert "new.py" not in service.get_selected_files()
+        # Block still surfaced in edit_blocks for UI display.
+        result = self._last_complete_result(event_cb)
+        assert len(result["edit_blocks"]) == 1
+        # But no apply activity.
+        assert result["passed"] == 0
+        assert result["files_created"] == []
+
     async def test_not_in_context_edit_auto_adds_file(
         self,
         service: LLMService,

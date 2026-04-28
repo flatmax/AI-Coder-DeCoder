@@ -104,15 +104,27 @@ class ApplyReport:
     ``streamComplete`` event. Per-block details are in
     ``results``; the count fields are convenience aggregates.
 
-    The ``files_modified`` and ``files_auto_added`` lists are
-    order-preserving (first-seen) with duplicates removed —
-    matches what the frontend expects for the "files changed"
-    and "files auto-added" message banners.
+    The ``files_modified``, ``files_auto_added``, and
+    ``files_created`` lists are order-preserving (first-seen)
+    with duplicates removed — matches what the frontend expects
+    for the "files changed" and "files auto-added" message
+    banners.
+
+    ``files_auto_added`` and ``files_created`` are distinct by
+    design. Auto-added files come from not-in-context *modifies*
+    — the LLM guessed at old-text from the index block and
+    needs to retry. Created files come from successful *creates*
+    — nothing to retry, but the caller still wants to add them
+    to selection so the user sees the new file and the next
+    turn has its content in context. The service layer unions
+    both into the selected-files list; only auto-added drives
+    the "not-in-context retry prompt" on the chat panel.
     """
 
     results: list[EditResult] = field(default_factory=list)
     files_modified: list[str] = field(default_factory=list)
     files_auto_added: list[str] = field(default_factory=list)
+    files_created: list[str] = field(default_factory=list)
 
     # Aggregate counts. Named fields rather than a dict so the
     # streaming handler can access them as attributes (and so a
@@ -322,10 +334,11 @@ class EditPipeline:
         """
         report = ApplyReport()
 
-        # Track which files we've auto-added and which we've
+        # Track which files we've auto-added, created, and
         # modified. Order-preserving, deduped.
         modified_seen: set[str] = set()
         auto_added_seen: set[str] = set()
+        created_seen: set[str] = set()
 
         for block in blocks:
             result = await self._apply_one(
@@ -341,6 +354,17 @@ class EditPipeline:
                 if result.file_path not in modified_seen:
                     modified_seen.add(result.file_path)
                     report.files_modified.append(result.file_path)
+                # Successful creates land in files_created so
+                # the service layer can auto-add them to the
+                # selection. Dry-run creates (VALIDATED status)
+                # are excluded — nothing to add to context
+                # when no file was written.
+                if (
+                    block.is_create
+                    and result.file_path not in created_seen
+                ):
+                    created_seen.add(result.file_path)
+                    report.files_created.append(result.file_path)
             elif result.status == EditStatus.ALREADY_APPLIED:
                 report.already_applied += 1
             elif result.status == EditStatus.VALIDATED:

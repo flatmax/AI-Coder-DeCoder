@@ -2,6 +2,8 @@
 
 **Status:** Plan — not yet executed. Captures decisions from a design conversation so they aren't lost.
 
+**Companion:** [specs-reference-migration-plan.md](specs-reference-migration-plan.md) tracks execution progress across sessions. This file captures the design rationale; the plan file tracks what's been done and what's next.
+
 ## Why This Exists
 
 specs3 was written against an earlier AC⚡DC implementation and contains a mix of content: behavioral descriptions that specs4 has already superseded, and implementation detail that specs4 deliberately abstracted away. The [implementation-guide.md — Where specs4 Is Incomplete Without specs3](../0-overview/implementation-guide.md#where-specs4-is-incomplete-without-specs3) table lists the specific detail areas where specs3 is still authoritative: byte-level formats, numeric constants, persistent storage schemas, RPC method signatures, dependency quirks, and similar.

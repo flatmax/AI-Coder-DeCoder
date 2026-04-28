@@ -130,6 +130,13 @@ Stage-all / unstage-all / rename / exclude-all are deliberately absent — the r
 - Picker receives the updated selection via the standard broadcast and updates checkboxes
 - Parent directories of auto-added files are auto-expanded
 
+## Auto-Add from Created Files
+
+- When the LLM successfully creates a new file via an edit block, the file is automatically added to the selected list (see [edit-protocol.md](../3-llm/edit-protocol.md))
+- Picker receives the updated selection via the standard broadcast and updates checkboxes
+- Parent directories of created files are auto-expanded
+- Unlike not-in-context auto-adds, no retry prompt is generated in the chat input
+
 ## Middle-Click Path Insertion
 
 - Middle-click on any row inserts the path into chat input at cursor position, space-padded before and after
