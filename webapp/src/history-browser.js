@@ -55,7 +55,7 @@ import { LitElement, css, html } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { RpcMixin } from './rpc-mixin.js';
-import { escapeHtml, renderMarkdown } from './markdown.js';
+import { renderMarkdown } from './markdown.js';
 import { normalizeMessageContent } from './image-utils.js';
 
 /**
@@ -1070,15 +1070,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     const images = Array.isArray(msg.images)
       ? msg.images
       : normalized.images;
-    // User content rendered escaped verbatim; assistant and
-    // system markdown-rendered (matches the main chat
-    // panel's treatment).
-    let body;
-    if (msg.role === 'user' && !msg.system_event) {
-      body = html`${unsafeHTML(escapeHtml(textContent))}`;
-    } else {
-      body = html`${unsafeHTML(renderMarkdown(textContent))}`;
-    }
+    // All roles go through the markdown renderer so user
+    // newlines and lists render the same way they do in the
+    // main chat panel. The renderer handles escaping
+    // internally, so this is safe against HTML injection.
+    const body = html`${unsafeHTML(renderMarkdown(textContent))}`;
     return html`
       <div
         class="preview-message ${roleClass}"

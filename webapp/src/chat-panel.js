@@ -4699,16 +4699,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
     const isHighlighted =
       this._searchQuery.trim() !== '' &&
       index === currentMatchIdx;
-    // User and system-event content is rendered as-is — users
-    // typed what they typed (escaped verbatim), system events
-    // come through markdown so the `**Committed** …` pattern
-    // renders correctly. Assistant content goes through the
-    // edit-block segmenter so edit blocks become visual cards
-    // instead of raw prose.
+    // User content and system-event content both go through
+    // the markdown renderer so lists, paragraphs, code
+    // fences, etc. render as intended — users type markdown-
+    // literate text (that's what the LLM receives), so the
+    // chat UI should show it the same way. The markdown
+    // renderer handles escaping internally, so this path is
+    // safe against HTML injection. Assistant content goes
+    // through the edit-block segmenter so edit blocks become
+    // visual cards instead of raw prose.
     let bodyHtml;
     if (msg.role === 'user' && !msg.system_event) {
       bodyHtml = html`
-        <div class="md-content">${unsafeHTML(escapeHtml(msg.content))}</div>
+        <div class="md-content">
+          ${unsafeHTML(renderMarkdown(msg.content))}
+        </div>
       `;
     } else if (msg.role === 'assistant') {
       bodyHtml = this._renderAssistantBody(

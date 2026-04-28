@@ -529,14 +529,37 @@ class HistoryStore:
         render its detail view. Order is write order, which is
         also chronological given monotonic epoch timestamps.
 
+        ``image_refs`` (the on-disk filenames) is preserved for
+        diagnostics, and an ``images`` field is added alongside
+        carrying the reconstructed base64 data URIs so the
+        browser can render thumbnails without a second RPC.
+        Missing image files are silently skipped — a broken
+        images directory never prevents browsing. Legacy
+        records carrying an integer ``images`` field yield
+        no ``images`` list (same behaviour as the
+        context-retrieval path).
+
         Returns an empty list for unknown session IDs — never
         raises. The browser handles empty sessions gracefully.
         """
-        return [
-            dict(rec)
-            for rec in self._iter_records()
-            if rec.get("session_id") == session_id
-        ]
+        result: list[dict[str, Any]] = []
+        for rec in self._iter_records():
+            if rec.get("session_id") != session_id:
+                continue
+            shape = dict(rec)
+            refs = shape.get("image_refs")
+            if isinstance(refs, list) and refs:
+                uris: list[str] = []
+                for name in refs:
+                    if not isinstance(name, str):
+                        continue
+                    uri = self._reconstruct_image(name)
+                    if uri is not None:
+                        uris.append(uri)
+                if uris:
+                    shape["images"] = uris
+            result.append(shape)
+        return result
 
     def get_session_messages_for_context(
         self, session_id: str
