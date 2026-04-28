@@ -15,6 +15,16 @@ Completed layers and the decision log have been moved to [specs4/impl-history/](
 
 ## Decisions
 
+### D19 — SVG viewer listens directly for `files-modified`
+
+The diff viewer's D18 rewrite eliminated cross-run staleness by refetching on every `openFile`. The SVG viewer kept its multi-tab `_files[]` cache and relied on the app shell's narrower set of refresh triggers (`streamComplete` with non-empty `files_modified`, `commitResult`, `files-reverted`), which miss external edits that fire only the generic `files-modified` broadcast — git pulls, edit-pipeline applies on unrelated workflows, collab writes, terminal edits.
+
+Symptom: opening an SVG in the viewer, editing the same file outside AC⚡DC (or across a different run), clicking back to the viewer tab shows the pre-edit cached content. The backend RPC (`Repo.get_file_content`) is honest — it reads from disk — but `openFile`'s same-file short-circuit means it never gets called for an already-open path.
+
+Resolution: the SVG viewer subscribes to `files-modified` window events in `connectedCallback`, removes the listener in `disconnectedCallback`, and calls `refreshOpenFiles()` when any affected path is open. `refreshOpenFiles` itself gained a dirty-skip guard so mid-edit SvgEditor state isn't clobbered by an unrelated refresh. Defensive against missing / empty `paths` in the event detail (older backends, edge paths) — falls back to refreshing every open file. Six new tests in `svg-viewer.test.js § SvgViewer files-modified broadcast` cover the happy path, unrelated-paths short-circuit, empty-detail defensive refresh, no-open-files no-op, dirty-file preservation, and disconnect cleanup.
+
+The alternative — rewriting the SVG viewer to the diff viewer's single-file no-cache model (D18) — was rejected because the multi-tab SVG workflow is genuinely useful for presentation decks, the existing test coverage is extensive, and the set of paths that can change beneath an open SVG tab is narrow enough that `files-modified` covers it reliably.
+
 ### D17 — Per-repo working directory renamed to `.ac-dc4/`
 
 The previous AC-DC implementation uses `.ac-dc/` at the repo root for its per-repo working state (conversation history, symbol map snapshot, image attachments, doc cache sidecars). This reimplementation shares repositories with that implementation during the transition — a developer might run one instance in the morning and the other in the afternoon against the same checkout. Colliding on the same directory name would corrupt both states: session JSONL schemas, cache sidecar formats, and image filename conventions all drift between the two.

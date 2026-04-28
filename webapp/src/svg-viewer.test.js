@@ -734,6 +734,140 @@ describe('SvgViewer refreshOpenFiles', () => {
     expect(el._files[0].original).toContain('v2');
     expect(el._files[0].modified).toContain('v2');
   });
+
+  it('skips dirty files to preserve in-progress edits', async () => {
+    // A user mid-edit in the SvgEditor has local changes
+    // that haven't been saved. A refresh triggered by
+    // some unrelated file's change must not clobber
+    // those edits.
+    let version = 1;
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () =>
+        svgFixture(`disk:v${version}`),
+      ),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    // Simulate user edit.
+    el._files[0].modified = svgFixture('user-edit');
+    el._recomputeDirtyCount();
+    await settle(el);
+    expect(el.getDirtyFiles()).toEqual(['a.svg']);
+    version = 2;
+    await el.refreshOpenFiles();
+    await settle(el);
+    // User's edit survives; disk content not pulled.
+    expect(el._files[0].modified).toContain('user-edit');
+    expect(el._files[0].modified).not.toContain('v2');
+    // Dirty flag preserved.
+    expect(el.getDirtyFiles()).toEqual(['a.svg']);
+  });
+});
+
+describe('SvgViewer files-modified broadcast', () => {
+  it('refreshes when an open file appears in the event', async () => {
+    let version = 1;
+    const rpc = vi.fn(async () => svgFixture(`v${version}`));
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(el._files[0].original).toContain('v1');
+    version = 2;
+    window.dispatchEvent(
+      new CustomEvent('files-modified', {
+        detail: { paths: ['a.svg'] },
+      }),
+    );
+    // Listener kicks off refresh asynchronously — let
+    // it settle before reading state.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await settle(el);
+    expect(el._files[0].original).toContain('v2');
+  });
+
+  it('ignores broadcasts for unrelated files', async () => {
+    const rpc = vi.fn(async () => svgFixture('v1'));
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    // Initial open fetches HEAD + working = 2 calls.
+    expect(rpc).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(
+      new CustomEvent('files-modified', {
+        detail: { paths: ['other.svg', 'unrelated.md'] },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await settle(el);
+    // No additional fetches — the listener short-circuited.
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes defensively when paths list is missing', async () => {
+    // Older backends or unusual edit paths may dispatch
+    // the event with an empty or absent paths field.
+    // Refresh all open files rather than ignoring —
+    // cost is bounded (N fetches for N open tabs) and
+    // the alternative is staleness.
+    let version = 1;
+    const rpc = vi.fn(async () => svgFixture(`v${version}`));
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    version = 2;
+    window.dispatchEvent(
+      new CustomEvent('files-modified', {
+        detail: {},
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await settle(el);
+    expect(el._files[0].original).toContain('v2');
+  });
+
+  it('is a no-op when no files are open', async () => {
+    const rpc = vi.fn(async () => svgFixture());
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    // No open files — RPC should not be called.
+    window.dispatchEvent(
+      new CustomEvent('files-modified', {
+        detail: { paths: ['a.svg'] },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await settle(el);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('removes the listener on disconnect', async () => {
+    const rpc = vi.fn(async () => svgFixture());
+    setFakeRpc({ 'Repo.get_file_content': rpc });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    rpc.mockClear();
+    el.remove();
+    window.dispatchEvent(
+      new CustomEvent('files-modified', {
+        detail: { paths: ['a.svg'] },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(rpc).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

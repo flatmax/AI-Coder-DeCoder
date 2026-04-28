@@ -366,6 +366,7 @@ export class SvgViewer extends LitElement {
     this._onContextMenu = this._onContextMenu.bind(this);
     this._onContextDismiss = this._onContextDismiss.bind(this);
     this._onFitClick = this._onFitClick.bind(this);
+    this._onFilesModified = this._onFilesModified.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -376,11 +377,23 @@ export class SvgViewer extends LitElement {
     super.connectedCallback();
     document.addEventListener('keydown', this._onKeyDown);
     document.addEventListener('click', this._onContextDismiss);
+    // Pick up external edits — commits, pulls, edit-pipeline
+    // applies, collab writes. The app shell calls
+    // refreshOpenFiles on streamComplete / commitResult /
+    // files-reverted, but not on the generic files-modified
+    // broadcast that fires after any backend-side write.
+    // Without this listener, a file edited on disk between
+    // runs (or by a sibling tool) stays cached in _files
+    // indefinitely — clicking the tab again reads from
+    // memory, never from disk. Subscribing here closes
+    // the gap at the viewer level.
+    window.addEventListener('files-modified', this._onFilesModified);
   }
 
   disconnectedCallback() {
     document.removeEventListener('keydown', this._onKeyDown);
     document.removeEventListener('click', this._onContextDismiss);
+    window.removeEventListener('files-modified', this._onFilesModified);
     this._disposeEditors();
     super.disconnectedCallback();
   }
@@ -470,10 +483,15 @@ export class SvgViewer extends LitElement {
   async refreshOpenFiles() {
     const paths = this._files.map((f) => f.path);
     for (const path of paths) {
-      const fetched = await this._fetchFileContent(path);
-      if (!fetched) continue;
       const file = this._files.find((f) => f.path === path);
       if (!file) continue;
+      // Skip dirty files — the user has in-progress edits
+      // in the SvgEditor that refetching would silently
+      // discard. Matches the contract that refresh is for
+      // syncing disk → viewer, not viewer → disk.
+      if (this._isDirty(file)) continue;
+      const fetched = await this._fetchFileContent(path);
+      if (!fetched) continue;
       file.original = fetched.original;
       file.modified = fetched.modified;
       file.savedContent = fetched.modified;
@@ -484,6 +502,40 @@ export class SvgViewer extends LitElement {
     this._lastRightContent = null;
     this._recomputeDirtyCount();
     this.requestUpdate();
+  }
+
+  /**
+   * Handle `files-modified` window broadcasts. Fires after
+   * backend-side writes (commits, resets, edit-pipeline
+   * applies, collab writes, manual repo writes from the
+   * files tab's rename/duplicate paths). Calls
+   * `refreshOpenFiles` when any affected path is open in
+   * this viewer — otherwise it's a cheap no-op.
+   *
+   * Dirty files are preserved by refreshOpenFiles's own
+   * dirty-skip guard, so a user mid-edit in the SvgEditor
+   * doesn't lose their work when some other file triggers
+   * the broadcast.
+   */
+  _onFilesModified(event) {
+    if (this._files.length === 0) return;
+    const paths = event?.detail?.paths;
+    if (!Array.isArray(paths) || paths.length === 0) {
+      // Missing / empty paths list means "something
+      // changed, but we don't know what". Refresh
+      // defensively — cost is N fetches for N open
+      // files, which in practice is 1–3.
+      this.refreshOpenFiles().catch((err) => {
+        console.warn('[svg-viewer] refresh failed', err);
+      });
+      return;
+    }
+    const open = new Set(this._files.map((f) => f.path));
+    const affected = paths.some((p) => open.has(p));
+    if (!affected) return;
+    this.refreshOpenFiles().catch((err) => {
+      console.warn('[svg-viewer] refresh failed', err);
+    });
   }
 
   /**
