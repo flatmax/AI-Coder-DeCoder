@@ -41,25 +41,6 @@ def test_llm_model_names_are_provider_qualified() -> None:
         )
 
 
-def test_llm_cache_tuning_values_are_positive() -> None:
-    """Cache tuning numbers are positive and in plausible ranges."""
-    data = _load_json("llm.json")
-    min_tokens = data["cache_min_tokens"]
-    multiplier = data["cache_buffer_multiplier"]
-    assert isinstance(min_tokens, int)
-    assert min_tokens > 0, f"cache_min_tokens must be > 0, got {min_tokens}"
-    assert min_tokens >= 1024, (
-        f"cache_min_tokens={min_tokens} is below the provider minimum (1024)"
-    )
-    assert isinstance(multiplier, (int, float))
-    assert multiplier > 1.0, (
-        f"cache_buffer_multiplier must be > 1.0, got {multiplier}"
-    )
-    assert multiplier < 2.0, (
-        f"cache_buffer_multiplier={multiplier} is implausibly large"
-    )
-
-
 def test_llm_env_dict_values_are_strings() -> None:
     """The env dict, if populated, maps strings to strings."""
     data = _load_json("llm.json")

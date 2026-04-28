@@ -486,6 +486,72 @@ export class SvgViewer extends LitElement {
     this.requestUpdate();
   }
 
+  /**
+   * Re-fit both panes' content to the current container
+   * size. Called by the app shell on window resize and
+   * during dialog resize drags.
+   *
+   * Both editors run with `preserveAspectRatio="none"`,
+   * so the browser doesn't re-fit the SVG when the
+   * container dimensions change. Without an explicit
+   * `fitContent()` call, the viewBox stays at its prior
+   * computation and the content appears stretched or
+   * cropped after a resize.
+   *
+   * Held under `_syncingViewBox` so the mirror path
+   * between the two editors doesn't cascade — each
+   * side's fit write is silent (suppresses its own
+   * `onViewChange`), and the mutex covers the whole
+   * operation defensively. Mirrors the pattern in
+   * `_onFitClick` but kept separate because fit is a
+   * user-initiated re-frame while relayout is a
+   * passive response to container changes.
+   *
+   * No-op when no file is open (both editors null).
+   */
+  relayout() {
+    if (!this._editorLeft && !this._editorRight) return;
+    this._syncingViewBox = true;
+    try {
+      if (this._editorLeft) {
+        try {
+          this._editorLeft.fitContent({ silent: true });
+        } catch (err) {
+          console.debug('[svg-viewer] left relayout failed', err);
+        }
+      }
+      if (this._editorRight) {
+        try {
+          this._editorRight.fitContent({ silent: true });
+        } catch (err) {
+          console.debug('[svg-viewer] right relayout failed', err);
+        }
+      }
+    } finally {
+      this._syncingViewBox = false;
+    }
+    // Sync right→left so the two panes agree on the
+    // final viewBox. Same rationale as `_onFitClick`:
+    // each fit runs against its own container, and
+    // sub-pixel differences would otherwise leave the
+    // panes mismatched.
+    if (this._editorLeft && this._editorRight) {
+      this._syncingViewBox = true;
+      try {
+        const vb = this._editorRight.getViewBox();
+        this._editorLeft.setViewBox(
+          vb.x,
+          vb.y,
+          vb.width,
+          vb.height,
+          { silent: true },
+        );
+      } finally {
+        this._syncingViewBox = false;
+      }
+    }
+  }
+
   getDirtyFiles() {
     return this._files.filter((f) => this._isDirty(f)).map((f) => f.path);
   }

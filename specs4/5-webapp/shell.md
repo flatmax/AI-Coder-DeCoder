@@ -149,10 +149,12 @@ A segmented control plus overlay toggle lives inline in the dialog header, betwe
 
 ## Window Resize Handling
 
-- Window resize triggers two actions — proportional dialog rescaling and viewer layout
+- Window resize triggers two actions — proportional dialog rescaling and viewer relayout
 - Both throttled to one call per animation frame
 - Without throttling, rapid resize events cause feedback loops (layout shift → resize event → layout call → forced reflow → visible jank)
 - Throttle handle cancelled on component unmount to prevent stale callbacks
+- Viewer relayout is also scheduled on every dialog-resize pointermove frame — the viewer sits behind the dialog, so a dialog getting wider shrinks the visible viewer area. Monaco caches scrollbar / minimap dimensions; the SVG viewer's editors run with `preserveAspectRatio="none"` and rely on explicit `fitContent()` calls. Without this hook, both viewers leave stale layout until the user clicks into them.
+- Window-resize and dialog-resize relayouts use separate RAF handles so they don't cancel each other's pending frames.
 
 ## Toast System
 

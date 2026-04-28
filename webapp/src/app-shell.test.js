@@ -1281,6 +1281,52 @@ describe('AppShell', () => {
       const styleHeight = parseFloat(dialog.style.height);
       expect(styleHeight).toBeGreaterThanOrEqual(200);
     });
+
+    it('schedules viewer relayout on every resize pointermove frame', async () => {
+      // Resizing the dialog changes the visible area of
+      // the viewer behind it. Monaco caches layout;
+      // the SVG viewer's editors don't auto-refit. Each
+      // resize pointermove must schedule a viewer
+      // relayout, RAF-throttled so rapid events coalesce.
+      vi.useFakeTimers({
+        toFake: [
+          'setTimeout',
+          'clearTimeout',
+          'setInterval',
+          'clearInterval',
+          'requestAnimationFrame',
+          'cancelAnimationFrame',
+        ],
+      });
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diffRelayout = vi.spyOn(diff, 'relayout');
+      const svgRelayout = vi.spyOn(svg, 'relayout');
+      shell._onHandlePointerDown(
+        { button: 0, clientX: 500, clientY: 400,
+          stopPropagation() {} },
+        'right',
+      );
+      // Simulate 5 rapid pointermoves within one frame.
+      for (let i = 0; i < 5; i += 1) {
+        shell._onPointerMove({
+          clientX: 500 + (i * 10), clientY: 400,
+        });
+      }
+      // No relayout yet — RAF hasn't fired.
+      expect(diffRelayout).not.toHaveBeenCalled();
+      expect(svgRelayout).not.toHaveBeenCalled();
+      // Flush one frame — the 5 moves coalesce to a
+      // single relayout on each viewer.
+      vi.runAllTimers();
+      expect(diffRelayout).toHaveBeenCalledTimes(1);
+      expect(svgRelayout).toHaveBeenCalledTimes(1);
+      diffRelayout.mockRestore();
+      svgRelayout.mockRestore();
+    });
   });
 
   describe('window resize', () => {
@@ -1317,6 +1363,35 @@ describe('AppShell', () => {
       vi.runAllTimers();
       expect(spy).toHaveBeenCalledTimes(1);
       spy.mockRestore();
+    });
+
+    it('calls relayout on both viewers during window resize', async () => {
+      vi.useFakeTimers({
+        toFake: [
+          'setTimeout',
+          'clearTimeout',
+          'setInterval',
+          'clearInterval',
+          'requestAnimationFrame',
+          'cancelAnimationFrame',
+        ],
+      });
+      const shell = mountShell();
+      await shell.updateComplete;
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diffRelayout = vi.spyOn(diff, 'relayout');
+      const svgRelayout = vi.spyOn(svg, 'relayout');
+      shell._onWindowResize();
+      // Both throttles are pending; flush.
+      vi.runAllTimers();
+      // _handleWindowResize scheduled the viewer
+      // relayout, which fires on the next RAF tick.
+      vi.runAllTimers();
+      expect(diffRelayout).toHaveBeenCalled();
+      expect(svgRelayout).toHaveBeenCalled();
+      diffRelayout.mockRestore();
+      svgRelayout.mockRestore();
     });
 
     it('cancels pending RAF on disconnect', async () => {

@@ -140,7 +140,7 @@ class TestGetConfigContent:
         # Bundled llm.json is a valid JSON object — parse it to
         # confirm we got real content, not a truncated read.
         parsed = json.loads(result["content"])
-        assert parsed["model"].startswith("anthropic/")
+        assert "/" in parsed["model"]
 
     def test_reads_shipped_system_prompt(self, settings):
         result = settings.get_config_content("system")
@@ -203,8 +203,8 @@ class TestGetConfigInfo:
         self, settings, isolated_config_dir
     ):
         info = settings.get_config_info()
-        assert info["model"].startswith("anthropic/")
-        assert info["smaller_model"].startswith("anthropic/")
+        assert "/" in info["model"]
+        assert "/" in info["smaller_model"]
         assert info["config_dir"] == str(isolated_config_dir)
 
     def test_allowed_for_non_localhost(self, settings):

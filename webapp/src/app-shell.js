@@ -812,6 +812,13 @@ export class AppShell extends JRPCClient {
     // RAF handle for window resize throttling. One call
     // per animation frame, cancelled on unmount.
     this._resizeRAF = null;
+    // Separate RAF handle for viewer relayout during
+    // dialog resize drags. Distinct from _resizeRAF so a
+    // window-resize event in the middle of a drag
+    // doesn't cancel the drag's pending viewer relayout
+    // and vice versa. See specs4/5-webapp/shell.md §
+    // Window Resize Handling.
+    this._viewerRelayoutRAF = null;
 
     // Global toast event listener binding.
     this._onToastEvent = this._onToastEvent.bind(this);
@@ -999,6 +1006,10 @@ export class AppShell extends JRPCClient {
     if (this._resizeRAF) {
       cancelAnimationFrame(this._resizeRAF);
       this._resizeRAF = null;
+    }
+    if (this._viewerRelayoutRAF) {
+      cancelAnimationFrame(this._viewerRelayoutRAF);
+      this._viewerRelayoutRAF = null;
     }
     // If a drag was in progress at unmount (unusual but
     // possible during hot reload), remove document-scope
@@ -2528,6 +2539,13 @@ export class AppShell extends JRPCClient {
       }
       dialog.style.height = `${newHeight}px`;
     }
+    // Viewer behind the dialog may have a different
+    // visible area now — schedule a relayout so Monaco's
+    // scrollbars / minimap and the SVG viewer's viewBox
+    // track the change in real time. RAF-throttled so
+    // rapid pointermove events coalesce to one call per
+    // frame.
+    this._scheduleViewerRelayout();
   }
 
   /**
@@ -2617,8 +2635,17 @@ export class AppShell extends JRPCClient {
    *
    * Also re-clamps position so the dialog never strands
    * off-screen (same bounds check as at restore time).
+   *
+   * Viewer relayout is scheduled unconditionally — even when
+   * the dialog itself doesn't need rescaling, the viewer
+   * behind it may need to recompute its internal layout.
+   * Monaco caches scrollbar / minimap dimensions, and the
+   * SVG viewer's editors use `preserveAspectRatio="none"`
+   * which relies on explicit `fitContent()` calls to follow
+   * container size changes.
    */
   _handleWindowResize() {
+    this._scheduleViewerRelayout();
     if (!this._undockedPos) {
       // Docked. Nothing to rescale — CSS handles it.
       // But still re-clamp if the docked width exceeds the
@@ -2658,6 +2685,38 @@ export class AppShell extends JRPCClient {
       height: Math.min(p.height, vh),
     };
     this._saveUndockedPos();
+  }
+
+  /**
+   * RAF-throttled viewer relayout. Multiple calls within
+   * a single animation frame coalesce to one actual
+   * relayout call on each viewer. Called from both the
+   * window-resize path and the dialog-resize pointermove
+   * path; distinct from `_resizeRAF` so the two paths
+   * don't cancel each other's pending frames.
+   */
+  _scheduleViewerRelayout() {
+    if (this._viewerRelayoutRAF) return;
+    this._viewerRelayoutRAF = requestAnimationFrame(() => {
+      this._viewerRelayoutRAF = null;
+      this._relayoutViewers();
+    });
+  }
+
+  /**
+   * Call `relayout()` on both viewers if they're mounted
+   * and the method exists. Safe to call in tests where
+   * the viewers haven't been constructed yet.
+   */
+  _relayoutViewers() {
+    const diff = this.shadowRoot?.querySelector('ac-diff-viewer');
+    const svg = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (diff && typeof diff.relayout === 'function') {
+      diff.relayout();
+    }
+    if (svg && typeof svg.relayout === 'function') {
+      svg.relayout();
+    }
   }
 
   // ---------------------------------------------------------------

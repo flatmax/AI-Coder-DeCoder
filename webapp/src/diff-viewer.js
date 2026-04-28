@@ -791,6 +791,37 @@ export class DiffViewer extends LitElement {
   }
 
   /**
+   * Force Monaco to recompute its layout against the
+   * current container size. Called by the app shell on
+   * window resize and during dialog resize drags.
+   *
+   * Monaco caches its layout internally — when the
+   * container resizes (dialog gets narrower, window
+   * dimensions change), the editor's scrollbars,
+   * minimap position, and word-wrap measurements stay
+   * at stale dimensions until the next focus / click.
+   * `editor.layout()` is the public API Monaco exposes
+   * for explicit re-measurement.
+   *
+   * No-op when the editor hasn't been constructed yet
+   * (empty state, or before the first openFile).
+   * Swallows layout errors — a detached DOM node can
+   * throw from inside Monaco, but we'd rather silently
+   * drop the call than let a resize storm crash the
+   * shell's RAF loop.
+   */
+  relayout() {
+    if (!this._editor) return;
+    try {
+      this._editor.layout();
+    } catch (err) {
+      // Detached DOM during rapid unmount / remount
+      // can make Monaco throw. Not fatal.
+      console.debug('[diff-viewer] relayout failed', err);
+    }
+  }
+
+  /**
    * Close the active file and return to empty state.
    * Called by the app-shell's SVG-toggle handler when
    * swapping viewers for a file; no keyboard shortcut

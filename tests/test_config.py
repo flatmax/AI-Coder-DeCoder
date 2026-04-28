@@ -268,9 +268,11 @@ def test_backup_name_without_version(isolated_config_dir):
 def test_llm_config_defaults(isolated_config_dir):
     """Accessor properties return bundled defaults on a fresh install."""
     cfg = ConfigManager()
-    # The bundled llm.json has these values.
-    assert cfg.model.startswith("anthropic/")
-    assert cfg.smaller_model.startswith("anthropic/")
+    # The bundled llm.json uses a provider-qualified model identifier;
+    # the exact provider (anthropic/, bedrock/, etc.) is a shipping
+    # detail, not part of the config contract.
+    assert "/" in cfg.model
+    assert "/" in cfg.smaller_model
     assert cfg.cache_min_tokens == 1024
     assert cfg.cache_buffer_multiplier == pytest.approx(1.1)
 def test_llm_config_hot_reload(isolated_config_dir):

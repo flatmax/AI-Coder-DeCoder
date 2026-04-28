@@ -124,6 +124,7 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
         editor._updateDiffListeners.push(cb);
         return { dispose: vi.fn() };
       }),
+      layout: vi.fn(),
       dispose: vi.fn(() => {
         editor._disposed = true;
       }),
@@ -961,6 +962,72 @@ describe('DiffViewer refreshOpenFiles', () => {
     expect(rpc).not.toHaveBeenCalled();
     expect(el._virtualComparison.leftContent).toBe('left side');
     expect(el._virtualComparison.rightContent).toBe('right side');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// relayout — called by app shell on dialog / window resize
+// ---------------------------------------------------------------------------
+
+describe('DiffViewer relayout', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => 'x'),
+    });
+  });
+
+  it('calls editor.layout() when an editor is active', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    const editor = monacoState.editors[0];
+    editor.layout.mockClear();
+    el.relayout();
+    expect(editor.layout).toHaveBeenCalledOnce();
+  });
+
+  it('is a no-op when no file is open', async () => {
+    const el = mountViewer();
+    await settle(el);
+    // No editor constructed yet — relayout must not
+    // throw.
+    expect(() => el.relayout()).not.toThrow();
+    expect(monacoState.editors.length).toBe(0);
+  });
+
+  it('survives Monaco layout throwing', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    const editor = monacoState.editors[0];
+    editor.layout.mockImplementation(() => {
+      throw new Error('detached');
+    });
+    // Swallowed — a transient layout failure during
+    // rapid unmount / remount must not propagate into
+    // the RAF loop.
+    expect(() => el.relayout()).not.toThrow();
+  });
+
+  it('calls layout on the current editor after a file switch', async () => {
+    // _swapModel reuses the editor instance. Verify
+    // relayout hits the same editor the viewer is
+    // currently displaying — no stale references.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    await el.openFile({ path: 'b.py' });
+    await settle(el);
+    // Single-editor reuse means only one instance
+    // exists.
+    expect(monacoState.editors.length).toBe(1);
+    const editor = monacoState.editors[0];
+    editor.layout.mockClear();
+    el.relayout();
+    expect(editor.layout).toHaveBeenCalledOnce();
   });
 });
 

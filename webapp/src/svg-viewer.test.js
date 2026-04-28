@@ -842,6 +842,109 @@ describe('SvgViewer fit button', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// relayout — called by app shell on dialog / window resize
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer relayout', () => {
+  beforeEach(() => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => svgFixture()),
+    });
+  });
+
+  it('calls fitContent on both editors when a file is open', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    const leftFit = vi.spyOn(el._editorLeft, 'fitContent');
+    const rightFit = vi.spyOn(el._editorRight, 'fitContent');
+    el.relayout();
+    expect(leftFit).toHaveBeenCalled();
+    expect(rightFit).toHaveBeenCalled();
+    // Both calls silent — suppresses onViewChange so
+    // the mirror path doesn't cascade during relayout.
+    expect(leftFit.mock.calls[0][0]).toEqual({ silent: true });
+    expect(rightFit.mock.calls[0][0]).toEqual({ silent: true });
+  });
+
+  it('is a no-op when no file is open', async () => {
+    const el = mountViewer();
+    await settle(el);
+    expect(el._editorLeft).toBe(null);
+    expect(el._editorRight).toBe(null);
+    // No editors, no crash.
+    expect(() => el.relayout()).not.toThrow();
+  });
+
+  it('holds the sync mutex across both fit calls', async () => {
+    // Defensive: with `silent: true` already preventing
+    // onViewChange cascade, the mutex is belt-and-braces.
+    // Still, we pin that it's held during the call so
+    // a future refactor that drops the silent flag would
+    // still be safe.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    let mutexDuringLeft = null;
+    let mutexDuringRight = null;
+    vi.spyOn(el._editorLeft, 'fitContent').mockImplementation(
+      () => { mutexDuringLeft = el._syncingViewBox; },
+    );
+    vi.spyOn(el._editorRight, 'fitContent').mockImplementation(
+      () => { mutexDuringRight = el._syncingViewBox; },
+    );
+    el.relayout();
+    expect(mutexDuringLeft).toBe(true);
+    expect(mutexDuringRight).toBe(true);
+    // And cleared after.
+    expect(el._syncingViewBox).toBe(false);
+  });
+
+  it('survives fitContent throwing on one side', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    vi.spyOn(el._editorLeft, 'fitContent').mockImplementation(
+      () => { throw new Error('boom'); },
+    );
+    const rightFit = vi.spyOn(el._editorRight, 'fitContent');
+    // Left throw is swallowed; right still runs.
+    expect(() => el.relayout()).not.toThrow();
+    expect(rightFit).toHaveBeenCalled();
+    // Mutex released even after an exception.
+    expect(el._syncingViewBox).toBe(false);
+  });
+
+  it('syncs right viewBox to left after relayout', async () => {
+    // Each pane's fit runs against its own container,
+    // producing potentially sub-pixel-different viewBoxes.
+    // The final sync ensures the two panes display the
+    // same region. Mirrors the behaviour of _onFitClick.
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    // Spy on left setViewBox — the sync target. The
+    // right's fitContent is called first (no-op here
+    // since we don't stub it); then right.getViewBox()
+    // feeds left.setViewBox.
+    const leftSet = vi.spyOn(el._editorLeft, 'setViewBox');
+    el.relayout();
+    // At least one call — the final right→left sync.
+    // The fit itself may also internally call
+    // setViewBox, so we just assert the sync happened
+    // with silent:true (the contract for mirror writes).
+    expect(leftSet).toHaveBeenCalled();
+    const lastCall =
+      leftSet.mock.calls[leftSet.mock.calls.length - 1];
+    expect(lastCall[4]).toEqual({ silent: true });
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // SvgEditor integration

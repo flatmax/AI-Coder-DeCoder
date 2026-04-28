@@ -188,9 +188,11 @@ describe('ChatPanel message rendering', () => {
     expect(labels).toEqual(['You', 'Assistant']);
   });
 
-  it('renders user content as escaped plain text, not markdown', async () => {
-    // Users typed what they typed; we don't reinterpret their
-    // asterisks as bold or their backticks as code.
+  it('renders user content as markdown', async () => {
+    // User input goes through the markdown renderer —
+    // users type markdown-literate text (that's what the
+    // LLM receives), so the chat UI should show it the
+    // same way. See chat-panel.js _renderMessage comment.
     const p = mountPanel({
       messages: [
         { role: 'user', content: 'use **bold** here' },
@@ -200,9 +202,7 @@ describe('ChatPanel message rendering', () => {
     const html = p.shadowRoot.querySelector(
       '.role-user .md-content',
     ).innerHTML;
-    // Asterisks appear as literal characters, no <strong> tag.
-    expect(html).toContain('**bold**');
-    expect(html).not.toContain('<strong>');
+    expect(html).toContain('<strong>bold</strong>');
   });
 
   it('renders assistant content as markdown', async () => {
@@ -1498,7 +1498,10 @@ describe('ChatPanel history browser', () => {
     expect(btn.disabled).toBe(true);
   });
 
-  it('History button is disabled during streaming', async () => {
+  it('History button stays enabled during streaming', async () => {
+    // Opening the browser is read-only; browsing past
+    // sessions while waiting for a stream is allowed.
+    // See chat-panel.js _onOpenHistory comment.
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
@@ -1509,7 +1512,7 @@ describe('ChatPanel history browser', () => {
     await p._send();
     await settle(p);
     const btn = p.shadowRoot.querySelector('.history-button');
-    expect(btn.disabled).toBe(true);
+    expect(btn.disabled).toBe(false);
   });
 
   it('opens the modal on History button click', async () => {
@@ -1614,7 +1617,9 @@ describe('ChatPanel history browser', () => {
     expect(p.messages).toHaveLength(1);
   });
 
-  it('does not open modal while streaming', async () => {
+  it('can open modal while streaming', async () => {
+    // _onOpenHistory has no streaming gate — opening the
+    // browser is read-only and allowed mid-stream.
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
@@ -1624,11 +1629,9 @@ describe('ChatPanel history browser', () => {
     p._input = 'hi';
     await p._send();
     await settle(p);
-    // Try to open via method — gate at method level, not
-    // just disabled attribute.
     p._onOpenHistory();
     await settle(p);
-    expect(p._historyOpen).toBe(false);
+    expect(p._historyOpen).toBe(true);
   });
 });
 
