@@ -63,12 +63,90 @@ Spec updated in commit `7ef81d0` (`specs4/5-webapp/svg-viewer.md`). Impl-history
 
 Layers 0–4 complete. Layer 5 is substantially delivered — core interaction loop (chat + selection + viewing + editing + search + review) fully functional. Remaining Layer 5 work, in order of readiness:
 
-1. **Dialog polish** (next) — dragging, resizing, minimizing, position persistence to localStorage. Dialog is currently fixed left-docked at 50% width. Spec reference: `specs4/5-webapp/shell.md § Dialog Container`.
-2. **App shell polish** (next) — window resize handling (editor dimensions follow dialog + window resize; Monaco layout call chain), remaining global keyboard shortcuts (Alt+1..4 for tab switching, Alt+M for minimize toggle — Ctrl+Shift+F is already wired). State restoration cascade and file/viewport persistence are already delivered.
-3. **Doc Convert tab — commit 6** — commits 1–5 delivered the full interaction surface. Commit 6's scope is TBD; land after dialog/shell polish so the tab renders in a finished dialog chrome.
-4. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
+1. **UI polish work plan** (next, next) — see the dedicated plan section below. Four commits: viewer relayout on dialog/window resize (a real bug), Alt+1..4 / Alt+M shortcuts, file picker left-panel resizer, and specs4 docs catch-up for dialog chrome.
+2. **Doc Convert tab — commit 6** — commits 1–5 delivered the full interaction surface. Commit 6's scope is TBD; land after UI polish so the tab renders in a finished dialog chrome.
+3. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
 
 Beyond Layer 5: Layer 6 (deployment — build tooling, PyInstaller packaging, release pipeline) has not started. The webapp-dist bundling deferral (D7) and version baking for releases both land in Layer 6.
+
+## UI polish work plan
+
+Four commits, in order. Each is a standalone change with its own tests. Strike through the heading and add a one-line delivery note with the commit hash after each lands.
+
+### Commit A — Viewer relayout on dialog/window resize
+
+Real bug, not polish. Monaco caches its layout internally; when the dialog or window resizes, the visible viewer area behind the dialog changes but the Monaco editor's scrollbars, minimap positions, and word-wrap stay at stale dimensions until the user clicks into the editor. The SVG viewer's `SvgEditor` pair has a similar issue — `preserveAspectRatio="none"` means the viewBox doesn't auto-fit when container dimensions change.
+
+**Scope:**
+
+- `webapp/src/diff-viewer.js` — add a public `relayout()` method. Walks `this._editor` (when non-null) and calls `editor.layout()`. No-op when empty state.
+- `webapp/src/svg-viewer.js` — add a public `relayout()` method. Calls `fitContent({ silent: true })` on both `_editorLeft` and `_editorRight` under the `_syncingViewBox` mutex. No-op when no file is open.
+- `webapp/src/app-shell.js` — `_handleWindowResize` calls both viewers' `relayout()` after the clamp logic. `_onPointerMove` during dialog resize ALSO calls them, RAF-throttled through a new `_scheduleViewerRelayout()` helper (separate timer from `_resizeRAF` so window-resize and drag-resize don't cancel each other).
+- `specs4/5-webapp/shell.md § Window Resize Handling` — add a sentence documenting "Viewer relayout hooks are called on every dialog-resize frame and every window-resize frame, both RAF-throttled."
+
+**Test contracts:**
+
+- `webapp/src/diff-viewer.test.js` — one test: `relayout() calls layout() on the active editor; no-op in empty state`.
+- `webapp/src/svg-viewer.test.js` — one test: `relayout() calls fitContent on both editors under the sync mutex`.
+- `webapp/src/app-shell.test.js § window resize` — extend `throttles handler to one call per animation frame` to also assert both viewers' relayout was called. New test: `dialog resize during pointermove calls viewer relayout on each throttled frame`.
+
+### Commit B — Alt+1..4 / Alt+M keyboard shortcuts
+
+Small, additive. `specs4/5-webapp/shell.md § Global Keyboard Shortcuts` spec'd these but they were never wired. Ctrl+Shift+F is already in place; these are the last three shortcuts.
+
+**Scope:**
+
+- `webapp/src/app-shell.js` — add a new `_onGlobalKeyDown` bound handler registered on `document` (capture phase not required; bubble is fine since no child component intercepts Alt+digit / Alt+M). Dispatches:
+  - Alt+1 → `_switchTab('files')`
+  - Alt+2 → `_switchTab('context')`
+  - Alt+3 → `_switchTab('settings')`
+  - Alt+4 → `_switchTab('doc-convert')` — but only when `_docConvertAvailable === true`; otherwise the shortcut is a no-op (no tab exists).
+  - Alt+M → `_toggleMinimize()`
+- Existing `_onGridKeyDown` handler keeps the Alt+Arrow navigation grid; the new shortcuts use digit and M keys so there's no conflict.
+- All five shortcuts call `event.preventDefault()` so browser defaults don't fire (some browsers use Alt+digit for tab switching at the browser level).
+
+**Test contracts:**
+
+- `webapp/src/app-shell.test.js` — new describe block `global keyboard shortcuts` with tests for each: Alt+1..3 switches tab, Alt+4 switches when available, Alt+4 no-ops when doc-convert unavailable, Alt+M toggles minimize, preventDefault fires for all five.
+
+### Commit C — File picker left-panel resizer
+
+Spec'd in `specs4/5-webapp/file-picker.md § Left Panel Resizer` but not implemented. `files-tab.js` holds the width as a reactive property with only CSS constraints; no splitter DOM exists today.
+
+**Scope:**
+
+- `webapp/src/files-tab.js` —
+  - Add a `.splitter` div between `.picker-pane` and `.chat-pane`. Styled as a 4px-wide vertical strip with `cursor: col-resize` and a hover highlight (matches the dialog resize handle aesthetic from app-shell).
+  - Add `_onSplitterPointerDown`, `_onSplitterPointerMove`, `_onSplitterPointerUp` handlers using the same pattern as app-shell's dialog resize (snapshot on down, mutate during move, commit on up).
+  - Persist width to `ac-dc-picker-width` localStorage key. Hydrate in constructor so first paint doesn't flash the default.
+  - Collapse toggle — spec calls for it but leaves the interaction unspecified. Use double-click on the splitter to toggle between current width and a collapsed width (e.g. 24px, wide enough to show a `▸` affordance to restore). Persist collapsed state to `ac-dc-picker-collapsed` localStorage key.
+  - Width constrained to `min: 180px`, `max: 50%` of the host width.
+- `specs4/5-webapp/file-picker.md` — firm up "Width constrained to a reasonable range" to "Width constrained to 180px min, 50% max" and document the double-click-to-collapse interaction.
+
+**Test contracts:**
+
+- `webapp/src/files-tab.test.js` — new describe block `left-panel resizer`: splitter renders, drag updates width and persists, below-minimum drag clamps, above-max drag clamps, double-click toggles collapse, collapsed state persists, hydrate from localStorage on mount, malformed localStorage falls back to default.
+
+### Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome
+
+Pure docs, no code. `app-shell.test.js` already pins the dialog drag/resize/minimize/persistence behaviour as test invariants, but `specs4/5-webapp/shell.md § Dialog Container` is still a stub that doesn't document:
+
+- Three-handle geometry (right / bottom / corner)
+- Min-size constants (300 × 200)
+- `_DIALOG_VISIBLE_MARGIN` off-screen recovery rule (100px visible on both axes)
+- Drag threshold (5px)
+- "Bottom/corner resize auto-undocks" behaviour
+- The four localStorage keys (`ac-dc-active-tab`, `ac-dc-minimized`, `ac-dc-dialog-width`, `ac-dc-dialog-pos`)
+
+**Scope:** expand the Dialog Container section with a subsection per topic, matching the depth of specs3's `5-webapp/app_shell_and_dialog.md § Resize Handles` and `§ Position Persistence`. No code changes.
+
+Lands last so the spec reflects the final code surface after A–C. Can also land first if a reader needs spec context — the text doesn't depend on A–C changes.
+
+### Out of scope
+
+- Doc Convert commit 6 — deferred to its own plan section.
+- Collaboration UI — parked.
+- Refactoring `app-shell.js` into smaller modules — the file is ~2200 lines. Might be worth a follow-up commit after this plan lands, but it's a separate concern.
 
 ## Layer 0 — scaffolding — complete
 
