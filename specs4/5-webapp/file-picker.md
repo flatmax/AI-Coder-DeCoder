@@ -18,7 +18,7 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 - Name click opens in the diff viewer (or SVG viewer for SVG files)
 - Line count badge in neutral color (no size thresholds)
 - Git status badge — modified, staged, untracked, deleted
-- Diff stats for changed files (additions and deletions)
+- Diff stats for changed files (additions and deletions) — rendered in a reserved gutter to the left of the checkbox column so the checkbox column stays aligned across sibling rows regardless of whether a given row has diff stats
 ### Tooltip
 - Every row displays a native browser tooltip on hover
 - Format — full path and node name

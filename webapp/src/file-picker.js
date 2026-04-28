@@ -732,10 +732,11 @@ export class FilePicker extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      padding: 0.15rem 0.5rem 0.15rem 0;
+      padding: 0.15rem 0.5rem 0.15rem calc(var(--row-indent, 0px) + 2.8rem);
       cursor: pointer;
       white-space: nowrap;
       user-select: none;
+      position: relative;
     }
     .row:hover {
       background: rgba(240, 246, 252, 0.05);
@@ -835,6 +836,24 @@ export class FilePicker extends LitElement {
       display: inline-flex;
       gap: 0.25rem;
     }
+    /* Variant rendered to the LEFT of the checkbox —
+     * absolutely positioned so it floats in a dedicated
+     * gutter reserved at the row's left edge (inside
+     * the depth indent, just before the twisty). The
+     * checkbox stays in the same flex column regardless
+     * of whether a given row has diff stats, so siblings
+     * remain aligned. Width of the gutter is reserved
+     * by the row's padding-left; the stats right-align
+     * within it so numbers hug the checkbox side. */
+    .diff-stats.diff-stats-pre {
+      position: absolute;
+      left: calc(var(--row-indent, 0px) + 0.15rem);
+      width: 2.5rem;
+      justify-content: flex-end;
+      margin: 0;
+      pointer-events: none;
+      font-size: 0.65rem;
+    }
     .diff-stats .added {
       color: #3fb950;
     }
@@ -918,7 +937,7 @@ export class FilePicker extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      padding: 0.1rem 0.5rem 0.1rem 0;
+      padding: 0.1rem 0.5rem 0.1rem var(--row-indent, 0px);
       background: rgba(88, 166, 255, 0.06);
     }
     .row.is-inline .inline-input {
@@ -1810,7 +1829,7 @@ export class FilePicker extends LitElement {
     return html`
       <div
         class=${rowClasses}
-        style="padding-left: ${indentPx}px"
+        style="--row-indent: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onDirClick(e, node)}
         @auxclick=${(e) => this._onDirAuxClick(e, node)}
@@ -1892,7 +1911,7 @@ export class FilePicker extends LitElement {
     return html`
       <div
         class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isActive ? 'active-in-viewer' : ''}"
-        style="padding-left: ${indentPx}px"
+        style="--row-indent: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
         @auxclick=${(e) => this._onFileAuxClick(e, node)}
@@ -1903,6 +1922,16 @@ export class FilePicker extends LitElement {
       >
         <span class="indent"></span>
         <span class="twisty empty"></span>
+        ${diff
+          ? html`<span class="diff-stats diff-stats-pre" title="Lines changed">
+              ${diff.added > 0
+                ? html`<span class="added">+${diff.added}</span>`
+                : ''}
+              ${diff.removed > 0
+                ? html`<span class="removed">-${diff.removed}</span>`
+                : ''}
+            </span>`
+          : ''}
         <input
           type="checkbox"
           class="checkbox"
@@ -1919,16 +1948,6 @@ export class FilePicker extends LitElement {
               aria-label=${status.tooltip}
               >${status.letter}</span
             >`
-          : ''}
-        ${diff
-          ? html`<span class="diff-stats" title="Lines changed">
-              ${diff.added > 0
-                ? html`<span class="added">+${diff.added}</span>`
-                : ''}
-              ${diff.removed > 0
-                ? html`<span class="removed">-${diff.removed}</span>`
-                : ''}
-            </span>`
           : ''}
         ${typeof node.lines === 'number' && node.lines > 0
           ? html`<span class="lines-badge">${node.lines}</span>`
@@ -2007,7 +2026,7 @@ export class FilePicker extends LitElement {
     return html`
       <div
         class="row is-inline"
-        style="padding-left: ${indentPx}px"
+        style="--row-indent: ${indentPx}px"
         role="treeitem"
       >
         <span class="indent"></span>
