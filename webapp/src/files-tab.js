@@ -526,6 +526,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // any row; we insert the path into the chat
     // panel's textarea at the current cursor.
     this._onInsertPath = this._onInsertPath.bind(this);
+    // Reveal-file-in-picker — diff viewer dispatches
+    // this when the user clicks the status LED, so
+    // the picker scrolls to and flashes the active
+    // file. Useful when the picker has scrolled away
+    // from what the editor is showing.
+    this._onRevealFileInPicker =
+      this._onRevealFileInPicker.bind(this);
     // New-file and new-directory commit handlers —
     // fired when the picker's inline input is
     // confirmed with Enter. Same bind pattern as
@@ -554,6 +561,10 @@ export class FilesTab extends RpcMixin(LitElement) {
     super.connectedCallback();
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('files-modified', this._onFilesModified);
+    window.addEventListener(
+      'reveal-file-in-picker',
+      this._onRevealFileInPicker,
+    );
     // Viewer-dispatched `active-file-changed` bubbles and
     // composes out to the window naturally — the event
     // fires from inside the viewer's shadow root, passes
@@ -583,6 +594,10 @@ export class FilesTab extends RpcMixin(LitElement) {
     window.removeEventListener(
       'files-modified',
       this._onFilesModified,
+    );
+    window.removeEventListener(
+      'reveal-file-in-picker',
+      this._onRevealFileInPicker,
     );
     window.removeEventListener(
       'active-file-changed',
@@ -957,6 +972,22 @@ export class FilesTab extends RpcMixin(LitElement) {
       picker.activePath = nextPath;
       picker.requestUpdate();
     }
+  }
+
+  /**
+   * Handle `reveal-file-in-picker` — dispatched by the
+   * diff viewer's status LED. Calls the picker's public
+   * `revealFile` method which expands ancestors, clears
+   * the filter, scrolls the row into view, and flashes
+   * it briefly. No-op when the picker isn't mounted or
+   * the event carries no path.
+   */
+  _onRevealFileInPicker(event) {
+    const path = event.detail?.path;
+    if (typeof path !== 'string' || !path) return;
+    const picker = this._picker();
+    if (!picker) return;
+    picker.revealFile(path);
   }
 
   _onReviewStarted(event) {

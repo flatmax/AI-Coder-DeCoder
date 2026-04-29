@@ -955,6 +955,26 @@ export class FilePicker extends LitElement {
       color: var(--accent-primary, #58a6ff);
     }
 
+    /* Reveal flash — applied briefly when the diff
+     * viewer's status LED is clicked. A quick pulse of
+     * accented background + outline draws the eye to
+     * the row without permanently altering appearance.
+     * The class is added via revealFile() and auto-
+     * removed after the animation completes. */
+    @keyframes picker-reveal-flash {
+      0% {
+        background: rgba(88, 166, 255, 0.45);
+        box-shadow: inset 0 0 0 2px var(--accent-primary, #58a6ff);
+      }
+      100% {
+        background: transparent;
+        box-shadow: inset 0 0 0 2px transparent;
+      }
+    }
+    .row.reveal-flash {
+      animation: picker-reveal-flash 1.2s ease-out;
+    }
+
     /* Inline-input rows — for rename and duplicate.
      * Match the file-row layout so the input lines up
      * with the filename column. The textbox uses the
@@ -1379,6 +1399,82 @@ export class FilePicker extends LitElement {
     }
     walk(this.tree);
     this._expanded = all;
+  }
+
+  /**
+   * Reveal a file in the tree — expand its ancestor
+   * directories so the row exists in the DOM, clear any
+   * filter that would hide it, scroll it into the
+   * centre of the viewport, and briefly flash it with
+   * an accent highlight so the user's eye can find it.
+   *
+   * Called by the files-tab orchestrator in response to
+   * a `reveal-file-in-picker` event dispatched from the
+   * diff viewer's status LED. The common case: the
+   * user has scrolled the picker away from the active
+   * file, clicks the LED to get back to it.
+   *
+   * Safe no-op when `path` is empty, non-string, or
+   * doesn't exist in the current tree. The filter is
+   * cleared unconditionally — a file that matched the
+   * filter still gets revealed, but a file that didn't
+   * wouldn't otherwise appear, so clearing is the
+   * predictable behaviour.
+   */
+  revealFile(path) {
+    if (typeof path !== 'string' || !path) return;
+    // Clear filter so the row isn't filtered out.
+    // Preserving the filter would mean "reveal" is a
+    // silent no-op for non-matching paths — confusing.
+    if (this.filterQuery) {
+      this.filterQuery = '';
+    }
+    // Expand every ancestor directory so the row lands
+    // in the DOM. Same logic as the files-tab's
+    // _expandAncestorsOf but kept local here so the
+    // public API doesn't require orchestrator
+    // coordination.
+    const parts = path.split('/');
+    if (parts.length > 1) {
+      const next = new Set(this._expanded);
+      let acc = '';
+      for (let i = 0; i < parts.length - 1; i += 1) {
+        acc = acc ? `${acc}/${parts[i]}` : parts[i];
+        next.add(acc);
+      }
+      this._expanded = next;
+    }
+    // Set focus so the accent background highlights
+    // the row in addition to the flash animation.
+    // Having both states makes the location stick in
+    // the user's attention after the flash fades.
+    this._focusedPath = path;
+    // Defer scroll + flash until Lit commits the
+    // expansion and filter changes — the row needs to
+    // be in the DOM before scrollIntoView can target
+    // it.
+    this.updateComplete.then(() => {
+      const row = this._findRowElementForPath(path);
+      if (!row) return;
+      if (typeof row.scrollIntoView === 'function') {
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      // Remove any prior flash class on this row (the
+      // user may have clicked the LED twice quickly)
+      // then re-add so the animation restarts.
+      row.classList.remove('reveal-flash');
+      // Force a reflow so the restart takes effect.
+      // Reading offsetWidth is the canonical browser
+      // idiom for this; the value is discarded.
+      void row.offsetWidth;
+      row.classList.add('reveal-flash');
+      // Clean up the class after the animation
+      // completes so a subsequent class add triggers
+      // a fresh animation rather than a no-op.
+      setTimeout(() => {
+        row.classList.remove('reveal-flash');
+      }, 1300);
+    });
   }
 
   /**

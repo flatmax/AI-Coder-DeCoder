@@ -13,10 +13,13 @@ For SVG files, see [svg-viewer.md](svg-viewer.md) — a dedicated side-by-side v
 Circular indicator showing the active file's state:
 | State | Color | Behavior |
 |---|---|---|
-| Clean | Green (steady glow) | File matches saved content |
-| Dirty | Orange (pulsing) | Unsaved changes — click to save |
-| New file | Cyan (steady glow) | File doesn't exist in HEAD |
-- Tooltip shows current file path and save hint when dirty
+| Clean | Green (steady glow) | File matches saved content — click to reveal in picker |
+| Dirty | Orange (pulsing) | Unsaved changes — click to save and reveal in picker |
+| New file | Cyan (steady glow) | File doesn't exist in HEAD — click to reveal in picker |
+- Tooltip shows current file path and action hint (save when dirty, reveal in picker always)
+- Clicking the LED dispatches a `reveal-file-in-picker` event that bubbles/composes to the files tab, which calls the picker's public reveal method to expand ancestor directories, clear any active filter, scroll the matching row into view, and briefly flash it so the user can find where the active file lives in the tree. Useful when the picker has scrolled away from what the editor is showing.
+- Dirty LEDs save first, then dispatch the reveal — a single click does both actions
+- Virtual files (loadPanel comparisons) have no picker row; the reveal dispatch is suppressed for them
 - At most one file displayed at a time; no tab bar and no per-file keyboard navigation. The [file navigation grid](file-navigation.md) provides history-based navigation across previously-visited files (next/previous tab, close)
 ## Editor Features
 - Side-by-side — original (read-only) left, modified (editable) right

@@ -154,6 +154,20 @@ Stage-all / unstage-all / rename / exclude-all are deliberately absent — the r
 - App shell relays to the dialog → files tab → picker
 - Distinct background and left-border accent, independent of selection state
 
+## Reveal from Diff Viewer
+
+The picker exposes a public `revealFile(path)` method that makes the named file visible and draws the user's attention to it. Called by the files tab when the diff viewer dispatches `reveal-file-in-picker` (typically from a status-LED click — see [diff-viewer.md](diff-viewer.md#status-led)).
+
+Behavior:
+
+- Expand every ancestor directory of the target path so the row lands in the DOM
+- Clear any active filter — a filter that would hide the target file makes reveal feel broken, so reveal wins unconditionally
+- Set the focused-row highlight to the target path (same highlight channel file-search uses)
+- Scroll the target row to the centre of the picker viewport with smooth scrolling
+- Flash the row briefly with an accent-coloured animation, then remove the animation class so subsequent reveals restart cleanly
+
+No-op when the path is missing, non-string, or not found in the current tree. Safe to call from outside the picker component; the files tab is the conventional caller but any consumer with a picker reference can invoke it.
+
 ## Left Panel Resizer
 
 - Vertical 4px splitter between the file picker and chat panel, widening to a ~20px affordance strip with a `▸` glyph when the picker is collapsed

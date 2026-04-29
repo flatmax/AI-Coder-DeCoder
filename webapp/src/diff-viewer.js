@@ -2582,18 +2582,37 @@ export class DiffViewer extends LitElement {
     if (this._file === null) return '';
     const klass = this._statusLedClass();
     if (klass === 'dirty') {
-      return `${this._file.path} — unsaved (click to save)`;
+      return `${this._file.path} — unsaved (click to save and reveal in picker)`;
     }
     if (klass === 'new-file') {
-      return `${this._file.path} — new file`;
+      return `${this._file.path} — new file (click to reveal in picker)`;
     }
-    return this._file.path;
+    return `${this._file.path} (click to reveal in picker)`;
   }
 
   _onStatusLedClick() {
     if (this._file === null) return;
+    // Save first if dirty — the user's primary reason
+    // for clicking a dirty LED is to commit the buffer.
+    // Reveal happens regardless so a single click does
+    // both (save + locate), consistent with the
+    // "every click does something useful" contract.
     if (this._isDirty(this._file)) {
       this._saveFile(this._file.path);
+    }
+    // Dispatch reveal event so the files-tab can scroll
+    // the picker to the active file. Virtual files
+    // (loadPanel content) aren't in the picker tree so
+    // skip the dispatch for those — no matching row to
+    // scroll to.
+    if (!this._file.isVirtual) {
+      this.dispatchEvent(
+        new CustomEvent('reveal-file-in-picker', {
+          detail: { path: this._file.path },
+          bubbles: true,
+          composed: true,
+        }),
+      );
     }
   }
 

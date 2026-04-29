@@ -420,6 +420,28 @@ class StabilityTracker:
         # Phase 2 — place graduates into L3 as entry N.
         self._place_graduates(graduates)
 
+        # Phase 2b — controlled history graduation. History is
+        # immutable so the N-based progression that drives file
+        # and symbol graduation is the wrong signal. Per
+        # specs4/3-llm/cache-tiering.md § "History Graduation",
+        # history graduates only when:
+        #
+        #   - cache_target_tokens > 0 (otherwise history stays
+        #     active permanently), AND
+        #   - either L3 is already broken this cycle (piggyback
+        #     on an invalidation that's going to rebuild the L3
+        #     cache block anyway — free ride), OR
+        #   - eligible history tokens exceed the cache target
+        #     (token-threshold rule; keeps the verbatim window
+        #     bounded regardless of cache state).
+        #
+        # Runs AFTER _place_graduates so the file/symbol graduates
+        # that just marked L3 broken unlock the piggyback path.
+        # Runs BEFORE _run_cascade so any history additions to L3
+        # participate in the cascade's anchor/cap/promote logic
+        # uniformly with other L3 content.
+        self._graduate_history_if_eligible()
+
         # Phase 3 — cascade. Bottom-up pass, anchoring,
         # promotion, post-cascade underfill demotion.
         self._run_cascade()
@@ -561,10 +583,18 @@ class StabilityTracker:
                 existing.n_value += 1
 
             # Graduation check — items at or above the active
-            # promote threshold are candidates for L3.
+            # promote threshold are candidates for L3. History
+            # is excluded: per specs4/3-llm/cache-tiering.md
+            # § "History Graduation", history is immutable so
+            # N-based progression is the wrong signal. History
+            # graduation is controlled separately — piggyback
+            # on L3 invalidation, or token-threshold-driven —
+            # and runs in a dedicated phase after _place_graduates
+            # via _graduate_history_if_eligible.
             if (
                 existing.tier == Tier.ACTIVE
                 and existing.n_value >= _TIER_CONFIG[Tier.ACTIVE]["promote_n"]
+                and not key.startswith("history:")
             ):
                 graduates.append(key)
 
@@ -612,6 +642,118 @@ class StabilityTracker:
                 f"{old_tier.value} → L3: {key} (graduated)"
             )
         self._broken_tiers.add(Tier.L3)
+
+    # ------------------------------------------------------------------
+    # Phase 2b — controlled history graduation
+    # ------------------------------------------------------------------
+
+    def _graduate_history_if_eligible(self) -> None:
+        """Graduate history to L3 only when a gate condition holds.
+
+        Per specs4/3-llm/cache-tiering.md § "History Graduation",
+        history does not follow the standard N-based promotion
+        path. Two gates permit graduation:
+
+        1. **Piggyback** — if L3 is already in ``_broken_tiers``
+           this cycle (because some file/symbol graduated into
+           it, or some L3 item demoted/promoted out), the cache
+           block is going to be rebuilt regardless. Graduating
+           history at the same time costs nothing extra in
+           cache churn — we get the history into a cached tier
+           "for free".
+
+        2. **Token threshold** — if the active history's total
+           tokens exceed ``cache_target_tokens``, the oldest
+           messages are forced to graduate to keep the verbatim
+           window bounded. This fires independent of L3's state
+           because an unbounded active history would eventually
+           push the prompt past the provider's cache-min
+           threshold for the active block itself.
+
+        When neither gate holds, history stays in active. When
+        ``cache_target_tokens == 0``, the entire mechanism is
+        disabled and history remains active permanently.
+
+        Graduation walks NEWEST → OLDEST, accumulating tokens
+        into a verbatim window sized at ``cache_target_tokens``.
+        Everything newer than the window stays in active;
+        everything older graduates to L3 at L3's entry N.
+
+        Marks L3 broken when any graduation occurs so downstream
+        cascade passes see the invalidation. A no-op piggyback
+        (gate passed but no items graduated — the whole history
+        fits in the verbatim window) leaves ``_broken_tiers``
+        untouched.
+        """
+        if self._cache_target_tokens <= 0:
+            # Never rule — history stays active when caching is
+            # disabled.
+            return
+
+        # Collect active history items and sort newest → oldest
+        # by index. Keys are ``history:{N}`` where N is the
+        # conversation-order index — higher N means more recent.
+        active_history: list[tuple[int, TrackedItem]] = []
+        for key, item in self._items.items():
+            if item.tier != Tier.ACTIVE:
+                continue
+            if not key.startswith("history:"):
+                continue
+            try:
+                idx = int(key[len("history:"):])
+            except ValueError:
+                continue
+            active_history.append((idx, item))
+        if not active_history:
+            return
+        active_history.sort(key=lambda p: p[0], reverse=True)
+
+        total_active_tokens = sum(
+            item.tokens for _, item in active_history
+        )
+
+        # Gate check.
+        piggyback = Tier.L3 in self._broken_tiers
+        token_threshold_exceeded = (
+            total_active_tokens > self._cache_target_tokens
+        )
+        if not (piggyback or token_threshold_exceeded):
+            return
+
+        # Walk newest → oldest, keeping the verbatim window. The
+        # first message whose inclusion would overflow the window
+        # becomes the boundary; it and every older message
+        # graduates to L3.
+        accumulated = 0
+        graduation_boundary: int | None = None
+        for idx, item in active_history:
+            if accumulated + item.tokens > self._cache_target_tokens:
+                graduation_boundary = idx
+                break
+            accumulated += item.tokens
+        if graduation_boundary is None:
+            # Whole history fits in the verbatim window. Nothing
+            # to graduate — even on piggyback, there's no item to
+            # promote. Leave everything in active.
+            return
+
+        l3_entry_n = _TIER_CONFIG[Tier.L3]["entry_n"]
+        graduated_any = False
+        for idx, item in active_history:
+            if idx > graduation_boundary:
+                # Newer than the boundary — stays in verbatim
+                # window.
+                continue
+            item.tier = Tier.L3
+            item.n_value = l3_entry_n
+            reason = "piggyback" if piggyback else "token threshold"
+            self._log_change(
+                f"active → L3: history:{idx} ({reason})"
+            )
+            graduated_any = True
+
+        if graduated_any:
+            self._broken_tiers.add(Tier.L3)
 
     # ------------------------------------------------------------------
     # Phase 3 — cascade (the complex bit)

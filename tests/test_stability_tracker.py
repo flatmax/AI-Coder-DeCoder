@@ -29,7 +29,13 @@ from ac_dc.stability_tracker import (
     StabilityTracker,
     Tier,
     TrackedItem,
+    _TIER_CONFIG,
 )
+
+# Convenience alias for the L3 promote threshold — used by
+# tests that seed items directly into L3 and want to exercise
+# promotion without reproducing the numeric literal.
+_TIER_CONFIG_PROMOTE_L3 = _TIER_CONFIG[Tier.L3]["promote_n"]
 
 
 # ---------------------------------------------------------------------------
@@ -1223,3 +1229,281 @@ class TestIntrospection:
         tracker.update({"file:a.py": _active_item("original")})
         tracker.update({"file:a.py": _active_item("modified")})
         assert tracker.get_signature_hash("file:a.py") == "modified"
+
+
+# ---------------------------------------------------------------------------
+# History graduation — gated, NOT N-based
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryGraduation:
+    """History graduates only via piggyback or token threshold.
+
+    Per specs4/3-llm/cache-tiering.md § "History Graduation",
+    history is immutable so waiting on an N-value progression
+    is the wrong signal. Graduation is controlled by two gates:
+
+    1. Piggyback — L3 is already broken this cycle (file/symbol
+       graduated in, or L3 item demoted/promoted out).
+    2. Token threshold — active history tokens exceed cache target.
+
+    When cache_target_tokens=0, neither gate fires — history
+    stays active forever.
+    """
+
+    def test_history_stays_active_under_n_progression(self) -> None:
+        """N reaching the active promote threshold does NOT graduate history.
+
+        The critical regression test — before the fix, history
+        items were promoted identically to file items, causing
+        cache churn on every stable conversation cycle.
+        Without a piggyback or token-threshold trigger, history
+        must stay in active no matter how stable it becomes.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        # Drive many unchanged cycles — N grows indefinitely.
+        for _ in range(10):
+            tracker.update({"history:0": _active_item("h1", 100)})
+        item = tracker.get_all_items()["history:0"]
+        assert item.tier == Tier.ACTIVE
+
+    def test_cache_target_zero_never_graduates(self) -> None:
+        """With cache_target_tokens=0, history stays active forever.
+
+        Even with an enormous active history that would trip
+        the token-threshold gate, cache_target=0 disables the
+        whole mechanism.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # Seed 20 history entries with large token counts in a
+        # single update — Phase 1 cleanup removes history:* items
+        # not present in the current active_items dict, so we
+        # can't seed them in separate cycles.
+        active = {
+            f"history:{i}": _active_item("h1", 10_000)
+            for i in range(20)
+        }
+        tracker.update(active)
+        # Run a few more cycles with the same set so N grows.
+        # Without the cache_target=0 guard these would graduate
+        # (large tokens → token-threshold gate would fire).
+        for _ in range(5):
+            tracker.update(active)
+        # All should still be in active.
+        for i in range(20):
+            item = tracker.get_all_items()[f"history:{i}"]
+            assert item.tier == Tier.ACTIVE
+
+    def test_piggyback_graduates_when_file_graduates(self) -> None:
+        """File graduation marks L3 broken → history piggybacks.
+
+        A file graduating from active to L3 invalidates L3's
+        cache block. Since the block is going to be rebuilt,
+        graduating history at the same time is free. Older
+        history messages graduate; newer ones stay in the
+        verbatim window sized at cache_target_tokens.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Seed history entries (tokens intentionally small so
+        # they fit comfortably within the verbatim window when
+        # not graduated, and the oldest falls outside once the
+        # verbatim window accumulates 500 tokens).
+        # tokens=200 means the window holds 2 messages (400
+        # accumulated), and the third would push to 600 > 500
+        # → becomes the graduation boundary.
+        for i in range(3):
+            tracker.update(
+                {f"history:{i}": _active_item("h_hist", 200)}
+            )
+        # Drive a file through to graduation. 4 cycles of
+        # unchanged content → file:a.py graduates on cycle 4.
+        # We also keep history present each cycle so it's not
+        # cleaned up as departed.
+        for _ in range(4):
+            tracker.update(
+                {
+                    "file:a.py": _active_item("h_file", 100),
+                    "history:0": _active_item("h_hist", 200),
+                    "history:1": _active_item("h_hist", 200),
+                    "history:2": _active_item("h_hist", 200),
+                }
+            )
+        # file:a.py graduated — L3 was broken that cycle, so
+        # history piggyback fires. Walking newest→oldest with
+        # cache_target=500 and 200-token items:
+        #   idx=2 (newest): accumulated 200, stays
+        #   idx=1: accumulated 400, stays
+        #   idx=0 (oldest): accumulated 600 > 500, graduates
+        item0 = tracker.get_all_items()["history:0"]
+        item2 = tracker.get_all_items()["history:2"]
+        assert item0.tier == Tier.L3, (
+            f"oldest history should graduate on piggyback; "
+            f"got tier={item0.tier}"
+        )
+        assert item2.tier == Tier.ACTIVE, (
+            f"newest history should stay in verbatim window; "
+            f"got tier={item2.tier}"
+        )
+
+    def test_token_threshold_graduates_without_piggyback(self) -> None:
+        """Active history exceeding cache_target graduates even without piggyback.
+
+        No files are graduating this cycle, L3 is not otherwise
+        broken, but the sheer size of active history forces
+        graduation to keep the verbatim window bounded.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Seed 4 history entries at 200 tokens each.
+        # Total: 800 tokens > 500 cache target → token-threshold
+        # gate fires.
+        for i in range(4):
+            tracker.update(
+                {f"history:{i}": _active_item("h_hist", 200)}
+            )
+        # One more cycle with all four present. No file work —
+        # the only trigger is the token threshold. Walking
+        # newest→oldest with window=500:
+        #   idx=3: acc 200, stays
+        #   idx=2: acc 400, stays
+        #   idx=1: acc 600 > 500 → boundary
+        #   idx=0: older than boundary → graduates
+        tracker.update(
+            {
+                "history:0": _active_item("h_hist", 200),
+                "history:1": _active_item("h_hist", 200),
+                "history:2": _active_item("h_hist", 200),
+                "history:3": _active_item("h_hist", 200),
+            }
+        )
+        items = tracker.get_all_items()
+        assert items["history:0"].tier == Tier.L3
+        assert items["history:1"].tier == Tier.L3
+        assert items["history:2"].tier == Tier.ACTIVE
+        assert items["history:3"].tier == Tier.ACTIVE
+
+    def test_piggyback_noop_when_history_fits_window(self) -> None:
+        """Piggyback with small history → nothing graduates.
+
+        L3 gets broken by a file graduation, but the entire
+        active history fits inside the verbatim window
+        (total tokens ≤ cache_target_tokens). No graduation
+        boundary exists; every history message stays in active.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # Two history messages, 100 tokens each → 200 total,
+        # well under cache_target=1000.
+        for i in range(2):
+            tracker.update(
+                {f"history:{i}": _active_item("h_hist", 100)}
+            )
+        # Graduate a file (4 unchanged cycles) with history
+        # also present each cycle.
+        for _ in range(4):
+            tracker.update(
+                {
+                    "file:a.py": _active_item("h_file", 100),
+                    "history:0": _active_item("h_hist", 100),
+                    "history:1": _active_item("h_hist", 100),
+                }
+            )
+        # File graduated — L3 broken. Piggyback gate opens.
+        # But total active history (200) < cache_target (1000)
+        # → no graduation boundary → history stays put.
+        items = tracker.get_all_items()
+        assert items["history:0"].tier == Tier.ACTIVE
+        assert items["history:1"].tier == Tier.ACTIVE
+
+    def test_graduated_history_logs_reason(self) -> None:
+        """Change log distinguishes piggyback vs token-threshold.
+
+        The log message annotates why history graduated so
+        operators can tell from the terminal HUD whether the
+        cache churn was amortised onto a file graduation or
+        forced by history size.
+        """
+        tracker = StabilityTracker(cache_target_tokens=300)
+        # 3 history items, 200 tokens each → 600 total > 300.
+        # No file activity → token-threshold gate fires.
+        for i in range(3):
+            tracker.update(
+                {f"history:{i}": _active_item("h_hist", 200)}
+            )
+        tracker.update(
+            {
+                "history:0": _active_item("h_hist", 200),
+                "history:1": _active_item("h_hist", 200),
+                "history:2": _active_item("h_hist", 200),
+            }
+        )
+        changes = tracker.get_changes()
+        # At least one history entry should have graduated.
+        history_grads = [
+            c for c in changes
+            if "history:" in c and "→ L3" in c
+        ]
+        assert history_grads, (
+            f"expected history graduation in change log, "
+            f"got: {changes}"
+        )
+        # Reason annotation should say "token threshold".
+        assert any(
+            "token threshold" in c for c in history_grads
+        ), (
+            f"expected 'token threshold' reason, "
+            f"got: {history_grads}"
+        )
+
+    def test_history_graduation_marks_l3_broken(self) -> None:
+        """Graduating history joins the cascade's broken-tier set.
+
+        When history graduates (via either gate), L3 is marked
+        broken so downstream passes can rebalance — e.g., an
+        L2 item ready to promote would flow into L3's refreshed
+        cache block on the next cycle.
+        """
+        tracker = StabilityTracker(cache_target_tokens=300)
+        # Force token-threshold graduation.
+        for i in range(3):
+            tracker.update(
+                {f"history:{i}": _active_item("h_hist", 200)}
+            )
+        tracker.update(
+            {
+                "history:0": _active_item("h_hist", 200),
+                "history:1": _active_item("h_hist", 200),
+                "history:2": _active_item("h_hist", 200),
+            }
+        )
+        # The cascade consumes _broken_tiers mid-method and
+        # clears it per-cycle. We can't read the set after
+        # update() returns, but we CAN verify the downstream
+        # effect: the change log should show an L3 change.
+        changes = tracker.get_changes()
+        assert any("→ L3: history:" in c for c in changes)
+
+    def test_history_in_cached_tier_promotes_normally(self) -> None:
+        """Once graduated, history items cascade like any other tier resident.
+
+        The immutability argument that gates the ACTIVE → L3
+        transition doesn't apply to L3 → L2 → L1 → L0 promotions.
+        Once in a cached tier, history is ordinary content and
+        flows upward via _try_promote_from as N progresses.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # Seed a history item directly into L3 with N at L3's
+        # promote threshold. With cache_target=0 (no anchoring,
+        # no underfill demotion) and L2 empty (broken), it
+        # should promote on the next update.
+        tracker._items["history:0"] = TrackedItem(
+            key="history:0",
+            tier=Tier.L3,
+            n_value=_TIER_CONFIG_PROMOTE_L3,
+            content_hash="h1",
+            tokens=100,
+        )
+        # Include the item in active_items with unchanged hash
+        # so Phase 1 doesn't drop it as departed. N increments
+        # past promote_n, which is fine.
+        tracker.update({"history:0": _active_item("h1", 100)})
+        item = tracker.get_all_items()["history:0"]
+        assert item.tier == Tier.L2
