@@ -31,12 +31,13 @@ const _TIER_COLORS = {
 
 /** Icons for tier sub-item types. Mirrors context-tab.js. */
 const _TYPE_ICONS = {
-  symbol: '🔧',
-  doc: '📄',
-  file: '📁',
-  history: '💬',
   system: '⚙️',
-  url: '🔗',
+  legend: '📖',
+  symbols: '📦',
+  doc_symbols: '📝',
+  files: '📄',
+  urls: '🔗',
+  history: '💬',
 };
 
 function _fmtTokens(n) {
@@ -69,6 +70,10 @@ export class TokenHud extends RpcMixin(LitElement) {
     _requestUsage: { type: Object, state: true },
     /** Set of collapsed section names. */
     _collapsed: { type: Object, state: true },
+    /** Map-block modal content (null when closed). */
+    _mapModalContent: { type: Object, state: true },
+    /** Map-block modal title. */
+    _mapModalTitle: { type: String, state: true },
   };
 
   static styles = css`
@@ -318,6 +323,93 @@ export class TokenHud extends RpcMixin(LitElement) {
     }
     .tot-value.green { color: #7ee787; }
     .tot-value.yellow { color: #f59e0b; }
+
+    .tier-subitem.clickable {
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 0.05rem 0.2rem;
+      margin: 0 -0.2rem;
+    }
+    .tier-subitem.clickable:hover {
+      background: rgba(240, 246, 252, 0.06);
+    }
+
+    /* Map-block modal — mirrors the Context tab's Cache
+     * sub-view modal. Clicking a tier sub-item opens this
+     * overlay with the full content the LLM sees for that
+     * entry. */
+    .map-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 10001;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .map-modal {
+      background: var(--bg-primary, #0d1117);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 8px;
+      max-width: min(900px, 90vw);
+      max-height: 85vh;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    }
+    .map-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+    }
+    .map-modal-title {
+      font-weight: 600;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.85rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .map-modal-close {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary, #8b949e);
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+    }
+    .map-modal-close:hover {
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .map-modal-body {
+      flex: 1;
+      overflow: auto;
+      padding: 1rem;
+    }
+    .map-modal-body pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.75rem;
+      line-height: 1.5;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .map-modal-error {
+      color: #f85149;
+      font-style: italic;
+    }
+    .map-modal-loading {
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
   `;
 
   constructor() {
@@ -327,6 +419,8 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._data = null;
     this._requestUsage = null;
     this._collapsed = this._loadCollapsed();
+    this._mapModalContent = null;
+    this._mapModalTitle = '';
 
     this._autoHideTimer = null;
     this._fadeTimer = null;
@@ -521,11 +615,65 @@ export class TokenHud extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Map-block modal
+  // ---------------------------------------------------------------
+
+  /**
+   * Open the map-block modal for a tracker key. Mirrors the
+   * Context tab's Cache sub-view behavior — fetches the
+   * backend's formatted block for this item and displays it
+   * in a centered overlay.
+   *
+   * Pauses the HUD's auto-hide timer while the modal is open
+   * so the HUD doesn't fade out from under the user.
+   */
+  async _openMapModal(key, name) {
+    this._mapModalTitle = name || key || '';
+    // Sentinel: null means "closed", {} with a `loading`
+    // flag means "fetching". The template distinguishes.
+    this._mapModalContent = { loading: true };
+    this._clearTimers();
+    if (!this.rpcConnected) {
+      this._mapModalContent = {
+        error: 'Not connected to the server',
+      };
+      return;
+    }
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.get_file_map_block',
+        key,
+      );
+      this._mapModalContent =
+        result && typeof result === 'object' ? result : {};
+    } catch (err) {
+      this._mapModalContent = {
+        error: err?.message || 'Failed to fetch content',
+      };
+    }
+  }
+
+  _closeMapModal() {
+    this._mapModalContent = null;
+    this._mapModalTitle = '';
+    // Resume the auto-hide timer so the HUD eventually
+    // dismisses itself after the user closes the modal.
+    this._startAutoHide();
+  }
+
+  _onMapModalKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._closeMapModal();
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------
 
   render() {
-    if (!this._visible) return html``;
+    if (!this._visible && !this._mapModalContent) return html``;
 
     const d = this._data;
     const cacheRate = d
@@ -533,22 +681,63 @@ export class TokenHud extends RpcMixin(LitElement) {
       : 0;
 
     return html`
+      ${this._visible ? html`
+        <div
+          class="hud"
+          @mouseenter=${this._onMouseEnter}
+          @mouseleave=${this._onMouseLeave}
+        >
+          ${this._renderHeader(d, cacheRate)}
+          ${this._renderSection('Cache Tiers', 'tiers',
+            () => this._renderTiers(d))}
+          ${this._renderSection('This Request', 'request',
+            () => this._renderRequest())}
+          ${this._renderSection('History Budget', 'budget',
+            () => this._renderBudget(d))}
+          ${this._renderSection('Tier Changes', 'changes',
+            () => this._renderChanges(d))}
+          ${this._renderSection('Session Totals', 'totals',
+            () => this._renderTotals(d))}
+        </div>
+      ` : ''}
+      ${this._mapModalContent ? this._renderMapModal() : ''}
+    `;
+  }
+
+  _renderMapModal() {
+    const c = this._mapModalContent;
+    let body;
+    if (c.loading) {
+      body = html`<div class="map-modal-loading">Loading…</div>`;
+    } else if (c.error) {
+      body = html`<div class="map-modal-error">${c.error}</div>`;
+    } else {
+      body = html`<pre>${c.content || '(empty)'}</pre>`;
+    }
+    return html`
       <div
-        class="hud"
-        @mouseenter=${this._onMouseEnter}
-        @mouseleave=${this._onMouseLeave}
+        class="map-modal-backdrop"
+        @click=${(e) => {
+          if (e.target === e.currentTarget) this._closeMapModal();
+        }}
+        @keydown=${this._onMapModalKeyDown}
+        tabindex="0"
+        role="dialog"
+        aria-modal="true"
       >
-        ${this._renderHeader(d, cacheRate)}
-        ${this._renderSection('Cache Tiers', 'tiers',
-          () => this._renderTiers(d))}
-        ${this._renderSection('This Request', 'request',
-          () => this._renderRequest())}
-        ${this._renderSection('History Budget', 'budget',
-          () => this._renderBudget(d))}
-        ${this._renderSection('Tier Changes', 'changes',
-          () => this._renderChanges(d))}
-        ${this._renderSection('Session Totals', 'totals',
-          () => this._renderTotals(d))}
+        <div class="map-modal">
+          <div class="map-modal-header">
+            <span class="map-modal-title"
+              title=${this._mapModalTitle}
+            >${this._mapModalTitle}</span>
+            <button
+              class="map-modal-close"
+              @click=${this._closeMapModal}
+              aria-label="Close"
+            >✕</button>
+          </div>
+          <div class="map-modal-body">${body}</div>
+        </div>
       </div>
     `;
   }
@@ -656,8 +845,26 @@ export class TokenHud extends RpcMixin(LitElement) {
       ? Math.min(100, (item.n / item.threshold) * 100)
       : 0;
     const displayName = item.path || item.name || '—';
+    // Clickable when we have a key the backend knows how to
+    // resolve — same criterion the Context tab's Cache sub-
+    // view uses. The backend's get_file_map_block handles
+    // system:, symbol:, doc:, file:, url:, and meta:* keys;
+    // history: entries have no corresponding block so we
+    // leave them non-clickable.
+    const key = item.name;
+    const clickable = typeof key === 'string'
+      && key.length > 0
+      && !key.startsWith('history:');
     return html`
-      <div class="tier-subitem">
+      <div
+        class="tier-subitem ${clickable ? 'clickable' : ''}"
+        @click=${clickable
+          ? () => this._openMapModal(key, displayName)
+          : null}
+        title=${clickable
+          ? `Click to view: ${displayName}`
+          : displayName}
+      >
         <span class="tier-subitem-icon">${icon}</span>
         <span class="tier-subitem-name" title=${displayName}>
           ${displayName}

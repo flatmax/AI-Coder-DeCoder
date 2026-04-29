@@ -57,7 +57,7 @@ const MAX_ENTRIES = 100;
  * so this is more of a "don't render thousands of items"
  * safeguard than a visible-count limit.
  */
-const _VISIBLE_BATCH = 50;
+const _VISIBLE_BATCH = 20;
 
 export class InputHistory extends LitElement {
   static properties = {
@@ -117,14 +117,18 @@ export class InputHistory extends LitElement {
       overflow-y: auto;
       display: flex;
       flex-direction: column;
+      max-height: 40vh;
     }
     .entry {
-      padding: 0.25rem 0.6rem;
+      flex: 0 0 auto;
+      box-sizing: border-box;
+      min-height: 1.75rem;
+      padding: 0.35rem 0.6rem;
       cursor: pointer;
       font-size: 0.8125rem;
-      line-height: 1.4;
+      line-height: 1.25;
       color: var(--text-primary, #c9d1d9);
-      border-bottom: 1px solid rgba(240, 246, 252, 0.04);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.12);
       /* Single-line with ellipsis — multi-line entries collapse
        * to their first line so the list stays dense. The
        * filter input and focused-row preview make the full
@@ -134,6 +138,9 @@ export class InputHistory extends LitElement {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .entry:last-child {
+      border-bottom: none;
     }
     .entry:hover {
       background: rgba(240, 246, 252, 0.04);
@@ -433,6 +440,7 @@ export class InputHistory extends LitElement {
                     class="entry ${isFocused ? 'focused' : ''}"
                     role="option"
                     aria-selected=${isFocused}
+                    title=${text}
                     @click=${() => this._onEntryClick(realIdx, filtered)}
                   >
                     ${text}

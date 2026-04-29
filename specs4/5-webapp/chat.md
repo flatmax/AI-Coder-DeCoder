@@ -170,6 +170,8 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Items displayed oldest-first (top) to newest (bottom)
 - Up/Down navigate; Enter selects; Escape restores original input
 - Session seeding — when a session is loaded, all user messages from that session are added to the input history for up-arrow recall
+- Long entries (including multi-line messages) collapse to a single ellipsis-clipped line; the full text is disclosed via native `title` tooltip on hover. No inline preview pane
+- Overflow — when entries exceed the initial visible window, the list scrolls within a bounded height. Filter input is the primary discovery mechanism for older entries
 ### Snippet Drawer
 - Toggleable quick-insert buttons from config
 - Click inserts at cursor

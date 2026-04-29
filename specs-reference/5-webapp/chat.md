@@ -174,6 +174,11 @@ Last 15 messages force full render to keep scroll heights accurate near the bott
 |---|---|
 | Maximum entries | 100 |
 | Duplicate handling | Move to end of list rather than create a second entry |
+| Visible batch (no filter) | 20 newest entries rendered; remainder reachable via filter |
+| Entries scroll max-height | 40vh (list scrolls independently of filter input and hint strip) |
+| Overlay max-height | 50vh |
+| Row min-height | 1.75rem (prevents flex squashing when many entries fit the cap) |
+| Long-entry disclosure | Native `title` attribute on each entry — full text (including newlines) shown on hover |
 
 ### Image limits
 
