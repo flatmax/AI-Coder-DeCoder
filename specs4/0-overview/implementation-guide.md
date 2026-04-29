@@ -40,13 +40,13 @@ The running system's `src/ac_dc/config/*.md` files are authoritative for system 
 - **Dependency quirks** — tree-sitter TypeScript function name, Vite optimizeDeps exclusion, PyInstaller hidden imports, Monaco worker configuration paths
 - **RPC wire formats** — exact argument shapes, return shapes, event payload structures
 
-### Use `src/ac_dc/config/*.md` for:
+### Use `specs-reference/3-llm/prompts.md` for:
 
-- **System prompt text** — the actual LLM instruction strings. These files are the authoritative source; a twin would create drift risk.
+- **LLM prompt text and config defaults** — system prompts, the compaction detector contract, commit message prompt, edit-format reminder, default snippets, and default values for `llm.json` / `app.json`. Note this twin holds references to the original text rather than duplicating every line verbatim for files whose content doesn't cross interop boundaries — the compaction prompt, edit reminder, and emoji-marker references in the system prompts are the parts a reimplementer must reproduce faithfully.
 
 ## Conflict Resolution
 
-**When specs4 and a specs-reference twin conflict, specs4 wins.** specs4 owns behavioral contracts. If a twin's detail describes behavior that specs4 contradicts, the twin is out of date and needs updating.
+**When specs4 and a specs-reference twin conflict, specs4 wins.** specs4 owns behavioral contracts. If a twin's detail describes behavior that specs4 contradicts, the twin is out of date and needs updating. One exception: `specs-reference/3-llm/prompts.md` holds LLM-facing interop text that may not be fully articulated in specs4; when the prompts twin describes a contract with the LLM (compaction JSON shape, edit-format reminder rules), that contract takes precedence even if specs4 is silent.
 
 **When specs4 is silent on a byte-level or numeric detail, the specs-reference twin is authoritative.** Do not invent alternative wire formats, file formats, or thresholds that affect observable behavior. The values in `specs-reference/` are proven in production; changing them silently breaks compatibility with existing data, existing LLM behavior, or existing user configs.
 
