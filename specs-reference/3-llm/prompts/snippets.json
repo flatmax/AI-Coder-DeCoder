@@ -1,0 +1,103 @@
+{
+  "code": [
+    {
+      "icon": "✂️",
+      "tooltip": "Continue truncated edit",
+      "message": "Your last edit was truncated. Please continue from where you left off."
+    },
+    {
+      "icon": "🔍",
+      "tooltip": "Check context",
+      "message": "Check in your context for the full file(s)."
+    },
+    {
+      "icon": "✏️",
+      "tooltip": "Fix malformed edits",
+      "message": "Some of your edits failed. Please reread the current file content from context and fix the edit blocks. Make sure the old text is copy-pasted exactly from the file."
+    },
+    {
+      "icon": "⏸️",
+      "tooltip": "Pause before implementing",
+      "message": "Before writing any code, describe what you're about to do and confirm the approach. Don't produce edit blocks yet."
+    },
+    {
+      "icon": "✅",
+      "tooltip": "Verify tests",
+      "message": "After the edit, what tests would confirm the change is correct? List the test cases and their expected outcomes."
+    },
+    {
+      "icon": "📦",
+      "tooltip": "Pre-commit checklist",
+      "message": "Before I commit, review the staged changes. Flag any missing tests, unused imports, debug prints, TODOs, or changes outside the intended scope."
+    },
+    {
+      "icon": "🏁",
+      "tooltip": "Pre-commit with plan completion",
+      "message": "Review the staged changes against the plan we agreed on. For each item in the plan, confirm it's done or flag what's missing. Also flag unused imports, debug prints, or unintended changes."
+    }
+  ],
+  "review": [
+    {
+      "icon": "🔍",
+      "tooltip": "Full review",
+      "message": "Give me a full review of this PR. Cover correctness, edge cases, error handling, naming, and anything that looks risky or unclear."
+    },
+    {
+      "icon": "🔒",
+      "tooltip": "Security review",
+      "message": "Review these changes specifically for security issues: input validation, authentication, authorization, injection risks, secret handling, and unsafe defaults."
+    },
+    {
+      "icon": "🚶",
+      "tooltip": "Commit walkthrough",
+      "message": "Walk through each commit in order. For each one, summarize what it changes and whether it stands on its own."
+    },
+    {
+      "icon": "⚡",
+      "tooltip": "Performance review",
+      "message": "Review these changes for performance: unnecessary work, N+1 queries, quadratic loops, missing caches, blocking I/O in hot paths."
+    },
+    {
+      "icon": "🧪",
+      "tooltip": "Test coverage",
+      "message": "Assess test coverage for these changes. What code paths are untested? What edge cases are missing?"
+    }
+  ],
+  "doc": [
+    {
+      "icon": "📄",
+      "tooltip": "Summarise",
+      "message": "Summarise this document in 3-5 bullet points."
+    },
+    {
+      "icon": "🔗",
+      "tooltip": "Cross-refs",
+      "message": "Check all cross-references in this document. Flag broken links and suggest fixes."
+    },
+    {
+      "icon": "🏗️",
+      "tooltip": "Restructure",
+      "message": "Suggest a better structure for this document. What should be reordered, split, or merged?"
+    },
+    {
+      "icon": "📋",
+      "tooltip": "Executive summary",
+      "message": "Write an executive summary of this document suitable for someone who has 2 minutes."
+    },
+    {
+      "icon": "📑",
+      "tooltip": "TOC",
+      "message": "Generate a table of contents for this document."
+    },
+    {
+      "icon": "🔍",
+      "tooltip": "Consistency",
+      "message": "Check this document for terminology inconsistencies, vague phrasing, and sections that contradict each other."
+    },
+    {
+      "icon": "✏️",
+      "tooltip": "Simplify",
+      "message": "Rewrite this section in simpler language without losing technical accuracy."
+    }
+  ]
+}

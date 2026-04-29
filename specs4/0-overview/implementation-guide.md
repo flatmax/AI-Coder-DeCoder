@@ -40,9 +40,9 @@ The running system's `src/ac_dc/config/*.md` files are authoritative for system 
 - **Dependency quirks** — tree-sitter TypeScript function name, Vite optimizeDeps exclusion, PyInstaller hidden imports, Monaco worker configuration paths
 - **RPC wire formats** — exact argument shapes, return shapes, event payload structures
 
-### Use `specs-reference/3-llm/prompts.md` for:
+### Use `specs-reference/3-llm/prompts/` for:
 
-- **LLM prompt text and config defaults** — system prompts, the compaction detector contract, commit message prompt, edit-format reminder, default snippets, and default values for `llm.json` / `app.json`. Note this twin holds references to the original text rather than duplicating every line verbatim for files whose content doesn't cross interop boundaries — the compaction prompt, edit reminder, and emoji-marker references in the system prompts are the parts a reimplementer must reproduce faithfully.
+- **LLM prompt text and config defaults** — system prompts, the compaction detector contract, commit message prompt, edit-format reminder, default snippets, and default values for `llm.json` / `app.json`. Each file is a verbatim copy of its counterpart in `src/ac_dc/config/`, synced via `scripts/sync_prompts.py`. The index file `specs-reference/3-llm/prompts.md` documents which contracts are load-bearing (compaction JSON shape, edit-format reminder rules, emoji markers in system prompts) and which are free to rewrite.
 
 ## Conflict Resolution
 
@@ -107,7 +107,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Collaboration admission messages | `specs-reference/4-features/collaboration.md` (admission message types, 120s timeout, WebSocket close code 1008, share-info payload) |
 | Startup progress stages | `specs-reference/6-deployment/startup.md` (stage name strings, reconnect backoff schedule, port probe range) |
 | Context-model thresholds | `specs-reference/3-llm/context-model.md` (shedding 0.90, overhead 500 tokens, emergency 2× multiplier) |
-| System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
+| System prompt text | `specs-reference/3-llm/prompts/` (verbatim copies of `src/ac_dc/config/*.md`, synced via `scripts/sync_prompts.py`; index in `specs-reference/3-llm/prompts.md`) |
 | Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs-reference/5-webapp/diff-viewer.md` (Monaco workers), `specs-reference/6-deployment/build.md` (Vite optimizeDeps, PyInstaller imports) |
 
 ## Architectural Changes from specs3

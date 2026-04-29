@@ -81,8 +81,11 @@ Canonical ownership is the one place where topical thinking survives in the mirr
 ## What Stays Outside
 
 - Behavioral contracts, invariants, module decomposition, data flow, design rationale — all stay in `specs4/`
-- Live system prompt text — stays in `src/ac_dc/config/*.md`. Duplicating into a twin creates drift risk; the live config files are already authoritative
 - Historical delivery records — stay in `specs4/impl-history/`. They reference specs3 intentionally and are not migrated
+
+## Synced Mirror
+
+The `specs-reference/3-llm/prompts/` directory is a special case: it holds byte-exact copies of `src/ac_dc/config/*.md` and `*.json`, synced via `scripts/sync_prompts.py`. The mirror exists because prompt text is LLM-interop (changes can silently break compaction JSON parsing, edit-block reliability, or commit-message conventions) and because specs4 deliberately describes prompts by contract rather than duplicating their bodies. Drift between the source and the mirror is detectable via the sync script's check-before-write behavior. When the source tree is deleted or absent, the mirror becomes the authoritative reference. See `specs-reference/3-llm/prompts.md` for the index.
 
 ## Migration Status
 

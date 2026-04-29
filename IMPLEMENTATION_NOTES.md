@@ -4,85 +4,59 @@ Working log for the reimplementation of AC-DC against the specs4/ suite. Notes t
 
 Remove when the project reaches feature parity with the previous implementation.
 
-## specs-reference preservation pass — status (2025-01)
+## specs-reference preservation pass — complete (2025-01)
 
-Before deleting specs3 and the source tree, a preservation pass added byte-level / numeric-constant twins for the webapp specs and moved LLM prompt text ownership from `src/ac_dc/config/*.md` into `specs-reference/3-llm/prompts.md`.
+Before deleting specs3 and the source tree, a preservation pass added byte-level / numeric-constant twins for the webapp specs and mirrored LLM prompt text into `specs-reference/3-llm/prompts/`.
 
-### Delivered and applied
+### Twin files added
 
-Seven new twin files with byte-level detail that would otherwise be lost when specs3 and the source tree are deleted:
+Seven new reference twins covering detail that would otherwise be lost when specs3 and the source tree are deleted:
 
-- `specs-reference/5-webapp/svg-viewer.md` — SvgEditor constants (`HANDLE_SCREEN_RADIUS`, `_MIN_RESIZE_DIMENSION`, `_UNDO_MAX`, `_PASTE_OFFSET`, `_MARQUEE_MIN_SCREEN`, `_DRAG_THRESHOLD_SCREEN`), per-element drag dispatch table (rect/circle/ellipse/line/polyline/polygon/path/text/g), path command parser argument counts, endpoint computation, control-point computation, coordinate math (screen→SVG, element-local→SVG root, handle size constancy), handle role identifiers (nw/n/ne/e/se/s/sw/w for rect; v0..v{N-1} for poly; p{N} and c{N}-{K} for path), auto-generated ID filter regex, marquee visual feedback (forward = containment, reverse = crossing), copy-as-PNG pipeline, keyboard focus guard
-- `specs-reference/5-webapp/chat.md` — Request ID format (`{epoch_ms}-{6-char-alnum}`), finish-reason badge labels + CSS classes + toast messages, compaction event stage routing table (url_fetch, url_ready, compacting, compacted, compaction_error, doc_* stages), retry prompt templates (ambiguous, not-in-context, old-text-mismatch with priority rule), file mention input accumulation templates, system event message content templates, scroll behavior constants (30px disengage, double-rAF, chunk coalescing), content-visibility thresholds (last 15 forced), input history max 100, image limits, edit block diff highlighting algorithm, compaction post-response timing (500ms + 3 retries at 1s), localStorage keys, `_suppressNextPaste` cross-component flag
-- `specs-reference/5-webapp/file-picker.md` — localStorage keys (`ac-dc-sort-mode`, `ac-dc-sort-asc`, `ac-dc-picker-width`, `ac-dc-picker-collapsed`), panel width constraints (280 default, 180 min, 50% host max, 24 collapsed), context menu action IDs for file/directory/root rows, inline input mode table, shift+click vs regular click `preventDefault()` asymmetry, regular-click-on-excluded two-state-change rule, directory-click-with-excluded-descendants un-exclude-first rule, three-state checkbox cycle (default → excluded → default, NOT → selected), deleted file exclusion cleanup
-- `specs-reference/5-webapp/shell.md` — dialog dimensions (50% default docked, 300×200 min, 100px visible margin), resize handle table (right/bottom/corner with hit zones), drag threshold 5px, reconnect backoff cross-reference, startup overlay (400ms fade), global keyboard shortcuts (Alt+1..4, Alt+M, Ctrl+Shift+F), Ctrl+Shift+F synchronous selection capture rule, window resize throttling (separate RAF handles for dialog resize vs viewer relayout), localStorage keys with repo-scoping for file/viewport restore, file viewport state save triggers, restore flow (deferred until overlay dismisses)
-- `specs-reference/5-webapp/file-navigation.md` — spatial layout constants (`GRID_SPACING_X` 180, `GRID_SPACING_Y` 100, `NODE_WIDTH` 150, `NODE_HEIGHT` 48, `NODE_RADIUS` 8), animation timings (`FADE_DURATION` 150ms, `UNDO_TIMEOUT` 3s, Alt+Arrow debounce ~200ms), `PLACEMENT_ORDER` and `REPLACEMENT_ORDER` arrays (exact inverses), `DIR_OFFSET` table, node data model, grid state structure, event detail flags (`_fromNav`, `_refresh`, `_remote`), file type color palette (10 colors keyed by extension family), Alt+Arrow capture-phase listener rule, Escape priority
-- `specs-reference/5-webapp/viewers-hud.md` — Token HUD auto-hide timing (`_AUTO_HIDE_MS` 8000, `_FADE_MS` 800, hover pauses), HUD geometry (fixed top-right, z-index 10000, 340px, 80vh max), cache hit rate color thresholds (≥50 green, ≥20 amber, <20 red), budget bar color thresholds (≤75 green, 75–90 amber, >90 red), tier color palette (L0 green / L1 teal / L2 blue / L3 amber / active orange with hex), category color palette (system/map/files/URLs/history), content group type icons (⚙️/📖/📦/📝/📄/🔗/💬), tier change markers (📈/📉), provider-cache-rate precedence rule, startup init HUD box format, post-response HUD format (cache blocks, token usage, tier changes), localStorage keys
-- `specs-reference/3-llm/prompts.md` — structural twin (file inventory, role descriptions per prompt file, invariants for each, JSON schema references); NOT yet populated with verbatim prompt text — see "incomplete" below
+- `specs-reference/5-webapp/svg-viewer.md` — SvgEditor constants, per-element drag dispatch, path parser, coordinate math, handle role identifiers, auto-generated ID filter regex, marquee visual feedback, copy-as-PNG pipeline, keyboard focus guard
+- `specs-reference/5-webapp/chat.md` — Request ID format, finish-reason badges, compaction event stage routing, retry prompt templates, file mention accumulation, system event message templates, scroll constants, content-visibility thresholds, input history cap, image limits, edit block diff highlighting, post-response compaction timing, localStorage keys, cross-component paste suppression flag
+- `specs-reference/5-webapp/file-picker.md` — localStorage keys, panel width constraints, context menu action IDs, inline input modes, shift+click vs regular click semantics, three-state checkbox cycle, deleted file exclusion cleanup
+- `specs-reference/5-webapp/shell.md` — dialog dimensions, resize handle table, drag threshold, startup overlay timing, global keyboard shortcuts, synchronous selection capture rule, window resize throttling, repo-scoped localStorage keys for file/viewport restore
+- `specs-reference/5-webapp/file-navigation.md` — spatial layout constants, animation timings, PLACEMENT_ORDER / REPLACEMENT_ORDER arrays, DIR_OFFSET table, node data model, event detail flags, file type color palette, Alt+Arrow capture-phase listener rule
+- `specs-reference/5-webapp/viewers-hud.md` — Token HUD auto-hide timing, geometry, cache hit rate colors, budget bar thresholds, tier color palette, category colors, content group type icons, provider-cache-rate precedence, terminal HUD format, localStorage keys
+- `specs-reference/3-llm/prompts.md` — index documenting contracts per prompt file; points at sibling files in `specs-reference/3-llm/prompts/` for content
 
-### Implementation guide update
+### Prompt files as a synced mirror
 
-`specs4/0-overview/implementation-guide.md` was updated:
-
-- Replaced `### Use src/ac_dc/config/*.md for:` heading with `### Use specs-reference/3-llm/prompts.md for:` pointing at the new twin
-- Added conflict-resolution exception: when `specs-reference/3-llm/prompts.md` describes an LLM interop contract (compaction JSON shape, edit-format reminder rules) not articulated in specs4, that contract takes precedence even if specs4 is silent
-- Updated the "Where specs4 Is Incomplete Without specs-reference" table — removed the row pointing at `src/ac_dc/config/*.md`, added seven rows pointing at the new twins (prompts, chat, file-picker, shell, file-navigation, viewers-hud, svg-viewer)
-
-### Incomplete — needs verbatim prompt text embedded into `specs-reference/3-llm/prompts.md`
-
-The prompts twin currently has structural documentation but NOT the verbatim content of the nine config files. When I attempted to embed the verbatim text, the context exceeded the 1M-token limit and the edit session could not continue.
-
-**The verbatim content for each file needs to be pasted into `specs-reference/3-llm/prompts.md` under that file's section.** Source is `src/ac_dc/config/*.md` (and `*.json`) in the existing source tree. Deleting the source tree before this step completes means losing the actual text.
-
-Per-file embedding status and what the target section currently says:
-
-1. **`compaction.md`** — attempted embed, appears to have been applied successfully in the failed session but please verify. The target section in the twin should have a `### Verbatim content` subsection containing the full compaction prompt wrapped in a four-backtick fence. This is the MOST CRITICAL file to embed — the LLM response it elicits must produce parseable JSON with exactly the four fields (`boundary_index`, `boundary_reason`, `confidence`, `summary`). Reimplementers without the original text will guess at the prompt and silently break history compaction.
-
-2. **`system_reminder.md`** — attempted embed, appears to have been applied. Verify the `### Verbatim content` subsection contains the literal reminder text including the leading `\n\n` note. Short file. Second most critical — without it, edit-block reliability degrades over long sessions.
-
-3. **`system.md`** — attempted embed, appears to have been applied. Verify the full coding-agent system prompt is wrapped in a four-backtick fence under `### Verbatim content`. The file is long (~170 lines of markdown) covering the symbol map, edit protocol, context trust, failure recovery.
-
-4. **`system_doc.md`** — embed was partially attempted when the session hit the context limit. The target section's stub paragraph reading "**Content:** Preserve verbatim from a reference deployment. Plain markdown." needs to be replaced with `### Verbatim content` + four-backtick-fenced full document-mode prompt.
-
-5. **`review.md`** — not yet embedded. Same pattern — replace the "Content: Preserve verbatim..." stub with `### Verbatim content` + fenced full review-mode prompt.
-
-6. **`commit.md`** — not yet embedded. Same pattern. Conventional-commit style prompt, ~60 lines.
-
-7. **`snippets.json`** — not yet embedded. The twin has a "Content: Preserve the full snippet arrays verbatim from a reference deployment." stub that needs replacing with `### Verbatim content` + a JSON fence containing the full nested structure (`code`, `review`, `doc` arrays with icon/tooltip/message fields).
-
-8. **`llm.json`** — the twin already shows a schema example, but NOT the actual default values that shipped. Replace the "Default values to ship:" bullet list with the verbatim JSON content. The actual file has `model: "bedrock/global.anthropic.claude-opus-4-7"`, `smaller_model: "bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"`, `max_output_tokens: 128000`, and an env block with `AWS_REGION: "ap-southeast-2"` — note these are provider-specific defaults from the reference deployment. A generic reimplementation might ship different defaults; preserve the original as "reference values."
-
-9. **`app.json`** — the twin already embeds the schema and default values verbatim because they're short. Verify the rendered values in the twin match the source file (they should — the values I placed there came from the current codebase).
-
-### How to complete this work
-
-Each file should follow the same pattern — in `specs-reference/3-llm/prompts.md`, locate the section for that file and replace the placeholder paragraph with:
+Rather than embedding verbatim prompt text inside `prompts.md` (which would have required extensive four-backtick fence escaping for files containing edit-block markers, and would have created a drift risk on every prompt improvement), the prompts live as standalone sibling files:
 
 ```
-### Verbatim content
-
-````
-<paste exact file content here>
-````
+specs-reference/3-llm/
+  prompts.md              — index + contracts-per-file documentation
+  prompts/
+    system.md
+    system_doc.md
+    review.md
+    commit.md
+    compaction.md
+    system_reminder.md
+    snippets.json
+    llm.json
+    app.json
 ```
 
-Use FOUR backticks for the outer fence so triple-backtick fences in the source (e.g., the JSON examples in `compaction.md`) don't terminate the outer fence prematurely.
+`scripts/sync_prompts.py` copies the nine files from `src/ac_dc/config/` into `specs-reference/3-llm/prompts/`, comparing bytes before writing so unchanged files are no-ops. Re-run after any prompt edit; commit both sides of the diff together. When the source tree is deleted, the mirror becomes authoritative.
 
-Suggested order (by criticality):
+The script itself avoids the edit-block self-reference problem by reading bytes off disk and writing them verbatim — it never constructs marker sequences in its own source code.
 
-1. Verify `compaction.md` and `system_reminder.md` landed (the earlier session reported success but the session crashed so the applied state should be double-checked)
-2. Embed `review.md` and `commit.md` (short, high value)
-3. Embed `snippets.json`, `llm.json` verbatim sections
-4. Verify `system.md` and `system_doc.md` landed or finish embedding them
-5. Verify `app.json` values match
+### Implementation guide updates
 
-After completion, delete `src/ac_dc/config/*.md` and `*.json` from the source tree along with the rest of specs3 and the source code.
+- `specs4/0-overview/implementation-guide.md` "Where specs4 Is Incomplete Without specs-reference" table updated: the prompt-text row now points at `specs-reference/3-llm/prompts/` (the directory) and mentions the sync script. The "Use specs-reference/3-llm/prompts.md for" heading was updated to reflect the index/mirror split.
+- `specs-reference/README.md` "What Stays Outside" section updated: prompt text is no longer called out as "stays in the source tree." A new "Synced Mirror" section documents the `prompts/` directory as the special case.
 
-### Other observations from this pass
+### specs3 retirement
 
-- `specs4/1-foundation/jrpc-oo.md` was noted as a potential gap but the user requested it be left as-is. Not addressed.
-- No twin was created for `specs4/2-indexing/reference-graph.md`, `specs4/2-indexing/keyword-enrichment.md`, `specs4/3-llm/modes.md`, `specs4/4-features/code-review.md`, `specs4/4-features/images.md`, `specs4/4-features/url-content.md`, `specs4/5-webapp/agent-browser.md`, `specs4/5-webapp/diff-viewer.md` beyond what specs-reference already has, `specs4/5-webapp/search.md`, `specs4/5-webapp/settings.md`, `specs4/5-webapp/speech.md`, `specs4/5-webapp/tex-preview.md`, `specs4/6-deployment/packaging.md`. The spec4 content for these was judged sufficient for reimplementation during the analysis. If a byte-level detail turns out to be missing during reimplementation, the right response is to grep the original source tree (before deletion) or add the detail to an ad-hoc twin and update the implementation guide's table.
-- The pattern for any future missing twin — same mechanical rule: `specs4/{path}/{name}.md` ↔ `specs-reference/{path}/{name}.md`; add a row to the implementation guide's table; twin gets byte-level / numeric detail only, not behavior.
+With prompts mirrored and the seven webapp reference twins in place, the [Where specs4 Is Incomplete Without specs-reference](specs4/0-overview/implementation-guide.md) table has no remaining rows pointing into specs3. specs3 can be deleted with `git rm -r specs3/`.
+
+### Other observations
+
+- `specs4/1-foundation/jrpc-oo.md` was noted as a potential gap but left as-is per user request.
+- No twin was created for several spec4 files judged self-sufficient during the pass: `specs4/2-indexing/reference-graph.md`, `specs4/2-indexing/keyword-enrichment.md`, `specs4/3-llm/modes.md`, `specs4/4-features/code-review.md`, `specs4/4-features/images.md`, `specs4/4-features/url-content.md`, `specs4/5-webapp/agent-browser.md`, `specs4/5-webapp/search.md`, `specs4/5-webapp/settings.md`, `specs4/5-webapp/speech.md`, `specs4/5-webapp/tex-preview.md`, `specs4/6-deployment/packaging.md`. If a byte-level detail turns out to be missing during reimplementation, grep the source tree (before deletion) or add an ad-hoc twin and update the implementation guide's table.
+- Future missing twins follow the same mechanical rule: `specs4/{path}/{name}.md` ↔ `specs-reference/{path}/{name}.md`; add a row to the implementation guide's table; twin gets byte-level / numeric detail only, not behavior.
 
 
 ## Archive
