@@ -90,7 +90,7 @@ When in doubt, read the twin carefully — not just for formats, but for sequenc
 
 specs4 alone is not sufficient for byte-exact reimplementation in the following areas. Consult `specs-reference/` (or the running system's config files, where indicated) for each:
 
-| Area | specs3 location |
+| Area | specs-reference location |
 |---|---|
 | Symbol map compact format | `specs-reference/2-indexing/symbol-index.md` (legend, abbreviations, ditto marks, path aliases, test collapsing) |
 | Doc outline annotation syntax | `specs-reference/2-indexing/document-index.md` (keyword parentheses, content-type markers, section size, ref counts, outgoing refs) |
@@ -103,6 +103,10 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | JSONL history schema | `specs-reference/3-llm/history.md` |
 | Docuvert provenance header | `specs-reference/4-features/doc-convert.md` |
 | Config file schemas | `specs-reference/1-foundation/configuration.md` |
+| Prompt assembly headers and cache-control | `specs-reference/3-llm/prompt-assembly.md` (header strings, cache-control placement, acknowledgement text, file content formatting) |
+| Collaboration admission messages | `specs-reference/4-features/collaboration.md` (admission message types, 120s timeout, WebSocket close code 1008, share-info payload) |
+| Startup progress stages | `specs-reference/6-deployment/startup.md` (stage name strings, reconnect backoff schedule, port probe range) |
+| Context-model thresholds | `specs-reference/3-llm/context-model.md` (shedding 0.90, overhead 500 tokens, emergency 2× multiplier) |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
 | Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs-reference/5-webapp/diff-viewer.md` (Monaco workers), `specs-reference/6-deployment/build.md` (Vite optimizeDeps, PyInstaller imports) |
 

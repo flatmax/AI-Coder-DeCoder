@@ -74,11 +74,20 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 
 **Config/deployment (2 commits)**
 
-- [ ] Dependency quirks — three separate twins per the mirror rule:
-  - [ ] `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript function name) — may already exist from pilot; append if so
+- [x] Dependency quirks — three separate twins per the mirror rule:
+  - [x] `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript function name) — documented under § Dependency quirks from pilot commit
   - [x] `specs-reference/5-webapp/diff-viewer.md` (Monaco worker configuration paths)
   - [x] `specs-reference/6-deployment/build.md` (Vite optimizeDeps exclusion, PyInstaller hidden imports)
-- [ ] System prompt text — **do not create a twin.** Update the table row to point directly at `src/ac_dc/config/*.md` as the authoritative source. Duplicating prompt text into a twin creates a drift risk; the live config files are already authoritative.
+- [x] System prompt text — **no twin created.** Table row in `implementation-guide.md` points directly at `src/ac_dc/config/*.md` as the authoritative source. Duplicating prompt text into a twin would create drift risk; the live config files are already authoritative.
+
+**Pre-retirement supplementary twins (4 commits)**
+
+Gap-fill twins identified during the pre-retirement review. Each addresses a specific category of byte-level or numeric detail specs4 leaves unspecified.
+
+- [x] `specs-reference/3-llm/prompt-assembly.md` — header constant byte-strings, cache-control marker placement rules, acknowledgement text, current user message shape, file content formatting, provider forwarding notes
+- [x] `specs-reference/4-features/collaboration.md` — raw WebSocket admission message types (`admission_pending`/`admission_granted`/`admission_denied`), admission timeout (120s), WebSocket close code (1008), share-info payload, broadcast event shapes
+- [x] `specs-reference/6-deployment/startup.md` — progress stage name strings (`symbol_index`, `session_restore`, `indexing`, `stability`, `ready`, `doc_index*`), reconnect backoff schedule ([1s, 2s, 4s, 8s, 15s] cap), fade-out timing (400ms), port probe range (100 attempts), browser-wait delay (500ms), indexing batch size (20)
+- [x] `specs-reference/3-llm/context-model.md` — shedding threshold (0.90), estimate overhead (500 tokens), emergency truncation multiplier (2× compaction trigger), token budget response shape, mode enum str-subclass quirk
 
 ### Phase 4 — Retirement
 
