@@ -644,6 +644,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
       color: #f85149;
       border-color: rgba(248, 81, 73, 0.4);
     }
+    /* Muted green variant for natural completions (stop,
+     * end_turn). Per specs-reference/5-webapp/chat.md §
+     * Finish-reason badge labels — natural reasons produce
+     * a visible-but-quiet badge so users get positive
+     * confirmation the stream ended cleanly, without the
+     * badge dominating the role label on every successful
+     * turn. Reduced opacity keeps the pill readable but
+     * visually secondary to the role label text. */
+    .finish-reason-badge.severity-natural {
+      background: rgba(126, 231, 135, 0.1);
+      color: #7ee787;
+      border-color: rgba(126, 231, 135, 0.25);
+      opacity: 0.6;
+    }
 
     /* Message action toolbars — hover-only copy and paste
      * buttons, at top-right and bottom-right of each card.
@@ -1926,10 +1940,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
               role: 'assistant',
               content: finalContent,
               editResults,
-              ...(finishReason && finishReason !== 'stop' &&
-                finishReason !== 'end_turn'
-                ? { finishReason }
-                : {}),
+              // Per specs-reference/5-webapp/chat.md §
+              // Finish-reason badge labels — every finish
+              // reason (including natural `stop` and
+              // `end_turn`) produces a badge. Natural
+              // reasons render muted; abnormal reasons
+              // render in amber/red. We pass the raw
+              // reason through to `_renderFinishBadge`
+              // which picks the severity. The toast path
+              // stays filtered (natural reasons are
+              // silent there — see the switch in
+              // `_maybeShowFinishReasonToast`).
+              ...(finishReason ? { finishReason } : {}),
             },
       ];
       // Surface non-natural stops as a toast in addition to
@@ -4793,15 +4815,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   /**
    * Render the finish-reason badge for a message. Picks a
-   * severity class (red for max_tokens truncation and
-   * content-filter blocks; amber default for everything
-   * else non-natural) and a user-readable label with icon.
+   * severity class per specs-reference/5-webapp/chat.md §
+   * Finish-reason badge labels:
    *
-   * Called only when `msg.finishReason` is set, which only
-   * happens for non-natural stop reasons (the
-   * `_onStreamComplete` handler strips `stop`/`end_turn`
-   * before assigning to the message). So this never
-   * renders on a successful completion.
+   *   - `stop` / `end_turn` → muted green `✓` badge
+   *     (.severity-natural)
+   *   - `length` / `content_filter` → red badge
+   *     (.severity-error)
+   *   - `tool_calls` / `function_call` → amber badge
+   *     (default)
+   *   - anything else → amber, with the raw reason
+   *     surfaced verbatim so unexpected provider values
+   *     stay diagnosable
+   *
+   * Called for every completed assistant message that
+   * carries a finish reason. Natural completions still
+   * render a badge — it's muted so it doesn't dominate
+   * the role label, but visible so users get positive
+   * confirmation the stream ended normally rather than
+   * being cut off by an error or network hiccup.
    *
    * @param {string} reason — the raw finish_reason string
    *   from the provider (via litellm normalization)
@@ -4809,12 +4841,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
    */
   _renderFinishBadge(reason) {
     // Icon + label + severity, picked per reason. Severity
-    // `error` produces the red CSS variant; absent severity
-    // uses the amber default.
+    // `natural` produces the muted green variant; `error`
+    // produces the red variant; absent severity uses the
+    // amber default.
     let icon = '⚠️';
     let label = reason;
     let severity = '';
     switch (reason) {
+      case 'stop':
+        icon = '✓';
+        label = 'stopped';
+        severity = 'severity-natural';
+        break;
+      case 'end_turn':
+        icon = '✓';
+        label = 'end of turn';
+        severity = 'severity-natural';
+        break;
       case 'length':
         icon = '✂️';
         label = 'truncated (max_tokens)';
