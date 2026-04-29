@@ -69,11 +69,12 @@ All dispatch to window-level custom events that the relevant child components li
 - Keys are repo-scoped so opening a different repo never restores the wrong file
 - Legacy bare keys migrated to scoped keys on first recognition of the repo name
 - File path saved on every navigate-file event
-- Viewport state (scroll position, cursor, and any view-mode toggles) saved on `beforeunload` and before navigating away from the current file
+- Viewport state (scroll position, cursor, and any view-mode toggles) saved on `beforeunload`, before navigating away from the current file, and whenever a viewer reports a new active file via `active-file-changed`. The last case captures the `type` discriminator (svg vs diff) at the moment the viewer is ready, so a reload immediately after opening a file always has a correct viewer-routing record — without it, the stored viewport would still describe the previous file and restore would short-circuit on path mismatch
 - View-mode toggles covered:
   - Markdown files — whether the preview pane was open and the preview's scroll position
   - TeX files — whether the preview pane was open and the preview's scroll position
-- Not persisted: SVG pan/zoom (no zoom-restore contract yet), editor find-widget state, focused side of the diff editor. Adding any of these is an additive `ac-last-viewport` schema change.
+  - SVG files — the current viewBox (pan/zoom), presentation-mode flag, and which viewer was active (visual SVG vs. Monaco text diff via `toggle-svg-mode`). Persisting the active-viewer choice means a user who switched to text diff for precise editing, then reloaded, returns to the text diff rather than having to re-toggle every session.
+- Not persisted: editor find-widget state, focused side of the diff editor. Adding either is an additive `ac-last-viewport` schema change.
 
 ### Restore Flow
 
@@ -81,6 +82,7 @@ All dispatch to window-level custom events that the relevant child components li
 - On reconnect (init already complete), reopen immediately
 - After the reopen, restore viewport state once the viewer is ready
 - Preview toggles restore before scroll — the user's last view (raw editor vs preview) is the one they see, and the preview's own scroll position is restored against the preview pane rather than the editor
+- For SVG files: if the stored `type` is `svg`, route through the SVG viewer and apply presentation-mode flag before writing the viewBox — presentation mode changes the right pane's width (no left pane), and the viewBox rectangle is only meaningful against its actual container. If the stored `type` is `diff` for an `.svg` path, the user toggled to text diff; restore via the diff viewer and dispatch `toggle-svg-mode` with target `diff` after navigate so the visibility flip lands on the diff viewer. The visual ↔ text toggle buttons remain available; persistence only affects the initial restore.
 - A timeout cancels restoration if the file never opens (e.g., deleted)
 
 ## Viewer Background

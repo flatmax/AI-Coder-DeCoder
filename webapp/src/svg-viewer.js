@@ -621,6 +621,95 @@ export class SvgViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Public API — viewport state (for shell-driven restore)
+  // ---------------------------------------------------------------
+
+  /**
+   * Current viewBox of the right (editable) editor, or
+   * null when no file is open. Used by the app shell's
+   * viewport persistence. The two editors mirror via the
+   * sync mutex, so reading either returns the same
+   * answer at rest — we read the right side because it's
+   * the editable authority and exists in every mode
+   * (presentation mode collapses the left pane).
+   *
+   * Wrapped in try/catch: SvgEditor's getViewBox can
+   * throw when the root SVG is mid-detach (e.g., during
+   * a file switch, between `_disposeEditors` and
+   * `_initEditors`). Returning null on throw matches
+   * the "no file open" contract and lets the shell
+   * gracefully omit the svg block from persistence.
+   */
+  getActiveViewBox() {
+    if (!this._editorRight) return null;
+    try {
+      return this._editorRight.getViewBox();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Write a viewBox to the right editor. The sync
+   * callback mirrors to the left editor silently (via
+   * the `_syncingViewBox` mutex and `silent: true`). Used
+   * by the shell's restore flow — the viewer passes the
+   * stored pan/zoom state here and the editors pick it
+   * up. No-op when no editor exists (file not yet
+   * loaded) or when the viewBox shape is malformed.
+   *
+   * Values are in SVG user units — same space as
+   * `getActiveViewBox()` returns. Not clamped to the
+   * authored viewBox; the user may have zoomed out
+   * beyond the original extent and we want to restore
+   * exactly where they were.
+   */
+  setActiveViewBox(vb) {
+    if (!this._editorRight) return;
+    if (!vb || typeof vb !== 'object') return;
+    const { x, y, width, height } = vb;
+    if (
+      typeof x !== 'number' || typeof y !== 'number'
+      || typeof width !== 'number' || typeof height !== 'number'
+      || !Number.isFinite(x) || !Number.isFinite(y)
+      || !Number.isFinite(width) || !Number.isFinite(height)
+      || width <= 0 || height <= 0
+    ) {
+      return;
+    }
+    try {
+      this._editorRight.setViewBox(x, y, width, height);
+    } catch (err) {
+      console.debug('[svg-viewer] setActiveViewBox failed', err);
+    }
+  }
+
+  /**
+   * Whether the viewer is currently in presentation
+   * mode (left pane collapsed, right pane full-width).
+   */
+  isPresentation() {
+    return this._mode === _MODE_PRESENT;
+  }
+
+  /**
+   * Set presentation mode idempotently. Unlike
+   * `_togglePresentation`, calling `setPresentation(true)`
+   * twice leaves presentation on rather than flipping
+   * off. Used by the shell's restore flow.
+   *
+   * No-op when no file is open (matches the toggle's
+   * own guard) or when the requested state matches the
+   * current state.
+   */
+  setPresentation(on) {
+    if (this._activeIndex < 0) return;
+    const target = !!on;
+    if (target === this.isPresentation()) return;
+    this._togglePresentation();
+  }
+
+  // ---------------------------------------------------------------
   // Internals — file loading
   // ---------------------------------------------------------------
 
@@ -1135,6 +1224,33 @@ export class SvgViewer extends LitElement {
 
   /** Right → left mirror. Symmetric with `_onLeftViewChange`. */
   _onRightViewChange(vb) {
+    // Emit viewbox-changed regardless of mirror state —
+    // the shell debounces on its end, and the mutex
+    // only guards the left-editor write below. Skipping
+    // emit under the mutex would silently drop saves
+    // for any viewBox change that originated on the
+    // left side and cascaded here (currently impossible
+    // — fit and user gestures always hit the right
+    // pane in editable mode — but defensive against
+    // future paths that could flip which side
+    // originates).
+    this.dispatchEvent(
+      new CustomEvent('viewbox-changed', {
+        detail: {
+          path: this._activeIndex >= 0
+            ? this._files[this._activeIndex]?.path || null
+            : null,
+          viewBox: {
+            x: vb.x,
+            y: vb.y,
+            width: vb.width,
+            height: vb.height,
+          },
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
     if (this._syncingViewBox) return;
     if (!this._editorLeft) return;
     this._syncingViewBox = true;
@@ -1267,6 +1383,21 @@ export class SvgViewer extends LitElement {
     this._mode =
       this._mode === _MODE_PRESENT ? _MODE_SELECT : _MODE_PRESENT;
     this._contextMenu = null;
+    // Fire the presentation-changed event so the shell
+    // saves the new mode immediately. Matches the
+    // preview-mode-changed pattern — a reload right
+    // after a toggle-then-nothing restores the correct
+    // layout rather than the stale pre-toggle one.
+    this.dispatchEvent(
+      new CustomEvent('svg-presentation-changed', {
+        detail: {
+          path: this._files[this._activeIndex]?.path || null,
+          presentation: this._mode === _MODE_PRESENT,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
     // Mode toggle is CSS-only — .split.present hides the
     // left pane and lets the right pane flex to 100%. The
     // right pane's SVG, its pan-zoom instance, and its

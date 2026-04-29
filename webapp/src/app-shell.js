@@ -851,6 +851,19 @@ export class AppShell extends JRPCClient {
     // specs-reference/5-webapp/shell.md.
     this._onPreviewModeChanged =
       this._onPreviewModeChanged.bind(this);
+    // viewbox-changed — fired by the SVG viewer on
+    // every right-editor onViewChange. Debounced save
+    // so wheel-zoom bursts don't produce one write per
+    // frame. See specs-reference/5-webapp/shell.md §
+    // "SVG viewBox debounce window".
+    this._onSvgViewBoxChanged =
+      this._onSvgViewBoxChanged.bind(this);
+    this._svgViewBoxSaveTimer = null;
+    // svg-presentation-changed — same pattern as
+    // preview-mode-changed but for the SVG viewer's
+    // presentation toggle. Saves immediately.
+    this._onSvgPresentationChanged =
+      this._onSvgPresentationChanged.bind(this);
     // files-reverted — after Discard Changes and
     // similar working-tree reverts, refresh open
     // viewers so stale modified buffers get replaced
@@ -931,6 +944,13 @@ export class AppShell extends JRPCClient {
     window.addEventListener('file-saved', this._onFileSaved);
     window.addEventListener(
       'preview-mode-changed', this._onPreviewModeChanged,
+    );
+    window.addEventListener(
+      'viewbox-changed', this._onSvgViewBoxChanged,
+    );
+    window.addEventListener(
+      'svg-presentation-changed',
+      this._onSvgPresentationChanged,
     );
     // files-reverted fires from files-tab after a
     // successful Discard Changes (and in future: stage
@@ -1038,6 +1058,17 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'preview-mode-changed', this._onPreviewModeChanged,
     );
+    window.removeEventListener(
+      'viewbox-changed', this._onSvgViewBoxChanged,
+    );
+    window.removeEventListener(
+      'svg-presentation-changed',
+      this._onSvgPresentationChanged,
+    );
+    if (this._svgViewBoxSaveTimer) {
+      clearTimeout(this._svgViewBoxSaveTimer);
+      this._svgViewBoxSaveTimer = null;
+    }
     window.removeEventListener(
       'files-reverted', this._onFilesReverted,
     );
@@ -1701,6 +1732,27 @@ export class AppShell extends JRPCClient {
     const detail = event.detail || {};
     const { path, target, modified, savedContent } = detail;
     if (!path || !target) return;
+    // After the swap completes (one frame lets the
+    // target viewer's openFile chain settle), save
+    // viewport state so the new `type` — reflecting
+    // which viewer is now active — is persisted. Per
+    // specs-reference/5-webapp/shell.md save-triggers
+    // table, `toggle-svg-mode` is a standalone save
+    // point so a reload right after the toggle lands
+    // back on the intended viewer rather than the
+    // pre-toggle one.
+    const saveAfterSwap = () => {
+      requestAnimationFrame(() => {
+        try {
+          this._saveViewportState();
+        } catch (err) {
+          console.debug(
+            '[app-shell] viewport save on svg-mode toggle failed',
+            err,
+          );
+        }
+      });
+    };
     this.updateComplete.then(() => {
       const diffViewer =
         this.shadowRoot?.querySelector('ac-diff-viewer');
@@ -1732,6 +1784,7 @@ export class AppShell extends JRPCClient {
               diffViewer._recomputeDirty?.();
               diffViewer._showEditor?.();
             }
+            saveAfterSwap();
           });
         }
       } else if (target === 'visual') {
@@ -1769,6 +1822,7 @@ export class AppShell extends JRPCClient {
                 svgViewer._recomputeDirtyCount();
               }
             }
+            saveAfterSwap();
           });
         }
       }
@@ -1831,12 +1885,21 @@ export class AppShell extends JRPCClient {
    * preview concept" stay distinguishable.
    */
   _saveViewportState() {
+    // Branch by active viewer. When the SVG viewer is
+    // the active layer, persist its pan/zoom and
+    // presentation state. Otherwise persist the diff
+    // viewer's state (which includes the case where the
+    // user toggled an .svg file to text diff — the
+    // diff viewer becomes active, and we save with
+    // type: "diff" even though the path ends in .svg).
+    if (this._activeViewer === 'svg') {
+      this._saveSvgViewportState();
+      return;
+    }
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (!viewer) return;
     const file = viewer._file;
     if (!file || !file.path) return;
-    // Skip SVG files — SVG zoom restore not yet supported.
-    if (file.path.toLowerCase().endsWith('.svg')) return;
     try {
       const modifiedEditor = viewer._getModifiedEditor?.();
       if (!modifiedEditor) return;
@@ -1870,6 +1933,56 @@ export class AppShell extends JRPCClient {
       localStorage.setItem(key, JSON.stringify(state));
     } catch (_) {
       // Monaco mock or broken editor — skip silently.
+    }
+  }
+
+  /**
+   * Save the SVG viewer's viewport state. Separate from
+   * the diff-viewer path because the viewers hold
+   * independent state — the SVG viewer tracks multiple
+   * open files with an active index, not a single file
+   * slot. Reading the active file's viewBox from the
+   * right editor (the editable side; the left mirrors
+   * via the sync mutex) gives the canonical pan/zoom.
+   *
+   * Only writes when the active file is actually an
+   * SVG. In practice the shell only flips `_activeViewer`
+   * to 'svg' on SVG navigation, but a defensive check
+   * costs nothing and protects against future viewer
+   * sharing.
+   */
+  _saveSvgViewportState() {
+    const viewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (!viewer) return;
+    if (typeof viewer.getActiveViewBox !== 'function') return;
+    if (viewer._activeIndex < 0) return;
+    const file = viewer._files?.[viewer._activeIndex];
+    if (!file || !file.path) return;
+    if (!file.path.toLowerCase().endsWith('.svg')) return;
+    try {
+      const vb = viewer.getActiveViewBox();
+      if (!vb) return;
+      const presentation =
+        typeof viewer.isPresentation === 'function'
+          ? !!viewer.isPresentation()
+          : false;
+      const state = {
+        path: file.path,
+        type: 'svg',
+        svg: {
+          viewBox: {
+            x: vb.x,
+            y: vb.y,
+            width: vb.width,
+            height: vb.height,
+          },
+          presentation,
+        },
+      };
+      const key = _repoKey(_LAST_VIEWPORT_KEY, this._repoName);
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch (err) {
+      console.debug('[app-shell] SVG viewport save failed', err);
     }
   }
 
@@ -1931,7 +2044,11 @@ export class AppShell extends JRPCClient {
   _doReopenLastFile(path) {
     this._pendingReopen = false;
     if (!path) return;
-    // Dispatch navigate-file to open the file.
+    // Dispatch navigate-file to open the file. Routing
+    // to the correct viewer happens via extension check
+    // in _onNavigateFile; the viewport.type field below
+    // determines WHICH viewer we wait on for the post-
+    // open restore step.
     window.dispatchEvent(
       new CustomEvent('navigate-file', {
         detail: { path, _refresh: true },
@@ -1940,10 +2057,20 @@ export class AppShell extends JRPCClient {
     // Restore viewport state if it matches the file.
     const viewport = this._loadViewportState();
     if (!viewport || viewport.path !== path) return;
+    // Branch by type. SVG files with svg-type state
+    // route through the SVG restore path; everything
+    // else (including .svg paths that the user
+    // toggled to text diff) goes through the diff
+    // restore path.
+    if (viewport.type === 'svg' && viewport.svg) {
+      this._doReopenSvg(path, viewport.svg);
+      return;
+    }
     if (!viewport.diff) return;
-    // Wait for the file to open, then restore. Use a
-    // one-shot active-file-changed listener filtered
-    // to the target path. Timeout after 10 seconds.
+    // Diff path — wait for the file to open, then
+    // restore. Use a one-shot active-file-changed
+    // listener filtered to the target path. Timeout
+    // after 10 seconds.
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (!viewer) return;
     let settled = false;
@@ -1973,6 +2100,65 @@ export class AppShell extends JRPCClient {
       // Step 2 — wait for diff computation to settle
       // before restoring scroll + cursor.
       this._restoreViewport(viewer, viewport.diff, viewport.preview);
+    };
+    viewer.addEventListener('active-file-changed', handler);
+  }
+
+  /**
+   * Restore the SVG viewer's viewport after navigate-
+   * file has routed to the SVG viewer. Applies
+   * presentation mode first (changes the right pane's
+   * width), then writes the viewBox so the user's
+   * last-seen framing returns.
+   *
+   * Presentation-before-viewBox ordering matches the
+   * preview-before-scroll ordering in the diff path:
+   * the layout change must land first so the coordinate
+   * write targets the same layout it was captured in.
+   */
+  _doReopenSvg(path, svgState) {
+    const viewer = this.shadowRoot?.querySelector('ac-svg-viewer');
+    if (!viewer) return;
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      settled = true;
+    }, 10000);
+    const handler = (event) => {
+      if (settled) return;
+      if (event.detail?.path !== path) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      viewer.removeEventListener('active-file-changed', handler);
+      // Step 1 — presentation mode. Run idempotently
+      // so a false value (the default) doesn't toggle
+      // out of presentation if the viewer happened to
+      // be in it already.
+      if (typeof viewer.setPresentation === 'function') {
+        try {
+          viewer.setPresentation(!!svgState.presentation);
+        } catch (err) {
+          console.debug(
+            '[app-shell] presentation restore failed', err,
+          );
+        }
+      }
+      // Step 2 — viewBox. Wrap in try/catch and wait
+      // one frame so the presentation-mode refit (which
+      // runs in requestAnimationFrame inside
+      // _togglePresentation) lands before we overwrite
+      // its viewBox. Without the deferral, our
+      // setViewBox would race with presentation's
+      // fitContent and whichever ran last would win.
+      requestAnimationFrame(() => {
+        if (typeof viewer.setActiveViewBox !== 'function') return;
+        try {
+          viewer.setActiveViewBox(svgState.viewBox);
+        } catch (err) {
+          console.debug(
+            '[app-shell] SVG viewBox restore failed', err,
+          );
+        }
+      });
     };
     viewer.addEventListener('active-file-changed', handler);
   }
@@ -2249,15 +2435,50 @@ export class AppShell extends JRPCClient {
     // path — the event originates inside the viewer's
     // shadow root and bubbles up through the host element.
     const path = event.composedPath ? event.composedPath() : [];
+    let newActive = null;
     for (const el of path) {
       if (el && el.tagName === 'AC-SVG-VIEWER') {
-        this._activeViewer = 'svg';
-        return;
+        newActive = 'svg';
+        break;
       }
       if (el && el.tagName === 'AC-DIFF-VIEWER') {
-        this._activeViewer = 'diff';
-        return;
+        newActive = 'diff';
+        break;
       }
+    }
+    if (!newActive) return;
+    this._activeViewer = newActive;
+    // Save a baseline viewport now that the viewer has a
+    // file active. Without this, a user who opens an SVG
+    // and reloads without any further interaction has no
+    // persisted record of which viewer was active — the
+    // stored `ac-last-viewport` still reflects the
+    // previously-open file, and the restore short-circuits
+    // because `viewport.path !== fileToRestore`. Saving
+    // here captures the `type` discriminator (svg vs diff)
+    // the moment the viewer reports its file, so every
+    // reload has the right routing info regardless of
+    // whether the user interacted with the viewer.
+    //
+    // For the SVG viewer this also covers the case where
+    // the editors haven't finished attaching yet —
+    // `_saveSvgViewportState` will see `getActiveViewBox()`
+    // return null and the save becomes a no-op for that
+    // trigger, but subsequent `viewbox-changed` events
+    // (initial fit, first pan/zoom) arrive with editors
+    // live and populate the viewBox block then.
+    //
+    // Wrapped in try/catch so a broken save never trips
+    // downstream viewer-swap logic — the viewport save
+    // is a best-effort persistence, not a correctness
+    // requirement for the current render.
+    try {
+      this._saveViewportState();
+    } catch (err) {
+      console.debug(
+        '[app-shell] viewport save on active-file-changed failed',
+        err,
+      );
     }
   }
 
@@ -2393,6 +2614,52 @@ export class AppShell extends JRPCClient {
       // always be recaptured on the next save trigger.
       console.debug(
         '[app-shell] viewport save on preview toggle failed', err,
+      );
+    }
+  }
+
+  /**
+   * SVG viewer emitted viewbox-changed (wheel zoom,
+   * pan, fit). Debounce saves so a continuous gesture
+   * (wheel burst, drag) produces one save at the end
+   * rather than dozens per frame.
+   *
+   * 150 ms per the save-triggers table. Shorter than a
+   * smooth-scroll animation and longer than a single
+   * wheel tick; captures the "settled" viewBox. The
+   * beforeunload save runs synchronously and bypasses
+   * the debounce so a reload right after the last
+   * gesture still persists the final state.
+   */
+  _onSvgViewBoxChanged(_event) {
+    if (this._svgViewBoxSaveTimer) {
+      clearTimeout(this._svgViewBoxSaveTimer);
+    }
+    this._svgViewBoxSaveTimer = setTimeout(() => {
+      this._svgViewBoxSaveTimer = null;
+      try {
+        this._saveViewportState();
+      } catch (err) {
+        console.debug(
+          '[app-shell] viewport save on viewbox change failed', err,
+        );
+      }
+    }, 150);
+  }
+
+  /**
+   * SVG viewer toggled presentation mode. Same pattern
+   * as preview-mode-changed — save immediately, no
+   * debounce (the toggle is a single user gesture, not
+   * a continuous stream).
+   */
+  _onSvgPresentationChanged(_event) {
+    try {
+      this._saveViewportState();
+    } catch (err) {
+      console.debug(
+        '[app-shell] viewport save on presentation toggle failed',
+        err,
       );
     }
   }

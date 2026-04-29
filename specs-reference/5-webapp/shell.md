@@ -124,7 +124,7 @@ The formula is `scaled = round(stored_pixels * current_viewport / baseline_viewp
 | `ac-dc-dialog-width` | integer px (string) | Docked-mode width override (absent until first right-edge resize while docked) |
 | `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle (absent until first drag past threshold or first bottom/corner resize) |
 | `ac-last-open-file` | string (file path) | Last-opened file for restore on reload |
-| `ac-last-viewport` | JSON `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}, preview?: {open, scrollTop}}` | Last viewport state of the last-opened file. `preview` is present only for file types that have a preview toggle (markdown, TeX); absent for plain diff files. `preview.open` is a boolean — true when the user last had the preview pane open. `preview.scrollTop` is the preview pane's scroll offset in pixels, restored against the preview element after the editor's own scroll restore runs. Unknown or absent `preview` means "preview was not open" — restore logic treats missing as false rather than as "unknown". |
+| `ac-last-viewport` | JSON `{path, type, diff?: {...}, preview?: {open, scrollTop}, svg?: {viewBox, presentation}}` | Last viewport state of the last-opened file. The `type` field discriminates restore routing: `"diff"` routes to the diff viewer (Monaco), `"svg"` routes to the SVG viewer. For `.svg` paths, `type` reflects which viewer the user last had active — a user who toggled to text diff gets `type: "diff"` and a `diff` block; a user editing visually gets `type: "svg"` and an `svg` block. The blocks are mutually exclusive in practice; schema permits both for future mixed-mode viewers but only one is read per restore. `diff` shape: `{scrollTop, scrollLeft, lineNumber, column}`. `preview` shape: `{open: boolean, scrollTop: px}` — present only for markdown/TeX; restore treats missing as false. `svg` shape: `{viewBox: {x, y, width, height}, presentation: boolean}` — present only when `type === "svg"`; `viewBox` values are in SVG user units (matches `SvgEditor.getViewBox()`), `presentation` is whether the right pane was full-width with the left pane collapsed. Unknown or absent branches mean the feature wasn't used — restore treats missing as the default (no preview, no presentation, no SVG block). |
 | `ac-dc-enrichment-unavailable-shown` | `"true"` | One-shot flag suppressing the enrichment-unavailable warning toast across browser sessions |
 
 **Repo-scoped keys:** `ac-last-open-file` and `ac-last-viewport` use a `_repoKey(key, repoName)` helper producing `{key}:{repoName}`. Prevents opening a different repo from restoring the wrong file. Falls back to the bare key when repo name not yet known.
@@ -139,14 +139,19 @@ Malformed values (non-JSON, wrong shape, width below minimum, non-finite numbers
 
 | Trigger | Save scope |
 |---|---|
-| `beforeunload` | Save current viewport state including preview toggle and preview scroll |
-| Before navigating to a different file | Save outgoing file's viewport including preview fields |
+| `beforeunload` | Save current viewport state — diff scroll/cursor OR svg viewBox/presentation, plus preview toggle/scroll |
+| Before navigating to a different file | Save outgoing file's viewport |
+| `active-file-changed` from either viewer | Save alone — the viewer has just reported a file is live, so the `type` discriminator (svg vs diff) becomes known. Without this, opening a file and reloading without further interaction leaves the stored viewport describing the *previous* file, and the restore short-circuits on path mismatch. The save is additive: when the viewer's editors aren't yet attached (SVG: `getActiveViewBox()` returns null; diff: no modified editor yet), the save no-ops via the same try/catch guards that protect the other paths, so it can't clobber a live stored viewBox. First real gesture or Monaco attach produces a follow-up save that fills in the geometry block |
 | Preview toggle (on/off) | Save alone — capturing the toggle immediately means a reload right after a toggle-then-nothing still restores the correct pane |
-| SVG files | Excluded (SVG zoom restore not yet supported) |
+| SVG viewBox change (pan, zoom, fit, presentation-mode refit) | Debounced save — the viewer emits `viewbox-changed` on every right-editor `onViewChange`; the shell coalesces via a short debounce so a wheel-zoom burst doesn't produce one write per frame |
+| SVG presentation-mode toggle | Save alone — same reasoning as preview toggle |
+| SVG ↔ text diff toggle (`toggle-svg-mode`) | Save alone — flips which viewer is reflected in the stored `type`, so a reload right after the toggle restores the intended view. Redundant with the `active-file-changed` save trigger (the swap fires `active-file-changed` on the target viewer), but kept as belt-and-braces against any future refactor that might bypass the active-file event |
 
-Save wraps Monaco layout queries in try/catch so the file navigation never blocks on a throw from a detached-DOM editor. The same guard covers preview-scroll reads — a markdown preview that's mid-render may not yet have a scrollable element.
+Save wraps Monaco layout queries, preview-scroll reads, and SvgEditor viewBox reads in try/catch. A diff editor on a detached DOM, a markdown preview mid-render, or an SVG editor with a partially-disposed CTM can each throw from inside their respective read path; the file navigation must not block on a broken save.
 
-The preview fields are only written for files whose type has a preview toggle (markdown, TeX). Writing `preview: {open: false, scrollTop: 0}` for every plain file would bloat the stored JSON without expressing anything; omitting the key entirely keeps "no preview" and "preview closed" distinguishable in logs and future schema migrations.
+The preview fields are only written for files whose type has a preview toggle (markdown, TeX). Writing `preview: {open: false, scrollTop: 0}` for every plain file would bloat the stored JSON without expressing anything; omitting the key entirely keeps "no preview" and "preview closed" distinguishable in logs and future schema migrations. The same omission rule applies to `svg` — written only when the active viewer is the SVG viewer.
+
+**SVG viewBox debounce window.** 150 ms after the last `viewbox-changed` event. Shorter than the smooth-scroll animation time and longer than a single wheel tick; captures the user's "settled" viewBox rather than every intermediate frame. The final write on `beforeunload` is not debounced — it runs synchronously so the last write survives a page reload.
 
 ### Restore flow
 
@@ -156,14 +161,19 @@ File reopen is deferred until the startup overlay dismisses (on `startupProgress
 2. If startup overlay still visible, set `_pendingReopen = true` and return
 3. When overlay dismisses, proceed
 4. Read `ac-last-viewport` and verify `viewport.path === fileToRestore`
-5. Dispatch `navigate-file` event to re-open
-6. For diff files with saved viewport, register a one-shot `active-file-changed` listener filtered to the target path
+5. Dispatch `navigate-file` event to re-open. Routing happens via the path's extension — `.svg` paths land on the SVG viewer, everything else on the diff viewer
+6. Branch on `viewport.type`:
+   - `type === "diff"` → register one-shot `active-file-changed` listener on the diff viewer
+   - `type === "svg"` → register one-shot `active-file-changed` listener on the SVG viewer
+   - For the `.svg` path + `type === "diff"` case (user had toggled to text diff), the navigate-file already routed to the diff viewer based on extension, so the diff listener catches it naturally. No follow-up `toggle-svg-mode` dispatch is needed on restore — the stored `type` determines which viewer registered interest
 7. When file opens, use double-rAF to wait for editor readiness
-8. If `viewport.preview?.open` is true, toggle the preview pane before restoring scroll — Monaco's editor and the preview element are separate scroll surfaces, so the editor-scroll restore in step 9 would target the wrong element if preview hadn't been opened first
-9. Call `restoreViewportState()` — cursor position, reveal line, editor scroll offsets
-10. `restoreViewportState()` polls up to 20 animation frames for Monaco editor readiness
-11. If `viewport.preview?.open` is true and `viewport.preview.scrollTop` is non-zero, restore the preview pane's `scrollTop` on the next animation frame after step 9 completes — the preview element may still be mid-render when step 8 returns, so waiting one more frame gives the markdown/TeX renderer time to populate the pane before the scroll assignment takes effect
-12. 10-second timeout removes the listener if the file never opens (deleted, etc.)
+8. For diff `type`: if `viewport.preview?.open` is true, toggle the preview pane before restoring scroll — Monaco's editor and the preview element are separate scroll surfaces, so the editor-scroll restore in step 9 would target the wrong element if preview hadn't been opened first
+9. For diff `type`: call `restoreViewportState()` — cursor position, reveal line, editor scroll offsets. Polls up to 20 animation frames for Monaco editor readiness. If `viewport.preview?.open` is true and `viewport.preview.scrollTop` is non-zero, restore the preview pane's `scrollTop` on the next animation frame after the editor scroll settles
+10. For svg `type`:
+    - If `viewport.svg.presentation === true`, toggle presentation mode before writing viewBox. Presentation mode changes the right pane's width (left pane collapsed to zero), and the viewBox we saved was framed against that layout. Applying viewBox first would frame against the two-pane layout and the content would re-fit after the presentation toggle
+    - Write `viewport.svg.viewBox` to the right editor via the viewer's `setActiveViewBox`. The sync-mirror writes the same viewBox to the left editor silently. Wrap in try/catch — an SvgEditor with a not-yet-attached root can throw from `setViewBox` and the restore should degrade to "fit-content default" rather than crashing
+    - No polling equivalent to Monaco's 20-frame loop — the SVG editors attach synchronously in `_initEditors` after the first `_injectSvgContent` call, which runs in the same `updated()` lifecycle as the navigate-file handler. By the time `active-file-changed` fires, the editors exist. Defensive guard anyway — if `_editorRight` is still null, skip the write and let fit-content stand
+11. 10-second timeout removes the listener if the file never opens (deleted, etc.)
 
 ## Cross-references
 
