@@ -70,7 +70,7 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 
 **Layer 4 (1 commit)**
 
-- [ ] Docuvert provenance header (`specs-reference/4-features/doc-convert.md`)
+- [x] Docuvert provenance header (`specs-reference/4-features/doc-convert.md`)
 
 **Config/deployment (2 commits)**
 

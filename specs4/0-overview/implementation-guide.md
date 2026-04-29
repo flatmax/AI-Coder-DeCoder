@@ -97,7 +97,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | RPC method signatures | `specs-reference/1-foundation/rpc-inventory.md` (full RPC inventory with argument and return shapes) |
 | Streaming event payload shapes | `specs-reference/3-llm/streaming.md` (streamChunk, streamComplete, compactionEvent) |
 | JSONL history schema | `specs-reference/3-llm/history.md` |
-| Docuvert provenance header | `specs3/4-features/doc_convert.md` |
+| Docuvert provenance header | `specs-reference/4-features/doc-convert.md` |
 | Config file schemas | `specs-reference/1-foundation/configuration.md` |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
 | Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs3/5-webapp/diff_viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
