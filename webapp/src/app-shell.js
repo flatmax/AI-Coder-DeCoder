@@ -843,6 +843,14 @@ export class AppShell extends JRPCClient {
     // file-saved — routes editor saves to Repo.write_file
     // or Settings.save_config_content.
     this._onFileSaved = this._onFileSaved.bind(this);
+    // preview-mode-changed — fired by the diff viewer
+    // whenever the user toggles the preview pane. We
+    // save the viewport state immediately so a reload
+    // right after a toggle-then-nothing restores the
+    // correct pane. Per save-triggers table in
+    // specs-reference/5-webapp/shell.md.
+    this._onPreviewModeChanged =
+      this._onPreviewModeChanged.bind(this);
     // files-reverted — after Discard Changes and
     // similar working-tree reverts, refresh open
     // viewers so stale modified buffers get replaced
@@ -921,6 +929,9 @@ export class AppShell extends JRPCClient {
     // when the file is flagged as a config file. Without
     // this handler, saves silently vanish.
     window.addEventListener('file-saved', this._onFileSaved);
+    window.addEventListener(
+      'preview-mode-changed', this._onPreviewModeChanged,
+    );
     // files-reverted fires from files-tab after a
     // successful Discard Changes (and in future: stage
     // rollback, reset-to-HEAD paths). Refresh open
@@ -1024,6 +1035,9 @@ export class AppShell extends JRPCClient {
   disconnectedCallback() {
     window.removeEventListener(TOAST_EVENT, this._onToastEvent);
     window.removeEventListener('file-saved', this._onFileSaved);
+    window.removeEventListener(
+      'preview-mode-changed', this._onPreviewModeChanged,
+    );
     window.removeEventListener(
       'files-reverted', this._onFilesReverted,
     );
@@ -1802,12 +1816,24 @@ export class AppShell extends JRPCClient {
    * Save the current diff viewer's viewport state to
    * localStorage. SVG files are excluded (SVG zoom
    * restore is not yet supported).
+   *
+   * Post-D18: the diff viewer holds a single file slot
+   * (`_file`), not a `_files[]` array. An older version
+   * of this method read `_files[_activeIndex]` and
+   * silently no-op'd after D18 — every save produced
+   * nothing, reload-reopen had no viewport to restore.
+   *
+   * For markdown / TeX files the `preview` block is
+   * populated by querying the viewer's public API
+   * (isPreviewOpen / getPreviewScrollTop). The key is
+   * omitted entirely for plain files so the stored
+   * JSON stays compact and "preview closed" vs "no
+   * preview concept" stay distinguishable.
    */
   _saveViewportState() {
     const viewer = this.shadowRoot?.querySelector('ac-diff-viewer');
     if (!viewer) return;
-    if (viewer._activeIndex < 0) return;
-    const file = viewer._files?.[viewer._activeIndex];
+    const file = viewer._file;
     if (!file || !file.path) return;
     // Skip SVG files — SVG zoom restore not yet supported.
     if (file.path.toLowerCase().endsWith('.svg')) return;
@@ -1825,6 +1851,21 @@ export class AppShell extends JRPCClient {
           column: pos?.column || 1,
         },
       };
+      // Preview block — only for file types that have a
+      // preview toggle. Populated via the viewer's
+      // public API so we don't rely on private fields.
+      if (typeof viewer.isPreviewOpen === 'function') {
+        const previewOpen = !!viewer.isPreviewOpen();
+        if (previewOpen) {
+          state.preview = {
+            open: true,
+            scrollTop:
+              (typeof viewer.getPreviewScrollTop === 'function'
+                ? viewer.getPreviewScrollTop()
+                : 0) || 0,
+          };
+        }
+      }
       const key = _repoKey(_LAST_VIEWPORT_KEY, this._repoName);
       localStorage.setItem(key, JSON.stringify(state));
     } catch (_) {
@@ -1872,6 +1913,20 @@ export class AppShell extends JRPCClient {
 
   /**
    * Actually reopen the file and restore viewport state.
+   *
+   * When the persisted viewport says preview was open,
+   * toggle preview BEFORE the editor scroll restore —
+   * preview mode disposes and rebuilds the Monaco
+   * editor with `renderSideBySide: false` against a
+   * half-width pane, and the scroll offsets we saved
+   * were captured against that half-width layout. If
+   * we restored scroll first and toggled preview
+   * after, Monaco's layout math would run twice and
+   * the scroll would snap to a different position.
+   *
+   * Preview scrollTop restores after the editor scroll
+   * has settled, via a follow-up one-frame delay
+   * inside the viewer's `restorePreviewScrollTop`.
    */
   _doReopenLastFile(path) {
     this._pendingReopen = false;
@@ -1901,9 +1956,23 @@ export class AppShell extends JRPCClient {
       settled = true;
       clearTimeout(timeoutId);
       viewer.removeEventListener('active-file-changed', handler);
-      // Wait for diff computation to settle before
-      // restoring scroll + cursor.
-      this._restoreViewport(viewer, viewport.diff);
+      // Step 1 — open preview if it was open before.
+      // Must happen before editor scroll restore so
+      // Monaco's layout computes against the split
+      // pane the scroll offsets were captured in.
+      const wantsPreview = !!(viewport.preview && viewport.preview.open);
+      if (wantsPreview && typeof viewer.setPreviewMode === 'function') {
+        try {
+          viewer.setPreviewMode(true);
+        } catch (err) {
+          console.debug(
+            '[app-shell] preview restore failed', err,
+          );
+        }
+      }
+      // Step 2 — wait for diff computation to settle
+      // before restoring scroll + cursor.
+      this._restoreViewport(viewer, viewport.diff, viewport.preview);
     };
     viewer.addEventListener('active-file-changed', handler);
   }
@@ -1914,10 +1983,31 @@ export class AppShell extends JRPCClient {
    * frames for the editor to be ready (it's created
    * asynchronously after the file content fetch
    * completes).
+   *
+   * When `preview` is non-null the caller has already
+   * opened the preview pane via `setPreviewMode(true)`.
+   * After the editor's own scroll lands, we hand off
+   * to the viewer's `restorePreviewScrollTop`, which
+   * waits one more frame before writing the preview
+   * pane's scrollTop — the markdown/TeX pipeline may
+   * still be mid-render when the editor scroll
+   * settles, and scrolling an empty pane would snap
+   * back to 0 once the content actually populates.
    */
-  _restoreViewport(viewer, state) {
+  _restoreViewport(viewer, state, preview) {
     let attempts = 0;
     const maxAttempts = 20;
+    const finishPreview = () => {
+      if (!preview || !preview.open) return;
+      if (typeof viewer.restorePreviewScrollTop !== 'function') return;
+      try {
+        viewer.restorePreviewScrollTop(preview.scrollTop || 0);
+      } catch (err) {
+        console.debug(
+          '[app-shell] preview scroll restore failed', err,
+        );
+      }
+    };
     const tryRestore = () => {
       attempts += 1;
       const modifiedEditor = viewer._getModifiedEditor?.();
@@ -1938,6 +2028,7 @@ export class AppShell extends JRPCClient {
             modifiedEditor.setScrollTop?.(state.scrollTop || 0);
             modifiedEditor.setScrollLeft?.(state.scrollLeft || 0);
           } catch (_) {}
+          finishPreview();
         });
       } else {
         try {
@@ -1948,6 +2039,7 @@ export class AppShell extends JRPCClient {
           modifiedEditor.setScrollTop?.(state.scrollTop || 0);
           modifiedEditor.setScrollLeft?.(state.scrollLeft || 0);
         } catch (_) {}
+        finishPreview();
       }
     };
     requestAnimationFrame(tryRestore);
@@ -2281,6 +2373,27 @@ export class AppShell extends JRPCClient {
           '[app-shell] svg viewer refresh after revert failed', err,
         );
       });
+    }
+  }
+
+  /**
+   * Diff viewer told us preview-mode toggled. Save the
+   * viewport immediately so a reload right after the
+   * toggle restores the correct pane state. The save-
+   * triggers table in specs-reference/5-webapp/shell.md
+   * pins this as a standalone save point — distinct
+   * from beforeunload and from the pre-navigate save.
+   */
+  _onPreviewModeChanged(_event) {
+    try {
+      this._saveViewportState();
+    } catch (err) {
+      // Don't let a broken save trip later event
+      // handlers — preview toggle is cheap and can
+      // always be recaptured on the next save trigger.
+      console.debug(
+        '[app-shell] viewport save on preview toggle failed', err,
+      );
     }
   }
 

@@ -69,13 +69,18 @@ All dispatch to window-level custom events that the relevant child components li
 - Keys are repo-scoped so opening a different repo never restores the wrong file
 - Legacy bare keys migrated to scoped keys on first recognition of the repo name
 - File path saved on every navigate-file event
-- Viewport state (scroll position, cursor) saved on `beforeunload` and before navigating away from the current file
+- Viewport state (scroll position, cursor, and any view-mode toggles) saved on `beforeunload` and before navigating away from the current file
+- View-mode toggles covered:
+  - Markdown files — whether the preview pane was open and the preview's scroll position
+  - TeX files — whether the preview pane was open and the preview's scroll position
+- Not persisted: SVG pan/zoom (no zoom-restore contract yet), editor find-widget state, focused side of the diff editor. Adding any of these is an additive `ac-last-viewport` schema change.
 
 ### Restore Flow
 
 - On startup, after state-loaded completes, defer file reopen until the startup overlay dismisses (prevents file-fetch RPC calls from blocking the server during heavy init)
 - On reconnect (init already complete), reopen immediately
 - After the reopen, restore viewport state once the viewer is ready
+- Preview toggles restore before scroll — the user's last view (raw editor vs preview) is the one they see, and the preview's own scroll position is restored against the preview pane rather than the editor
 - A timeout cancels restoration if the file never opens (e.g., deleted)
 
 ## Viewer Background

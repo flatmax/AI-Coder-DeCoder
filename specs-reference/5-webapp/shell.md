@@ -124,7 +124,7 @@ The formula is `scaled = round(stored_pixels * current_viewport / baseline_viewp
 | `ac-dc-dialog-width` | integer px (string) | Docked-mode width override (absent until first right-edge resize while docked) |
 | `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle (absent until first drag past threshold or first bottom/corner resize) |
 | `ac-last-open-file` | string (file path) | Last-opened file for restore on reload |
-| `ac-last-viewport` | JSON `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}}` | Last viewport state of the last-opened file |
+| `ac-last-viewport` | JSON `{path, type, diff: {scrollTop, scrollLeft, lineNumber, column}, preview?: {open, scrollTop}}` | Last viewport state of the last-opened file. `preview` is present only for file types that have a preview toggle (markdown, TeX); absent for plain diff files. `preview.open` is a boolean — true when the user last had the preview pane open. `preview.scrollTop` is the preview pane's scroll offset in pixels, restored against the preview element after the editor's own scroll restore runs. Unknown or absent `preview` means "preview was not open" — restore logic treats missing as false rather than as "unknown". |
 | `ac-dc-enrichment-unavailable-shown` | `"true"` | One-shot flag suppressing the enrichment-unavailable warning toast across browser sessions |
 
 **Repo-scoped keys:** `ac-last-open-file` and `ac-last-viewport` use a `_repoKey(key, repoName)` helper producing `{key}:{repoName}`. Prevents opening a different repo from restoring the wrong file. Falls back to the bare key when repo name not yet known.
@@ -139,11 +139,14 @@ Malformed values (non-JSON, wrong shape, width below minimum, non-finite numbers
 
 | Trigger | Save scope |
 |---|---|
-| `beforeunload` | Save current viewport state |
-| Before navigating to a different file | Save outgoing file's viewport |
+| `beforeunload` | Save current viewport state including preview toggle and preview scroll |
+| Before navigating to a different file | Save outgoing file's viewport including preview fields |
+| Preview toggle (on/off) | Save alone — capturing the toggle immediately means a reload right after a toggle-then-nothing still restores the correct pane |
 | SVG files | Excluded (SVG zoom restore not yet supported) |
 
-Save wraps Monaco layout queries in try/catch so the file navigation never blocks on a throw from a detached-DOM editor.
+Save wraps Monaco layout queries in try/catch so the file navigation never blocks on a throw from a detached-DOM editor. The same guard covers preview-scroll reads — a markdown preview that's mid-render may not yet have a scrollable element.
+
+The preview fields are only written for files whose type has a preview toggle (markdown, TeX). Writing `preview: {open: false, scrollTop: 0}` for every plain file would bloat the stored JSON without expressing anything; omitting the key entirely keeps "no preview" and "preview closed" distinguishable in logs and future schema migrations.
 
 ### Restore flow
 
@@ -156,9 +159,11 @@ File reopen is deferred until the startup overlay dismisses (on `startupProgress
 5. Dispatch `navigate-file` event to re-open
 6. For diff files with saved viewport, register a one-shot `active-file-changed` listener filtered to the target path
 7. When file opens, use double-rAF to wait for editor readiness
-8. Call `restoreViewportState()` — cursor position, reveal line, scroll offsets
-9. `restoreViewportState()` polls up to 20 animation frames for Monaco editor readiness
-10. 10-second timeout removes the listener if the file never opens (deleted, etc.)
+8. If `viewport.preview?.open` is true, toggle the preview pane before restoring scroll — Monaco's editor and the preview element are separate scroll surfaces, so the editor-scroll restore in step 9 would target the wrong element if preview hadn't been opened first
+9. Call `restoreViewportState()` — cursor position, reveal line, editor scroll offsets
+10. `restoreViewportState()` polls up to 20 animation frames for Monaco editor readiness
+11. If `viewport.preview?.open` is true and `viewport.preview.scrollTop` is non-zero, restore the preview pane's `scrollTop` on the next animation frame after step 9 completes — the preview element may still be mid-render when step 8 returns, so waiting one more frame gives the markdown/TeX renderer time to populate the pane before the scroll assignment takes effect
+12. 10-second timeout removes the listener if the file never opens (deleted, etc.)
 
 ## Cross-references
 

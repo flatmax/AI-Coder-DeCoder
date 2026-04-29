@@ -915,6 +915,105 @@ export class DiffViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Public API — preview state (for shell-driven restore)
+  // ---------------------------------------------------------------
+
+  /**
+   * Whether the preview pane is currently open. Used by
+   * the app shell's viewport persistence to decide
+   * whether to record `preview: {open: true}` in the
+   * stored viewport state. Returns false for files that
+   * don't support preview — the stored JSON omits the
+   * preview key entirely in that case (see
+   * specs-reference/5-webapp/shell.md save-triggers
+   * table).
+   */
+  isPreviewOpen() {
+    if (this._file === null) return false;
+    if (!this._isPreviewableFile(this._file)) return false;
+    return !!this._previewMode;
+  }
+
+  /**
+   * Current scrollTop of the preview pane, or 0 when
+   * preview isn't open / the pane hasn't rendered yet.
+   * Wrapped in try/catch because the pane may be mid-
+   * render (TeX compile in flight, markdown pipeline
+   * mid-render) and accessing scrollTop on a detached
+   * element can throw in some browsers.
+   */
+  getPreviewScrollTop() {
+    if (!this._previewMode) return 0;
+    try {
+      const pane =
+        this._previewPane ||
+        this.shadowRoot?.querySelector('.preview-pane');
+      if (!pane) return 0;
+      return pane.scrollTop || 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Open or close the preview pane programmatically.
+   * Used by the app shell's restore flow — if the
+   * persisted viewport says preview was open, the shell
+   * calls `setPreviewMode(true)` BEFORE restoring
+   * editor scroll so Monaco's layout math runs against
+   * the split layout's editor pane (half-width), not
+   * against the full-width side-by-side diff layout.
+   *
+   * No-op when the file isn't previewable or when the
+   * requested state matches the current state. Unlike
+   * `_togglePreview` this is idempotent — calling
+   * `setPreviewMode(true)` twice leaves preview open,
+   * not closed.
+   */
+  setPreviewMode(open) {
+    if (this._file === null) return;
+    if (!this._isPreviewableFile(this._file)) return;
+    const target = !!open;
+    if (target === this._previewMode) return;
+    this._togglePreview();
+  }
+
+  /**
+   * Restore the preview pane's scroll position. Called
+   * by the shell after the editor's own scroll restore
+   * has settled, so the preview and editor don't fight
+   * over the scroll-sync lock during restore.
+   *
+   * Waits one animation frame to let the renderer
+   * populate the pane before assigning scrollTop. For
+   * TeX this is critical — the compile RPC is async and
+   * the pane may be showing a "Compiling…" placeholder
+   * when the shell calls this method. A subsequent
+   * successful compile will re-populate the pane at
+   * scrollTop=0; the shell's retry policy handles that.
+   *
+   * Acquires the scroll lock in the 'preview' slot so
+   * the sync handler doesn't immediately mirror this
+   * scroll back to the editor (which would undo the
+   * editor's just-restored position).
+   */
+  restorePreviewScrollTop(scrollTop) {
+    if (!this._previewMode) return;
+    const px = Number(scrollTop) || 0;
+    if (px <= 0) return;
+    requestAnimationFrame(() => {
+      const pane =
+        this._previewPane ||
+        this.shadowRoot?.querySelector('.preview-pane');
+      if (!pane) return;
+      try {
+        this._acquireScrollLock('preview');
+        pane.scrollTop = px;
+      } catch (_) {}
+    });
+  }
+
+  // ---------------------------------------------------------------
   // Internals — file loading
   // ---------------------------------------------------------------
 
@@ -1313,6 +1412,21 @@ export class DiffViewer extends LitElement {
           this._compileTex(file);
         }
       }
+      // Notify the shell so it can persist the preview
+      // toggle state immediately. Per the save-triggers
+      // table, toggling preview is itself a save event
+      // — without this, a reload right after a toggle-
+      // then-nothing would restore the wrong pane.
+      this.dispatchEvent(
+        new CustomEvent('preview-mode-changed', {
+          detail: {
+            path: this._file?.path || null,
+            open: this._previewMode,
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
     });
   }
 
