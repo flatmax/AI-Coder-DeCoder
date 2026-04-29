@@ -501,6 +501,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     // remove so cleanup matches.
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
     this._onActiveFileChanged =
       this._onActiveFileChanged.bind(this);
@@ -561,6 +562,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     super.connectedCallback();
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('files-modified', this._onFilesModified);
+    window.addEventListener('state-loaded', this._onStateLoaded);
     window.addEventListener(
       'reveal-file-in-picker',
       this._onRevealFileInPicker,
@@ -595,6 +597,7 @@ export class FilesTab extends RpcMixin(LitElement) {
       'files-modified',
       this._onFilesModified,
     );
+    window.removeEventListener('state-loaded', this._onStateLoaded);
     window.removeEventListener(
       'reveal-file-in-picker',
       this._onRevealFileInPicker,
@@ -945,6 +948,43 @@ export class FilesTab extends RpcMixin(LitElement) {
       new Set(incoming),
       /* notifyServer */ false,
     );
+  }
+
+  _onStateLoaded(event) {
+    // AppShell dispatches `state-loaded` after every
+    // successful `get_current_state()` fetch — on initial
+    // connect and on every reconnect. Restore the server's
+    // authoritative selection and exclusion sets so a
+    // browser refresh preserves what the user had ticked,
+    // even when the working tree is clean (and thus
+    // `_applyInitialAutoSelect` wouldn't otherwise seed
+    // anything).
+    //
+    // Suppress the first-load auto-select. The server's
+    // snapshot IS the authoritative state — layering the
+    // git-changed union on top would silently add files
+    // the user had deliberately deselected. The flag flip
+    // only matters when the snapshot arrives before the
+    // first tree load (common case — `_fetchCurrentState`
+    // fires synchronously on setupDone, before the files
+    // tab's own onRpcReady hook triggers the tree RPC).
+    const state = event?.detail;
+    if (!state || typeof state !== 'object') return;
+    this._initialAutoSelect = false;
+    const selected = state.selected_files;
+    if (Array.isArray(selected)) {
+      this._applySelection(
+        new Set(selected),
+        /* notifyServer */ false,
+      );
+    }
+    const excluded = state.excluded_index_files;
+    if (Array.isArray(excluded)) {
+      this._applyExclusion(
+        new Set(excluded),
+        /* notifyServer */ false,
+      );
+    }
   }
 
   _onFilesModified(_event) {
