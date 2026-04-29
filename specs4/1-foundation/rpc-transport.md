@@ -1,7 +1,5 @@
 # RPC Transport
 
-**Status:** stub
-
 Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo library. Either side can call methods exposed by the other.
 
 ## Connection Model

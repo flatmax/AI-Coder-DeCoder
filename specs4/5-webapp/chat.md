@@ -1,5 +1,5 @@
 # Chat
-**Status:** stub
+
 The chat panel renders conversation messages, handles streaming display, manages auto-scrolling, and owns the user input area. It is the primary interaction surface within the Files tab. It also hosts the history browser and session-management controls.
 ## Message Display
 - Scrollable list of message cards — user, assistant, system event

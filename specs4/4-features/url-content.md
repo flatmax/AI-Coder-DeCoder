@@ -1,7 +1,5 @@
 # URL Content
 
-**Status:** stub
-
 The system detects URLs in user input, fetches and extracts content, optionally summarizes via a smaller LLM, caches results to disk, and makes content available as conversation context. A url-chips UI component surfaces detection, fetch state, and inclusion toggles.
 
 ## URL Detection

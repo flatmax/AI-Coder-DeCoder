@@ -1,7 +1,5 @@
 # Search
 
-**Status:** stub
-
 Search is integrated into the Files tab's chat panel action bar rather than occupying a separate tab. A mode toggle switches between chat message search and file content search. File search shows a match overlay covering the messages area and a pruned file tree in the picker, with bidirectional scroll sync between them.
 
 ## Action Bar Integration

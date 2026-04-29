@@ -1,5 +1,5 @@
 # Document Convert
-**Status:** stub
+
 A dialog-driven tool (not a background auto-convert) for converting non-markdown documents to markdown files. Requires a clean git working tree so converted files appear as clear, reviewable diffs. The user selects which files to convert, reviews the results, and commits normally. Converted files are placed as siblings to the originals and indexed by the document index like any other markdown.
 ## Supported Formats
 | Extension | Source | Conversion notes |

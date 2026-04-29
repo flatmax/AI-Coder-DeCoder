@@ -1,5 +1,5 @@
 # Code Review
-**Status:** stub
+
 A review mode that leverages git's staging mechanism to present branch changes for AI-assisted code review. By performing a soft reset, all review changes appear as staged modifications — allowing the existing file picker, diff viewer, and context engine to work unchanged. The LLM reviews code with full symbol map context, structural change analysis, and interactive conversation.
 ## Architecture
 - User selects branch and base commit via an interactive git graph

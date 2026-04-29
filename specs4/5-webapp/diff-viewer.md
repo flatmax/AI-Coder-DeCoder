@@ -1,5 +1,5 @@
 # Diff Viewer
-**Status:** stub
+
 Side-by-side diff editor for text file changes. Lives outside the dialog, filling the background viewport. Supports inline editing with save, and LSP features.
 
 **Single-file, no-cache model.** Exactly one file is displayed at a time. Every `openFile` call fetches HEAD and working-copy content fresh from the backend — there is no caching of file content across switches. Unsaved edits to the currently-displayed file are discarded when any other file is opened, including when the same file is opened again (same-file click forces refetch). The diff editor is a transient window onto disk state, not a stateful workspace.

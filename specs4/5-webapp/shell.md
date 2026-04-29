@@ -1,7 +1,5 @@
 # Shell
 
-**Status:** stub
-
 The root component of the webapp. Owns the WebSocket connection, routes server-push events to child components, hosts the dialog and viewer background, manages global keyboard shortcuts, and orchestrates startup and reconnection. All child components receive RPC access through a shared singleton rather than holding their own WebSocket.
 
 ## Role

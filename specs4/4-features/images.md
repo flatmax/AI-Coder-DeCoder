@@ -1,7 +1,5 @@
 # Image Persistence
 
-**Status:** stub
-
 Images pasted into the chat input are persisted to disk so they can be displayed when loading previous sessions. Stored as individual files in the per-repo working directory, referenced by content hash in the JSONL history.
 
 ## Storage Location

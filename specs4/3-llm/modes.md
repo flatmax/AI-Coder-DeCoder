@@ -1,7 +1,5 @@
 # Modes
 
-**Status:** stub
-
 The mode system determines which index feeds the LLM context, which system prompt is active, and which snippets are shown. Two primary modes (code, document) toggle between code-oriented and documentation-oriented workflows. Cross-reference mode is an overlay that adds the other index alongside the primary.
 
 ## Primary Modes

@@ -1,7 +1,5 @@
 # Symbol Index
 
-**Status:** stub
-
 A tree-sitter based code analysis engine. Extracts classes, functions, variables, and imports from source files to produce a compact textual symbol map for LLM context and to support editor features (hover, go-to-definition, completions).
 
 ## Architecture

@@ -1,5 +1,5 @@
 # Viewers and Token HUD
-**Status:** stub
+
 Two surfaces that consume the same backend context-breakdown data to show different perspectives on token usage and cache state: the **Context tab** (with Budget and Cache sub-views, persistent while visible) and the **Token HUD** (floating transient overlay triggered after each LLM response). Also covers the terminal HUD printed server-side after each response.
 ## Shared Backend
 Both the Context tab and the Token HUD call the same breakdown RPC. Shared capabilities:

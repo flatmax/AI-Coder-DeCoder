@@ -1,5 +1,5 @@
 # File Navigation Grid
-**Status:** stub
+
 File navigation uses a 2D spatial grid rather than tabs or a linear history stack. Every file-open action creates a new node adjacent to the current node on a 2D grid. Alt+Arrow keys traverse the grid spatially — left, right, up, down — opening the target file in the diff viewer or SVG viewer as appropriate. A fullscreen HUD overlay appears while Alt is held, showing the grid structure and the user's position within it.
 ## Constants
 Navigation grid behavior is driven by direction-priority arrays and a small set of sizing/timing constants.

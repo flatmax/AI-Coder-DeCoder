@@ -1,5 +1,5 @@
 # File Picker
-**Status:** stub
+
 Tree view of repository files with checkboxes, git status, and context menu. Left panel of the Files tab. Drives file selection (which files are in LLM context) and file navigation (which file is open in the viewer).
 ## Tree Rendering
 ### Root Node — Branch Badge

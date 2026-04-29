@@ -1,7 +1,5 @@
 # Cache Tiering
 
-**Status:** stub
-
 Stability-based tiering of prompt content to align with provider cache breakpoints. Content that remains unchanged across requests promotes to higher tiers; changed content demotes. Reduces re-ingestion costs for large contexts.
 
 ## Content Categories Tracked

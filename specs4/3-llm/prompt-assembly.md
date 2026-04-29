@@ -1,7 +1,5 @@
 # Prompt Assembly
 
-**Status:** stub
-
 The single source of truth for how LLM messages are assembled. All prompt content — system prompts, symbol map, files, history, URLs, review — is organized into a structured message array with stability-based cache tier placement.
 
 ## Two Assembly Modes

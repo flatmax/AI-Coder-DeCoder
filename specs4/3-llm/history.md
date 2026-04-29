@@ -1,7 +1,5 @@
 # History
 
-**Status:** stub
-
 Two coupled stores for conversation history: an in-memory working copy used for prompt assembly, and an append-only JSONL file for persistence across sessions. Compaction keeps both within a token budget by summarizing old messages via LLM.
 
 ## Storage

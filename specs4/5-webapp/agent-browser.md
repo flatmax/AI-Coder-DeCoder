@@ -1,7 +1,5 @@
 # Agent Browser
 
-**Status:** stub
-
 There is no separate agent browser view. When the main LLM spawns agents to execute sub-tasks in parallel, each agent's conversation is archived and surfaced as a right-side region that fans out from the chat for the active turn. The default chat UX is unchanged for turns that did not spawn agents; agent turns simply surface an extra region when relevant.
 
 The main LLM's own conversation — decomposition, agent-output review, iteration decisions, synthesis — is part of the assistant response shown in the chat. There is no separate column or card for it; it's just the assistant message. The agent region shows only what the spawned agents produced.

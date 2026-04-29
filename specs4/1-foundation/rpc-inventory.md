@@ -1,7 +1,5 @@
 # RPC Method Inventory
 
-**Status:** stub
-
 Authoritative catalog of every RPC method in the system. Other specs reference methods by name rather than re-listing them.
 
 ## Structure

@@ -1,5 +1,5 @@
 # TeX Preview
-**Status:** stub
+
 Live TeX preview activated via the Preview button on TeX and LaTeX files in the diff viewer. Source is compiled with `make4ht` on the server and rendered in the browser with KaTeX for math. Uses anchor-based scroll synchronization that works reliably even when KaTeX rendering destroys the original text layout.
 ## Compilation Pipeline
 1. Diff viewer sends the current editor content and file path to the compile-tex RPC

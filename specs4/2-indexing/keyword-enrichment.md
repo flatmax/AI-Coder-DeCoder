@@ -1,7 +1,5 @@
 # Keyword Enrichment
 
-**Status:** stub
-
 Keyword extraction for document outlines. Disambiguates sections with similar heading structures by surfacing what each section is actually about.
 
 ## Motivation

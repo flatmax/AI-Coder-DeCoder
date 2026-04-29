@@ -44,7 +44,7 @@ Braces indicate optional segments. Each segment has a leading space only when pr
 ### Full file block example
 
 ```
-specs3/3-llm-engine/context_and_history.md [spec]:
+docs/guides/context-and-history.md [spec]:
   # Context & History ~280ln ←5
   ## ContextManager (FileContext, token budget, shed) [code] ~85ln ←3
     →src/ac_dc/context.py

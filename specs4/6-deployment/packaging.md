@@ -1,7 +1,5 @@
 # Packaging
 
-**Status:** stub
-
 How config defaults, prompts, and per-repo working state are distributed with the application and managed across upgrades. The bundle embeds sensible defaults; the user config directory persists customizations across releases. A per-repo working directory holds conversation history and caches.
 
 ## Config Directory Resolution

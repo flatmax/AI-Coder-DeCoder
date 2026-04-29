@@ -1,7 +1,5 @@
 # Repository
 
-**Status:** stub
-
 The repository layer wraps version control and file I/O. It is exposed to the browser via RPC and used internally by the LLM context engine. All operations target a single git repository specified at startup.
 
 ## File Operations

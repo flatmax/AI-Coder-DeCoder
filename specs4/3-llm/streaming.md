@@ -1,7 +1,5 @@
 # Streaming Lifecycle
 
-**Status:** stub
-
 The full lifecycle of a user message: UI submission → file validation → message assembly → LLM streaming → edit parsing → stability tracking → post-response compaction.
 
 ## Request Flow

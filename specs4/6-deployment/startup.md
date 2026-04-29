@@ -1,5 +1,5 @@
 # Startup
-**Status:** stub
+
 The startup sequence is split into two phases to give the user early feedback. The browser connects and shows a startup overlay while heavy initialization runs in the background with progress updates. The WebSocket server is accepting connections within the fast phase.
 ## Running Modes
 | Mode | Description | URL pattern |

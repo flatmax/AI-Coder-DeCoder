@@ -1,7 +1,5 @@
 # Configuration
 
-**Status:** stub
-
 Configuration is split across multiple files, each with a distinct purpose. A settings service provides RPC methods for reading, editing, and reloading configs. Packaged builds copy configs to a persistent user directory on first run.
 
 ## Config File Set

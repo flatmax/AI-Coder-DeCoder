@@ -1,7 +1,5 @@
 # Document Index
 
-**Status:** stub
-
 A document-oriented analog to the symbol index. Extracts structural outlines from documentation files and feeds them through the same cache tiering system used for code. Supports markdown and SVG.
 
 ## Motivation

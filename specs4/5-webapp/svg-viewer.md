@@ -1,5 +1,5 @@
 # SVG Viewer
-**Status:** stub
+
 Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Both panels host instances of the same visual editor component — the left pane in read-only mode (pan, zoom, fit, wheel zoom, middle-click pan), the right pane fully editable. Each editor owns its own viewBox and fires an on-view-change callback on every write; the viewer mirrors writes to the sibling editor under a mutex so pan/zoom stays synchronized without feedback loops. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
 ## Routing
 The app shell inspects the file extension on every navigate-file event:

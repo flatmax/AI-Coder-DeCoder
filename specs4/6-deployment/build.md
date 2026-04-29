@@ -1,7 +1,5 @@
 # Build
 
-**Status:** stub
-
 How the webapp and backend are packaged for distribution. The webapp is a Vite-built SPA served by a built-in HTTP static file server; the backend is a Python package optionally packaged as a PyInstaller single-file binary. Source installs can use a fallback served from GitHub Pages.
 
 ## Webapp Bundling

@@ -1,7 +1,5 @@
 # Reference Graph
 
-**Status:** stub
-
 A unified view of cross-file references used by both the symbol index (code → code) and the document index (doc → doc, doc → code). The graph feeds cache tier initialization and navigation features.
 
 ## Purpose

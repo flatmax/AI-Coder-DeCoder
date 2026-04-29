@@ -1,5 +1,5 @@
 # Collaboration
-**Status:** stub
+
 Collaboration mode allows multiple browsers to connect to a single backend. The first connection is auto-admitted as the host; subsequent connections require explicit admission from any already-admitted user via a toast prompt. Once admitted, non-localhost participants see the full UI and receive all broadcast events but cannot send prompts, mutate LLM state, or perform git operations. Disabled by default — enabled via an explicit CLI flag.
 ## Activation
 - Disabled by default for security

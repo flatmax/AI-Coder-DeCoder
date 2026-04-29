@@ -1,7 +1,5 @@
 # Context Model
 
-**Status:** stub
-
 The context manager is the central state holder for an LLM session. It owns the conversation history, file context, system prompt, URL context, review context, and coordinates prompt assembly. It delegates stability tracking and history compaction to dedicated subsystems.
 
 ## Responsibilities

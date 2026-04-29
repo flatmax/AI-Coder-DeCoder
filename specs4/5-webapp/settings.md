@@ -1,7 +1,5 @@
 # Settings
 
-**Status:** stub
-
 The Settings tab provides access to configuration editing and hot-reload. Config files are read, written, and reloaded via the settings RPC service with a whitelisted type set. Editing happens inline within the tab — no separate window or modal.
 
 ## Layout

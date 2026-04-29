@@ -1,7 +1,5 @@
 # Edit Protocol
 
-**Status:** stub
-
 The LLM proposes file changes using a structured edit block format. Each block contains old text (exact copy from the file, searched as a contiguous block) and new text (its complete replacement). Blocks are parsed from the streaming response, validated against file content, and applied sequentially.
 
 ## Block Structure

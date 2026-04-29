@@ -1,7 +1,5 @@
 # Speech to Text
 
-**Status:** stub
-
 Continuous voice dictation using the browser's Web Speech API. A single toggle button starts and stops auto-transcribing mode. Transcribed text is inserted at the current cursor position in the chat textarea with automatic space separators, preserving any existing input.
 
 ## Component Role
