@@ -66,7 +66,7 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 **Layer 1 (2 commits)**
 
 - [x] RPC method signatures (`specs-reference/1-foundation/rpc-inventory.md`) — full argument and return shapes, complementing the behavioral inventory in specs4
-- [ ] Config file schemas (`specs-reference/1-foundation/configuration.md`) — field names, nesting, legacy format fallbacks
+- [x] Config file schemas (`specs-reference/1-foundation/configuration.md`) — field names, nesting, legacy format fallbacks
 
 **Layer 4 (1 commit)**
 
