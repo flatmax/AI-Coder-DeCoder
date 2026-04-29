@@ -3,12 +3,13 @@
 Tree view of repository files with checkboxes, git status, and context menu. Left panel of the Files tab. Drives file selection (which files are in LLM context) and file navigation (which file is open in the viewer).
 ## Tree Rendering
 ### Root Node — Branch Badge
-- Root row displays the repo name plus a compact pill showing the current git branch
+- Root row displays a checkbox, the repo name, and a compact pill showing the current git branch
 - Branch name prefixed with a branch icon
 - Normal branch — muted style
 - Detached HEAD — orange-tinted style, short SHA instead of branch name
 - Long branch names truncated with ellipsis, full name in tooltip
 - Fetched via the current-branch RPC on every tree reload — stays current after commits, checkouts, and review entry/exit
+- Root checkbox aggregates over every file in the repo — same semantics as a directory checkbox applied to the whole tree: regular click toggles select-all (un-excluding any excluded descendants), shift+click toggles exclude-all (deselecting any selected descendants). Checked / indeterminate / unchecked reflect aggregate selection; strikethrough + dimmed checkbox reflect all-excluded; `✕` badge reflects partial exclusion
 ### Directory Nodes
 - Expandable toggle
 - Checkbox selects/deselects all children
@@ -67,12 +68,14 @@ Files have three context states controlled via the picker checkbox:
 - Regular click on an excluded file — un-excludes and selects
 - Shift+click on a directory — toggles exclusion for all children
 - Regular click to select directory children — un-excludes any excluded children
+- Regular and shift+click on the root checkbox apply the same rules as a directory checkbox, but scoped to every file in the repository
 ### Visual Treatment
 - Excluded files — strikethrough and muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include. No badge — the strikethrough alone carries the signal.
 - Directory rows reflect descendant exclusion state so the tree surfaces exclusion without requiring every folder to be expanded:
   - All descendant files excluded — strikethrough, muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include all. No badge.
   - Some descendants excluded — `✕` badge at reduced opacity (no strikethrough), tooltip indicating partial exclusion. The badge is the distinguishing signal for this state alone, where strikethrough would be misleading.
   - None excluded — normal styling
+- The root row uses the same three visual states as directory rows, aggregated over the entire repository
 - A directory with zero descendant files is treated as "none excluded"
 - Checkbox tooltip adapts to exclusion state — prompts differ for default vs excluded files
 ### Context Menu

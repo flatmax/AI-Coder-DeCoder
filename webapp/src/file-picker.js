@@ -902,15 +902,19 @@ export class FilePicker extends LitElement {
      * partial state that shows a dimmed badge but leaves
      * the name intact. Users scanning a collapsed tree
      * can tell at a glance whether a subtree is fully,
-     * partially, or not excluded. */
-    .row.is-dir.all-excluded .name {
+     * partially, or not excluded. Also applies to the
+     * root row, which aggregates over the entire repo. */
+    .row.is-dir.all-excluded .name,
+    .row.is-root.all-excluded .name {
       text-decoration: line-through;
       opacity: 0.45;
     }
-    .row.is-dir.all-excluded .checkbox {
+    .row.is-dir.all-excluded .checkbox,
+    .row.is-root.all-excluded .checkbox {
       opacity: 0.5;
     }
-    .row.is-dir.some-excluded .excluded-badge {
+    .row.is-dir.some-excluded .excluded-badge,
+    .row.is-root.some-excluded .excluded-badge {
       opacity: 0.5;
     }
     .excluded-badge {
@@ -1566,17 +1570,112 @@ export class FilePicker extends LitElement {
       '';
     const pill = this._renderBranchPill();
     if (!repoName && !pill) return '';
+    // Compute aggregate selection/exclusion state the same
+    // way directory rows do — the root is effectively the
+    // directory containing every file in the repo.
+    const allExcluded = this._allDescendantsExcluded(this.tree);
+    const someExcluded =
+      !allExcluded && this._someDescendantsExcluded(this.tree);
+    const allSelected = this._allDescendantsSelected(this.tree);
+    const someSelected =
+      !allSelected && this._someDescendantsSelected(this.tree);
+    const rowClasses = [
+      'row',
+      'is-root',
+      allExcluded ? 'all-excluded' : '',
+      someExcluded ? 'some-excluded' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    const badgeTitle = 'Some files excluded from index';
+    const checkboxTitle =
+      'Click to select all files, shift+click to exclude all from index.';
     return html`
       <div
-        class="row is-root"
+        class=${rowClasses}
         role="treeitem"
         title=${repoName || 'repository'}
         @contextmenu=${this._onRootContextMenu}
       >
+        <input
+          type="checkbox"
+          class="checkbox"
+          .checked=${allSelected}
+          .indeterminate=${someSelected}
+          @click=${this._onRootCheckbox}
+          aria-label="Select all files in repository"
+          title=${checkboxTitle}
+        />
         <span class="name">${repoName || 'repository'}</span>
+        ${someExcluded
+          ? html`<span
+              class="excluded-badge"
+              title=${badgeTitle}
+              aria-label=${badgeTitle}
+              >✕</span
+            >`
+          : ''}
         ${pill}
       </div>
     `;
+  }
+
+  /**
+   * Root-row checkbox handler. Mirrors `_onDirCheckbox`
+   * but targets every file in the repo via `this.tree`.
+   * Regular click toggles select-all (and un-excludes
+   * any excluded files so the selection isn't silently
+   * partial). Shift+click toggles exclude-all (and
+   * deselects any that were selected, since excluded
+   * and selected are mutually exclusive).
+   */
+  _onRootCheckbox(event) {
+    event.stopPropagation();
+    const descendants = this._collectDescendantFiles(this.tree);
+    if (descendants.length === 0) return;
+    if (event.shiftKey) {
+      event.preventDefault();
+      const allExcluded = descendants.every((p) =>
+        this.excludedFiles.has(p),
+      );
+      const nextExcluded = new Set(this.excludedFiles);
+      if (allExcluded) {
+        for (const p of descendants) nextExcluded.delete(p);
+      } else {
+        for (const p of descendants) nextExcluded.add(p);
+      }
+      this._emitExclusionChanged(nextExcluded);
+      if (!allExcluded) {
+        const nextSelected = new Set(this.selectedFiles);
+        let selectionChanged = false;
+        for (const p of descendants) {
+          if (nextSelected.has(p)) {
+            nextSelected.delete(p);
+            selectionChanged = true;
+          }
+        }
+        if (selectionChanged) this._emitSelectionChanged(nextSelected);
+      }
+      return;
+    }
+    const anyExcluded = descendants.some((p) =>
+      this.excludedFiles.has(p),
+    );
+    if (anyExcluded) {
+      const nextExcluded = new Set(this.excludedFiles);
+      for (const p of descendants) nextExcluded.delete(p);
+      this._emitExclusionChanged(nextExcluded);
+    }
+    const allSelected = descendants.every((p) =>
+      this.selectedFiles.has(p),
+    );
+    const next = new Set(this.selectedFiles);
+    if (allSelected) {
+      for (const p of descendants) next.delete(p);
+    } else {
+      for (const p of descendants) next.add(p);
+    }
+    this._emitSelectionChanged(next);
   }
 
   /**
