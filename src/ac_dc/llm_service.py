@@ -83,7 +83,7 @@ D10 contracts:
   heavyweight indexing completes.
 
 Governing spec: ``specs4/3-llm/streaming.md``.
-Numeric reference: ``specs3/3-llm-engine/streaming_lifecycle.md``.
+Numeric reference: ``specs-reference/3-llm/streaming.md``.
 """
 
 from __future__ import annotations
@@ -186,8 +186,8 @@ def _resolve_max_output_tokens(
 ) -> int:
     """Resolve the effective ``max_tokens`` for an LLM call.
 
-    Two-level fallback chain per specs3/3-llm-engine/
-    streaming_lifecycle.md § Max-Tokens Source:
+    Two-level fallback chain per specs-reference/3-llm/
+    streaming.md § Max-tokens resolution:
 
     1. ``config.max_output_tokens`` — user override in ``llm.json``
     2. ``counter.max_output_tokens`` — per-model ceiling
@@ -223,7 +223,7 @@ def _extract_finish_reason(chunk: Any) -> str | None:
     and propagate it into the completion result.
 
     Values we see in the wild, documented in
-    specs3/3-llm-engine/streaming_lifecycle.md § Finish Reason:
+    specs-reference/3-llm/streaming.md § Finish reason values:
 
     - ``"stop"`` — natural end of generation
     - ``"end_turn"`` — Anthropic passthrough (also natural)
@@ -3181,7 +3181,7 @@ class LLMService:
         to reach a sensible distribution (e.g., just after
         selecting a large working set).
 
-        Governing spec: specs3/3-llm-engine/cache_tiering.md
+        Governing spec: specs-reference/3-llm/cache-tiering.md
         § Manual Cache Rebuild.
 
         Sequence (atomic from the RPC caller's perspective):
@@ -4911,7 +4911,7 @@ class LLMService:
     def _print_post_response_hud(self) -> None:
         """Print the three-section terminal HUD after each response.
 
-        Sections per specs3/5-webapp/viewers_and_hud.md:
+        Sections per specs-reference/5-webapp/viewers-hud.md:
         1. Cache blocks (boxed) — per-tier token counts + cache hit %
         2. Token usage — model, per-category, total, last request, session
         3. Tier changes — promotions and demotions
@@ -5032,7 +5032,7 @@ class LLMService:
         the current selected-files list before computing so the
         breakdown reflects what the next LLM request would look like.
 
-        Shape matches specs3/5-webapp/viewers_and_hud.md.
+        Shape matches specs-reference/5-webapp/viewers-hud.md.
         """
         import hashlib
         from ac_dc.stability_tracker import Tier
@@ -5408,9 +5408,8 @@ class LLMService:
             t: [] for t in ("L0", "L1", "L2", "L3")
         }
 
-        # Defensive filter sets per specs3/3-llm-engine/
-        # prompt_assembly.md § "Step 2: Build Content for Each
-        # Tier" and § "Step 3: Determine Exclusions". A file's
+        # Defensive filter sets per specs-reference/3-llm/
+        # prompt-assembly.md § Uniqueness invariants. A file's
         # index block must never coexist with its full content
         # in any form — upstream (Step 2 of _update_stability,
         # set_excluded_index_files, _rebuild_cache_impl) is
@@ -5967,8 +5966,8 @@ class LLMService:
         the tracker update with the current repo file set for
         stale-removal.
 
-        Order of operations (from specs3/3-llm-engine/
-        streaming_lifecycle.md — Post-Response Processing):
+        Order of operations (from specs-reference/3-llm/
+        streaming.md § Order of Operations (Per Request)):
 
         0a. Defensive removal of user-excluded files from the
             tracker. set_excluded_index_files does a one-shot
