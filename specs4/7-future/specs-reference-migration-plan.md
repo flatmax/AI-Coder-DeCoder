@@ -1,6 +1,6 @@
 # specs-reference Migration — Execution Plan
 
-**Status:** Not started. Companion to [specs-reference-migration.md](specs-reference-migration.md) which covers the design rationale.
+**Status:** Complete pending the final `git rm -r specs3/` step. Companion to [specs-reference-migration.md](specs-reference-migration.md) which covers the design rationale.
 
 ## Purpose
 
@@ -77,19 +77,19 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 - [ ] Dependency quirks — three separate twins per the mirror rule:
   - [ ] `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript function name) — may already exist from pilot; append if so
   - [x] `specs-reference/5-webapp/diff-viewer.md` (Monaco worker configuration paths)
-  - [ ] `specs-reference/6-deployment/build.md` (Vite optimizeDeps exclusion, PyInstaller hidden imports)
+  - [x] `specs-reference/6-deployment/build.md` (Vite optimizeDeps exclusion, PyInstaller hidden imports)
 - [ ] System prompt text — **do not create a twin.** Update the table row to point directly at `src/ac_dc/config/*.md` as the authoritative source. Duplicating prompt text into a twin creates a drift risk; the live config files are already authoritative.
 
 ### Phase 4 — Retirement
 
 Single commit. Confirm migration is complete, then delete specs3.
 
-- [ ] Grep specs4 live files (exclude `specs4/impl-history/`) for `specs3/` references. Expected result: zero matches.
-- [ ] Grep the "Where specs4 Is Incomplete Without specs3" table for `specs3/` entries. Expected result: zero matches (all rows now point at `specs-reference/` or `src/ac_dc/config/`).
-- [ ] Rename the table heading in `implementation-guide.md` from "Where specs4 Is Incomplete Without specs3" to something like "Where specs4 Is Incomplete Without specs-reference" and update surrounding prose
-- [ ] Delete `specs3/` entirely
-- [ ] Update the "Context: Why Two Suites Exist" section in `implementation-guide.md` to describe the specs4 + specs-reference split instead of the specs4 + specs3 split
-- [ ] Update `specs4/README.md` if it still references specs3
+- [x] Grep specs4 live files (exclude `specs4/impl-history/`) for `specs3/` references. Expected result: zero matches.
+- [x] Grep the "Where specs4 Is Incomplete Without specs3" table for `specs3/` entries. Expected result: zero matches (all rows now point at `specs-reference/` or `src/ac_dc/config/`).
+- [x] Rename the table heading in `implementation-guide.md` from "Where specs4 Is Incomplete Without specs3" to "Where specs4 Is Incomplete Without specs-reference" and update surrounding prose
+- [ ] Delete `specs3/` entirely — requires `git rm -r specs3/` (cannot be done via edit protocol)
+- [x] Update the "Context: Why Two Suites Exist" section in `implementation-guide.md` to describe the specs4 + specs-reference split instead of the specs4 + specs3 split
+- [x] Update `specs4/README.md` if it still references specs3 — no specs3 references found; README is clean
 
 ## Invariants across all phases
 

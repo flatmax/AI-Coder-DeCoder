@@ -4,19 +4,20 @@ How to use specs4 and specs3 together when implementing AC⚡DC from scratch.
 
 ## Context: Why Two Suites Exist
 
-specs3 was written alongside an earlier implementation of AC⚡DC produced by a less capable AI coding assistant. It captures that implementation in exhaustive detail — method names, field shapes, sequencing quirks, workarounds for framework bugs — because the earlier assistant needed prescriptive guidance to produce working code.
+AC⚡DC's specification is split across two peer directories:
 
-specs4 is the deliberate abstraction raise: the same application's behavior described at the level a capable reimplementer actually needs. It exists because the original detail-level specs had accumulated incidental implementation choices that a fresh reimplementation would legitimately make differently.
+- **`specs4/`** — behavioral contracts, invariants, module decomposition, data flow. Written at the level a capable reimplementer actually needs. Deliberately omits byte-level detail that a fresh implementation would legitimately handle differently.
+- **`specs-reference/`** — implementation detail that specs4 deliberately leaves unspecified but a reimplementation must reproduce for interop. Byte-level formats, numeric constants, persistent storage schemas, RPC argument shapes, dependency quirks. Mirrors specs4's path structure; each twin file supplements its specs4 counterpart.
 
-The reimplementation is a clean-room rewrite. The goal is equivalent user-visible behavior and interop compatibility, not line-by-line reproduction. specs3's structural choices (module boundaries, class hierarchies, internal APIs, specific framework patterns) should be treated as one valid solution among several — not as a contract.
-
-What *is* a contract: the parts of specs3 that cross module boundaries visible to users, the LLM, git, or other AC⚡DC instances. Wire formats, file formats, prompt text, numeric thresholds that affect observable behavior. These are proven-in-production interop details; don't re-derive them.
+The reimplementation goal is equivalent user-visible behavior and interop compatibility, not line-by-line reproduction. Internal structures (module boundaries, class hierarchies, internal APIs, framework patterns) are the reimplementer's choice. External structures (wire formats, file formats, prompt text, numeric thresholds that affect observable behavior) are contracts because existing data, existing LLM behavior, and existing user configs depend on them.
 
 ## The Two-Suite Relationship
 
-**specs4 is the primary reference.** It describes behavioral contracts, invariants, module decomposition, and data flow at a level suitable for clean-room reimplementation. A reimplementer designs from specs4, structures modules per specs4, and writes tests against specs4's invariants.
+**specs4 is the primary reference.** Describes behavioral contracts, invariants, module decomposition, and data flow at a level suitable for clean-room reimplementation. A reimplementer designs from specs4, structures modules per specs4, and writes tests against specs4's invariants.
 
-**specs3 is the detail reference.** It describes the previous implementation at a concrete level — byte-exact formats, numeric thresholds, prompt text, and dependency quirks. When specs4 leaves a format or threshold unspecified, specs3 provides the authoritative value for interop. When specs3 prescribes an internal structure that specs4 is silent on, the reimplementer is free to choose differently.
+**specs-reference/ is the detail reference.** Byte-exact formats, numeric thresholds, storage schemas, dependency quirks. When specs4 leaves a format or threshold unspecified, consult the mirrored `specs-reference/` file (same path, same name). Twins exist only where specs4 needs supplementing — a missing twin means the specs4 spec is self-sufficient.
+
+The running system's `src/ac_dc/config/*.md` files are authoritative for system prompt text. Duplicating prompt text into a twin would create drift risk, so the table below points directly at the config directory for that row.
 
 ## When to Use Which
 
@@ -30,38 +31,41 @@ What *is* a contract: the parts of specs3 that cross module boundaries visible t
 - Test design — invariants become test properties
 - Design decisions where specs3 described an implementation-specific pattern
 
-### Use specs3 for:
+### Use `specs-reference/` for:
 
-- **Byte-level formats** — the symbol map compact format, doc outline annotation syntax (`←N`, `→target#Section`, `~Nln`, content-type markers), edit block marker bytes (`««« EDIT`, `═══════ REPL`, `»»» EDIT END`)
+- **Byte-level formats** — the symbol map compact format, doc outline annotation syntax (`←N`, `→target#Section`, `~Nln`, content-type markers), edit block marker bytes (`🟧🟧🟧 EDIT`, `🟨🟨🟨 REPL`, `🟩🟩🟩 END`)
 - **Numeric constants** — tier entry-N and promotion-N values, cache buffer multipliers, model-specific minimums, compaction thresholds, debounce intervals
 - **Persistent storage schemas** — JSONL history record field names, docuvert provenance header format, cache sidecar JSON structure
 - **Config file schemas** — exact field names, nesting, legacy format fallbacks
-- **System prompts** — the actual prompt text (LLM instruction contracts)
 - **Dependency quirks** — tree-sitter TypeScript function name, Vite optimizeDeps exclusion, PyInstaller hidden imports, Monaco worker configuration paths
 - **RPC wire formats** — exact argument shapes, return shapes, event payload structures
 
+### Use `src/ac_dc/config/*.md` for:
+
+- **System prompt text** — the actual LLM instruction strings. These files are the authoritative source; a twin would create drift risk.
+
 ## Conflict Resolution
 
-**When specs3 and specs4 conflict, specs4 wins.** specs4 is the deliberate abstraction; conflicts mean specs4 made a behavioral choice that supersedes the previous implementation.
+**When specs4 and a specs-reference twin conflict, specs4 wins.** specs4 owns behavioral contracts. If a twin's detail describes behavior that specs4 contradicts, the twin is out of date and needs updating.
 
-**When specs4 is silent and specs3 has an interop detail, specs3 wins.** Do not invent alternative wire formats, file formats, numeric thresholds that affect observable behavior, or prompt text. The existing values are proven in production and changing them silently breaks compatibility.
+**When specs4 is silent on a byte-level or numeric detail, the specs-reference twin is authoritative.** Do not invent alternative wire formats, file formats, or thresholds that affect observable behavior. The values in `specs-reference/` are proven in production; changing them silently breaks compatibility with existing data, existing LLM behavior, or existing user configs.
 
-**When specs4 is silent and specs3 prescribes an internal structure, the reimplementer chooses.** Class hierarchies, method names, module organization, framework patterns, and internal APIs in specs3 are one valid solution. A cleaner design is welcome.
+**When neither specs4 nor the twin covers a case, the reimplementer chooses.** Class hierarchies, method names, module organization, framework patterns, and internal APIs are not contracts. A cleaner design is welcome.
 
-**When specs3's detail seems wrong, raise it for discussion.** specs3 captures the previous implementation's choices, including its workarounds and compromises. Some of those are genuine bugs or over-engineering that a fresh implementation should improve on. Flagging "specs3 says X but it looks like a bug or a workaround for something that doesn't exist in this rewrite" is more valuable than silent preservation.
+**When a twin's detail seems wrong or overfit to historical implementation, raise it for discussion.** Some twin detail captures workarounds for bugs in libraries the reimplementation may not use, or compromises that a fresh implementation could improve on. Flagging "the twin says X but it looks like a workaround for something that doesn't exist in this rewrite" is more valuable than silent preservation.
 
-**When you have a better approach than what specs3 prescribes, propose it before implementing.** If during implementation you see a cleaner, simpler, or more robust approach to a section specs3 prescribes — and specs4 hasn't explicitly raised that section to a behavioral contract — surface the alternative to the guide rather than either silently deviating or silently following specs3. Describe the specs3 approach, the proposed alternative, and the tradeoffs. A short discussion before writing code is cheaper than refactoring after. This applies especially to internal structures, framework patterns, and workarounds whose original motivation may not carry over to the rewrite.
+**When you have a better approach than what a twin prescribes, propose it before implementing.** If during implementation you see a cleaner, simpler, or more robust approach to a section a twin prescribes — and specs4 hasn't explicitly raised that section to a behavioral contract — surface the alternative rather than silently deviating or silently following. Describe the twin's approach, the proposed alternative, and the tradeoffs. A short discussion before writing code is cheaper than refactoring after.
 
 ## Freedom the Reimplementer Has
 
-specs4's abstraction raise exists so the reimpl can make better design choices at the module level. Legitimate changes:
+specs4 describes behavior at an abstraction level that leaves internal design choices open. Legitimate changes:
 
 - Module organization — restructure files, merge or split modules, pick better names
 - Internal APIs — method signatures, class hierarchies, dependency injection patterns
 - Framework choices — different async primitives, different data structure types
 - Error handling — unified approach rather than case-by-case
 - Code style — consistent naming, type hinting, docstring conventions
-- Test structure — organize around specs4's invariants rather than mirroring specs3's test sections
+- Test structure — organize around specs4's invariants, not around any specific previous implementation's test layout
 - Performance optimizations — specs4 invariants don't prescribe specific caching strategies beyond what correctness requires
 
 ## Freedom the Reimplementer Does Not Have
@@ -78,13 +82,13 @@ Changing any of these silently breaks compatibility with existing data, existing
 
 ## Subtle Cases
 
-Some specs4 behavioral descriptions could be satisfied in multiple valid ways, but specs3 has a specific way that subtle downstream behavior depends on. Example — specs4 says "compaction re-registers history items in the stability tracker." specs3 may specify a specific ordering (purge first, then re-add) that subtle cache-invalidation behavior depends on.
+Some specs4 behavioral descriptions could be satisfied in multiple valid ways, but the `specs-reference/` twin specifies a sequencing or timing detail that subtle downstream behavior depends on. Example — specs4 says "compaction re-registers history items in the stability tracker." A twin (or a specs4 subsection) may specify a specific ordering (purge first, then re-add) that subtle cache-invalidation behavior depends on.
 
-When in doubt, read specs3 carefully — not just for formats, but for sequencing, timing, and ordering constraints that specs4 abstracts away.
+When in doubt, read the twin carefully — not just for formats, but for sequencing, timing, and ordering constraints that specs4 abstracts away.
 
-## Where specs4 Is Incomplete Without specs3
+## Where specs4 Is Incomplete Without specs-reference
 
-specs4 alone is not sufficient for byte-exact reimplementation in the following areas. Consult specs3 for each:
+specs4 alone is not sufficient for byte-exact reimplementation in the following areas. Consult `specs-reference/` (or the running system's config files, where indicated) for each:
 
 | Area | specs3 location |
 |---|---|
@@ -93,14 +97,14 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Edit block marker bytes | `specs-reference/3-llm/edit-protocol.md` |
 | Cache tier numeric thresholds | `specs-reference/3-llm/cache-tiering.md` (entry-N, promotion-N, cache buffer multiplier) |
 | Model-specific cache minimums | `specs-reference/3-llm/cache-tiering.md` (Claude family minimums — same twin as the tier thresholds) |
-| Compaction defaults | `specs3/3-llm-engine/context_and_history.md` |
+| Compaction defaults | `specs-reference/3-llm/history.md` (under "Compaction config defaults" — folded into the history schema twin alongside JSONL records, since both persist through the same store) |
 | RPC method signatures | `specs-reference/1-foundation/rpc-inventory.md` (full RPC inventory with argument and return shapes) |
 | Streaming event payload shapes | `specs-reference/3-llm/streaming.md` (streamChunk, streamComplete, compactionEvent) |
 | JSONL history schema | `specs-reference/3-llm/history.md` |
 | Docuvert provenance header | `specs-reference/4-features/doc-convert.md` |
 | Config file schemas | `specs-reference/1-foundation/configuration.md` |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
-| Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs-reference/5-webapp/diff-viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
+| Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs-reference/5-webapp/diff-viewer.md` (Monaco workers), `specs-reference/6-deployment/build.md` (Vite optimizeDeps, PyInstaller imports) |
 
 ## Architectural Changes from specs3
 
