@@ -87,6 +87,3 @@ Canonical ownership is the one place where topical thinking survives in the mirr
 
 The `specs-reference/3-llm/prompts/` directory is a special case: it holds byte-exact copies of `src/ac_dc/config/*.md` and `*.json`, synced via `scripts/sync_prompts.py`. The mirror exists because prompt text is LLM-interop (changes can silently break compaction JSON parsing, edit-block reliability, or commit-message conventions) and because specs4 deliberately describes prompts by contract rather than duplicating their bodies. Drift between the source and the mirror is detectable via the sync script's check-before-write behavior. When the source tree is deleted or absent, the mirror becomes the authoritative reference. See `specs-reference/3-llm/prompts.md` for the index.
 
-## Migration Status
-
-This tree is being populated incrementally. See `specs4/7-future/specs-reference-migration.md` for design rationale and `specs4/7-future/specs-reference-migration-plan.md` for execution progress.
