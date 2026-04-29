@@ -6,8 +6,8 @@ trigger thresholds, the stability tracker for cache-target decisions,
 the prompt assembler for the token HUD.
 
 Design points pinned by the spec (specs4/1-foundation/configuration.md
-#token-counter-data-sources, specs3/1-foundation/configuration.md
-#token-counter-data-sources for the concrete numbers):
+and specs-reference/1-foundation/configuration.md § Token counter
+defaults for the concrete numbers):
 
 - **One encoding for every model.** ``cl100k_base`` is the OpenAI
   tokenizer but it's close enough to Claude and Bedrock tokenisation
@@ -47,9 +47,9 @@ logger = logging.getLogger(__name__)
 # Model-family limits
 # ---------------------------------------------------------------------------
 #
-# All values from specs3/1-foundation/configuration.md#token-counter-data-
-# sources. The spec is the authoritative source — do not derive these from
-# provider docs at runtime.
+# All values from specs-reference/1-foundation/configuration.md § Token
+# counter defaults. The spec is the authoritative source — do not derive
+# these from provider docs at runtime.
 
 # Default fallbacks when we see a model we don't recognise. Safe
 # minimums — 1M input matches the current supported set, 4096 output

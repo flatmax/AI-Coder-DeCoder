@@ -12,7 +12,7 @@ Governing specs:
 
 - ``specs4/3-llm/edit-protocol.md`` — status codes, error types,
   not-in-context handling, concurrent invocation contract
-- ``specs3/3-llm-engine/edit_protocol.md`` — concrete anchor
+- ``specs-reference/3-llm/edit-protocol.md`` — concrete anchor
   matching semantics, whitespace diagnostics, sequential
   application rules
 

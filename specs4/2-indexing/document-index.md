@@ -242,7 +242,7 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 
 - Server startup (background structural extraction, then enrichment)
 - Switch to doc mode (re-index changed files)
-- Every chat in doc mode (structure re-extraction, enrichment queued)
+- Every chat in doc mode — full `index_repo(file_list)` pass with the current repo file list, which re-extracts changed files via the mtime cache AND prunes stale entries for files that no longer exist on disk (user deleted, `git rm`, branch switch)
 - LLM edits a doc file (explicit invalidation + re-extraction + enrichment queue)
 - User edits in viewer (lazy detection via mtime on next structure pass)
 

@@ -53,7 +53,7 @@ concrete algorithm:
   so the LLM sees: summary → earlier context → verbatim window.
 
 Governing spec: ``specs4/3-llm/history.md``.
-Numeric reference: ``specs3/3-llm-engine/context_and_history.md``.
+Numeric reference: ``specs-reference/3-llm/history.md``.
 """
 
 from __future__ import annotations

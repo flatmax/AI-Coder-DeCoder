@@ -162,7 +162,7 @@ class Mode(str, Enum):
 # Budget enforcement — module constants
 # ---------------------------------------------------------------------------
 #
-# Pinned by specs3/3-llm-engine/context_and_history.md. Kept as module
+# Pinned by specs-reference/3-llm/context-model.md. Kept as module
 # constants rather than config so tests can reference them directly
 # and so the thresholds can't be accidentally tuned per-instance.
 

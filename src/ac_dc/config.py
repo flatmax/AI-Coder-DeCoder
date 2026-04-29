@@ -497,8 +497,8 @@ class ConfigManager:
     def max_output_tokens(self) -> int | None:
         """User-configured ceiling for model output tokens.
 
-        Per specs3/3-llm-engine/streaming_lifecycle.md § Max-Tokens
-        Source: when set, overrides the per-model default from
+        Per specs-reference/3-llm/streaming.md § Max-tokens
+        resolution: when set, overrides the per-model default from
         :class:`TokenCounter`. When absent (the default), callers
         fall back to ``counter.max_output_tokens``.
 

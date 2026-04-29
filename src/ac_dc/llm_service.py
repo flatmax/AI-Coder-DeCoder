@@ -3801,6 +3801,43 @@ class LLMService:
             # or that the repo can't read.
             self._sync_file_context()
 
+            # Re-index on every chat request so deletions
+            # propagate. Per specs4/2-indexing/document-index.md
+            # § Triggers and specs4/2-indexing/symbol-index.md
+            # § Indexing Pipeline, the full repo walk must run
+            # each turn so _prune_stale drops entries for files
+            # that no longer exist on disk (git rm, user delete,
+            # branch switch). The mtime cache makes unchanged
+            # files free — the real cost is just the prune walk.
+            # Without this, _all_outlines / _all_symbols grows
+            # only and map rendering includes stale entries,
+            # wasting tokens and misleading the LLM about the
+            # current repo shape.
+            if self._repo is not None:
+                try:
+                    file_list_raw = self._repo.get_flat_file_list()
+                    file_list = [
+                        f for f in file_list_raw.split("\n") if f
+                    ]
+                    if self._symbol_index is not None:
+                        self._symbol_index.index_repo(file_list)
+                    if self._doc_index_ready:
+                        doc_files = [
+                            f for f in file_list
+                            if self._doc_index._extension_of(f)
+                            in self._doc_index._extractors
+                        ]
+                        self._doc_index.index_repo(doc_files)
+                except Exception as exc:
+                    # Non-fatal — indexing failure shouldn't
+                    # block the chat. Stale entries remain but
+                    # the request proceeds with whatever state
+                    # the indexes were in.
+                    logger.warning(
+                        "Per-request re-index failed: %s",
+                        exc,
+                    )
+
             # Persist user message BEFORE the LLM call. Matches
             # specs4 — mid-stream crash preserves user intent.
             if self._history_store is not None:
@@ -4447,6 +4484,66 @@ class LLMService:
         max_output = _resolve_max_output_tokens(
             self._config, self._counter
         )
+
+        # Debug hook — when AC_DC_DUMP_PROMPT is set, pretty-
+        # print the assembled message array to stderr before
+        # the completion call. Lets operators diagnose "why
+        # is my prompt so large" without adding live Python
+        # exec. Values: "1"/"true"/"yes" → full JSON dump;
+        # "summary" → per-message role + token count only
+        # (lighter, useful for category-drift debugging);
+        # anything else → no dump. Off by default so the
+        # hook costs nothing in production.
+        import os as _os
+        dump_mode = _os.environ.get("AC_DC_DUMP_PROMPT", "").lower()
+        if dump_mode in ("1", "true", "yes", "full"):
+            import json as _json
+            import sys as _sys
+            print(
+                f"\n=== AC_DC_DUMP_PROMPT request={request_id} ===",
+                file=_sys.stderr,
+            )
+            print(
+                _json.dumps(messages, indent=2, default=str),
+                file=_sys.stderr,
+            )
+            print(
+                "=== end dump ===\n",
+                file=_sys.stderr,
+            )
+        elif dump_mode == "summary":
+            import sys as _sys
+            print(
+                f"\n=== AC_DC_DUMP_PROMPT summary "
+                f"request={request_id} ===",
+                file=_sys.stderr,
+            )
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    tokens = self._counter.count(content)
+                    preview = content[:80].replace("\n", " ")
+                    print(
+                        f"[{i:3d}] {role:10s} {tokens:7d} tok "
+                        f"| {preview}",
+                        file=_sys.stderr,
+                    )
+                elif isinstance(content, list):
+                    tokens = self._counter.count(msg)
+                    kinds = ",".join(
+                        b.get("type", "?") for b in content
+                        if isinstance(b, dict)
+                    )
+                    print(
+                        f"[{i:3d}] {role:10s} {tokens:7d} tok "
+                        f"| multimodal [{kinds}]",
+                        file=_sys.stderr,
+                    )
+            print(
+                "=== end summary ===\n",
+                file=_sys.stderr,
+            )
 
         try:
             stream = litellm.completion(

@@ -10,7 +10,7 @@ Governing specs:
 - ``specs4/3-llm/edit-protocol.md`` — block structure, marker
   byte sequences, state machine, file-path detection, streaming
   considerations
-- ``specs3/3-llm-engine/edit_protocol.md`` — concrete regex
+- ``specs-reference/3-llm/edit-protocol.md`` — concrete regex
   rules for file path detection (Python-side, more permissive
   than the frontend parser)
 
@@ -50,8 +50,8 @@ silently failing — the streaming handler surfaces these as
   tolerance concern.
 - **File path detection is Python-side authoritative.** The
   frontend has its own simpler heuristic (see
-  specs3/3-llm-engine/edit_protocol.md#frontend-vs-backend-divergence);
-  the backend's is permissive enough to recognise
+  specs-reference/3-llm/edit-protocol.md § Frontend vs backend
+  detection divergence); the backend's is permissive enough to recognise
   ``Makefile``, ``Dockerfile``, ``.gitignore`` etc. without
   requiring extensions.
 - **No anchor validation here.** This module returns parsed
@@ -133,9 +133,9 @@ _KNOWN_EXTENSIONLESS = frozenset({
 def _is_file_path(line: str) -> bool:
     """Return True if ``line`` looks like a repo-relative file path.
 
-    Authoritative Python-side heuristic. Matches specs3's rules
-    — see the "Frontend vs Backend Divergence" note in
-    specs3/3-llm-engine/edit_protocol.md.
+    Authoritative Python-side heuristic. Matches the rules
+    in specs-reference/3-llm/edit-protocol.md § Frontend vs
+    backend detection divergence.
     """
     # Defensive input-sanitisation. Empty-after-strip lines never
     # count; very long lines (200+ chars) are almost certainly

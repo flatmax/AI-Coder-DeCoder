@@ -14,7 +14,7 @@ reads tier assignments via :meth:`get_tier_items`.
 Governing specs:
 
 - ``specs4/3-llm/cache-tiering.md`` — the contract-level spec
-- ``specs3/3-llm-engine/cache_tiering.md`` — the numeric detail
+- ``specs-reference/3-llm/cache-tiering.md`` — the numeric detail
   reference (entry N and promotion thresholds, cascade order,
   anchoring algorithm)
 

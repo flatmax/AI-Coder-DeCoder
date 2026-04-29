@@ -4,7 +4,7 @@ AI-assisted code editing with a browser UI, stability-based prompt caching, and 
 
 ## Status
 
-**Early development.** This repository is being reimplemented from scratch against a new specification suite ([specs4/](specs4/)). The previous implementation's behavior is captured in [specs3/](specs3/) as a detail reference.
+**Early development.** This repository is being reimplemented from scratch against a new specification suite ([specs4/](specs4/)), supplemented by byte-level detail in [specs-reference/](specs-reference/).
 
 See [specs4/README.md](specs4/README.md) for the architecture overview and reading order, and [specs4/0-overview/implementation-guide.md](specs4/0-overview/implementation-guide.md) for how the two spec suites relate.
 

@@ -3,8 +3,8 @@
 Concrete :class:`~ac_dc.base_formatter.BaseFormatter` subclass
 that turns a list of :class:`~ac_dc.symbol_index.models.FileSymbols`
 into the token-efficient text format documented in
-``specs3/2-code-analysis/symbol_index.md#compact-format-symbol-map``
-and ``specs4/2-indexing/symbol-index.md#compact-format--symbol-map``.
+``specs4/2-indexing/symbol-index.md#compact-format--symbol-map``
+and detailed in ``specs-reference/2-indexing/symbol-index.md``.
 
 Two variants, selected via ``include_line_numbers``:
 
@@ -27,8 +27,8 @@ Design notes pinned by the test suite:
 
 Governing specs:
 
-- ``specs3/2-code-analysis/symbol_index.md#compact-format-symbol-map``
 - ``specs4/2-indexing/symbol-index.md#compact-format--symbol-map``
+- ``specs-reference/2-indexing/symbol-index.md``
 """
 
 from __future__ import annotations
