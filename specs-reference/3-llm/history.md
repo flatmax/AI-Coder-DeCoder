@@ -1,0 +1,315 @@
+# Reference: History
+
+**Supplements:** `specs4/3-llm/history.md`
+
+## Byte-level formats
+
+### Session ID
+
+```
+sess_{epoch_ms}_{uuid6}
+```
+
+Example: `sess_1736956800000_a1b2c3`
+
+- `sess_` — literal prefix
+- `epoch_ms` — `time.time() * 1000` at session creation, base-10 integer
+- `uuid6` — first 6 chars of a fresh `uuid.uuid4().hex`
+
+### Message ID
+
+```
+{epoch_ms}_{uuid8}
+```
+
+Example: `1736956800000-a1b2c3d4`
+
+- `epoch_ms` — creation time
+- `uuid8` — first 8 chars of a fresh `uuid.uuid4().hex`
+
+Generated per-message inside `HistoryStore`; unique across sessions. The original implementation uses a dash separator between the epoch and uuid segments rather than an underscore — this is an established interop format and the dash is not a typo.
+
+### Timestamp format
+
+ISO 8601 UTC, Python `datetime.now(timezone.utc).isoformat()`:
+
+```
+2025-01-15T10:30:00.123456+00:00
+```
+
+No millisecond truncation — full microsecond precision as produced by `datetime.isoformat()`.
+
+### JSONL record schema
+
+One record per line, no trailing comma, UTF-8 encoded. Each record has:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | ✓ | Message ID format above |
+| `session_id` | string | ✓ | Session ID format above |
+| `timestamp` | string | ✓ | ISO 8601 UTC |
+| `role` | `"user"` \| `"assistant"` | ✓ | Always one of the two string literals |
+| `content` | string | ✓ | Message text; never null, can be empty string |
+| `system_event` | bool | optional | `true` for operational events (commit, reset, mode switch, compaction). Omitted from records where false — readers must treat absence as false |
+| `image_refs` | list[string] | optional | Filenames in `.ac-dc4/images/`; omitted when empty |
+| `images` | int | optional, deprecated | Legacy integer count. Newer records use `image_refs` instead. Readers must tolerate both |
+| `files` | list[string] | optional | Files in context at send time (user messages only) |
+| `files_modified` | list[string] | optional | Paths changed by edit application (assistant messages only) |
+| `edit_results` | list[object] | optional | Per-edit detail records; see `specs-reference/3-llm/edit-protocol.md` § Per-block result |
+| `turn_id` | string | optional | Turn identifier; absent on records predating turn-ID introduction |
+
+Lines that fail JSON parse are skipped with a warning on load — defends against mid-write crashes leaving a partially-written final line. The record immediately before a crash is always intact (it completed before the crash); only a partial final line can be lost, and only if that partial line lacks a trailing newline AND a subsequent write concatenates into it.
+
+### Session summary shape
+
+Returned by `list_sessions(limit)`. Not persisted — computed on demand from the JSONL scan.
+
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | string | |
+| `timestamp` | string | Timestamp of the session's first message |
+| `message_count` | int | Total messages in the session |
+| `preview` | string | First ~100 chars of the first message's content |
+| `first_role` | string | Role of the first message (`"user"` or `"assistant"`) |
+
+### System event message content
+
+System event messages use `role: "user"` with `system_event: true`. Content templates are rendered as plain markdown strings:
+
+**Commit**
+
+```
+**Committed** `{sha}`
+
+```
+{commit_message}
+```
+```
+
+Uses a fenced code block for the commit message body so multi-line commit messages render cleanly.
+
+**Reset to HEAD**
+
+```
+**Reset to HEAD** — all uncommitted changes have been discarded.
+```
+
+**Mode switch**
+
+```
+Switched to {mode} mode.
+```
+
+Where `{mode}` is `"code"` or `"document"`.
+
+**Compaction event text** — synthesized after compaction runs. For the truncate case:
+
+```
+**History compacted** — truncate
+
+Boundary reason: {reason}
+Confidence: {confidence:.2f}
+
+Removed {N} messages • {before_tokens} → {after_tokens} tokens
+```
+
+For the summarize case, adds a collapsible details block with the generated summary:
+
+```
+**History compacted** — summarize
+
+Boundary reason: {reason}
+
+Removed {N} messages • {before_tokens} → {after_tokens} tokens
+
+<details>
+<summary>Summary</summary>
+
+{summary_text}
+
+</details>
+```
+
+The `<details>` tag renders natively in markdown preview (marked.js with GFM passes HTML through) and keeps long summaries collapsed by default.
+
+### Summary pair inserted by compaction
+
+When the compactor produces a summarize case, the pre-verbatim messages are replaced by this exact two-message pair:
+
+```
+{"role": "user", "content": "[History Summary]\n{summary_text}"}
+{"role": "assistant", "content": "Ok, I understand the context from the previous conversation."}
+```
+
+The literal prefix `[History Summary]\n` tells the assistant on subsequent turns that the opening user message is synthesized context, not a real user turn. The assistant response is a fixed acknowledgement — never generated by the LLM. Downstream parsers can detect compacted context by looking for this exact prefix on a user message followed by this exact acknowledgement string.
+
+### Topic detector input format
+
+Messages formatted as indexed blocks for the detector LLM call:
+
+```
+[0] user: {content_truncated}
+[1] assistant: {content_truncated}
+[2] user: {content_truncated}
+...
+```
+
+Per-message truncation: 1000 characters. Overall cap: 50 messages (most recent tail when history exceeds that).
+
+### Topic detector output format
+
+The detector returns JSON. Parser accepts both bare JSON and markdown-fenced JSON (```json ... ```) so models that prefer fenced output don't break detection.
+
+```json
+{
+  "boundary_index": 12,
+  "boundary_reason": "user explicitly switched from auth work to logging review",
+  "confidence": 0.92,
+  "summary": "The prior conversation covered adding rate limiting to the auth endpoint..."
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `boundary_index` | int \| null | Index of the first message in the NEW topic, or null if no boundary detected |
+| `boundary_reason` | string | Human-readable rationale |
+| `confidence` | float | 0.0–1.0, clamped by parser if provider returns out-of-range |
+| `summary` | string | Used only when the summarize case fires |
+
+Parser failure (unparseable JSON, wrong shape, exception) returns safe defaults: `boundary_index=null`, `boundary_reason=""`, `confidence=0.0`, `summary=""`. The summarize case fires on safe defaults (no boundary detected → can't truncate).
+
+## Numeric constants
+
+### Compaction config defaults
+
+Stored under the `history_compaction` key in `app.json`:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Master switch |
+| `compaction_trigger_tokens` | `24000` | History tokens at or above this trigger compaction on next turn |
+| `verbatim_window_tokens` | `4000` | Recent tokens kept unchanged — lower bound on post-compaction history |
+| `summary_budget_tokens` | `500` | Max tokens for the generated summary |
+| `min_verbatim_exchanges` | `2` | Minimum recent exchanges always kept, even if token budgets would drop them |
+
+All values are user-tunable via `app.json` hot-reload. The compactor reads these through accessor properties on each check (not a snapshot dict), so changes take effect on the next compaction probe.
+
+### Truncate confidence threshold
+
+```
+0.5
+```
+
+The case decision in `compact_history_if_needed`:
+
+- Boundary in or after the verbatim window AND confidence ≥ 0.5 → truncate case
+- Boundary before verbatim window, OR confidence < 0.5, OR no boundary → summarize case
+
+Hardcoded in the compactor. Not user-configurable (tuning this changes the semantic split between the two cases in ways that interact badly with user expectations).
+
+### Emergency truncation multiplier
+
+```
+2x compaction_trigger_tokens
+```
+
+If compaction fails AND history exceeds twice the trigger, oldest messages are dropped without summarization. Method exists on `ContextManager.emergency_truncate()` but is not currently called by the streaming pipeline — available as a manual safety net.
+
+### Compaction event broadcast retry
+
+When delivering `compaction_complete` events via the `compactionEvent` RPC, a retry loop handles momentary WebSocket contention from the preceding `streamComplete` write:
+
+| Parameter | Value |
+|---|---|
+| Max attempts | 3 |
+| Delay between attempts | 1 second |
+
+See `specs-reference/3-llm/streaming.md` § `compactionEvent` retry for the same constants — they're shared because both events travel the same channel.
+
+### Post-response compaction delay
+
+Compaction runs after `streamComplete` with a brief delay:
+
+```
+500ms
+```
+
+See `specs-reference/3-llm/streaming.md` § Post-response compaction delay.
+
+## Schemas
+
+### Storage layout
+
+```
+{repo_root}/.ac-dc4/
+├── history.jsonl          # main conversation store
+├── images/                # persisted image attachments
+│   └── {hash12}.{ext}     # content-addressed filenames
+└── agents/                # agent turn archives (optional)
+    └── {turn_id}/
+        ├── agent-00.jsonl
+        ├── agent-01.jsonl
+        └── ...
+```
+
+The `images/` and `agents/` directories are created lazily — only when first image is pasted or first agent turn completes.
+
+### Image filename format
+
+```
+{hash12}.{ext}
+```
+
+Where `hash12` is the first 12 hex chars of SHA-256 over the raw data URI string, and `ext` is derived from the MIME type:
+
+| MIME type | Extension |
+|---|---|
+| `image/png` | `.png` |
+| `image/jpeg` | `.jpg` |
+| `image/gif` | `.gif` |
+| `image/webp` | `.webp` |
+| `image/bmp` | `.bmp` |
+| fallback | `.png` |
+
+Hash-based names are content-addressed and idempotent — re-pasting the same image produces the same filename and skips the write (existence check). Chronological ordering is recoverable from filesystem mtime if needed.
+
+### Reverse MIME map (for reconstruction)
+
+When reconstructing data URIs from saved filenames on session load:
+
+| Extension | MIME type |
+|---|---|
+| `.png` | `image/png` |
+| `.jpg` / `.jpeg` | `image/jpeg` |
+| `.gif` | `image/gif` |
+| `.webp` | `image/webp` |
+| `.bmp` | `image/bmp` |
+| unknown | `application/octet-stream` |
+
+Missing image files (user manually deleted) are silently skipped on reconstruction — a warning is logged but the message is still rendered without the image.
+
+## Dependency quirks
+
+### JSON decode tolerance
+
+Every JSONL read path uses per-line try/except around `json.loads` and skips failed lines with a warning. This is defensive against three specific failure modes:
+
+1. **Mid-write crashes** — process killed between `f.write(line)` and `f.write("\n")` leaves a partial record with no trailing newline. Subsequent writes concatenate into it, producing one bogus line that can't be recovered. The record BEFORE the crash is always intact.
+2. **Manual user edits** — users occasionally edit `history.jsonl` directly (truncation, surgical removal). Malformed lines from manual editing produce warnings, not crashes.
+3. **Schema drift** — loading a JSONL file written by a newer version with unknown fields. The `json.loads` succeeds; unknown fields are ignored by field-name-based access.
+
+The record count returned by `list_sessions` counts only successfully-parsed records. A corrupted line reduces the visible count by one without blocking access to the rest.
+
+### Content hash for image filenames
+
+The hash input is the raw base64 data URI string (including the `data:image/png;base64,` prefix), not the decoded binary. This is slightly wasteful (the prefix is always the same within a MIME type) but simpler than pre-decoding for hashing, and deterministic across sessions.
+
+Collisions at 12 hex chars are astronomically unlikely for any realistic repo — the birthday bound on 48 bits is ~16 million distinct images before a 0.1% collision probability. Real sessions rarely exceed a few hundred images.
+
+## Cross-references
+
+- Behavioral contracts, compaction algorithm, auto-restore flow, turn archive semantics, invariants: `specs4/3-llm/history.md`
+- Compaction stage events on the progress channel: `specs-reference/3-llm/streaming.md` § `compactionEvent`
+- Edit block result shapes stored in `edit_results`: `specs-reference/3-llm/edit-protocol.md` § Per-block result
+- System event message rendering (distinct card style): `specs4/5-webapp/chat.md`
+- Turn ID generation and propagation through agent turns: `specs4/3-llm/history.md` § Turns

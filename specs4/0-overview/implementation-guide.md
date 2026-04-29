@@ -96,7 +96,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Compaction defaults | `specs3/3-llm-engine/context_and_history.md` |
 | RPC method signatures | `specs3/1-foundation/communication_layer.md` (full RPC inventory with argument and return shapes) |
 | Streaming event payload shapes | `specs-reference/3-llm/streaming.md` (streamChunk, streamComplete, compactionEvent) |
-| JSONL history schema | `specs3/3-llm-engine/context_and_history.md` |
+| JSONL history schema | `specs-reference/3-llm/history.md` |
 | Docuvert provenance header | `specs3/4-features/doc_convert.md` |
 | Config file schemas | `specs3/1-foundation/configuration.md` |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
