@@ -94,7 +94,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Cache tier numeric thresholds | `specs-reference/3-llm/cache-tiering.md` (entry-N, promotion-N, cache buffer multiplier) |
 | Model-specific cache minimums | `specs-reference/3-llm/cache-tiering.md` (Claude family minimums — same twin as the tier thresholds) |
 | Compaction defaults | `specs3/3-llm-engine/context_and_history.md` |
-| RPC method signatures | `specs3/1-foundation/communication_layer.md` (full RPC inventory with argument and return shapes) |
+| RPC method signatures | `specs-reference/1-foundation/rpc-inventory.md` (full RPC inventory with argument and return shapes) |
 | Streaming event payload shapes | `specs-reference/3-llm/streaming.md` (streamChunk, streamComplete, compactionEvent) |
 | JSONL history schema | `specs-reference/3-llm/history.md` |
 | Docuvert provenance header | `specs3/4-features/doc_convert.md` |
