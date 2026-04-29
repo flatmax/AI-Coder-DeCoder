@@ -2745,24 +2745,55 @@ export class AppShell extends JRPCClient {
     }
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    // If position is still valid, leave it alone. We only
-    // act when the current rect has stranded off-screen.
+    // Three failure modes after a monitor/resolution change:
+    //   (a) The dialog is stranded off-screen (origin past
+    //       the far edge, or rect ends before the near edge).
+    //   (b) The dialog extends past the viewport edge — the
+    //       origin is still on-screen but width or height
+    //       overflow, leaving the resize handle and chat
+    //       input area unreachable. This is the common case
+    //       when switching from a large monitor to a small
+    //       one: the prompt input sits near the right edge
+    //       of the dialog and disappears past the right
+    //       viewport edge.
+    //   (c) The dialog itself is larger than the viewport —
+    //       shrink to fit.
+    // If none of these apply, leave position alone.
     const p = this._undockedPos;
-    const outOfBounds =
+    const stranded =
       p.left > vw - _DIALOG_VISIBLE_MARGIN
       || p.top > vh - _DIALOG_VISIBLE_MARGIN
       || p.left + p.width < _DIALOG_VISIBLE_MARGIN
       || p.top + p.height < _DIALOG_VISIBLE_MARGIN;
-    if (!outOfBounds) return;
+    const overflows =
+      p.left + p.width > vw
+      || p.top + p.height > vh;
+    if (!stranded && !overflows) return;
+    // Clamp width/height to viewport first, preserving the
+    // minimums so we don't produce an unusable sliver.
+    const newWidth = Math.max(
+      _DIALOG_MIN_WIDTH, Math.min(p.width, vw),
+    );
+    const newHeight = Math.max(
+      _DIALOG_MIN_HEIGHT, Math.min(p.height, vh),
+    );
+    // Then clamp origin so the full rect fits on-screen.
+    // Math.max(0, ...) guards against viewports smaller
+    // than the minimum dialog size (newWidth > vw): prefer
+    // anchoring at left=0/top=0 with the right edge
+    // clipped over a negative origin that would hide the
+    // header's drag handle.
+    const newLeft = Math.max(
+      0, Math.min(p.left, vw - newWidth),
+    );
+    const newTop = Math.max(
+      0, Math.min(p.top, vh - newHeight),
+    );
     this._undockedPos = {
-      left: Math.max(
-        0, Math.min(p.left, vw - _DIALOG_VISIBLE_MARGIN),
-      ),
-      top: Math.max(
-        0, Math.min(p.top, vh - _DIALOG_VISIBLE_MARGIN),
-      ),
-      width: Math.min(p.width, vw),
-      height: Math.min(p.height, vh),
+      left: newLeft,
+      top: newTop,
+      width: newWidth,
+      height: newHeight,
     };
     this._saveUndockedPos();
   }
