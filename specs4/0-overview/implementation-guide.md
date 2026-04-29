@@ -100,7 +100,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Docuvert provenance header | `specs-reference/4-features/doc-convert.md` |
 | Config file schemas | `specs-reference/1-foundation/configuration.md` |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
-| Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs3/5-webapp/diff_viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
+| Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs-reference/5-webapp/diff-viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
 
 ## Architectural Changes from specs3
 

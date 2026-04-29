@@ -76,7 +76,7 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 
 - [ ] Dependency quirks — three separate twins per the mirror rule:
   - [ ] `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript function name) — may already exist from pilot; append if so
-  - [ ] `specs-reference/5-webapp/diff-viewer.md` (Monaco worker configuration paths)
+  - [x] `specs-reference/5-webapp/diff-viewer.md` (Monaco worker configuration paths)
   - [ ] `specs-reference/6-deployment/build.md` (Vite optimizeDeps exclusion, PyInstaller hidden imports)
 - [ ] System prompt text — **do not create a twin.** Update the table row to point directly at `src/ac_dc/config/*.md` as the authoritative source. Duplicating prompt text into a twin creates a drift risk; the live config files are already authoritative.
 
