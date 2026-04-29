@@ -91,8 +91,8 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Symbol map compact format | `specs-reference/2-indexing/symbol-index.md` (legend, abbreviations, ditto marks, path aliases, test collapsing) |
 | Doc outline annotation syntax | `specs-reference/2-indexing/document-index.md` (keyword parentheses, content-type markers, section size, ref counts, outgoing refs) |
 | Edit block marker bytes | `specs-reference/3-llm/edit-protocol.md` |
-| Cache tier numeric thresholds | `specs3/3-llm-engine/cache_tiering.md` (entry-N, promotion-N, cache buffer multiplier) |
-| Model-specific cache minimums | `specs3/1-foundation/configuration.md` (Claude family minimums) |
+| Cache tier numeric thresholds | `specs-reference/3-llm/cache-tiering.md` (entry-N, promotion-N, cache buffer multiplier) |
+| Model-specific cache minimums | `specs-reference/3-llm/cache-tiering.md` (Claude family minimums — same twin as the tier thresholds) |
 | Compaction defaults | `specs3/3-llm-engine/context_and_history.md` |
 | RPC method signatures | `specs3/1-foundation/communication_layer.md` (full RPC inventory with argument and return shapes) |
 | Streaming event payload shapes | `specs3/3-llm-engine/streaming_lifecycle.md` (streamChunk, streamComplete, compactionEvent) |

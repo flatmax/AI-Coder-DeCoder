@@ -57,11 +57,11 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 **Layer 3 (6 commits)**
 
 - [x] Edit block markers (`specs-reference/3-llm/edit-protocol.md`) — exact marker bytes, parser state machine, diagnostics. Also the canonical owner; webapp twins link here.
-- [ ] Cache tier numeric thresholds (`specs-reference/3-llm/cache-tiering.md`) — entry-N and promotion-N values, cache buffer multiplier, anchoring thresholds
+- [x] Cache tier numeric thresholds (`specs-reference/3-llm/cache-tiering.md`) — entry-N and promotion-N values, cache buffer multiplier, anchoring thresholds
 - [ ] Streaming event payload shapes (`specs-reference/3-llm/streaming.md`) — streamChunk, streamComplete, compactionEvent
 - [ ] JSONL history schema (`specs-reference/3-llm/history.md`) — record field names, session ID format, image ref format, turn ID
 - [ ] Compaction defaults (could be part of history.md or a separate twin; decide during implementation)
-- [ ] Model-specific cache minimums (`specs-reference/1-foundation/configuration.md` or `specs-reference/3-llm/cache-tiering.md` — decide canonical location during implementation)
+- [x] Model-specific cache minimums — folded into `specs-reference/3-llm/cache-tiering.md` during implementation. The per-model `min_cacheable_tokens` values are inputs to the cache target calculation, so they belong with the cache mechanics rather than with config keys. The configuration twin (when written) will link here for the values.
 
 **Layer 1 (2 commits)**
 
