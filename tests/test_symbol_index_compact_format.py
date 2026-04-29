@@ -2,7 +2,7 @@
 
 Scope: the concrete CompactFormatter that renders code
 symbol maps. Pins the exact byte-stable output shape that
-specs3/2-code-analysis/symbol_index.md defines and that
+specs-reference/2-indexing/symbol-index.md defines and that
 Layer 3's cache tiering and the LLM itself consume.
 
 Strategy:
@@ -28,7 +28,7 @@ The formatter produces two variants:
 
 Governing spec sections:
 
-- specs3/2-code-analysis/symbol_index.md#compact-format-symbol-map
+- specs-reference/2-indexing/symbol-index.md#compact-format--symbol-map
 - specs4/2-indexing/symbol-index.md#compact-format--symbol-map
 """
 

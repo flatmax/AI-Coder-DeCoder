@@ -2705,11 +2705,74 @@ class LLMService:
                 "mode": self._context.mode.value,
             }
 
-        # Strip a known prefix so callers can pass either the
-        # raw tracker key (``doc:README.md``) or the bare
-        # file path (``README.md``). The cache viewer sends
-        # the full key; other callers may send the path.
-        for prefix in ("file:", "symbol:", "doc:"):
+        # Synthetic meta:* keys — sections of the assembled
+        # prompt that aren't individual tracker entries. The
+        # cache viewer surfaces these as rows per
+        # specs4/5-webapp/viewers-hud.md § "Synthetic Meta
+        # Rows"; clicking them opens this modal, which must
+        # return the aggregate content that would have gone
+        # into the prompt for that section.
+        if path.startswith("meta:"):
+            return self._get_meta_block(path)
+
+        # Prefix dispatch. The tracker uses three path-bearing
+        # prefixes and each represents a different KIND of
+        # content in the prompt:
+        #
+        #   - file:{path}   — full file bytes, rendered under
+        #     FILES_L{N}_HEADER in the file's cached tier (or
+        #     the active "Working Files" section if
+        #     ungraduated). Modal should show the same full
+        #     content.
+        #   - symbol:{path} — compact symbol-index block (the
+        #     ``i,c,f,v`` summary from the symbol map).
+        #     Rendered under TIER_SYMBOLS_HEADER.
+        #   - doc:{path}    — compact doc-index block (heading
+        #     outline, section refs). Also under
+        #     TIER_SYMBOLS_HEADER in doc mode.
+        #
+        # Callers may also pass a bare path without a prefix;
+        # that falls through to the mode-based dispatch below
+        # (compact block via the primary index).
+        if path.startswith("file:"):
+            file_path = path[len("file:"):]
+            content = self._file_context.get_content(file_path)
+            if content is not None:
+                return {
+                    "path": file_path,
+                    "content": content,
+                    "mode": self._context.mode.value,
+                }
+            # Selected file ungraduated but not loaded into
+            # the context yet (rare — normally _sync_file_context
+            # loads every selected file before every request).
+            # Fall back to reading from disk so the modal
+            # shows something useful. If the read fails the
+            # caller sees the generic "no index data found"
+            # error below.
+            if self._repo is not None:
+                try:
+                    disk_content = self._repo.get_file_content(
+                        file_path
+                    )
+                    return {
+                        "path": file_path,
+                        "content": disk_content,
+                        "mode": self._context.mode.value,
+                    }
+                except Exception:
+                    pass
+            return {
+                "error": (
+                    f"File content for {file_path} not "
+                    "available (not in file context, not "
+                    "readable from disk)"
+                ),
+                "path": path,
+            }
+        # symbol: and doc: strip the prefix and fall through
+        # to the compact-block dispatch below.
+        for prefix in ("symbol:", "doc:"):
             if path.startswith(prefix):
                 path = path[len(prefix):]
                 break
@@ -2762,6 +2825,201 @@ class LLMService:
         return {
             "error": f"No index data found for {path}",
             "path": path,
+        }
+
+    def _wide_map_exclude_set(self) -> set[str]:
+        """Compute the wide exclusion set for aggregate map bodies.
+
+        The aggregate symbol-map or doc-map body (rendered in L0's
+        system message) must exclude every path whose full content
+        or compact block already appears elsewhere in the prompt.
+        Without this exclusion, files that have graduated into
+        cached tiers would render twice — once as a compact block
+        in the aggregate map, and once under their tier's
+        TIER_SYMBOLS_HEADER or FILES_L{N}_HEADER section — wasting
+        tokens and confusing the model about which view is
+        authoritative.
+
+        The exclusion set is the union of:
+
+        1. Selected files — their full content renders in the
+           active "Working Files" section (if ungraduated) or in
+           a cached tier's FILES_L{N}_HEADER block (if graduated
+           as ``file:``)
+        2. User-excluded index files — no representation in the
+           prompt at all, so the aggregate map must also skip them
+        3. Every path graduated into any cached tier as ``file:``,
+           ``symbol:``, or ``doc:`` — all three prefixes represent
+           content that's already in a cached tier's section
+
+        All three tier-item prefixes contribute because each
+        represents a file whose content (full or compact) appears
+        in a cached tier's TIER_SYMBOLS_HEADER / FILES_L{N}_HEADER
+        block. A ``symbol:{path}`` entry in L2 means that file's
+        compact block is in L2's content body; rendering the same
+        block in the aggregate L0 map would be duplicate prompt
+        content.
+
+        Per specs-reference/3-llm/prompt-assembly.md § "Symbol map
+        exclusions". Three call sites must agree on this
+        computation: ``_assemble_tiered`` (what the LLM receives),
+        ``_get_meta_block`` (modal content for click-to-view), and
+        ``get_context_breakdown`` (token counts for cache viewer
+        rows). A divergence between any two surfaces the same-row/
+        different-count bug documented in the spec.
+
+        This helper is the canonical source for the computation.
+        ``_assemble_tiered`` derives its exclusion set from a
+        different source (the tiered_content dict's
+        ``graduated_files`` lists, computed at build time); the
+        two paths converge on the same exclusion set but via
+        different inputs, which is fine. The two meta-related
+        surfaces (``_get_meta_block``, ``get_context_breakdown``)
+        both call this helper.
+        """
+        from ac_dc.stability_tracker import Tier
+
+        exclude: set[str] = set(self._selected_files)
+        exclude.update(
+            getattr(self, "_excluded_index_files", None) or ()
+        )
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
+            for item_key in self._stability_tracker.get_tier_items(tier):
+                for prefix in ("file:", "symbol:", "doc:"):
+                    if item_key.startswith(prefix):
+                        exclude.add(item_key[len(prefix):])
+                        break
+        return exclude
+
+    def _get_meta_block(self, key: str) -> dict[str, Any]:
+        """Return the content for a synthetic meta:* cache row.
+
+        The cache viewer emits meta:* rows for sections of the
+        prompt that aren't individual tracker entries — the
+        aggregate repo/doc map, the file tree, fetched URLs,
+        review context, and active files. Clicking a meta row
+        opens the map-block modal, which routes here rather
+        than through the file-path dispatch in
+        get_file_map_block.
+
+        Each sub-key produces the same text the assembler
+        would inject into the prompt this turn. For the
+        aggregate map, that means re-running the map builder
+        with the same exclusions the assembler uses; for URLs
+        and review context we return the formatted block
+        directly.
+        """
+        # meta:repo_map / meta:doc_map — aggregate index map
+        # body for the current mode. Matches what
+        # _assemble_tiered feeds into the L0 system message.
+        if key in ("meta:repo_map", "meta:doc_map"):
+            # Wide exclusion set — see _wide_map_exclude_set for
+            # the rationale. The same exclusion must be applied
+            # in get_context_breakdown so the row's token count
+            # matches the modal content this branch produces.
+            exclude = self._wide_map_exclude_set()
+            if self._context.mode == Mode.DOC:
+                content = self._doc_index.get_doc_map(
+                    exclude_files=exclude
+                )
+                mode = "doc"
+            else:
+                content = ""
+                if self._symbol_index is not None:
+                    try:
+                        content = self._symbol_index.get_symbol_map(
+                            exclude_files=exclude
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregate symbol map fetch failed: %s",
+                            exc,
+                        )
+                mode = "code"
+            if not content:
+                return {
+                    "error": (
+                        "Aggregate map is empty — every indexed "
+                        "file has graduated to a cached tier."
+                    ),
+                    "path": key,
+                }
+            return {
+                "path": key,
+                "content": content,
+                "mode": mode,
+            }
+
+        # meta:file_tree — flat repo file listing.
+        if key == "meta:file_tree":
+            if self._repo is None:
+                return {"error": "No repository attached", "path": key}
+            try:
+                content = self._repo.get_flat_file_list()
+            except Exception as exc:
+                return {"error": str(exc), "path": key}
+            return {
+                "path": key,
+                "content": content or "(empty)",
+                "mode": "code",
+            }
+
+        # meta:url:{url} — individual fetched URL body.
+        if key.startswith("meta:url:"):
+            url = key[len("meta:url:"):]
+            content_obj = self._url_service.get_url_content(url)
+            if content_obj.error and content_obj.error != "":
+                # "URL not yet fetched" is the sentinel shape —
+                # surface it as an error so the user knows why
+                # the row is empty.
+                return {
+                    "error": content_obj.error,
+                    "path": key,
+                }
+            formatted = content_obj.format_for_prompt()
+            return {
+                "path": key,
+                "content": formatted or "(empty)",
+                "mode": self._context.mode.value,
+            }
+
+        # meta:review_context — review mode's injected block.
+        if key == "meta:review_context":
+            review_text = self._context.get_review_context()
+            if not review_text:
+                return {
+                    "error": "Review context is empty",
+                    "path": key,
+                }
+            return {
+                "path": key,
+                "content": review_text,
+                "mode": self._context.mode.value,
+            }
+
+        # meta:active_file:{path} — an active (non-graduated)
+        # selected file. Returns the file content as it would
+        # appear in the "Working Files" section.
+        if key.startswith("meta:active_file:"):
+            file_path = key[len("meta:active_file:"):]
+            content = self._file_context.get_content(file_path)
+            if content is None:
+                return {
+                    "error": (
+                        f"File {file_path} is not currently "
+                        "loaded into context."
+                    ),
+                    "path": key,
+                }
+            return {
+                "path": key,
+                "content": content,
+                "mode": self._context.mode.value,
+            }
+
+        return {
+            "error": f"Unknown meta key: {key}",
+            "path": key,
         }
 
     # ------------------------------------------------------------------
@@ -5101,9 +5359,11 @@ class LLMService:
                 # Aggregate map for the Budget bar — use the
                 # formatter's output rather than summing
                 # per-file details (the formatter adds alias
-                # headers and separators).
+                # headers and separators). Wide exclusion set
+                # shared with _get_meta_block so this row's
+                # token count matches the modal content.
                 symbol_map = self._doc_index.get_doc_map(
-                    exclude_files=selected_set | excluded_set
+                    exclude_files=self._wide_map_exclude_set()
                 )
             else:
                 # Code mode primary: iterate symbol index.
@@ -5135,8 +5395,11 @@ class LLMService:
                             "path": path,
                             "tokens": self._counter.count(block),
                         })
+                    # Wide exclusion set shared with
+                    # _get_meta_block so this row's token count
+                    # matches the modal content.
                     symbol_map = self._symbol_index.get_symbol_map(
-                        exclude_files=selected_set | excluded_set
+                        exclude_files=self._wide_map_exclude_set()
                     )
         except Exception as exc:
             # Defensive — malformed index state shouldn't
@@ -5275,13 +5538,142 @@ class LLMService:
                     promote_n = tier_cfg.get("promote_n")
                 entry["threshold"] = promote_n
                 contents.append(entry)
+
+            # Synthetic meta rows — sections of the prompt that
+            # aren't individual tracker entries but DO contribute
+            # tokens to this tier's cached block. Per user
+            # request: every distinct section of the assembled
+            # prompt should appear as a visible row so the cache
+            # viewer is a literal inventory of what the LLM sees.
+            #
+            # L0 is the only cached tier that receives a meta
+            # row today — the aggregate repo/doc map body, which
+            # lives in the system message but isn't represented
+            # by any tracker key. Per-file symbol/doc entries
+            # already render as symbol:*/doc:* rows; this synthetic
+            # row captures the residual aggregate that spans
+            # ungraduated files.
+            if tier == Tier.L0 and symbol_map:
+                map_token_count = self._counter.count(symbol_map)
+                if map_token_count > 0:
+                    contents.append({
+                        "name": (
+                            "meta:doc_map" if self._context.mode == Mode.DOC
+                            else "meta:repo_map"
+                        ),
+                        "path": (
+                            "Document structure map"
+                            if self._context.mode == Mode.DOC
+                            else "Repository structure map"
+                        ),
+                        "tokens": map_token_count,
+                        "type": (
+                            "doc_symbols" if self._context.mode == Mode.DOC
+                            else "symbols"
+                        ),
+                    })
+                    tier_tokens += map_token_count
+
             blocks.append({
                 "name": tier.value,
                 "tier": tier.value,
                 "tokens": tier_tokens,
-                "count": len(tier_items),
+                "count": len(contents),
                 "cached": tier != Tier.ACTIVE,
                 "contents": contents,
+            })
+
+        # Uncached tail — sections that always appear in the
+        # prompt after the last cache breakpoint. These have no
+        # tracker representation because they're rebuilt on
+        # every request, but the user expects to see them in
+        # the cache viewer for a complete accounting of what
+        # the LLM received.
+        #
+        # Per specs-reference/3-llm/prompt-assembly.md §
+        # "Message array structure", the uncached tail contains:
+        # file tree, URL context, review context, active files
+        # section, active history, current user message.
+        #
+        # Active history is already rendered as history:*
+        # entries in the active tier; we don't duplicate it
+        # here. The current user message is transient (it IS
+        # the current request) and not worth a row.
+        file_tree = ""
+        if self._repo is not None:
+            try:
+                file_tree = self._repo.get_flat_file_list()
+            except Exception as exc:
+                # Non-fatal — a breakdown call shouldn't crash
+                # just because the git subprocess hiccuped.
+                # The row just won't appear.
+                logger.debug(
+                    "File tree fetch for breakdown failed: %s",
+                    exc,
+                )
+
+        uncached_contents: list[dict[str, Any]] = []
+        if file_tree:
+            ft_tokens = self._counter.count(file_tree)
+            if ft_tokens > 0:
+                uncached_contents.append({
+                    "name": "meta:file_tree",
+                    "path": "Repository file listing",
+                    "tokens": ft_tokens,
+                    "type": "files",
+                })
+        for url_entry in url_details:
+            uncached_contents.append({
+                "name": f"meta:url:{url_entry['url']}",
+                "path": url_entry["name"],
+                "tokens": url_entry["tokens"],
+                "type": "urls",
+            })
+        review_ctx = self._context.get_review_context()
+        if review_ctx:
+            rv_tokens = self._counter.count(review_ctx)
+            if rv_tokens > 0:
+                uncached_contents.append({
+                    "name": "meta:review_context",
+                    "path": "Code review context",
+                    "tokens": rv_tokens,
+                    "type": "other",
+                })
+        # Active files section — files currently in the file
+        # context but not graduated to any cached tier. These
+        # render in the uncached "Working Files" section of
+        # the prompt.
+        # Every file: tracker entry — active OR cached — already
+        # represents a prompt section (working files if active,
+        # cached tier block if graduated). Adding a
+        # meta:active_file: row for the same path would
+        # double-count it in the viewer. Walk all tiers
+        # including active to dedupe against the file: entries.
+        represented_file_paths: set[str] = set()
+        for b in blocks:
+            for c in b.get("contents", ()):
+                if c.get("type") == "files":
+                    # c["path"] for file:* entries is the file path
+                    represented_file_paths.add(c.get("path") or "")
+        for fd in file_details:
+            if fd["path"] in represented_file_paths:
+                continue
+            uncached_contents.append({
+                "name": f"meta:active_file:{fd['path']}",
+                "path": fd["path"],
+                "tokens": fd["tokens"],
+                "type": "files",
+            })
+
+        if uncached_contents:
+            uncached_tokens = sum(c["tokens"] for c in uncached_contents)
+            blocks.append({
+                "name": "uncached",
+                "tier": "uncached",
+                "tokens": uncached_tokens,
+                "count": len(uncached_contents),
+                "cached": False,
+                "contents": uncached_contents,
             })
 
         # Promotions and demotions from the most recent update.
@@ -5475,6 +5867,19 @@ class LLMService:
                 block = self._symbol_index.get_file_symbol_block(path)
                 if block:
                     tier_symbol_fragments[tier_name].append(block)
+                    # Track this path as graduated so the
+                    # aggregate symbol map in L0's system
+                    # message doesn't ALSO render this file's
+                    # compact block. Without this, every
+                    # symbol-graduated file's block appears
+                    # twice in the prompt — once here under
+                    # the tier's TIER_SYMBOLS_HEADER, and
+                    # once in the aggregate map body. The
+                    # `graduated_files` list is consumed by
+                    # `_assemble_tiered` to build the
+                    # exclude_files set passed to
+                    # `get_symbol_map()`.
+                    result[tier_name]["graduated_files"].append(path)
             elif key.startswith("doc:"):
                 # Doc blocks share the tier's `symbols` field
                 # with symbol blocks — both render under the
@@ -5492,6 +5897,13 @@ class LLMService:
                 block = self._doc_index.get_file_doc_block(path)
                 if block:
                     tier_symbol_fragments[tier_name].append(block)
+                    # Same deduplication reasoning as the
+                    # symbol: branch above. Doc-graduated
+                    # paths also need to be excluded from
+                    # the aggregate map (which in doc mode
+                    # is the doc map, in cross-ref mode
+                    # could be either).
+                    result[tier_name]["graduated_files"].append(path)
             elif key.startswith("file:"):
                 path = key[len("file:"):]
                 content = self._file_context.get_content(path)

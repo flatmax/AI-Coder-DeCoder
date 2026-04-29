@@ -1022,7 +1022,7 @@ class TestIntegration:
             children=[cm, compaction],
         )
         outline = _o(
-            "specs3/3-llm-engine/context_and_history.md",
+            "specs-reference/3-llm/context-model.md",
             doc_type="spec",
             headings=[top],
             links=[
@@ -1036,7 +1036,7 @@ class TestIntegration:
 
         # Verify key pieces of the shape.
         assert (
-            "specs3/3-llm-engine/context_and_history.md [spec]:"
+            "specs-reference/3-llm/context-model.md [spec]:"
             in out
         )
         assert "# Context & History" in out

@@ -76,7 +76,7 @@ export function rpcExtract(result) {
     return result;
   }
   // Single key: unwrap. Multi-key: return the first value
-  // (specs3/3-llm-engine/streaming_lifecycle.md "first key wins"
+  // (specs-reference/3-llm/streaming.md "first key wins"
   // convention). Either way the access shape is the same.
   return result[keys[0]];
 }

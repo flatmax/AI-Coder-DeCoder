@@ -58,7 +58,7 @@ describe('STATUS_META', () => {
 
   it('does NOT have entries for undocumented statuses', () => {
     // Guard against a future refactor that adds a key without
-    // updating specs3/specs4 or the README. Catches typo
+    // updating specs-reference/specs4 or the README. Catches typo
     // variants too (`not-in-context` vs `not_in_context`).
     const extra = Object.keys(STATUS_META).filter(
       (k) => !REQUIRED_KEYS.includes(k),

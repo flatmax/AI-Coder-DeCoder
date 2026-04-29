@@ -102,6 +102,14 @@ Summary at top with cache hit rate as a percentage label and a proportional bar.
 | Files | — | File path + stability bar + tokens |
 | URLs | — | Title + tokens |
 | History | — | Message count + tokens |
+
+#### Synthetic Meta Rows
+
+Tier content includes synthetic rows with a `meta:` prefix alongside the per-entry tracker rows. Meta rows surface sections of the assembled prompt that don't correspond to individual tracker entries — the aggregate map body (cached in L0), the file tree, fetched URLs, review-mode context, and active (non-graduated) selected files (all in the uncached tail). Clicking a meta row opens the same map-block modal used for per-entry rows; the modal dispatches to the backend which recomputes or re-fetches the section's content.
+
+The token counts displayed on `meta:repo_map` / `meta:doc_map` rows must match the content the click-to-view modal produces. Divergence indicates a violation of the three-way exclusion-set contract documented in [`specs-reference/3-llm/prompt-assembly.md § Symbol map exclusions`](../../specs-reference/3-llm/prompt-assembly.md#symbol-map-exclusions).
+
+See [`specs-reference/3-llm/prompt-assembly.md § Synthetic meta rows`](../../specs-reference/3-llm/prompt-assembly.md#synthetic-meta-rows) for the full key catalog.
 #### Measured vs Unmeasured Items
 Within each tier, items split into two groups:
 - **Measured items** — non-zero token count, rendered individually with icon, name, token count, stability bar, and N/threshold label
@@ -144,7 +152,15 @@ Tiers use a warm-to-cool spectrum:
 - L2 — blue
 - L3 — amber
 - Active — orange
+- Uncached — muted grey (synthetic tier for the uncached tail; distinguishes meta rows whose content lives after the last cache breakpoint from the always-present cached tiers and from the active tier)
+
 Token values in monospace. Cache writes highlighted. Errors in warning color.
+
+#### Uncached Synthetic Tier
+
+A synthetic tier named `uncached` aggregates every meta row whose content appears after the last cache breakpoint. Composition: file tree row, per-URL rows, review-context row, per-active-file rows. These sections are rebuilt on every request; no caching benefit accrues even if cache markers were placed. The tier appears after the active tier in the viewer so the user can see the uncached tail as a coherent group.
+
+The uncached tier is not present in the stability tracker's tier enum — it exists only in the context-breakdown payload and the cache viewer's rendering. Items in the uncached tier have no N/threshold values and no stability bars.
 ## Token HUD (Floating Overlay)
 Floating overlay on the viewer background, appearing after each LLM response.
 ### Placement

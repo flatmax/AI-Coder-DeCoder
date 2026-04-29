@@ -3874,7 +3874,7 @@ class TestBuildTieredContentUniquenessInvariant:
     """Defensive filters enforce the "never appears twice" invariant.
 
     Per specs4/3-llm/prompt-assembly.md § "Uniqueness Invariants"
-    and specs3/3-llm-engine/prompt_assembly.md § "A File Never
+    and specs-reference/3-llm/prompt-assembly.md § "A File Never
     Appears Twice": a file's index block (``symbol:`` or ``doc:``)
     must never coexist with its full content (``file:``) in any
     form. Upstream (``_update_stability`` Step 2,

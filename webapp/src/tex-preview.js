@@ -26,7 +26,7 @@
 //     `stripUnsupportedCommands`) for test coverage
 //
 // Design notes (pinned by specs4/5-webapp/tex-preview.md
-// and specs3/5-webapp/diff_viewer.md §TeX Preview):
+// and specs-reference/5-webapp/diff-viewer.md §TeX Preview):
 //
 //   - **Math rendering is client-side.** make4ht emits
 //     raw LaTeX delimiters (via the mathjax option in the

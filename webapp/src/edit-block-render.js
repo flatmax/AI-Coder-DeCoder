@@ -362,7 +362,7 @@ function _renderDiffLine(line, side) {
  * word-level highlights inside the line-level coloured
  * background via `_computeCharDiff`.
  *
- * Per specs3/5-webapp/chat_interface.md §Two-Level Diff
+ * Per specs-reference/5-webapp/chat.md §Two-Level Diff
  * Highlighting — the visual model is unified-diff style
  * (one column), not side-by-side. Side-by-side OLD/NEW
  * panes make short edits look like huge blocks and waste

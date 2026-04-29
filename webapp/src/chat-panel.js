@@ -419,7 +419,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * True when review mode is active. Pushed down from the
      * files-tab orchestrator when the server's review state
      * is populated. Disables the commit button — review is
-     * read-only per specs3/4-features/code_review.md § Read-Only
+     * read-only per specs4/4-features/code-review.md § Read-Only
      * Mode. Reset is NOT disabled in review mode; a user may
      * legitimately want to discard review-mode modifications.
      *
@@ -1974,7 +1974,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * caller has already filtered them out before calling
    * us, but we double-check defensively.
    *
-   * Per specs3/3-llm-engine/streaming_lifecycle.md § Finish
+   * Per specs-reference/3-llm/streaming.md § Finish
    * Reason — `length` and `content_filter` are `error`
    * severity ("response incomplete"); `tool_calls` /
    * `function_call` are `warning` (the provider wanted
@@ -2278,7 +2278,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    *      makes it appear in the current session's UI
    *      without waiting for a reload.
    *
-   * Per specs3/5-webapp/chat_interface.md § System Event
+   * Per specs-reference/5-webapp/chat.md § System Event
    * Messages — commit events render as role=user with
    * system_event=true, distinct styling.
    *
@@ -2567,7 +2567,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    *      Those edits weren't attempted at all; the auto-add
    *      made the files available for the next turn.
    *
-   * The ordering matches specs3/edit_protocol.md —
+   * The ordering matches specs-reference/3-llm/edit-protocol.md —
    * not-in-context runs last so it overwrites earlier
    * prompts. This is acceptable per spec: "Note: may
    * overwrite an earlier ambiguous-anchor prompt if both
@@ -4738,7 +4738,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // completions (stop, end_turn) don't carry the field
     // (the sender strips them in _onStreamComplete).
     //
-    // Per specs3/3-llm-engine/streaming_lifecycle.md § Finish
+    // Per specs-reference/3-llm/streaming.md § Finish
     // Reason:
     //   - length → red "✂️ truncated (max_tokens)"
     //   - content_filter → red "🚫 content filter"
@@ -4899,7 +4899,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * Appears at the end of the message (after all edit cards)
    * when the response contained at least one edit.
    *
-   * Per specs3/5-webapp/chat_interface.md §Edit Summary and
+   * Per specs-reference/5-webapp/chat.md §Edit Summary and
    * specs4/5-webapp/chat.md §Edit Summary Banner:
    *
    *   - Aggregate counts as color-coded stat badges

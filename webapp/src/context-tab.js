@@ -43,6 +43,13 @@ const _TIER_COLORS = {
   L2: '#60a5fa',
   L3: '#f59e0b',
   active: '#f97316',
+  // Uncached block — sections of the prompt that appear after
+  // the last cache breakpoint (file tree, URLs, review
+  // context, active files). Muted grey distinguishes them
+  // from the always-present cached tiers and from the active
+  // tier (which DOES carry tracker state and can graduate
+  // into cached tiers).
+  uncached: '#8b949e',
 };
 
 /** Content type icons for cache tier items. */
@@ -1028,8 +1035,11 @@ export class ContextTab extends RpcMixin(LitElement) {
         if (Array.isArray(arr)) return new Set(arr);
       }
     } catch (_) {}
-    // Default: L0 and active expanded, others collapsed.
-    return new Set(['L0', 'active']);
+    // Default: L0, active, and uncached expanded so the first
+    // paint shows the sections users most want to audit.
+    // Mid-tiers stay collapsed to keep the initial render
+    // scannable — users drill into L1/L2/L3 when they care.
+    return new Set(['L0', 'active', 'uncached']);
   }
 
   _saveCacheExpanded() {
@@ -1509,9 +1519,17 @@ export class ContextTab extends RpcMixin(LitElement) {
     const expanded = filtering || this._cacheExpanded.has(name);
     const contents = Array.isArray(block.contents) ? block.contents : [];
 
-    // Split into measured (tokens > 0) and unmeasured.
+    // Split into measured (tokens > 0) and unmeasured. The
+    // "awaiting measurement" aggregate line only applies to
+    // symbol/doc entries that were pre-indexed without a
+    // token count yet — synthetic meta rows and other types
+    // with tokens=0 would be mislabeled, so we gate the
+    // count by type.
     const measured = contents.filter((c) => (c.tokens || 0) > 0);
-    const unmeasuredCount = contents.length - measured.length;
+    const unmeasuredCount = contents.filter(
+      (c) => (c.tokens || 0) === 0
+        && (c.type === 'symbols' || c.type === 'doc_symbols'),
+    ).length;
 
     // Apply sort mode. 'size' (default) sorts by descending
     // token count; 'name' sorts alphabetically by the

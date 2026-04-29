@@ -965,7 +965,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     // backend's `start_review` has already cleared its
     // own `_selected_files`, but we mirror the clear
     // locally (defense-in-depth, per
-    // specs3/4-features/code_review.md) so the UI
+    // specs4/4-features/code-review.md) so the UI
     // reflects the empty selection without waiting for
     // the server's `filesChanged` broadcast.
     //

@@ -48,7 +48,7 @@ const EXTENSIONLESS_FILENAMES = new Set(['Makefile', 'Dockerfile']);
 /**
  * Heuristic: is `line` plausibly a file path?
  *
- * Rules match the backend loosely (specs3/3-llm-engine/edit_protocol.md#file-path-detection):
+ * Rules match the backend loosely (specs-reference/3-llm/edit-protocol.md#file-path-detection):
  *   - Not empty, not excessively long
  *   - Not a comment (common prefixes: #, //, *, -, >, ```)
  *   - Contains `/` or `\` — path with separators (common case)
@@ -325,7 +325,7 @@ export function matchSegmentsToResults(segments, editResults) {
   // Group results by file, preserving order within each group.
   //
   // Backend key is `file_path` per
-  // specs3/3-llm-engine/edit_protocol.md. Fall back to `file`
+  // specs-reference/3-llm/edit-protocol.md. Fall back to `file`
   // so tests using shortened fixture shape still work.
   /** @type {Map<string, Array<object>>} */
   const byFile = new Map();

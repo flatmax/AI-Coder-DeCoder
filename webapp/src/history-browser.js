@@ -60,7 +60,7 @@ import { normalizeMessageContent } from './image-utils.js';
 
 /**
  * Debounce delay for search queries. 300ms matches the
- * specs3/4-webapp/search_and_settings.md file-search value and
+ * specs4/5-webapp/search.md file-search value and
  * is short enough to feel responsive while coalescing bursts
  * of typing into a single RPC call.
  */

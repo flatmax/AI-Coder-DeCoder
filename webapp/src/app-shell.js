@@ -265,7 +265,7 @@ export class AppShell extends JRPCClient {
     /**
      * True while review mode is active. Disables the
      * header commit button — review is read-only per
-     * specs3/4-features/code_review.md. Reset is NOT
+     * specs4/4-features/code-review.md. Reset is NOT
      * disabled in review mode (user may legitimately
      * want to discard review-mode changes). Synced via
      * the review-started / review-ended window events.
