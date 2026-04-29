@@ -29,6 +29,16 @@ const _TIER_COLORS = {
   active: '#f97316',
 };
 
+/** Icons for tier sub-item types. Mirrors context-tab.js. */
+const _TYPE_ICONS = {
+  symbol: '🔧',
+  doc: '📄',
+  file: '📁',
+  history: '💬',
+  system: '⚙️',
+  url: '🔗',
+};
+
 function _fmtTokens(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '0';
   if (n < 1000) return String(Math.round(n));
@@ -364,6 +374,13 @@ export class TokenHud extends RpcMixin(LitElement) {
 
   _onStreamComplete(event) {
     const result = event.detail?.result;
+    console.debug('[token-hud] stream-complete', {
+      hasResult: !!result,
+      hasError: !!result?.error,
+      hasCancelled: !!result?.cancelled,
+      currentVisible: this._visible,
+      currentFading: this._fading,
+    });
     if (!result) return;
     if (result.error) return;
 
