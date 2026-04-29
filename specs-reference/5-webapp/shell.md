@@ -94,6 +94,25 @@ Focus changes between tab switch and search activation clear the selection. Read
 
 Without throttling, rapid resize events cause feedback loops: scroll → layout shift → resize → `layout()` → forced reflow → visible jank.
 
+### Proportional rescaling baselines
+
+Used by the "same fraction of viewport" rule in `specs4/5-webapp/shell.md` § Proportional Rescaling.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `_dockedWidthViewport` | integer px | `window.innerWidth` at the moment `_dockedWidth` was committed. Drives the scale ratio for docked-with-custom-width resizes. |
+| `_undockedPosViewport` | `{w, h}` integer px | `window.innerWidth` and `window.innerHeight` at the moment `_undockedPos` was committed. Drives the per-axis scale ratio for undocked resizes. |
+
+Both baselines are updated at three points:
+
+1. User pointerup after a right-edge resize (`_dockedWidthViewport`), drag (`_undockedPosViewport`), or bottom/corner resize (`_undockedPosViewport`).
+2. After each resize-driven rescale completes — the just-captured viewport becomes the new baseline so subsequent resize events chain correctly against "now", not against the original commit.
+3. At construction — initialised to `window.innerWidth` / `window.innerHeight` so the very first resize after page load scales from the current viewport, not from an implicit zero.
+
+Baselines are in-memory state only (not persisted). On page reload they re-initialise from the current viewport; the first post-reload resize scales from that point. This means stored geometry doesn't drift across sessions — the dialog reopens at its saved pixel-literal values — but the first resize after reload may visibly "reset" the scaling reference. Acceptable trade-off: persisting the baseline would require storing an extra pair of viewport dimensions for every state change, and the drift from not persisting is bounded by the size of a single resize gesture.
+
+The formula is `scaled = round(stored_pixels * current_viewport / baseline_viewport)` on each axis independently, followed by clamp to `[_DIALOG_MIN_WIDTH, viewport - _DIALOG_VISIBLE_MARGIN]` for width and analogous bounds for the other dimensions.
+
 ## Schemas
 
 ### localStorage keys

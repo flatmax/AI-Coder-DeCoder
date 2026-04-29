@@ -748,6 +748,24 @@ export class AppShell extends JRPCClient {
     this._minimized = this._loadMinimized();
     this._dockedWidth = this._loadDockedWidth();
     this._undockedPos = this._loadUndockedPos();
+    // Baseline viewport size at the moment _dockedWidth and
+    // _undockedPos were last committed (pointerup or
+    // resize-driven rescale). Used to rescale proportionally
+    // on window resize — without a remembered baseline, each
+    // resize event would start over from the pixel-literal
+    // saved value and the dialog would stop tracking the
+    // viewport.
+    //
+    // Initialised to the current viewport so the very first
+    // resize after a fresh load scales from "now", not from
+    // whatever viewport was active when the stored geometry
+    // was originally written. The spec (§ Proportional
+    // Rescaling) asks for scaling from the last-known state.
+    this._dockedWidthViewport = window.innerWidth;
+    this._undockedPosViewport = {
+      w: window.innerWidth,
+      h: window.innerHeight,
+    };
     this.toasts = [];
     this.reconnectAttempt = 0;
     // Default to diff viewer — most files route there.
@@ -2655,6 +2673,10 @@ export class AppShell extends JRPCClient {
         width: rect.width,
         height: rect.height,
       };
+      this._undockedPosViewport = {
+        w: window.innerWidth,
+        h: window.innerHeight,
+      };
       this._saveUndockedPos();
       return;
     }
@@ -2664,6 +2686,7 @@ export class AppShell extends JRPCClient {
     if (drag.which === _RESIZE_RIGHT && !this._undockedPos) {
       // Docked width change only.
       this._dockedWidth = rect.width;
+      this._dockedWidthViewport = window.innerWidth;
       this._saveDockedWidth();
       return;
     }
@@ -2673,6 +2696,10 @@ export class AppShell extends JRPCClient {
       top: rect.top,
       width: rect.width,
       height: rect.height,
+    };
+    this._undockedPosViewport = {
+      w: window.innerWidth,
+      h: window.innerHeight,
     };
     this._saveUndockedPos();
   }
@@ -2726,76 +2753,127 @@ export class AppShell extends JRPCClient {
    */
   _handleWindowResize() {
     this._scheduleViewerRelayout();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
     if (!this._undockedPos) {
-      // Docked. Nothing to rescale — CSS handles it.
-      // But still re-clamp if the docked width exceeds the
-      // new viewport, otherwise the user has to resize
-      // manually after a shrink.
-      if (
-        this._dockedWidth != null
-        && this._dockedWidth > window.innerWidth - _DIALOG_VISIBLE_MARGIN
-      ) {
-        this._dockedWidth = Math.max(
-          _DIALOG_MIN_WIDTH,
-          window.innerWidth - _DIALOG_VISIBLE_MARGIN,
-        );
-        this._saveDockedWidth();
+      // Docked mode.
+      //
+      // When the user has never right-edge-resized, CSS
+      // handles proportional scaling — the stylesheet's
+      // `width: 50%` tracks the viewport automatically and
+      // _dockedWidth is null. Nothing to do.
+      //
+      // Once _dockedWidth is committed (user dragged the
+      // right edge while docked), the inline style overrides
+      // the percentage rule and the pixel value becomes
+      // static. Rescale it so the dialog keeps the same
+      // fraction of the viewport the user chose. Without
+      // this, setting the dialog to half on a 1200-wide
+      // window would leave it at 600px when the window
+      // grows to 2400 — the user would see the dialog
+      // shrink to a quarter of the viewport.
+      if (this._dockedWidth != null) {
+        const baseVw = this._dockedWidthViewport || vw;
+        if (baseVw > 0 && baseVw !== vw) {
+          const ratio = this._dockedWidth / baseVw;
+          let scaled = Math.round(ratio * vw);
+          // Respect the same safety margin used elsewhere —
+          // never let the dialog consume so much width that
+          // fewer than _DIALOG_VISIBLE_MARGIN pixels remain
+          // for the viewer background.
+          const maxW = Math.max(
+            _DIALOG_MIN_WIDTH, vw - _DIALOG_VISIBLE_MARGIN,
+          );
+          scaled = Math.max(
+            _DIALOG_MIN_WIDTH, Math.min(scaled, maxW),
+          );
+          this._dockedWidth = scaled;
+          this._saveDockedWidth();
+        } else if (
+          this._dockedWidth > vw - _DIALOG_VISIBLE_MARGIN
+        ) {
+          // Same-viewport (or missing baseline) case — fall
+          // through to the simple shrink-clamp so the dialog
+          // never overflows the current viewport.
+          this._dockedWidth = Math.max(
+            _DIALOG_MIN_WIDTH, vw - _DIALOG_VISIBLE_MARGIN,
+          );
+          this._saveDockedWidth();
+        }
+        this._dockedWidthViewport = vw;
       }
       return;
     }
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    // Three failure modes after a monitor/resolution change:
-    //   (a) The dialog is stranded off-screen (origin past
-    //       the far edge, or rect ends before the near edge).
-    //   (b) The dialog extends past the viewport edge — the
-    //       origin is still on-screen but width or height
-    //       overflow, leaving the resize handle and chat
-    //       input area unreachable. This is the common case
-    //       when switching from a large monitor to a small
-    //       one: the prompt input sits near the right edge
-    //       of the dialog and disappears past the right
-    //       viewport edge.
-    //   (c) The dialog itself is larger than the viewport —
-    //       shrink to fit.
-    // If none of these apply, leave position alone.
+
+    // Undocked mode — scale the full rect proportionally
+    // against the baseline viewport captured at the last
+    // commit. Without this, resizing the browser leaves the
+    // pixel-literal stored rectangle unchanged and the
+    // dialog occupies a visibly different fraction of the
+    // viewport than the user last chose.
+    //
+    // Left and top are scaled against width and height
+    // respectively so the dialog's position tracks its
+    // size — a dialog pinned to the right edge stays
+    // pinned, a dialog centred stays centred.
     const p = this._undockedPos;
-    const stranded =
-      p.left > vw - _DIALOG_VISIBLE_MARGIN
-      || p.top > vh - _DIALOG_VISIBLE_MARGIN
-      || p.left + p.width < _DIALOG_VISIBLE_MARGIN
-      || p.top + p.height < _DIALOG_VISIBLE_MARGIN;
-    const overflows =
-      p.left + p.width > vw
-      || p.top + p.height > vh;
-    if (!stranded && !overflows) return;
-    // Clamp width/height to viewport first, preserving the
-    // minimums so we don't produce an unusable sliver.
-    const newWidth = Math.max(
-      _DIALOG_MIN_WIDTH, Math.min(p.width, vw),
+    const base = this._undockedPosViewport
+      || { w: vw, h: vh };
+    const baseW = base.w || vw;
+    const baseH = base.h || vh;
+    let newLeft = p.left;
+    let newTop = p.top;
+    let newWidth = p.width;
+    let newHeight = p.height;
+    if (baseW > 0 && baseW !== vw) {
+      const rx = vw / baseW;
+      newLeft = Math.round(p.left * rx);
+      newWidth = Math.round(p.width * rx);
+    }
+    if (baseH > 0 && baseH !== vh) {
+      const ry = vh / baseH;
+      newTop = Math.round(p.top * ry);
+      newHeight = Math.round(p.height * ry);
+    }
+    // Enforce minimums so a very small new viewport doesn't
+    // produce an unusable sliver of a dialog.
+    newWidth = Math.max(
+      _DIALOG_MIN_WIDTH, Math.min(newWidth, vw),
     );
-    const newHeight = Math.max(
-      _DIALOG_MIN_HEIGHT, Math.min(p.height, vh),
+    newHeight = Math.max(
+      _DIALOG_MIN_HEIGHT, Math.min(newHeight, vh),
     );
-    // Then clamp origin so the full rect fits on-screen.
+    // Clamp origin so the full rect fits on-screen.
     // Math.max(0, ...) guards against viewports smaller
     // than the minimum dialog size (newWidth > vw): prefer
     // anchoring at left=0/top=0 with the right edge
     // clipped over a negative origin that would hide the
     // header's drag handle.
-    const newLeft = Math.max(
-      0, Math.min(p.left, vw - newWidth),
+    newLeft = Math.max(
+      0, Math.min(newLeft, vw - newWidth),
     );
-    const newTop = Math.max(
-      0, Math.min(p.top, vh - newHeight),
+    newTop = Math.max(
+      0, Math.min(newTop, vh - newHeight),
     );
-    this._undockedPos = {
-      left: newLeft,
-      top: newTop,
-      width: newWidth,
-      height: newHeight,
-    };
-    this._saveUndockedPos();
+    const changed =
+      newLeft !== p.left
+      || newTop !== p.top
+      || newWidth !== p.width
+      || newHeight !== p.height;
+    if (changed) {
+      this._undockedPos = {
+        left: newLeft,
+        top: newTop,
+        width: newWidth,
+        height: newHeight,
+      };
+      this._saveUndockedPos();
+    }
+    // Update the baseline even when nothing changed (e.g.
+    // resize was along an axis the dialog didn't respond to)
+    // so subsequent resizes chain correctly against the new
+    // viewport, not the original one.
+    this._undockedPosViewport = { w: vw, h: vh };
   }
 
   /**

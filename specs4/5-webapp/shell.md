@@ -138,12 +138,25 @@ The margin is a "findable handle" guarantee: however the user maimed their windo
 
 ### Proportional Rescaling
 
-On window resize:
+On window resize, the dialog keeps the same approximate fraction of the viewport the user last chose — the user's intent was "half the window" or "this rectangle of screen real estate", not "exactly 600 pixels". Holding pixel values static across browser resizes makes the dialog drift away from its intended size.
 
-- **Docked** — CSS handles it. If the stored docked width exceeds the new viewport minus the visible-margin safety, the width is re-clamped and persisted.
-- **Undocked** — position is re-validated against the new viewport. If the stored rectangle still satisfies the visible-margin rule, it's left alone. Only out-of-bounds rectangles are clamped back into view.
+Three cases:
 
-Resize handling is throttled to one call per animation frame. Rapid resize events (drag the window corner, laptop lid reopen) can fire dozens of times per frame; without throttling the reflow math produces visible jank.
+- **Docked, default width** — The stylesheet's percentage rule (`width: 50%`) tracks the viewport automatically. No JS action needed. This is the state on first run, before the user ever drags the right edge.
+- **Docked, user-resized width** — Once the user drags the right edge, an inline pixel width overrides the percentage rule. Rescale it by `newViewport / baselineViewport` on every resize so the fraction stays constant. Without this, a user who set half-width on a 1200px-wide window would see the dialog become a quarter of the viewport when the browser grows to 2400px.
+- **Undocked** — Scale `width`, `height`, `left`, and `top` independently by the corresponding viewport-axis ratio. Left and top scale so a right-anchored or centred dialog stays pinned; width and height scale so the dialog keeps its fraction of the viewport on each axis.
+
+In every case the result is clamped to the dialog's minimum width / height and to the visible-margin safety rule (at least 100px of the dialog must remain inside the viewport on both axes).
+
+**Baseline viewport.** The scaling ratio needs a remembered "viewport at last commit" baseline for each state. Without one, every resize event would scale from the original stored pixel-literal and the dialog's fraction of the viewport would slowly drift.
+
+The baseline is updated at three points:
+
+- **User commit** — pointerup after a right-edge resize (docked width), drag (undocked position), or bottom/corner resize (undocked rectangle).
+- **After each resize-driven rescale** — the just-captured viewport becomes the new baseline, so subsequent resize events chain correctly.
+- **First render** — initialised to the current viewport, so the very first resize after a fresh load scales from "now" rather than from whatever viewport was active when the stored geometry was originally written.
+
+**Throttling.** Resize handling is throttled to one call per animation frame. Rapid resize events (drag the window corner, laptop lid reopen) can fire dozens of times per frame; without throttling the reflow math produces visible jank. The viewer relayout uses a separate RAF handle from the dialog rescale so a window resize during a dialog-resize drag doesn't cancel the drag's pending viewer relayout.
 
 ### Persistence
 
