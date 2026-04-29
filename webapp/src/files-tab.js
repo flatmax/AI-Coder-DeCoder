@@ -960,17 +960,20 @@ export class FilesTab extends RpcMixin(LitElement) {
     // `_applyInitialAutoSelect` wouldn't otherwise seed
     // anything).
     //
-    // Suppress the first-load auto-select. The server's
-    // snapshot IS the authoritative state — layering the
-    // git-changed union on top would silently add files
-    // the user had deliberately deselected. The flag flip
-    // only matters when the snapshot arrives before the
-    // first tree load (common case — `_fetchCurrentState`
-    // fires synchronously on setupDone, before the files
-    // tab's own onRpcReady hook triggers the tree RPC).
+    // Do NOT suppress the first-load auto-select. Per
+    // specs4/5-webapp/file-picker.md § Auto-Selection, the
+    // git-changed union must "merge with any server-
+    // provided selection … rather than replacing" it. The
+    // state-loaded snapshot typically arrives before the
+    // tree loads (AppShell's `_fetchCurrentState` fires on
+    // `setupDone`, before this component's `onRpcReady`
+    // microtask defers the tree RPC), so when
+    // `_applyInitialAutoSelect` runs on tree load it sees
+    // the server's selection already installed in
+    // `_selectedFiles` and unions the git-changed files on
+    // top. No extra ordering logic required.
     const state = event?.detail;
     if (!state || typeof state !== 'object') return;
-    this._initialAutoSelect = false;
     const selected = state.selected_files;
     if (Array.isArray(selected)) {
       this._applySelection(
