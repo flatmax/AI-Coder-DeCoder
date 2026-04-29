@@ -479,10 +479,23 @@ export class TokenHud extends RpcMixin(LitElement) {
     if (result.error) return;
 
     // Extract per-request usage immediately.
+    //
+    // Fields pulled from the backend's normalised shape (see
+    // ``LLMService._run_completion_sync``): prompt/completion
+    // are top-line counts; reasoning is a subset of completion
+    // that the provider spent on hidden thinking (Claude
+    // extended thinking, o1/o3); cache_read is unified across
+    // Anthropic's ``cache_read_input_tokens`` and OpenAI's
+    // ``prompt_tokens_details.cached_tokens`` so the HUD shows
+    // one number regardless of provider. ``cost_usd`` lives on
+    // the same payload but is deliberately NOT rendered here —
+    // per the operator's preference, cost only appears in the
+    // Context tab's session totals, not the per-request HUD.
     const usage = result.token_usage || {};
     this._requestUsage = {
       prompt: usage.prompt_tokens || 0,
       completion: usage.completion_tokens || 0,
+      reasoning: usage.reasoning_tokens || 0,
       cacheRead: usage.cache_read_tokens || 0,
       cacheWrite: usage.cache_write_tokens || 0,
     };
@@ -893,12 +906,35 @@ export class TokenHud extends RpcMixin(LitElement) {
     if (!u) {
       return html`<span style="color: var(--text-secondary); font-size: 0.75rem; font-style: italic;">—</span>`;
     }
+    // Reasoning row renders unconditionally (even when zero)
+    // per the operator's preference pinned in commit 1's
+    // planning: models without extended-thinking report 0
+    // and the persistent row makes the presence/absence of
+    // reasoning unambiguous rather than "did the backend
+    // forget to report it?". Other rows (cache read/write)
+    // stay conditional because they're genuinely absent for
+    // providers without caching, and a zero row there would
+    // be noise.
+    //
+    // Note on the Completion row: the provider's
+    // ``completion_tokens`` INCLUDES reasoning tokens. The
+    // Reasoning row is a breakdown of that total, not an
+    // additional charge — shown side by side so the user
+    // can see what portion of output went to hidden
+    // reasoning vs. visible response. E.g. "Completion:
+    // 5.7K, Reasoning: 4.0K" means the visible response was
+    // ~1.7K tokens and the model spent 4K reasoning.
     return html`
       <div class="request-grid">
         <span class="req-label">Prompt</span>
         <span class="req-value">${_fmtTokens(u.prompt)}</span>
         <span class="req-label">Completion</span>
         <span class="req-value">${_fmtTokens(u.completion)}</span>
+        <span class="req-label">Reasoning</span>
+        <span
+          class="req-value"
+          title="Hidden reasoning tokens (subset of Completion). Zero for models without extended thinking."
+        >${_fmtTokens(u.reasoning)}</span>
         ${u.cacheRead > 0
           ? html`
               <span class="req-label">Cache Read</span>

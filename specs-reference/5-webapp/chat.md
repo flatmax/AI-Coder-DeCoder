@@ -43,6 +43,54 @@ Non-natural, non-cancelled stops additionally fire an error toast via the `ac-to
 
 Cancelled streams (via the Stop button) suppress both the toast AND the badge — the `[stopped]` marker appended to the response body is the sole signal.
 
+### Typed error toast catalog
+
+When `streamComplete.result.error_info` is present, the chat panel dispatches on `error_info.error_type` to emit a per-type toast with a distinct icon, message template, and severity. The `error_info` shape and `error_type` enumeration are canonical in `specs-reference/3-llm/streaming.md` § Error classification; this section documents the frontend rendering only.
+
+| `error_type` | Icon | Toast message | Severity |
+|---|---|---|---|
+| `context_window_exceeded` | `📏` | `Context too large — compact or remove files` | `error` |
+| `rate_limit` (with `retry_after`) | `⏱️` | `Rate limited — retry in {N} s` or `Rate limited — retry in {N} min` when `retry_after >= 60` | `warning` |
+| `rate_limit` (no `retry_after`) | `⏱️` | `Rate limited — wait and retry` | `warning` |
+| `authentication` | `🔑` | `Authentication failed — check LLM config` | `error` |
+| `not_found` (with `model`) | `❓` | `Model not found: {model}` | `error` |
+| `not_found` (no `model`) | `❓` | `Model not found — check LLM config` | `error` |
+| `bad_request` | `⚠️` | `Invalid request: {provider message}` | `error` |
+| `api_connection` | `🌐` | `Connection failed — check network / proxy` | `warning` |
+| `service_unavailable` | `🔧` | `Provider unavailable — retry later` | `warning` |
+| `timeout` | `⏱️` | `Request timed out` | `warning` |
+| `llm_error` (or missing info) | `❌` | Provider message verbatim, or fallback `LLM error` | `error` |
+
+The toast is in addition to (not a replacement for) the assistant-card error body rendered by `_formatErrorBody`. The card is the persistent record of the failure; the toast catches attention when the assistant card is out of view.
+
+### Assistant-card error body format
+
+`_formatErrorBody` renders a three-part card body when `error_info` is present:
+
+```
+**Error:** {error type label}
+
+{provider message}
+
+*(provider: {provider}, model: {model})*
+```
+
+Where `{error type label}` is the human-readable form of the `error_type`:
+
+| `error_type` | Label |
+|---|---|
+| `context_window_exceeded` | `Context window exceeded` |
+| `rate_limit` | `Rate limit exceeded` |
+| `authentication` | `Authentication failed` |
+| `not_found` | `Model not found` |
+| `bad_request` | `Invalid request` |
+| `api_connection` | `Connection failed` |
+| `service_unavailable` | `Service unavailable` |
+| `timeout` | `Request timed out` |
+| (anything else) | `LLM error` |
+
+The metadata line is suppressed when both `provider` and `model` are null (self-hosted models often don't populate either). Unclassified errors (`error_info` absent) fall through to the legacy single-line `**Error:** {message}` format.
+
 ### Compaction event stage routing
 
 The `compactionEvent` channel carries both compaction and URL/doc progress events. The chat panel dispatches on `event.stage`:

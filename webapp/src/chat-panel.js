@@ -1925,16 +1925,31 @@ export class ChatPanel extends RpcMixin(LitElement) {
       const finalContent =
         result?.response ?? this._streamingContent ?? '';
       const error = result?.error;
+      const errorInfo = result?.error_info;
       const editResults = Array.isArray(result?.edit_results)
         ? result.edit_results
         : undefined;
       const finishReason = result?.finish_reason || '';
+      // Compose the assistant-card error body. When the
+      // backend classified the failure (error_info present),
+      // prefix the message with a human-readable error-type
+      // label so the card is informative even before the
+      // user sees the toast. Provider/model metadata appears
+      // in a secondary line so "why did this fail" is
+      // answerable at a glance. Unclassified errors
+      // (error_info absent — e.g., the pre-completion path
+      // raised before _run_completion_sync got a chance to
+      // stash typed info) fall through to the plain
+      // "**Error:** ..." format.
+      const errorBody = error
+        ? this._formatErrorBody(error, errorInfo)
+        : null;
       this.messages = [
         ...this.messages,
         error
           ? {
               role: 'assistant',
-              content: `**Error:** ${error}`,
+              content: errorBody,
             }
           : {
               role: 'assistant',
@@ -1954,6 +1969,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
               ...(finishReason ? { finishReason } : {}),
             },
       ];
+      // Surface the classified error as a toast with a
+      // type-specific message. Unclassified errors fall
+      // through to the generic path inside the toast
+      // helper. Runs only when `error` is set — success
+      // responses skip this branch entirely.
+      if (error) {
+        this._emitTypedErrorToast(errorInfo, error);
+      }
       // Surface non-natural stops as a toast in addition to
       // the in-message badge. The badge is easy to miss if
       // the user has scrolled elsewhere; the toast catches
@@ -1988,6 +2011,225 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (wasOwnRequest && result && !result.error) {
       this._maybePopulateRetryPrompt(result);
     }
+  }
+
+  /**
+   * Format the assistant-card body for an error result.
+   *
+   * When `errorInfo` is present, prefix the message with a
+   * human-readable label (e.g. "Rate limit exceeded") and
+   * append a secondary line carrying provider and model
+   * metadata. The user's first view of the failure is the
+   * assistant card; a one-line "**Error:** 400 Bad
+   * Request" is useless for diagnosis when the real cause
+   * is "Claude context window exceeded via Bedrock for
+   * claude-sonnet-4-5". The labels give operators and
+   * users enough to act without hunting through logs.
+   *
+   * Unclassified errors (backend never reached
+   * `_run_completion_sync` so `_last_error_info` was
+   * never set) fall through to the legacy plain format.
+   *
+   * @param {string} error — the raw error string from
+   *   `result.error`
+   * @param {object | undefined} errorInfo — structured
+   *   classification from `result.error_info`, absent on
+   *   early-exit error paths
+   * @returns {string} — markdown-ready error body
+   */
+  _formatErrorBody(error, errorInfo) {
+    if (!errorInfo || typeof errorInfo !== 'object') {
+      return `**Error:** ${error}`;
+    }
+    const label = this._errorTypeLabel(errorInfo.error_type);
+    const parts = [`**Error:** ${label}`];
+    // Provider message goes on its own line so long
+    // tracebacks don't collide with the label. Fall back
+    // to the raw error string if the classifier didn't
+    // capture a message (shouldn't happen — it defaults
+    // to str(exc) — but defensive).
+    const msg = errorInfo.message || error;
+    if (msg) parts.push(msg);
+    // Metadata line — provider and model when known.
+    // Skipped when both are null (self-hosted or local
+    // models often don't report these) to avoid a noisy
+    // "via  for " rendering.
+    const provider = errorInfo.provider;
+    const model = errorInfo.model;
+    if (provider || model) {
+      const metaParts = [];
+      if (provider) metaParts.push(`provider: ${provider}`);
+      if (model) metaParts.push(`model: ${model}`);
+      parts.push(`*(${metaParts.join(', ')})*`);
+    }
+    return parts.join('\n\n');
+  }
+
+  /**
+   * Human-readable label for each classified error type.
+   *
+   * Kept separate from the toast dispatcher because both
+   * the assistant card and the toast consume these, and
+   * keeping one source of truth avoids drift. Unknown
+   * types fall back to "LLM error" — the toast and card
+   * both surface the raw provider message alongside, so
+   * the user still sees what went wrong even when the
+   * classifier didn't recognise the specific failure.
+   */
+  _errorTypeLabel(errorType) {
+    switch (errorType) {
+      case 'context_window_exceeded':
+        return 'Context window exceeded';
+      case 'rate_limit':
+        return 'Rate limit exceeded';
+      case 'authentication':
+        return 'Authentication failed';
+      case 'not_found':
+        return 'Model not found';
+      case 'bad_request':
+        return 'Invalid request';
+      case 'api_connection':
+        return 'Connection failed';
+      case 'service_unavailable':
+        return 'Service unavailable';
+      case 'timeout':
+        return 'Request timed out';
+      default:
+        return 'LLM error';
+    }
+  }
+
+  /**
+   * Emit a toast for a classified LLM error. The backend's
+   * `_classify_litellm_error` maps LiteLLM exception types
+   * to nine distinct `error_type` values; this dispatcher
+   * picks the right icon, message, and severity for each.
+   *
+   * Per-type UX rationale (mirrors the intended behaviour
+   * pinned in the backend's `_classify_litellm_error`
+   * docstring):
+   *
+   *   - `context_window_exceeded` → error toast with
+   *     compaction hint. Actionable: compact or drop
+   *     files.
+   *   - `rate_limit` → warning toast with Retry-After
+   *     countdown when the header was populated. Users
+   *     learn how long to wait without guessing.
+   *   - `authentication` → error toast pointing at LLM
+   *     config.
+   *   - `not_found` → error toast naming the model so
+   *     the user can verify the config entry.
+   *   - `bad_request` → error toast with raw provider
+   *     message (schema mismatch — not actionable by
+   *     the user, but the message goes to the bug
+   *     report).
+   *   - `api_connection` → warning (network/proxy, often
+   *     transient).
+   *   - `service_unavailable` → warning (provider
+   *     outage, retry later).
+   *   - `timeout` → warning.
+   *   - `llm_error` / missing info → error toast with the
+   *     fallback message, same as the legacy uncategorised
+   *     path.
+   *
+   * The toast is in addition to the assistant-card error
+   * body, not a replacement — the card is the
+   * persistent record, the toast is the transient
+   * attention-getter. Users who scrolled away during
+   * the stream would otherwise miss the failure.
+   */
+  _emitTypedErrorToast(errorInfo, fallbackMessage) {
+    // No info → legacy path. Preserves behaviour for
+    // early-exit errors (pre-_run_completion_sync crashes
+    // in _sync_file_context, _build_tiered_content, etc.)
+    // and for any future error shape the backend ships
+    // before we update this dispatcher.
+    if (!errorInfo || typeof errorInfo !== 'object') {
+      this._emitToast(
+        `❌ ${fallbackMessage || 'LLM error'}`,
+        'error',
+      );
+      return;
+    }
+    const errorType = errorInfo.error_type;
+    const providerMsg = errorInfo.message || fallbackMessage || '';
+    let icon;
+    let label;
+    let type;
+    switch (errorType) {
+      case 'context_window_exceeded':
+        icon = '📏';
+        label = 'Context too large — compact or remove files';
+        type = 'error';
+        break;
+      case 'rate_limit': {
+        icon = '⏱️';
+        type = 'warning';
+        // Retry-After is float seconds when the provider
+        // populated the header. Render as "retry in N s"
+        // or "retry in N min" so the user knows roughly
+        // when to try again. Absent header → generic
+        // label.
+        const retryAfter = errorInfo.retry_after;
+        if (typeof retryAfter === 'number' && retryAfter > 0) {
+          const seconds = Math.round(retryAfter);
+          const when =
+            seconds >= 60
+              ? `${Math.round(seconds / 60)} min`
+              : `${seconds} s`;
+          label = `Rate limited — retry in ${when}`;
+        } else {
+          label = 'Rate limited — wait and retry';
+        }
+        break;
+      }
+      case 'authentication':
+        icon = '🔑';
+        label = 'Authentication failed — check LLM config';
+        type = 'error';
+        break;
+      case 'not_found': {
+        icon = '❓';
+        type = 'error';
+        // Name the model when available so the user
+        // knows which entry in LLM config to fix.
+        const model = errorInfo.model;
+        label = model
+          ? `Model not found: ${model}`
+          : 'Model not found — check LLM config';
+        break;
+      }
+      case 'bad_request':
+        icon = '⚠️';
+        // Raw message surfaces a provider schema
+        // complaint the user can paste into a bug report.
+        label = `Invalid request: ${providerMsg}`;
+        type = 'error';
+        break;
+      case 'api_connection':
+        icon = '🌐';
+        label = 'Connection failed — check network / proxy';
+        type = 'warning';
+        break;
+      case 'service_unavailable':
+        icon = '🔧';
+        label = 'Provider unavailable — retry later';
+        type = 'warning';
+        break;
+      case 'timeout':
+        icon = '⏱️';
+        label = 'Request timed out';
+        type = 'warning';
+        break;
+      default:
+        // Includes 'llm_error' and any future backend
+        // classifications we haven't learned about.
+        icon = '❌';
+        label = providerMsg || 'LLM error';
+        type = 'error';
+        break;
+    }
+    this._emitToast(`${icon} ${label}`, type);
   }
 
   /**

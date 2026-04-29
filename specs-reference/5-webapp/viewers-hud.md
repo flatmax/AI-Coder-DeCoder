@@ -106,6 +106,37 @@ The `cache_hit_rate` field in the breakdown response is computed locally (cached
 
 **Precedence rule:** Both HUD and Context tab prefer `provider_cache_rate` when non-null, falling back to the local `cache_hit_rate`. The fallback path is taken on the very first request (no cumulative session data yet).
 
+### Reasoning row rendering
+
+The `reasoning_tokens` field (subset of `completion_tokens` representing hidden reasoning — Claude extended thinking, o1/o3) is rendered in two places:
+
+**Token HUD — "This Request" section:**
+Persistent row, always rendered even when `reasoning_tokens == 0`. Rationale: zero is informative ("this model doesn't reason") and distinguishes genuine absence from "the backend forgot to report it". Label carries tooltip text "Hidden reasoning tokens (subset of Completion). Zero for models without extended thinking." so the user understands the relationship to `completion_tokens` without parsing field names.
+
+**Context tab — Session Totals grid:**
+Conditional row. Rendered only when the session's cumulative `completion` count is non-zero — a fresh session with no LLM calls suppresses the row entirely (an empty zero is noise). Tooltip text: "Cumulative hidden reasoning tokens across this session (subset of Completion Out — already billed inside it, shown separately for visibility)."
+
+Neither place adds `reasoning_tokens` to the `completion_tokens` total — the provider already bills them under completion, and double-counting would inflate displayed usage. The row is a breakdown, not an addition.
+
+### Cost row rendering (Context tab only)
+
+Per operator preference, `cost_usd` renders in the Context tab's Session Totals only — not in the per-request HUD. The HUD shows transient per-request state; cost belongs with cumulative session metrics.
+
+Three display cases driven by `priced_request_count` and `unpriced_request_count`:
+
+| Condition | Row visibility | Label | Value format | Tooltip |
+|---|---|---|---|---|
+| `priced == 0 && unpriced == 0` | Row hidden | — | — | — |
+| `priced > 0 && unpriced == 0` | Shown | Cost | `$0.0000` (4 decimals) | `{N} request(s) priced.` |
+| `priced > 0 && unpriced > 0` | Shown | Cost | `$0.0000 (partial)` | `Priced: {N} request(s). {M} additional request(s) could not be priced (LiteLLM pricing table missing the model). True total is higher.` |
+| `priced == 0 && unpriced > 0` | Shown | Cost | `—` | `{N} request(s) could not be priced (LiteLLM pricing table missing the model used).` |
+
+The `—` case (no priced requests but requests were made) is distinct from the hidden case (no requests at all). Distinguishing "unknown cost" from "no activity" matters for self-hosted models and brand-new releases where LiteLLM's pricing table hasn't caught up yet — rendering `$0.0000` there would misleadingly suggest the session was free.
+
+**4-decimal precision:** Typical per-session costs range from `$0.01` to `$10`; 4 decimals preserve sub-cent granularity for cheap auxiliary-model calls (commit-message generation, topic detection) which individually cost fractions of a cent. A session with many aux calls and few primary-model calls would round to `$0.00` at 2 decimals, hiding the actual spend.
+
+**Color:** Green (`#7ee787`) when priced > 0, secondary text color when rendering `—`. Matches the color treatment of `cache_hit` in the same grid.
+
 ### Startup init HUD
 
 Printed once during server startup after stability tracker initialization completes:

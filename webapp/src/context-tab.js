@@ -1367,6 +1367,59 @@ export class ContextTab extends RpcMixin(LitElement) {
   _renderSessionTotals() {
     const st = this._data?.session_totals;
     if (!st) return '';
+    // Cost rendering. Per operator preference: only the
+    // Context tab (not the per-request HUD) shows cost.
+    // Three display cases:
+    //
+    // - Zero priced requests AND zero unpriced requests →
+    //   row hidden entirely (session hasn't had any LLM
+    //   calls yet; showing "$0.00" would be misleading
+    //   because it's indistinguishable from "calls were
+    //   free").
+    // - At least one priced request → show the accumulated
+    //   dollar amount. When there are ALSO unpriced
+    //   requests, append "(partial)" to make clear the
+    //   true total is higher — the priced sum is a lower
+    //   bound.
+    // - Only unpriced requests → show "—" with a tooltip
+    //   explaining LiteLLM couldn't price the model used.
+    //   Distinct from $0.00 so the user knows the cost
+    //   isn't actually known.
+    const priced = st.priced_request_count || 0;
+    const unpriced = st.unpriced_request_count || 0;
+    const costUsd = typeof st.cost_usd === 'number' ? st.cost_usd : 0;
+    const showCost = priced > 0 || unpriced > 0;
+    let costLabel;
+    let costTitle;
+    if (priced > 0) {
+      // Format with 4 decimal places — typical per-session
+      // costs fall in the $0.01 – $10 range, and 4 decimals
+      // preserve sub-cent granularity for cheap smaller-model
+      // aux calls (commit-message generation, topic detection)
+      // which individually cost fractions of a cent.
+      const base = `$${costUsd.toFixed(4)}`;
+      costLabel = unpriced > 0 ? `${base} (partial)` : base;
+      costTitle = unpriced > 0
+        ? `Priced: ${priced} request${priced === 1 ? '' : 's'}. `
+          + `${unpriced} additional request${unpriced === 1 ? '' : 's'} `
+          + `could not be priced (LiteLLM pricing table missing `
+          + `the model). True total is higher.`
+        : `${priced} request${priced === 1 ? '' : 's'} priced.`;
+    } else {
+      costLabel = '—';
+      costTitle = `${unpriced} request${unpriced === 1 ? '' : 's'} `
+        + `could not be priced (LiteLLM pricing table missing `
+        + `the model used).`;
+    }
+    // Reasoning cumulative — always render when there's any
+    // output token activity, even at zero, so the user can
+    // see "this model doesn't reason" vs. "this session
+    // happened to not trigger reasoning this time". The row
+    // is suppressed when the whole session has no completion
+    // tokens (fresh session, no LLM calls yet) so the totals
+    // grid doesn't show a lonely zero.
+    const completionTotal = st.completion || st.output_tokens || 0;
+    const reasoningTotal = st.reasoning || 0;
     return html`
       <div class="session-totals">
         <div class="session-totals-title">Session Totals</div>
@@ -1374,7 +1427,16 @@ export class ContextTab extends RpcMixin(LitElement) {
           <span class="totals-label">Prompt In</span>
           <span class="totals-value">${_fmtTokens(st.prompt || st.input_tokens || 0)}</span>
           <span class="totals-label">Completion Out</span>
-          <span class="totals-value">${_fmtTokens(st.completion || st.output_tokens || 0)}</span>
+          <span class="totals-value">${_fmtTokens(completionTotal)}</span>
+          ${completionTotal > 0
+            ? html`
+                <span
+                  class="totals-label"
+                  title="Cumulative hidden reasoning tokens across this session (subset of Completion Out — already billed inside it, shown separately for visibility)."
+                >Reasoning</span>
+                <span class="totals-value">${_fmtTokens(reasoningTotal)}</span>
+              `
+            : ''}
           <span class="totals-label">Total</span>
           <span class="totals-value">${_fmtTokens(st.total || 0)}</span>
           ${(st.cache_hit || st.cache_read_tokens || 0) > 0
@@ -1387,6 +1449,16 @@ export class ContextTab extends RpcMixin(LitElement) {
             ? html`
                 <span class="totals-label">Cache Write</span>
                 <span class="totals-value cache-write">${_fmtTokens(st.cache_write || st.cache_write_tokens || 0)}</span>
+              `
+            : ''}
+          ${showCost
+            ? html`
+                <span class="totals-label" title=${costTitle}>Cost</span>
+                <span
+                  class="totals-value"
+                  title=${costTitle}
+                  style="color: ${priced > 0 ? '#7ee787' : 'var(--text-secondary, #8b949e)'};"
+                >${costLabel}</span>
               `
             : ''}
         </div>

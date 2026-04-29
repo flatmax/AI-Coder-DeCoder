@@ -509,8 +509,22 @@ def _build_topic_detector(
                 max_tokens=max_output,
             )
         except Exception as exc:
+            # Classify for richer log output. Topic detection
+            # always degrades to a safe default on failure —
+            # we don't propagate structured errors upward
+            # because the compactor's caller isn't equipped to
+            # react to them (no UI surface for "detection
+            # failed due to rate limit" — the compaction just
+            # falls through to summarize mode).
+            info = LLMService._classify_litellm_error(
+                litellm, exc
+            )
             logger.warning(
-                "Topic detection LLM call failed: %s", exc
+                "Topic detection LLM call failed: "
+                "type=%s provider=%s msg=%s",
+                info.get("error_type"),
+                info.get("provider"),
+                info.get("message"),
             )
             return TopicBoundary(None, "llm failure", 0.0, "")
 
@@ -836,12 +850,41 @@ class LLMService:
         self._excluded_index_files: list[str] = []
 
         # Session-totals accumulator. The token HUD reads this for
-        # cumulative display.
-        self._session_totals: dict[str, int] = {
+        # cumulative display. Several fields beyond the basic
+        # input/output pair:
+        #
+        # - ``reasoning_tokens`` — subset of completion_tokens that
+        #   the provider spent on hidden reasoning (Claude extended
+        #   thinking, o1/o3 reasoning). Already billed inside
+        #   output_tokens; tracked separately so the Context tab
+        #   can show "of your 40K output tokens this session,
+        #   30K were reasoning".
+        # - ``prompt_cached_tokens`` — OpenAI-shaped prompt cache
+        #   read count. Distinct from ``cache_read_tokens`` (which
+        #   accepts both Anthropic ``cache_read_input_tokens`` and
+        #   OpenAI ``prompt_tokens_details.cached_tokens``) —
+        #   merged into the unified cache_read_tokens field so
+        #   downstream consumers get one number regardless of
+        #   provider. Kept as its own key here for diagnostics.
+        # - ``cost_usd`` — cumulative USD cost when LiteLLM reports
+        #   it. None-valued responses (unpriced models) don't add
+        #   to this; the Context tab renders "—" when zero but
+        #   request count is nonzero.
+        # - ``priced_request_count`` / ``unpriced_request_count`` —
+        #   lets the UI show "(partial)" when some requests were
+        #   unpriced, so an accumulated $0.12 isn't misread as
+        #   "total session cost" when half the requests had no
+        #   price data.
+        self._session_totals: dict[str, Any] = {
             "input_tokens": 0,
             "output_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
+            "prompt_cached_tokens": 0,
+            "cost_usd": 0.0,
+            "priced_request_count": 0,
+            "unpriced_request_count": 0,
         }
 
         # Active stream tracking. The guard is a SET (not a single
@@ -863,6 +906,23 @@ class LLMService:
         # chat_streaming call — but accessed from the worker thread
         # via _main_loop. See D10.
         self._main_loop: asyncio.AbstractEventLoop | None = None
+
+        # Side channel for structured LLM error information
+        # from the most recent completion attempt. Populated by
+        # :meth:`_run_completion_sync` when a LiteLLM exception
+        # is raised; consumed by :meth:`_build_completion_result`
+        # and cleared after. Fixed-shape tuple returns from the
+        # worker don't accommodate an extra field cleanly — the
+        # single-stream guard means only one completion is in
+        # flight at a time, so a single-slot attribute is safe.
+        #
+        # Shape when populated: ``{"error_type": str,
+        # "message": str, "retry_after": float | None,
+        # "status_code": int | None, "provider": str | None,
+        # "model": str | None}``. ``error_type`` values documented
+        # in :meth:`_classify_litellm_error`. None when no error
+        # occurred or after the last error was consumed.
+        self._last_error_info: dict[str, Any] | None = None
 
         # Readiness flag. When deferred_init=True, chat_streaming
         # rejects with a friendly message until
@@ -4047,11 +4107,19 @@ class LLMService:
         full_content = ""
         cancelled = False
         finish_reason: str | None = None
-        request_usage: dict[str, int] = {
+        # Matches the empty_usage shape in _run_completion_sync
+        # so the frontend sees a stable set of keys regardless
+        # of which code path populated the dict. cost_usd
+        # defaults to None so early-exit errors don't misreport
+        # as "free".
+        request_usage: dict[str, Any] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
+            "prompt_cached_tokens": 0,
+            "cost_usd": None,
         }
         try:
             # File context sync — remove deselected files, load
@@ -4441,7 +4509,7 @@ class LLMService:
         cancelled: bool,
         error: str | None,
         finish_reason: str | None = None,
-        request_usage: dict[str, int] | None = None,
+        request_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Parse the response, apply edits, build the result dict.
 
@@ -4491,15 +4559,20 @@ class LLMService:
         # Default result — apply step skipped.
         # token_usage carries per-request counts from the
         # provider. The frontend's TokenHUD reads this for its
-        # "This Request" section. Falls through to an all-zero
+        # "This Request" section. Falls through to a zero-valued
         # dict when the caller didn't supply usage (error/early-
         # exit paths) — renders as all-zero rather than undefined
-        # so the HUD shape stays stable.
+        # so the HUD shape stays stable. ``cost_usd`` defaults to
+        # None (not 0.0) so "unknown cost" is distinct from
+        # "free request".
         usage_dict = dict(request_usage) if request_usage else {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
+            "prompt_cached_tokens": 0,
+            "cost_usd": None,
         }
         result: dict[str, Any] = {
             "response": full_content,
@@ -4522,6 +4595,19 @@ class LLMService:
             result["cancelled"] = True
         if error is not None:
             result["error"] = error
+            # Attach the structured error dict from the worker
+            # thread's side channel, if populated. Consumed and
+            # cleared so a subsequent request doesn't inherit
+            # stale classification. Absent when the exception
+            # path didn't run through _run_completion_sync
+            # (e.g., the try block raised earlier during
+            # _sync_file_context or _build_tiered_content) —
+            # in those cases the frontend sees `error` without
+            # `error_info` and falls back to the generic toast.
+            error_info = getattr(self, "_last_error_info", None)
+            if error_info is not None:
+                result["error_info"] = error_info
+                self._last_error_info = None
 
         # Gate the apply step. Three conditions must hold:
         # - No error occurred during streaming
@@ -4693,32 +4779,57 @@ class LLMService:
         request_id: str,
         messages: list[dict[str, Any]],
         loop: asyncio.AbstractEventLoop,
-    ) -> tuple[str, bool, str | None, dict[str, int]]:
+    ) -> tuple[str, bool, str | None, dict[str, Any]]:
         """Blocking LLM call — runs in a worker thread.
 
         Returns ``(full_content, was_cancelled, finish_reason,
         usage_dict)``. Schedules chunk callbacks onto the main
         event loop via ``run_coroutine_threadsafe``.
 
-        ``usage_dict`` carries the per-request token counts as a
-        plain dict with the keys the RPC contract expects
-        (``prompt_tokens``, ``completion_tokens``,
-        ``cache_read_tokens``, ``cache_write_tokens``). The worker
-        extracts from whatever shape the provider returned (dict
-        or attribute-style object) and normalises here so the
-        event-loop thread never has to touch the provider's
-        native types. Session-total accumulation uses the same
-        normalised view.
+        ``usage_dict`` carries the per-request token counts plus
+        cost as a plain dict. Keys:
 
-        Empty dict when the provider reported no usage (rare but
-        possible with some providers on cancellation) — the
-        frontend renders that as all-zero, which is honest.
+        - ``prompt_tokens`` / ``completion_tokens`` — top-line
+          input/output counts. ``completion_tokens`` INCLUDES
+          reasoning tokens (the provider bills for both visible
+          output and hidden reasoning under the same field).
+        - ``reasoning_tokens`` — subset of ``completion_tokens``
+          that went to hidden reasoning (Claude extended
+          thinking, o1/o3). Zero when the model doesn't reason
+          or when the provider doesn't report the breakdown.
+        - ``cache_read_tokens`` / ``cache_write_tokens`` — unified
+          across Anthropic's ``cache_read_input_tokens`` shape and
+          OpenAI's ``prompt_tokens_details.cached_tokens`` shape.
+          Whichever the provider reports, we surface here.
+        - ``prompt_cached_tokens`` — OpenAI-shaped cache read
+          count, kept as its own key for diagnostics. Merged
+          into ``cache_read_tokens`` above so downstream
+          consumers get one number; exposed separately for
+          operators debugging cache hit rates across providers.
+        - ``cost_usd`` — LiteLLM's computed cost for this request
+          in USD. ``None`` when the model isn't in LiteLLM's
+          price table (self-hosted, brand-new releases). The
+          frontend renders ``None`` as "—" rather than $0.00 so
+          an unknown price isn't mistaken for a free request.
+
+        The worker extracts from whatever shape the provider
+        returned (dict or attribute-style object) and normalises
+        here so the event-loop thread never has to touch the
+        provider's native types. Session-total accumulation uses
+        the same normalised view.
+
+        Empty dict shape (with zero-valued fields and
+        ``cost_usd=None``) when the provider reported no usage
+        — rare but possible with some providers on cancellation.
         """
-        empty_usage: dict[str, int] = {
+        empty_usage: dict[str, Any] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
+            "prompt_cached_tokens": 0,
+            "cost_usd": None,
         }
         try:
             import litellm
@@ -4812,7 +4923,28 @@ class LLMService:
                 max_tokens=max_output,
             )
         except Exception as exc:
+            # LiteLLM raises a small catalogue of typed
+            # exceptions that carry far more actionable info
+            # than a stringified message. We classify here and
+            # stash the structured error on ``self`` for
+            # ``_build_completion_result`` to pick up — the
+            # worker-thread return tuple is fixed-shape, so we
+            # use a thread-local attribute for the side
+            # channel. A future pass could widen the tuple,
+            # but single-stream operation makes this simpler.
+            #
+            # Classes tried in order of specificity. Unknown
+            # exception types fall through to the catch-all
+            # "llm_error" classification with the original
+            # string message. Callers (frontend toast) render
+            # the same message either way; the classification
+            # enables per-type UX (countdown for RateLimit,
+            # "trigger compaction" for ContextWindowExceeded,
+            # etc.).
             logger.exception("litellm.completion raised")
+            self._last_error_info = self._classify_litellm_error(
+                litellm, exc
+            )
             return (
                 f"LLM call failed: {exc}",
                 False,
@@ -4822,6 +4954,13 @@ class LLMService:
 
         usage: dict[str, Any] | None = None
         finish_reason: str | None = None
+        # Full response object — needed for _hidden_params /
+        # litellm.completion_cost fallback. Stream chunks don't
+        # carry _hidden_params directly; the cost lives on the
+        # stream object itself (which litellm populates as
+        # chunks arrive) OR on the final chunk's response
+        # attribute. Capture whichever surfaces.
+        cost_source: Any = stream
 
         for chunk in stream:
             if request_id in self._cancelled_requests:
@@ -4860,10 +4999,6 @@ class LLMService:
             if chunk_usage is not None:
                 usage = chunk_usage
 
-        # Accumulate session totals from usage.
-        if usage is not None:
-            self._accumulate_usage(usage)
-
         # Normalise usage into a plain dict for the return
         # value. Mirrors the provider-variant handling in
         # _accumulate_usage so the event-loop thread receives
@@ -4871,30 +5006,102 @@ class LLMService:
         # touching attribute-style provider objects.
         request_usage = dict(empty_usage)
         if usage is not None:
-            def _get(name: str) -> int:
-                if isinstance(usage, dict):
-                    val = usage.get(name)
+            def _get(name: str, source: Any = usage) -> int:
+                if isinstance(source, dict):
+                    val = source.get(name)
                 else:
-                    val = getattr(usage, name, None)
+                    val = getattr(source, name, None)
                 try:
                     return int(val) if val is not None else 0
                 except (TypeError, ValueError):
                     return 0
 
+            def _get_nested(
+                parent_name: str, child_name: str
+            ) -> int:
+                """Read a nested field like completion_tokens_details.reasoning_tokens.
+
+                Handles both attribute-style (OpenAI/Anthropic
+                Pydantic objects) and dict-style (older providers,
+                tests). Returns 0 when the parent or child is
+                missing rather than raising — a provider that
+                doesn't report reasoning shouldn't crash the
+                pipeline.
+                """
+                if isinstance(usage, dict):
+                    parent = usage.get(parent_name)
+                else:
+                    parent = getattr(usage, parent_name, None)
+                if parent is None:
+                    return 0
+                return _get(child_name, source=parent)
+
             request_usage["prompt_tokens"] = _get("prompt_tokens")
             request_usage["completion_tokens"] = _get(
                 "completion_tokens"
             )
-            # Provider field names vary; accept the most common
-            # pair and pick whichever reported a non-zero value.
+            # Reasoning tokens — subset of completion_tokens. Live
+            # inside completion_tokens_details for providers that
+            # report them (o1, o3, Claude extended thinking via
+            # Anthropic or Bedrock). Absent for regular models;
+            # nested access degrades to 0.
+            request_usage["reasoning_tokens"] = _get_nested(
+                "completion_tokens_details", "reasoning_tokens"
+            )
+            # OpenAI-shaped prompt cache read. Kept as its own
+            # field for diagnostics; also folded into the unified
+            # cache_read_tokens below.
+            prompt_cached = _get_nested(
+                "prompt_tokens_details", "cached_tokens"
+            )
+            request_usage["prompt_cached_tokens"] = prompt_cached
+            # Unified cache read — pick the max across Anthropic's
+            # cache_read_input_tokens, the legacy cache_read_tokens
+            # name, and OpenAI's prompt_tokens_details.cached_tokens.
+            # Provider reports only one of the three, so max()
+            # produces the correct value regardless of shape.
             request_usage["cache_read_tokens"] = max(
                 _get("cache_read_input_tokens"),
                 _get("cache_read_tokens"),
+                prompt_cached,
             )
             request_usage["cache_write_tokens"] = max(
                 _get("cache_creation_input_tokens"),
                 _get("cache_creation_tokens"),
             )
+
+        # Cost extraction. LiteLLM exposes per-request cost in two
+        # places depending on the call mode:
+        #
+        # - Non-streaming: ``response._hidden_params["response_cost"]``
+        #   on the response object.
+        # - Streaming: ``stream._hidden_params["response_cost"]``
+        #   on the stream iterator itself, populated as chunks
+        #   arrive. Some providers also attach it to the final
+        #   chunk's response attribute.
+        #
+        # Fallback: ``litellm.completion_cost(completion_response)``
+        # computes from the usage dict when ``_hidden_params`` is
+        # missing. Returns None when the model isn't in LiteLLM's
+        # price table — self-hosted models, brand-new releases
+        # before LiteLLM's model_prices_and_context_window.json
+        # catches up. None propagates through as None; the
+        # frontend renders it as "—" not $0.00.
+        request_cost = self._extract_response_cost(
+            cost_source, litellm, usage
+        )
+        request_usage["cost_usd"] = request_cost
+
+        # Accumulate session totals from usage. Must happen AFTER
+        # request_usage is built so the accumulator uses the same
+        # normalised view as the return value — otherwise the HUD
+        # (reads request_usage) and Context tab (reads session
+        # totals) disagree on cache_read_tokens for OpenAI calls.
+        if usage is not None:
+            self._accumulate_usage(usage)
+        # Cost accumulates separately — it's not part of the
+        # provider's usage dict.
+        self._accumulate_cost(request_cost)
 
         # Log non-natural finish reasons at WARNING so operators
         # can diagnose truncation without grep-spelunking through
@@ -4916,32 +5123,298 @@ class LLMService:
         return full_content, was_cancelled, finish_reason, request_usage
 
     def _accumulate_usage(self, usage: Any) -> None:
-        """Fold a per-request usage record into session totals."""
+        """Fold a per-request usage record into session totals.
+
+        Handles the full normalised shape including nested
+        reasoning + OpenAI-cached fields so session totals and
+        per-request numbers stay consistent. ``cost_usd`` is
+        accumulated separately by :meth:`_accumulate_cost`
+        because it isn't part of the provider's usage dict —
+        it comes from LiteLLM's pricing table.
+        """
         # Dual-mode accessor — provider responses may be either
         # attribute-style objects or plain dicts.
-        def _get(name: str, default: int = 0) -> int:
-            if isinstance(usage, dict):
-                val = usage.get(name, default)
+        def _get(name: str, source: Any = usage, default: int = 0) -> int:
+            if isinstance(source, dict):
+                val = source.get(name, default)
             else:
-                val = getattr(usage, name, default)
+                val = getattr(source, name, default)
             try:
                 return int(val) if val is not None else default
             except (TypeError, ValueError):
                 return default
 
+        def _get_nested(parent_name: str, child_name: str) -> int:
+            if isinstance(usage, dict):
+                parent = usage.get(parent_name)
+            else:
+                parent = getattr(usage, parent_name, None)
+            if parent is None:
+                return 0
+            return _get(child_name, source=parent)
+
         self._session_totals["input_tokens"] += _get("prompt_tokens")
         self._session_totals["output_tokens"] += _get(
             "completion_tokens"
         )
-        # Cache field names vary by provider; accept the most common.
+        # Reasoning tokens — subset of completion_tokens.
+        # Accumulated independently so the UI can show
+        # "of your X output tokens, Y were reasoning".
+        self._session_totals["reasoning_tokens"] += _get_nested(
+            "completion_tokens_details", "reasoning_tokens"
+        )
+        # OpenAI-shaped prompt cache read. Tracked separately
+        # for diagnostics AND folded into cache_read_tokens.
+        prompt_cached = _get_nested(
+            "prompt_tokens_details", "cached_tokens"
+        )
+        self._session_totals["prompt_cached_tokens"] += prompt_cached
+        # Cache field names vary by provider; accept all three.
         self._session_totals["cache_read_tokens"] += max(
             _get("cache_read_input_tokens"),
             _get("cache_read_tokens"),
+            prompt_cached,
         )
         self._session_totals["cache_write_tokens"] += max(
             _get("cache_creation_input_tokens"),
             _get("cache_creation_tokens"),
         )
+
+    def _accumulate_cost(self, cost: float | None) -> None:
+        """Fold a per-request cost into session totals.
+
+        ``cost`` is None when LiteLLM couldn't price the call
+        (unknown model, missing pricing entry). We increment
+        the unpriced counter in that case so the UI can show
+        a "(partial)" indicator — an accumulated $0.12 with
+        5 unpriced requests means "at least $0.12; true total
+        is higher by the unpriced requests' cost".
+        """
+        if cost is None:
+            self._session_totals["unpriced_request_count"] += 1
+            return
+        try:
+            cost_float = float(cost)
+        except (TypeError, ValueError):
+            # Defensive — a non-numeric cost shouldn't crash the
+            # pipeline. Count it as unpriced.
+            self._session_totals["unpriced_request_count"] += 1
+            return
+        self._session_totals["cost_usd"] += cost_float
+        self._session_totals["priced_request_count"] += 1
+
+    @staticmethod
+    def _extract_response_cost(
+        cost_source: Any,
+        litellm_module: Any,
+        usage: Any,
+    ) -> float | None:
+        """Pull the USD cost for a completion from LiteLLM.
+
+        Tries three locations in order:
+
+        1. ``cost_source._hidden_params["response_cost"]`` — the
+           primary location. LiteLLM populates this on the
+           response object (non-streaming) and on the stream
+           wrapper (streaming) as it receives usage.
+        2. ``cost_source.response_cost`` — some provider
+           integrations expose it as a direct attribute.
+        3. ``litellm.completion_cost(completion_response=cost_source)``
+           — computes from the usage dict using LiteLLM's
+           pricing table. Final fallback when the hidden-params
+           path didn't populate.
+
+        Returns None when none of the paths produced a numeric
+        cost. Callers treat None as "unknown"; the frontend
+        renders it as "—".
+        """
+        # Path 1 — _hidden_params["response_cost"].
+        try:
+            hidden = getattr(cost_source, "_hidden_params", None)
+            if isinstance(hidden, dict):
+                raw = hidden.get("response_cost")
+                if raw is not None:
+                    return float(raw)
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+        # Path 2 — direct attribute.
+        try:
+            raw = getattr(cost_source, "response_cost", None)
+            if raw is not None:
+                return float(raw)
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+        # Path 3 — litellm.completion_cost(). The function
+        # signature varies slightly across LiteLLM versions;
+        # pass the response object positionally as the primary
+        # arg and accept any of the supported shapes. Failures
+        # (unknown model, missing pricing, malformed response)
+        # return None — we don't want pricing to abort a stream.
+        try:
+            cost_fn = getattr(litellm_module, "completion_cost", None)
+            if cost_fn is not None and cost_source is not None:
+                raw = cost_fn(completion_response=cost_source)
+                if raw is not None:
+                    return float(raw)
+        except Exception as exc:
+            # LiteLLM raises various pricing-related exceptions
+            # (NotFoundError for unknown models,
+            # BadRequestError for malformed usage). Log at
+            # debug — unknown models are a normal case, not
+            # an error the user needs to see.
+            logger.debug(
+                "litellm.completion_cost failed: %s", exc
+            )
+
+        return None
+
+    @staticmethod
+    def _classify_litellm_error(
+        litellm_module: Any,
+        exc: BaseException,
+    ) -> dict[str, Any]:
+        """Map a LiteLLM exception to a structured error dict.
+
+        LiteLLM's exception hierarchy normalises provider errors
+        into a small set of typed classes — each carrying
+        ``status_code``, ``model``, ``llm_provider``, and
+        sometimes ``response`` with a ``Retry-After`` header.
+        This classifier reads those attributes into a flat dict
+        the frontend can dispatch on.
+
+        Recognised types and their intended UX:
+
+        - ``context_window_exceeded`` — the prompt (including
+          history) exceeds the model's input window. Actionable:
+          trigger compaction or drop files. Frontend shows a
+          toast with a "Compact now" action.
+        - ``rate_limit`` — provider throttled the request.
+          Actionable: wait and retry. Frontend shows a countdown
+          toast using the ``retry_after`` field when populated
+          (LiteLLM surfaces the ``Retry-After`` header on the
+          exception's ``response`` attribute).
+        - ``authentication`` — API key invalid or missing.
+          Actionable: edit LLM config. Frontend shows a toast
+          with a "Open Settings" action.
+        - ``bad_request`` — malformed request (usually a schema
+          mismatch between AC⚡DC's request shape and the
+          provider's expectations). Actionable: file a bug;
+          frontend shows the raw provider message.
+        - ``api_connection`` — network/transport failure before
+          the request reached the provider. Actionable: check
+          internet / corporate proxy.
+        - ``service_unavailable`` — provider reported 503 or
+          equivalent. Actionable: wait; may retry.
+        - ``timeout`` — request took longer than LiteLLM's
+          configured timeout.
+        - ``not_found`` — model identifier doesn't exist for
+          the configured provider. Actionable: verify the
+          model name in LLM config.
+        - ``llm_error`` — catch-all for exceptions not matching
+          any recognised LiteLLM subclass. Original exception
+          type name captured in ``original_type`` for debugging.
+
+        The classification tries the most specific types first.
+        LiteLLM's class hierarchy has
+        ``ContextWindowExceededError`` as a subclass of
+        ``BadRequestError`` (400 with specific error code), so
+        checking the window error BEFORE the generic bad-request
+        matters — otherwise every context overflow would be
+        mis-tagged.
+
+        Returns a dict with at minimum ``error_type`` and
+        ``message``. Additional fields populated when present on
+        the exception object.
+        """
+        info: dict[str, Any] = {
+            "error_type": "llm_error",
+            "message": str(exc),
+            "retry_after": None,
+            "status_code": None,
+            "provider": None,
+            "model": None,
+            "original_type": type(exc).__name__,
+        }
+
+        # Pull common metadata first — present on most LiteLLM
+        # exception types. Guarded access because not every
+        # exception in the chain carries these attributes
+        # (wrapped third-party errors sometimes don't).
+        info["status_code"] = getattr(exc, "status_code", None)
+        info["model"] = getattr(exc, "model", None)
+        info["provider"] = getattr(exc, "llm_provider", None)
+
+        # Classification. Each branch uses getattr on the module
+        # so a LiteLLM version that drops one of these classes
+        # doesn't crash classification — the attribute lookup
+        # returns None and isinstance(exc, None) is False, so
+        # the branch is skipped.
+        exceptions_mod = getattr(litellm_module, "exceptions", None)
+
+        def _cls(name: str) -> type | None:
+            """Locate a LiteLLM exception class by name.
+
+            Some versions expose classes on the top-level
+            module, others nest them under ``litellm.exceptions``.
+            Check both; return None if neither has it.
+            """
+            cls = getattr(litellm_module, name, None)
+            if cls is None and exceptions_mod is not None:
+                cls = getattr(exceptions_mod, name, None)
+            if isinstance(cls, type):
+                return cls
+            return None
+
+        ctx_cls = _cls("ContextWindowExceededError")
+        rate_cls = _cls("RateLimitError")
+        auth_cls = _cls("AuthenticationError")
+        not_found_cls = _cls("NotFoundError")
+        bad_req_cls = _cls("BadRequestError")
+        conn_cls = _cls("APIConnectionError")
+        unavail_cls = _cls("ServiceUnavailableError")
+        timeout_cls = _cls("Timeout")
+
+        # Order matters: more-specific subclasses first.
+        if ctx_cls is not None and isinstance(exc, ctx_cls):
+            info["error_type"] = "context_window_exceeded"
+        elif rate_cls is not None and isinstance(exc, rate_cls):
+            info["error_type"] = "rate_limit"
+            # Retry-After extraction. LiteLLM attaches the
+            # original httpx/requests response as .response on
+            # some exception types; the header is
+            # "retry-after" (lowercase in httpx, case-insensitive
+            # lookup). Parse as float seconds; fall back to
+            # None on any shape mismatch.
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                headers = getattr(resp, "headers", None)
+                if headers is not None:
+                    try:
+                        raw = headers.get("retry-after") or headers.get(
+                            "Retry-After"
+                        )
+                        if raw is not None:
+                            info["retry_after"] = float(raw)
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+        elif auth_cls is not None and isinstance(exc, auth_cls):
+            info["error_type"] = "authentication"
+        elif not_found_cls is not None and isinstance(exc, not_found_cls):
+            info["error_type"] = "not_found"
+        elif bad_req_cls is not None and isinstance(exc, bad_req_cls):
+            # Checked AFTER ContextWindowExceededError because
+            # the latter is a subclass of BadRequestError.
+            info["error_type"] = "bad_request"
+        elif conn_cls is not None and isinstance(exc, conn_cls):
+            info["error_type"] = "api_connection"
+        elif unavail_cls is not None and isinstance(exc, unavail_cls):
+            info["error_type"] = "service_unavailable"
+        elif timeout_cls is not None and isinstance(exc, timeout_cls):
+            info["error_type"] = "timeout"
+
+        return info
 
     # ------------------------------------------------------------------
     # Stability tracker initialization
@@ -5709,12 +6182,26 @@ class LLMService:
             "session_totals": {
                 "prompt": st.get("input_tokens", 0),
                 "completion": st.get("output_tokens", 0),
+                "reasoning": st.get("reasoning_tokens", 0),
                 "total": (
                     st.get("input_tokens", 0)
                     + st.get("output_tokens", 0)
                 ),
                 "cache_hit": st.get("cache_read_tokens", 0),
                 "cache_write": st.get("cache_write_tokens", 0),
+                "prompt_cached": st.get("prompt_cached_tokens", 0),
+                # Cost fields — always present for shape
+                # stability. cost_usd is a float (0.0 when no
+                # priced requests have accumulated); priced_count
+                # and unpriced_count let the UI show "(partial)"
+                # when some requests were unpriced.
+                "cost_usd": float(st.get("cost_usd", 0.0)),
+                "priced_request_count": st.get(
+                    "priced_request_count", 0
+                ),
+                "unpriced_request_count": st.get(
+                    "unpriced_request_count", 0
+                ),
             },
         }
 
@@ -6761,8 +7248,22 @@ class LLMService:
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
+                # Aux calls fail silently with an empty string —
+                # the outer caller substitutes a default commit
+                # message. Classify the error for the log line
+                # so operators can see WHY the aux call failed
+                # (rate-limit vs auth vs context overflow all
+                # manifest as "generation failed" without this).
+                info = LLMService._classify_litellm_error(
+                    litellm, exc
+                )
                 logger.warning(
-                    "Commit message generation failed: %s", exc
+                    "Commit message generation failed: "
+                    "type=%s provider=%s model=%s msg=%s",
+                    info.get("error_type"),
+                    info.get("provider"),
+                    info.get("model"),
+                    info.get("message"),
                 )
                 return ""
 
@@ -6894,6 +7395,11 @@ class LLMService:
     # Introspection
     # ------------------------------------------------------------------
 
-    def get_session_totals(self) -> dict[str, int]:
-        """Return a copy of cumulative token usage for this session."""
+    def get_session_totals(self) -> dict[str, Any]:
+        """Return a copy of cumulative session token usage and cost.
+
+        Value types are mixed — token counts are ints, cost is
+        a float, and the priced/unpriced counts are ints.
+        Callers receive a defensive copy.
+        """
         return dict(self._session_totals)

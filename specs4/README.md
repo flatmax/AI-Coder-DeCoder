@@ -33,7 +33,7 @@ Specs are numbered in dependency order — bottom-up. Each layer depends only on
 | **4 Features** | URL content, images, code review, collaboration, document convert |
 | **5 Webapp** | Shell, chat, viewers, file picker, search, settings, and specialized components |
 | **6 Deployment** | Build, startup, packaging |
-| **7 Future** | Speculative designs — **not for implementation** |
+| **7 Future** | Parallel agents, reasoning, migration plans — speculative designs, **not for implementation** |
 
 ## Conventions
 

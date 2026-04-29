@@ -54,6 +54,7 @@ Fire-and-forget notification of stream end. Fires exactly once per user-initiate
 | `user_message` | string | Always on passive streams | Original user text; used by collaborator clients that didn't see `userMessage` broadcast |
 | `cancelled` | bool | If stream was cancelled | Absent otherwise |
 | `error` | string | On fatal error | Error message; other fields may be partially populated |
+| `error_info` | object | On classified LLM error | Structured error classification; see "Error classification" below. Absent when `error` is set but the failure occurred before the LiteLLM call (pre-completion exceptions in `_sync_file_context`, `_build_tiered_content`, etc.) |
 | `binary_files` | list[string] | On validation failure | Rejected binary files |
 | `invalid_files` | list[string] | On validation failure | Files not found on disk |
 
@@ -154,20 +155,37 @@ The `token_usage` field inside `streamComplete.result` normalizes provider-speci
 | Field | Type | Notes |
 |---|---|---|
 | `prompt_tokens` | int | Input tokens (all providers report this) |
-| `completion_tokens` | int | Output tokens (all providers report this) |
-| `cache_read_tokens` | int | Cached input tokens read (0 if none or unsupported) |
+| `completion_tokens` | int | Output tokens (all providers report this). **Includes `reasoning_tokens`** — providers bill visible output and hidden reasoning under one field |
+| `reasoning_tokens` | int | Subset of `completion_tokens` spent on hidden reasoning (Claude extended thinking, o1/o3). 0 when the model doesn't reason or when the provider didn't report the breakdown |
+| `cache_read_tokens` | int | Cached input tokens read (0 if none or unsupported). Unified across Anthropic, Bedrock, and OpenAI shapes — see provider fallback table below |
 | `cache_write_tokens` | int | Cache write tokens (0 if none or unsupported) |
+| `prompt_cached_tokens` | int | OpenAI-shaped prompt cache read count. Exposed separately for diagnostics; also folded into `cache_read_tokens` |
+| `cost_usd` | float \| null | LiteLLM's computed USD cost for this request. `null` when the model isn't in LiteLLM's pricing table (self-hosted models, brand-new releases before `model_prices_and_context_window.json` catches up). The frontend renders `null` as `—` rather than `$0.00` to distinguish "unknown" from "free" |
 
 Field extraction uses a dual-mode getter (attribute + dict key access) with per-provider fallback chains:
 
-| Provider | `cache_read_tokens` source | `cache_write_tokens` source |
-|---|---|---|
-| Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` |
-| Bedrock | `prompt_tokens_details.cached_tokens` | `cache_creation_input_tokens` |
-| OpenAI | `prompt_tokens_details.cached_tokens` | *(not reported)* |
-| litellm unified | `cache_read_tokens` | `cache_creation_tokens` |
+| Provider | `cache_read_tokens` source | `cache_write_tokens` source | `reasoning_tokens` source |
+|---|---|---|---|
+| Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` | `completion_tokens_details.reasoning_tokens` |
+| Bedrock | `prompt_tokens_details.cached_tokens` | `cache_creation_input_tokens` | `completion_tokens_details.reasoning_tokens` |
+| OpenAI | `prompt_tokens_details.cached_tokens` | *(not reported)* | `completion_tokens_details.reasoning_tokens` |
+| litellm unified | `cache_read_tokens` | `cache_creation_tokens` | `completion_tokens_details.reasoning_tokens` |
+
+`cache_read_tokens` is computed as the max of all three provider shapes so one number reflects "cached input" regardless of provider. `prompt_cached_tokens` stays as a separate field for operators debugging cache hit rates across providers.
 
 Stream-level usage is captured from any chunk that includes it (typically the final chunk). Response-level usage is merged as fallback. If the provider reports no `completion_tokens`, it's estimated from content length at ~4 chars per token.
+
+### Cost extraction
+
+LiteLLM exposes per-request USD cost through three locations, tried in order:
+
+1. `cost_source._hidden_params["response_cost"]` — primary. LiteLLM populates this on the response object (non-streaming) and on the stream wrapper (streaming) as chunks arrive.
+2. `cost_source.response_cost` — some provider integrations expose it as a direct attribute.
+3. `litellm.completion_cost(completion_response=cost_source)` — computes from the usage dict using LiteLLM's pricing table. Final fallback when hidden-params didn't populate.
+
+Returns `None` when none of the paths produce a numeric cost. All three paths are guarded — unknown models raise `NotFoundError` from the pricing lookup, which we log at debug and fall through without aborting the stream.
+
+Cost accumulates into `session_totals["cost_usd"]` (float) alongside `priced_request_count` and `unpriced_request_count` counters. The unpriced counter lets the UI show "(partial)" when some requests couldn't be priced — an accumulated `$0.12` with 5 unpriced requests means "at least $0.12; true total is higher".
 
 ## Numeric constants
 
@@ -226,6 +244,54 @@ LiteLLM normalizes provider stop reasons to these strings:
 Cancelled streams suppress the toast even for non-natural stops — the `[stopped]` marker appended to the response body is sufficient signal.
 
 Extraction uses the same dual-mode getter pattern as token usage: `chunk.choices[0].finish_reason` via attribute + key access, with `None` as default. Only the final chunk of a stream typically reports a non-null value.
+
+## Error classification
+
+LiteLLM raises a catalog of typed exception classes that normalize provider errors into actionable categories. The backend classifier (`LLMService._classify_litellm_error`) maps each to a structured `error_info` dict attached to `streamComplete.result` when the failure occurred inside the LiteLLM call.
+
+### `error_info` dict shape
+
+| Field | Type | Notes |
+|---|---|---|
+| `error_type` | string | One of the nine classified types below. Defaults to `"llm_error"` for unrecognized exceptions |
+| `message` | string | Provider's error message. Defaults to `str(exc)` |
+| `retry_after` | float \| null | Seconds to wait before retry. Populated from the `Retry-After` HTTP header when present on `RateLimitError`; null otherwise |
+| `status_code` | int \| null | HTTP status code when the provider reported one |
+| `provider` | string \| null | LiteLLM's `llm_provider` attribute — `"anthropic"`, `"bedrock"`, `"openai"`, etc. |
+| `model` | string \| null | Model identifier from the exception's `model` attribute |
+| `original_type` | string | Python class name of the caught exception (for debugging unrecognized types) |
+
+### `error_type` values
+
+Classification tries types in specificity order. `ContextWindowExceededError` is a subclass of `BadRequestError` in LiteLLM's hierarchy, so the window error is checked BEFORE the generic bad-request — otherwise every context overflow would mis-tag as `bad_request`.
+
+| `error_type` | LiteLLM class | HTTP | Actionable hint |
+|---|---|---|---|
+| `context_window_exceeded` | `ContextWindowExceededError` | 400 | Prompt (including history) exceeds the model's input window. Trigger compaction or drop files |
+| `rate_limit` | `RateLimitError` | 429 | Provider throttled. Wait `retry_after` seconds and retry |
+| `authentication` | `AuthenticationError` | 401 | API key invalid or missing. Edit LLM config |
+| `not_found` | `NotFoundError` | 404 | Model identifier doesn't exist for the configured provider. Verify model name in LLM config |
+| `bad_request` | `BadRequestError` | 400 | Malformed request (usually a schema mismatch). File a bug with the raw provider message |
+| `api_connection` | `APIConnectionError` | — | Network/transport failure before the request reached the provider. Check internet / corporate proxy |
+| `service_unavailable` | `ServiceUnavailableError` | 503 | Provider outage. Wait and retry |
+| `timeout` | `Timeout` | — | Request took longer than LiteLLM's configured timeout |
+| `llm_error` | *(catch-all)* | — | Unrecognized exception. Raw message surfaces to the user for diagnosis |
+
+Class lookup is tolerant of LiteLLM version drift — each class is resolved via `getattr(litellm, name) or getattr(litellm.exceptions, name)`. A missing class (LiteLLM dropped or renamed it) causes that branch to skip rather than the classifier to crash.
+
+### Retry-After extraction
+
+`RateLimitError` may carry the original `httpx` response object as `.response`. When present, the classifier reads `response.headers["retry-after"]` (case-insensitive) and parses as float seconds. Shape mismatches (missing header, non-numeric value, absent response object) produce `retry_after: null`.
+
+### Frontend rendering
+
+The chat panel's `_emitTypedErrorToast` dispatches on `error_type` to produce per-type toasts with distinct icons and severity. See `specs-reference/5-webapp/chat.md` § Typed error toast catalog for the full icon/label/severity table.
+
+The assistant message card additionally renders the error via `_formatErrorBody` which prefixes the error with a human-readable label (e.g., "Rate limit exceeded"), appends the provider's raw message on a second line, and shows provider/model metadata in a third line when known. Unclassified errors (`error_info` absent) fall through to the legacy `**Error:** {message}` format.
+
+### Aux LLM call classification
+
+The same classifier runs for aux calls (`_generate_commit_message`, topic detector). Those paths don't surface `error_info` to the browser — they degrade to safe defaults (empty commit message falls back to `"chore: update files"`; topic detection falls back to summarize case). Classification runs only to enrich the log line so operators can distinguish rate-limit failures from auth failures from context overflows across all LiteLLM call sites.
 
 ## Dependency quirks
 
