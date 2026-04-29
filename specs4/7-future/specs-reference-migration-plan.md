@@ -39,12 +39,12 @@ Single commit. Prove the shape works on one representative area before committin
 
 **Pilot target:** symbol map compact format.
 
-- [ ] Read `specs3/2-code-analysis/symbol_index.md` carefully, identifying only the content that belongs in a twin (format syntax, legend, abbreviations, ditto marks, path aliases, test collapsing). Leave behavioral descriptions in specs3 for now.
-- [ ] Create `specs-reference/2-indexing/symbol-index.md` following the Phase 1 section conventions
-- [ ] Apply the non-replication check — read `specs4/2-indexing/symbol-index.md` and confirm the twin adds detail rather than restating
-- [ ] Update the row in `specs4/0-overview/implementation-guide.md` § "Where specs4 Is Incomplete Without specs3" from `specs3/2-code-analysis/symbol_index.md` to `specs-reference/2-indexing/symbol-index.md`
-- [ ] Grep specs4 live files (exclude impl-history) for other references to `specs3/2-code-analysis/symbol_index.md` and redirect them
-- [ ] Review the resulting twin file. If it feels like it duplicates behavior, rework before proceeding to Phase 3.
+- [x] Read `specs3/2-code-analysis/symbol_index.md` carefully, identifying only the content that belongs in a twin (format syntax, legend, abbreviations, ditto marks, path aliases, test collapsing). Leave behavioral descriptions in specs3 for now.
+- [x] Create `specs-reference/2-indexing/symbol-index.md` following the Phase 1 section conventions
+- [x] Apply the non-replication check — read `specs4/2-indexing/symbol-index.md` and confirm the twin adds detail rather than restating
+- [x] Update the row in `specs4/0-overview/implementation-guide.md` § "Where specs4 Is Incomplete Without specs3" from `specs3/2-code-analysis/symbol_index.md` to `specs-reference/2-indexing/symbol-index.md`
+- [x] Grep specs4 live files (exclude impl-history) for other references to `specs3/2-code-analysis/symbol_index.md` and redirect them
+- [x] Review the resulting twin file. If it feels like it duplicates behavior, rework before proceeding to Phase 3.
 
 ### Phase 3 — Remaining areas
 
@@ -52,7 +52,7 @@ One commit per area, grouped by layer for review navigability. Each commit follo
 
 **Layer 2 (2 commits)**
 
-- [ ] Doc outline annotations (`specs-reference/2-indexing/document-index.md`) — keyword parentheses, content-type markers, section size, ref counts, outgoing refs
+- [x] Doc outline annotations (`specs-reference/2-indexing/document-index.md`) — keyword parentheses, content-type markers, section size, ref counts, outgoing refs
 
 **Layer 3 (6 commits)**
 

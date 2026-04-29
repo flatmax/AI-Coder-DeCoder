@@ -88,8 +88,8 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 
 | Area | specs3 location |
 |---|---|
-| Symbol map compact format | `specs3/2-code-analysis/symbol_index.md` (legend, abbreviations, ditto marks, path aliases, test collapsing) |
-| Doc outline annotation syntax | `specs3/2-code-analysis/document_mode.md` (keyword parentheses, content-type markers, section size, ref counts, outgoing refs) |
+| Symbol map compact format | `specs-reference/2-indexing/symbol-index.md` (legend, abbreviations, ditto marks, path aliases, test collapsing) |
+| Doc outline annotation syntax | `specs-reference/2-indexing/document-index.md` (keyword parentheses, content-type markers, section size, ref counts, outgoing refs) |
 | Edit block marker bytes | `specs3/3-llm-engine/edit_protocol.md` |
 | Cache tier numeric thresholds | `specs3/3-llm-engine/cache_tiering.md` (entry-N, promotion-N, cache buffer multiplier) |
 | Model-specific cache minimums | `specs3/1-foundation/configuration.md` (Claude family minimums) |
@@ -100,7 +100,7 @@ specs4 alone is not sufficient for byte-exact reimplementation in the following 
 | Docuvert provenance header | `specs3/4-features/doc_convert.md` |
 | Config file schemas | `specs3/1-foundation/configuration.md` |
 | System prompt text | `src/ac_dc/config/*.md` (the running system's config files are authoritative) |
-| Dependency quirks | `specs3/2-code-analysis/symbol_index.md` (tree-sitter TypeScript), `specs3/5-webapp/diff_viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
+| Dependency quirks | `specs-reference/2-indexing/symbol-index.md` (tree-sitter TypeScript), `specs3/5-webapp/diff_viewer.md` (Monaco workers), `specs3/6-deployment/build_and_deployment.md` (Vite optimizeDeps, PyInstaller imports) |
 
 ## Architectural Changes from specs3
 
