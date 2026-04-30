@@ -737,6 +737,10 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
+    this._onBranchMenuRequested =
+      this._onBranchMenuRequested.bind(this);
+    this._onBranchSwitchRequested =
+      this._onBranchSwitchRequested.bind(this);
     this._onActiveFileChanged =
       this._onActiveFileChanged.bind(this);
     this._onReviewStarted = this._onReviewStarted.bind(this);
@@ -1386,6 +1390,116 @@ export class FilesTab extends RpcMixin(LitElement) {
       console.error('[files-tab] end_review failed', err);
       this._showToast(
         `Failed to exit review: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Branch switching
+  // ---------------------------------------------------------------
+
+  /**
+   * Picker dispatched `branch-menu-requested` — the
+   * user clicked the branch pill. Fetch the full
+   * branch list (local + remote) and hand it back to
+   * the picker via `populateBranchMenu`. Errors
+   * surface as toasts but don't close the menu — the
+   * picker's "Loading…" state falls through to
+   * "No branches" which is still informative.
+   */
+  async _onBranchMenuRequested() {
+    if (!this.rpcConnected) return;
+    try {
+      const branches = await this.rpcExtract(
+        'Repo.list_all_branches',
+      );
+      const picker = this._picker();
+      if (picker) {
+        picker.populateBranchMenu(
+          Array.isArray(branches) ? branches : [],
+        );
+      }
+    } catch (err) {
+      console.error('[files-tab] list_all_branches failed', err);
+      this._showToast(
+        `Failed to load branches: ${err?.message || err}`,
+        'error',
+      );
+      const picker = this._picker();
+      if (picker) picker.populateBranchMenu([]);
+    }
+  }
+
+  /**
+   * Picker dispatched `branch-switch-requested` —
+   * the user picked a branch from the popover.
+   * Detail: `{name, is_remote}`. Dirty-tree check
+   * runs before the RPC so users get a precise
+   * toast rather than a generic git error, even
+   * though the backend also refuses dirty trees
+   * (belt-and-braces).
+   *
+   * On success we reload the file tree so the
+   * picker reflects the new branch. The backend's
+   * post-write callback fires `filesChanged`-adjacent
+   * behaviour via LLMService refreshes, but the tree
+   * RPC is cheap and a fresh call keeps the UI
+   * authoritative.
+   */
+  async _onBranchSwitchRequested(event) {
+    const name = event.detail?.name;
+    if (typeof name !== 'string' || !name) return;
+    if (!this.rpcConnected) return;
+    // Clean-tree gate. The backend also checks, but
+    // this produces a clearer toast with no RPC
+    // round-trip for the common dirty-tree case.
+    try {
+      const clean = await this.rpcExtract('Repo.is_clean');
+      if (!clean) {
+        this._showToast(
+          'Working tree has uncommitted changes. ' +
+            'Commit, stash, or discard them before ' +
+            'switching branches.',
+          'warning',
+        );
+        return;
+      }
+    } catch (err) {
+      // If the probe fails, defer to the backend's
+      // own check — don't block the switch on a
+      // probe failure.
+      console.warn('[files-tab] is_clean probe failed', err);
+    }
+    try {
+      const result = await this.rpcExtract(
+        'Repo.checkout_branch',
+        name,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      if (result && typeof result === 'object' && result.error) {
+        this._showToast(
+          `Switch failed: ${result.error}`,
+          'error',
+        );
+        return;
+      }
+      const landedOn =
+        result && typeof result === 'object' && result.branch
+          ? result.branch
+          : name;
+      this._showToast(`Switched to ${landedOn}`, 'success');
+      await this._loadFileTree();
+    } catch (err) {
+      console.error('[files-tab] checkout_branch failed', err);
+      this._showToast(
+        `Switch failed: ${err?.message || err}`,
         'error',
       );
     }
@@ -3054,6 +3168,8 @@ export class FilesTab extends RpcMixin(LitElement) {
           @exit-review=${this._onExitReview}
           @open-review-selector=${this._onOpenReviewSelector}
           @open-review-graph=${this._onOpenReviewGraph}
+          @branch-menu-requested=${this._onBranchMenuRequested}
+          @branch-switch-requested=${this._onBranchSwitchRequested}
         ></ac-file-picker>
       </div>
       <div

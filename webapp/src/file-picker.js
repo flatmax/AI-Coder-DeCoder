@@ -353,6 +353,13 @@ const _CONTEXT_MENU_ROOT_ITEMS = [
 // glow without clipping on high-DPI displays.
 const _CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 
+// Maximum height for the branch switcher popover. Tall
+// enough to show ~10 branches at typical row height;
+// anything over scrolls. Matches the feel of VS Code's
+// status-bar branch menu.
+const _BRANCH_MENU_MAX_HEIGHT = 320;
+const _BRANCH_MENU_WIDTH = 280;
+
 // localStorage keys for persisting sort preferences.
 const _SORT_MODE_KEY = 'ac-dc-sort-mode';
 const _SORT_ASC_KEY = 'ac-dc-sort-asc';
@@ -534,6 +541,22 @@ export class FilePicker extends LitElement {
      * add a `type: 'dir'` discriminator when they ship.
      */
     _contextMenu: { type: Object, state: true },
+    /**
+     * Branch switcher popover state. Null when closed;
+     * populated shape when open:
+     *   {x, y, branches, current, loading}
+     * - branches: list of {name, sha, is_current,
+     *   is_remote} from Repo.list_all_branches
+     * - current: the current branch name (null if
+     *   detached)
+     * - loading: true while the branch list is being
+     *   fetched; switches to false when the list arrives
+     *
+     * Opened by clicking the branch pill on the root row.
+     * Closed on selection, outside click, Escape, or host
+     * disconnect.
+     */
+    _branchMenu: { type: Object, state: true },
     /**
      * Git action disable flags. Tracked locally by
      * listening to the same window events the app-shell
@@ -1064,8 +1087,125 @@ export class FilePicker extends LitElement {
       background: rgba(210, 153, 34, 0.2);
       color: #d29922;
     }
+    .branch-pill.clickable {
+      /* Reset button defaults so the pill reads as the
+       * same pill the span-form produced, then layer on
+       * hover + disabled affordances. Font inherits so
+       * the button text matches surrounding row text. */
+      border: 1px solid rgba(110, 118, 129, 0.35);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: 500;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .branch-pill.clickable:hover:not([disabled]) {
+      background: rgba(88, 166, 255, 0.18);
+      border-color: rgba(88, 166, 255, 0.5);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .branch-pill.clickable[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
     .branch-pill .glyph {
       opacity: 0.7;
+    }
+
+    /* Branch menu — positioned popover listing every
+     * local and remote branch. Shares the dialog-
+     * surface visual language with the context menu so
+     * the two feel like parts of one system. Scroll
+     * when the branch list overflows the max-height
+     * cap. */
+    .branch-menu {
+      position: fixed;
+      z-index: 1000;
+      width: 280px;
+      max-height: 320px;
+      display: flex;
+      flex-direction: column;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+      overflow: hidden;
+    }
+    .branch-menu-header {
+      flex-shrink: 0;
+      padding: 0.4rem 0.75rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary, #8b949e);
+    }
+    .branch-menu-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    .branch-menu-loading {
+      padding: 1rem;
+      text-align: center;
+      opacity: 0.6;
+      font-style: italic;
+    }
+    .branch-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+      border: none;
+      background: transparent;
+      width: 100%;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: left;
+    }
+    .branch-menu-item:hover:not([disabled]) {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .branch-menu-item[disabled] {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .branch-menu-item .branch-glyph {
+      flex-shrink: 0;
+      width: 1rem;
+      text-align: center;
+      opacity: 0.7;
+    }
+    .branch-menu-item .branch-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .branch-menu-item .branch-flag {
+      flex-shrink: 0;
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.05rem 0.3rem;
+      border-radius: 2px;
+      background: rgba(110, 118, 129, 0.2);
+      color: var(--text-secondary, #8b949e);
+    }
+    .branch-menu-item .branch-flag.current {
+      background: rgba(88, 166, 255, 0.2);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .branch-menu-item .branch-flag.remote {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
     }
 
     /* Context menu — position: fixed so it escapes the
@@ -1202,6 +1342,8 @@ export class FilePicker extends LitElement {
     // listeners or leave a stale menu in the DOM after
     // reinsertion.
     this._contextMenu = null;
+    // Branch menu state — null when closed.
+    this._branchMenu = null;
     // Bound handlers for document-level listeners —
     // identical references for addEventListener and
     // removeEventListener so the teardown path matches
@@ -1211,6 +1353,10 @@ export class FilePicker extends LitElement {
     this._onDocumentClickForMenu = this._onDocumentClickForMenu.bind(this);
     this._onDocumentKeyDownForMenu =
       this._onDocumentKeyDownForMenu.bind(this);
+    this._onDocumentClickForBranchMenu =
+      this._onDocumentClickForBranchMenu.bind(this);
+    this._onDocumentKeyDownForBranchMenu =
+      this._onDocumentKeyDownForBranchMenu.bind(this);
     // Git action flags — updated from window events.
     this._committing = false;
     this._reviewActive = false;
@@ -1264,6 +1410,7 @@ export class FilePicker extends LitElement {
   // so document listeners don't leak.
   disconnectedCallback() {
     this._closeContextMenu();
+    this._closeBranchMenu();
     window.removeEventListener(
       'stream-chunk', this._onStreamChunkGit,
     );
@@ -1643,6 +1790,7 @@ export class FilePicker extends LitElement {
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
       </div>
       ${this._renderContextMenu()}
+      ${this._renderBranchMenu()}
     `;
   }
 
@@ -1809,6 +1957,16 @@ export class FilePicker extends LitElement {
    * Returns an empty string when no branch info is
    * available — detached with no SHA, empty repo, or
    * pre-load state.
+   *
+   * Regular branches render as a clickable button that
+   * opens the branch-switcher popover. Detached HEAD
+   * renders as a non-interactive span — there's no
+   * branch to switch "from" in a meaningful way, and
+   * switching out of a detached HEAD is better done
+   * via the commit graph. The pill is also disabled
+   * during review mode, active streaming, or an
+   * in-flight commit — same gating as the git action
+   * buttons.
    */
   _renderBranchPill() {
     const info = this.branchInfo;
@@ -1831,15 +1989,27 @@ export class FilePicker extends LitElement {
       `;
     }
     if (typeof info.branch === 'string' && info.branch) {
+      const disabled =
+        this._reviewActive || this._streaming || this._committing;
+      const title = this._reviewActive
+        ? 'Branch switching disabled during review'
+        : this._streaming
+          ? 'Branch switching disabled while AI is responding'
+          : this._committing
+            ? 'Branch switching disabled during commit'
+            : `On branch ${info.branch} — click to switch`;
       return html`
-        <span
-          class="branch-pill"
-          title="On branch ${info.branch}"
-          aria-label="On branch ${info.branch}"
+        <button
+          type="button"
+          class="branch-pill clickable"
+          ?disabled=${disabled}
+          title=${title}
+          aria-label=${`Switch branch, currently on ${info.branch}`}
+          @click=${this._onBranchPillClick}
         >
           <span class="glyph">⎇</span>
           <span class="ref">${info.branch}</span>
-        </span>
+        </button>
       `;
     }
     return '';
@@ -3266,6 +3436,185 @@ export class FilePicker extends LitElement {
       }),
     );
     this._closeContextMenu();
+  }
+
+  // ---------------------------------------------------------------
+  // Branch menu
+  // ---------------------------------------------------------------
+
+  /**
+   * Open the branch switcher popover. Anchored at the
+   * pill's bounding rect so the menu appears just
+   * below the pill. Dispatches
+   * `branch-menu-requested` so the files-tab can
+   * fetch the branch list asynchronously — we show a
+   * "Loading…" state until the orchestrator calls
+   * `populateBranchMenu`.
+   */
+  _onBranchPillClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Close any context menu that might be open so we
+    // don't have two popovers visible at once.
+    if (this._contextMenu !== null) {
+      this._closeContextMenu();
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    this._branchMenu = {
+      x: rect.left,
+      y: rect.bottom + 4,
+      branches: [],
+      current: this.branchInfo?.branch || null,
+      loading: true,
+    };
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForBranchMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForBranchMenu,
+      true,
+    );
+    this.dispatchEvent(
+      new CustomEvent('branch-menu-requested', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Public API for the files-tab to populate the menu
+   * after its branch-list RPC resolves. A late-arriving
+   * response whose menu was already closed is silently
+   * dropped — the branch-menu state is our consent gate.
+   */
+  populateBranchMenu(branches) {
+    if (this._branchMenu === null) return;
+    this._branchMenu = {
+      ...this._branchMenu,
+      branches: Array.isArray(branches) ? branches : [],
+      loading: false,
+    };
+  }
+
+  _closeBranchMenu() {
+    if (this._branchMenu === null) return;
+    this._branchMenu = null;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForBranchMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForBranchMenu,
+      true,
+    );
+  }
+
+  _onDocumentClickForBranchMenu(event) {
+    if (this._branchMenu === null) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const insideMenu = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        el.classList.contains('branch-menu'),
+    );
+    if (!insideMenu) {
+      this._closeBranchMenu();
+    }
+  }
+
+  _onDocumentKeyDownForBranchMenu(event) {
+    if (this._branchMenu === null) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeBranchMenu();
+    }
+  }
+
+  _onBranchMenuItemClick(event, branch) {
+    event.preventDefault();
+    event.stopPropagation();
+    // Clicking the current branch is a no-op — just close.
+    if (branch.is_current) {
+      this._closeBranchMenu();
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent('branch-switch-requested', {
+        detail: { name: branch.name, is_remote: branch.is_remote },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this._closeBranchMenu();
+  }
+
+  _renderBranchMenu() {
+    if (this._branchMenu === null) return '';
+    const { x, y, branches, loading } = this._branchMenu;
+    // Clamp position so the menu stays on-screen. Use
+    // the branch-menu's fixed width and max-height
+    // rather than the context-menu estimates.
+    const margin = _CONTEXT_MENU_VIEWPORT_MARGIN;
+    const maxX = window.innerWidth - _BRANCH_MENU_WIDTH - margin;
+    const maxY = window.innerHeight - _BRANCH_MENU_MAX_HEIGHT - margin;
+    const clampedX = Math.max(margin, Math.min(x, maxX));
+    const clampedY = Math.max(margin, Math.min(y, maxY));
+    return html`
+      <div
+        class="branch-menu"
+        style="left: ${clampedX}px; top: ${clampedY}px"
+        role="menu"
+        aria-label="Switch branch"
+      >
+        <div class="branch-menu-header">Switch branch</div>
+        <div class="branch-menu-body">
+          ${loading
+            ? html`<div class="branch-menu-loading">Loading…</div>`
+            : this._renderBranchMenuItems(branches)}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderBranchMenuItems(branches) {
+    if (!Array.isArray(branches) || branches.length === 0) {
+      return html`<div class="branch-menu-loading">No branches</div>`;
+    }
+    return branches.map((b) => {
+      const glyph = b.is_remote ? '☁' : '⎇';
+      return html`
+        <button
+          type="button"
+          class="branch-menu-item"
+          ?disabled=${b.is_current}
+          role="menuitem"
+          title=${b.is_remote
+            ? `${b.name} — remote branch (switching will create a local tracking branch)`
+            : b.is_current
+              ? `${b.name} — current branch`
+              : `Switch to ${b.name}`}
+          @click=${(e) => this._onBranchMenuItemClick(e, b)}
+        >
+          <span class="branch-glyph">${glyph}</span>
+          <span class="branch-name">${b.name}</span>
+          ${b.is_current
+            ? html`<span class="branch-flag current">current</span>`
+            : b.is_remote
+              ? html`<span class="branch-flag remote">remote</span>`
+              : ''}
+        </button>
+      `;
+    });
   }
 
   // ---------------------------------------------------------------

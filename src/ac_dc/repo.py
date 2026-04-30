@@ -1661,6 +1661,136 @@ class Repo:
         )
         return not result.stdout.strip()
 
+    def checkout_branch(self, name: str) -> dict[str, object]:
+        """Switch to a local branch, or create a tracking branch
+        for a remote ref.
+
+        Refuses dirty working trees — the caller should run
+        ``is_clean()`` first and surface a toast, but we re-check
+        here so a racy click can't wedge git into a half-switched
+        state. Uses ``git checkout`` rather than ``git switch`` so
+        the behaviour matches the rest of this module's idioms
+        (git switch is newer and its DWIM rules differ slightly
+        from checkout's in edge cases).
+
+        DWIM semantics for remote refs:
+
+        - ``origin/feature`` with no local ``feature`` →
+          ``git checkout -b feature --track origin/feature``
+          creates a tracking branch and switches to it.
+        - ``origin/feature`` with a local ``feature`` that already
+          exists → switch to the local branch (don't re-create).
+          Matches what ``git checkout feature`` would do if the
+          user had typed the short form.
+        - Local branch name → plain ``git checkout <name>``.
+
+        Parameters
+        ----------
+        name:
+            Branch name. Accepts local branches (``feature``) or
+            remote tracking refs (``origin/feature``). Must not be
+            empty.
+
+        Returns
+        -------
+        dict
+            ``{"status": "ok", "branch": "<name>", "sha": "<SHA>"}``
+            on success. On failure, ``{"error": "<message>"}`` —
+            the UI surfaces this as a toast so the user can retry
+            or resolve the dirty-tree condition.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted  # type: ignore[return-value]
+        if not name or not name.strip():
+            return {"error": "Empty branch name"}
+        name = name.strip()
+        if not self.is_clean():
+            return {
+                "error": (
+                    "Working tree has uncommitted changes. "
+                    "Commit, stash, or discard them before "
+                    "switching branches."
+                )
+            }
+
+        # Distinguish remote-tracking ref ("origin/feature") from
+        # local branch ("feature"). A slash in the name is the
+        # signal — local branches can contain slashes (e.g.
+        # "feature/auth") but those don't start with a remote name
+        # followed by a slash, so we probe for a local branch by
+        # that exact name first.
+        local_probe = self._run_git(
+            ["rev-parse", "--verify", f"refs/heads/{name}"],
+        )
+        is_local = local_probe.returncode == 0
+
+        if is_local:
+            # Plain local switch.
+            checkout = self._run_git(["checkout", "-q", name])
+            if checkout.returncode != 0:
+                return {
+                    "error": (
+                        f"Failed to checkout {name}: "
+                        f"{checkout.stderr.strip() or 'unknown error'}"
+                    )
+                }
+        elif "/" in name:
+            # Remote tracking ref. Split into remote + branch tail,
+            # then DWIM: if a local branch with the tail name
+            # already exists, switch to it; otherwise create a
+            # tracking branch.
+            _, _, tail = name.partition("/")
+            if not tail:
+                return {"error": f"Malformed remote ref: {name}"}
+            tail_probe = self._run_git(
+                ["rev-parse", "--verify", f"refs/heads/{tail}"],
+            )
+            if tail_probe.returncode == 0:
+                # Local branch already exists — plain switch.
+                checkout = self._run_git(["checkout", "-q", tail])
+                if checkout.returncode != 0:
+                    return {
+                        "error": (
+                            f"Failed to checkout {tail}: "
+                            f"{checkout.stderr.strip() or 'unknown error'}"
+                        )
+                    }
+                name = tail  # Return the local name in the result.
+            else:
+                # Create tracking branch.
+                checkout = self._run_git(
+                    ["checkout", "-q", "-b", tail, "--track", name],
+                )
+                if checkout.returncode != 0:
+                    return {
+                        "error": (
+                            f"Failed to create tracking branch {tail}: "
+                            f"{checkout.stderr.strip() or 'unknown error'}"
+                        )
+                    }
+                name = tail
+        else:
+            # Name has no slash and isn't a local branch.
+            # Unresolvable — surface the error rather than letting
+            # git produce a less-specific message.
+            return {"error": f"Unknown branch: {name}"}
+
+        # Resolve the new HEAD SHA for the result envelope.
+        sha_probe = self._run_git(["rev-parse", "HEAD"])
+        sha = (
+            sha_probe.stdout.strip()
+            if sha_probe.returncode == 0
+            else ""
+        )
+        # Fire the post-write callback with an empty path — the
+        # whole working tree may have changed, so every index
+        # should re-scan on its own schedule. An empty path is
+        # the LLMService callback's signal for "refresh
+        # everything".
+        self._fire_post_write("")
+        return {"status": "ok", "branch": name, "sha": sha}
+
     # ------------------------------------------------------------------
     # Commit graph and log
     # ------------------------------------------------------------------

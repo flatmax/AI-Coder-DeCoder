@@ -1699,6 +1699,167 @@ class TestBranches:
 
 
 # ---------------------------------------------------------------------------
+# Branch checkout
+# ---------------------------------------------------------------------------
+
+
+class TestCheckoutBranch:
+    """checkout_branch — switching between local and remote branches."""
+
+    @staticmethod
+    def _seed_two_branches(repo: Repo) -> None:
+        """Create main with one commit and a feature branch with another.
+
+        Leaves HEAD on main so tests can verify the initial state.
+        """
+        (repo.root / "a.md").write_text("on main\n", encoding="utf-8")
+        _run_git(repo.root, "add", "a.md")
+        _run_git(repo.root, "commit", "-q", "-m", "main init")
+        _run_git(repo.root, "checkout", "-q", "-b", "feature")
+        (repo.root / "b.md").write_text("on feature\n", encoding="utf-8")
+        _run_git(repo.root, "add", "b.md")
+        _run_git(repo.root, "commit", "-q", "-m", "feature work")
+        _run_git(repo.root, "checkout", "-q", "main")
+
+    def test_switches_to_existing_local_branch(self, repo: Repo) -> None:
+        """Plain branch name switches HEAD to that branch."""
+        self._seed_two_branches(repo)
+        result = repo.checkout_branch("feature")
+        assert result.get("status") == "ok"
+        assert result.get("branch") == "feature"
+        assert len(result.get("sha", "")) == 40
+        # Working tree reflects feature branch now.
+        assert (repo.root / "b.md").is_file()
+        # And git's own view agrees.
+        current = _run_git(
+            repo.root, "rev-parse", "--abbrev-ref", "HEAD",
+        ).stdout.strip()
+        assert current == "feature"
+
+    def test_rejects_empty_name(self, repo: Repo) -> None:
+        """Empty string / whitespace-only returns a structured error."""
+        self._seed_two_branches(repo)
+        assert "error" in repo.checkout_branch("")
+        assert "error" in repo.checkout_branch("   ")
+
+    def test_rejects_unknown_branch(self, repo: Repo) -> None:
+        """Non-existent local branch returns a structured error."""
+        self._seed_two_branches(repo)
+        result = repo.checkout_branch("does-not-exist")
+        assert "error" in result
+        assert "does-not-exist" in result["error"]
+
+    def test_refuses_dirty_working_tree(self, repo: Repo) -> None:
+        """Uncommitted changes block the switch with a clear error."""
+        self._seed_two_branches(repo)
+        # Modify the tracked file so the working tree is dirty.
+        (repo.root / "a.md").write_text("uncommitted\n", encoding="utf-8")
+        result = repo.checkout_branch("feature")
+        assert "error" in result
+        assert "uncommitted" in result["error"].lower()
+        # HEAD still on main.
+        current = _run_git(
+            repo.root, "rev-parse", "--abbrev-ref", "HEAD",
+        ).stdout.strip()
+        assert current == "main"
+
+    def test_switch_to_current_branch_is_noop(self, repo: Repo) -> None:
+        """Switching to the branch you're already on succeeds.
+
+        Git's own checkout is a no-op in that case; we want the
+        same semantics so a racy double-click doesn't produce an
+        error toast.
+        """
+        self._seed_two_branches(repo)
+        result = repo.checkout_branch("main")
+        assert result.get("status") == "ok"
+        assert result.get("branch") == "main"
+
+    def test_remote_ref_creates_tracking_branch(
+        self, repo: Repo, tmp_path
+    ) -> None:
+        """``origin/feature`` with no local branch creates one that tracks.
+
+        Sets up a bare remote, pushes a feature branch, deletes the
+        local copy, then checks out via the ``origin/feature``
+        form. After the switch, a local ``feature`` branch exists
+        with upstream tracking configured.
+        """
+        remote_root = tmp_path / "origin.git"
+        remote_root.mkdir()
+        _run_git(remote_root, "init", "-q", "--bare")
+        # Initial commit on main, push.
+        (repo.root / "a.md").write_text("on main\n", encoding="utf-8")
+        _run_git(repo.root, "add", "a.md")
+        _run_git(repo.root, "commit", "-q", "-m", "init")
+        _run_git(repo.root, "remote", "add", "origin", str(remote_root))
+        _run_git(repo.root, "push", "-q", "-u", "origin", "main")
+        # Create a feature branch, push, then delete locally.
+        _run_git(repo.root, "checkout", "-q", "-b", "feature")
+        _run_git(repo.root, "commit", "-q", "--allow-empty", "-m", "feat")
+        _run_git(repo.root, "push", "-q", "-u", "origin", "feature")
+        _run_git(repo.root, "checkout", "-q", "main")
+        _run_git(repo.root, "branch", "-q", "-D", "feature")
+        # Sanity: feature is gone locally but origin/feature exists.
+        refs = _run_git(
+            repo.root, "for-each-ref", "refs/remotes/",
+            "--format=%(refname)",
+        ).stdout
+        assert "refs/remotes/origin/feature" in refs
+        # Switch via the remote form.
+        result = repo.checkout_branch("origin/feature")
+        assert result.get("status") == "ok"
+        # Result's branch name is the tail — the local name we
+        # just created, not the remote qualified form.
+        assert result.get("branch") == "feature"
+        # Local tracking branch now exists.
+        local_probe = _run_git(
+            repo.root, "rev-parse", "--verify", "refs/heads/feature",
+        )
+        assert local_probe.returncode == 0
+
+    def test_remote_ref_with_existing_local_switches_local(
+        self, repo: Repo, tmp_path
+    ) -> None:
+        """``origin/feature`` with an existing local ``feature`` switches
+        to the local branch without re-creating.
+
+        DWIM rule — matches what plain ``git checkout feature`` does
+        when both sides exist.
+        """
+        remote_root = tmp_path / "origin.git"
+        remote_root.mkdir()
+        _run_git(remote_root, "init", "-q", "--bare")
+        (repo.root / "a.md").write_text("on main\n", encoding="utf-8")
+        _run_git(repo.root, "add", "a.md")
+        _run_git(repo.root, "commit", "-q", "-m", "init")
+        _run_git(repo.root, "remote", "add", "origin", str(remote_root))
+        _run_git(repo.root, "push", "-q", "-u", "origin", "main")
+        _run_git(repo.root, "checkout", "-q", "-b", "feature")
+        _run_git(repo.root, "commit", "-q", "--allow-empty", "-m", "feat")
+        _run_git(repo.root, "push", "-q", "-u", "origin", "feature")
+        _run_git(repo.root, "checkout", "-q", "main")
+        # Local feature branch still exists — don't delete.
+        result = repo.checkout_branch("origin/feature")
+        assert result.get("status") == "ok"
+        assert result.get("branch") == "feature"
+        # HEAD is on the local feature branch.
+        current = _run_git(
+            repo.root, "rev-parse", "--abbrev-ref", "HEAD",
+        ).stdout.strip()
+        assert current == "feature"
+
+    def test_malformed_remote_ref_rejected(self, repo: Repo) -> None:
+        """``origin/`` with no tail name returns a structured error."""
+        self._seed_two_branches(repo)
+        result = repo.checkout_branch("origin/")
+        # Either rejected as malformed or as "unknown branch" —
+        # either response is acceptable because the ref can't
+        # resolve. We just assert it doesn't raise.
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
 # Commit graph and log
 # ---------------------------------------------------------------------------
 
