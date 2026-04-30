@@ -611,6 +611,7 @@ describe('SvgViewer keyboard shortcuts', () => {
 
   it('Ctrl+S saves active file', async () => {
     const el = mountViewer();
+    el.classList.add('viewer-visible');
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
@@ -626,6 +627,7 @@ describe('SvgViewer keyboard shortcuts', () => {
 
   it('Ctrl+W closes active file', async () => {
     const el = mountViewer();
+    el.classList.add('viewer-visible');
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
@@ -636,6 +638,7 @@ describe('SvgViewer keyboard shortcuts', () => {
 
   it('Ctrl+PageDown cycles to next file', async () => {
     const el = mountViewer();
+    el.classList.add('viewer-visible');
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
@@ -649,6 +652,7 @@ describe('SvgViewer keyboard shortcuts', () => {
 
   it('Ctrl+PageUp cycles to previous file', async () => {
     const el = mountViewer();
+    el.classList.add('viewer-visible');
     await settle(el);
     await el.openFile({ path: 'a.svg' });
     await settle(el);
