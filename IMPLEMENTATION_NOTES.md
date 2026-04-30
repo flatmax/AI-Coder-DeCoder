@@ -131,7 +131,7 @@ Layers 0–4 complete. Layer 5 is substantially delivered — core interaction l
 2. **Doc Convert tab — commit 6** — commits 1–5 delivered the full interaction surface. Commit 6's scope is TBD; land after UI polish so the tab renders in a finished dialog chrome.
 3. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
 
-Beyond Layer 5: Layer 6 (deployment — build tooling, PyInstaller packaging, release pipeline) has not started. The webapp-dist bundling deferral (D7) and version baking for releases both land in Layer 6.
+**Layer 6 (build & deployment) — on pause.** PyInstaller packaging, release workflow, Vite → webapp-dist bundling, and version baking are all deferred. The system needs more hardening at the application layer first — sharper edges in the existing features, deeper test coverage on the paths users actually exercise, and any latent correctness bugs surfaced in day-to-day use — before packaging cost becomes worth paying. Revisit after a hardening pass decides what's actually ready to ship. Related deferrals that land with Layer 6: the webapp-dist bundling rule (D7), the version-baking mechanism described in `specs4/6-deployment/build.md § Version Baking`, and the GitHub Actions release matrix described in `specs-reference/6-deployment/build.md § PyInstaller command — release build`.
 
 ## UI polish work plan
 
