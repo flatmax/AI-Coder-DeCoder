@@ -1613,9 +1613,23 @@ export class SvgViewer extends LitElement {
   _onKeyDown(event) {
     if (!this.isConnected) return;
     if (this._activeIndex < 0) return;
+    // Gate shortcuts on whether the SVG viewer is the
+    // foreground viewer. Focus typically lives in the
+    // chat textarea regardless of which viewer is
+    // active, so a composedPath check would never
+    // match and Ctrl+S would fall through to the
+    // browser's default Save Page action.
+    //
+    // The app shell adds `viewer-visible` to whichever
+    // of the diff / SVG viewers is currently front. We
+    // use that as the authority for shortcut ownership:
+    // when the SVG viewer is front, Ctrl+S saves the
+    // active SVG; when it isn't, the diff viewer's own
+    // shortcut handler (which lives inside Monaco) wins.
+    const isForeground = this.classList.contains('viewer-visible');
     // F11 toggles presentation mode (no Ctrl needed).
     if (event.key === 'F11') {
-      if (this._eventTargetInsideUs(event)) {
+      if (isForeground) {
         event.preventDefault();
         this._togglePresentation();
       }
@@ -1626,7 +1640,7 @@ export class SvgViewer extends LitElement {
       event.key === 'Escape' &&
       this._mode === _MODE_PRESENT
     ) {
-      if (this._eventTargetInsideUs(event)) {
+      if (isForeground) {
         event.preventDefault();
         this._togglePresentation();
       }
@@ -1634,7 +1648,7 @@ export class SvgViewer extends LitElement {
     }
     const ctrl = event.ctrlKey || event.metaKey;
     if (!ctrl) return;
-    if (!this._eventTargetInsideUs(event)) return;
+    if (!isForeground) return;
     // Ctrl+Shift+C — copy as PNG.
     if (
       (event.key === 'c' || event.key === 'C') &&

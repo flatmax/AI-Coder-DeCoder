@@ -1173,26 +1173,6 @@ export class FilePicker extends LitElement {
     // with rename and duplicate (only one inline input
     // can be active at a time).
     this._creating = null;
-    // New-entry creation state. Shape when active:
-    //   {mode: 'new-file' | 'new-directory',
-    //    parentPath: string}
-    // Null when no creation is in progress. Distinct from
-    // `_renaming` / `_duplicating` because the input is
-    // not operating on an existing file — it's creating
-    // a new one inside `parentPath`. Mutually exclusive
-    // with rename and duplicate (only one inline input
-    // can be active at a time).
-    this._creating = null;
-    // New-entry creation state. Shape when active:
-    //   {mode: 'new-file' | 'new-directory',
-    //    parentPath: string}
-    // Null when no creation is in progress. Distinct from
-    // `_renaming` / `_duplicating` because the input is
-    // not operating on an existing file — it's creating
-    // a new one inside `parentPath`. Mutually exclusive
-    // with rename and duplicate (only one inline input
-    // can be active at a time).
-    this._creating = null;
     // Snapshot of the expanded set before the most recent
     // `setTree` call that replaced a real tree with a pruned
     // one. Used by `restoreExpandedState` when file search
@@ -1915,6 +1895,24 @@ export class FilePicker extends LitElement {
     const resetTitle = this._streaming
       ? 'Reset disabled while AI is responding'
       : 'Reset to HEAD (discard all uncommitted changes)';
+    // Review button — only visible when not already in
+    // review mode. The picker's own review banner
+    // handles the exit affordance when review is active,
+    // so showing a "Review…" button alongside would be
+    // redundant and confusing. Disabled during streaming
+    // / commit to prevent racing a mid-flight mutation.
+    const reviewActive = !!(
+      this.reviewState && this.reviewState.active
+    );
+    const reviewDisabled =
+      this._committing || this._streaming || reviewActive;
+    const reviewTitle = reviewActive
+      ? 'Already in review mode'
+      : this._streaming
+        ? 'Review disabled while AI is responding'
+        : this._committing
+          ? 'Review disabled during commit'
+          : 'Start a code review of a branch';
     return html`
       <div
         class="picker-git-actions"
@@ -1942,8 +1940,35 @@ export class FilePicker extends LitElement {
           aria-label="Reset to HEAD"
           @click=${() => this._dispatchGitAction('reset')}
         >⚠️</button>
+        ${reviewActive ? '' : html`
+          <button
+            class="picker-git-btn"
+            ?disabled=${reviewDisabled}
+            title=${reviewTitle}
+            aria-label="Start code review"
+            @click=${this._onReviewButtonClick}
+          >🔍</button>
+        `}
       </div>
     `;
+  }
+
+  /**
+   * Handle the Review button click. Dispatches a
+   * bubbling+composed `open-review-selector` event
+   * that the files-tab orchestrator catches to open
+   * the branch-selection modal. The picker doesn't
+   * know about RPCs or modals — it just fires the
+   * intent event, matching the pattern used by
+   * `exit-review`.
+   */
+  _onReviewButtonClick() {
+    this.dispatchEvent(
+      new CustomEvent('open-review-selector', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _dispatchGitAction(action) {

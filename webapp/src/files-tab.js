@@ -75,6 +75,7 @@ import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import './file-picker.js';
 import './chat-panel.js';
+import './commit-graph.js';
 
 // ---------------------------------------------------------------
 // Left-panel resizer constants
@@ -292,6 +293,24 @@ export class FilesTab extends RpcMixin(LitElement) {
      * reflect load status in the template for tests.
      */
     _treeLoaded: { type: Boolean, state: true },
+    /**
+     * Review selector modal state. Null when closed;
+     * when open, the shape is:
+     *   {
+     *     open: bool,
+     *     selected: {commit, branch} | null,
+     *     starting: bool,
+     *   }
+     * `selected` holds the commit/branch the user has
+     * clicked from the graph but hasn't yet confirmed
+     * with "Start review". `starting` gates the confirm
+     * button while the RPC is in flight.
+     *
+     * The commit-graph component fetches its own data
+     * via the injected `call` prop; we don't preload
+     * branches here anymore.
+     */
+    _reviewSelector: { type: Object, state: true },
   };
 
   static styles = css`
@@ -384,6 +403,197 @@ export class FilesTab extends RpcMixin(LitElement) {
     ac-chat-panel {
       flex: 1;
       min-height: 0;
+    }
+
+    /* Review selector modal — floating dialog anchored
+     * inside the files-tab's own shadow. Positioned
+     * fixed so it escapes any ancestor transform
+     * contexts and renders cleanly above the rest of
+     * the app. Backdrop dims the background to signal
+     * modal focus without fully hiding the underlying
+     * UI (the user may want to glance at the picker
+     * while deciding which branch to review).
+     *
+     * This is the minimal first-increment UI — a flat
+     * branch list. The full git-graph selector (SVG
+     * lanes, disambiguation popover) will replace the
+     * list body later without changing the modal
+     * container or the start_review dispatch path. */
+    .review-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 2500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .review-modal {
+      background: rgba(22, 27, 34, 0.98);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      width: 80vw;
+      max-width: 1100px;
+      min-width: 520px;
+      height: 80vh;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.875rem;
+      backdrop-filter: blur(8px);
+    }
+    /* Commit-graph wrapper fills the modal body. */
+    ac-commit-graph {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .review-action-bar {
+      flex-shrink: 0;
+      padding: 0.6rem 1rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.1);
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .review-action-summary {
+      flex: 1;
+      font-size: 0.8125rem;
+      color: var(--text-secondary, #8b949e);
+    }
+    .review-action-summary strong {
+      color: var(--text-primary, #c9d1d9);
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    .review-action-bar .review-start-btn {
+      flex-shrink: 0;
+    }
+    .review-modal-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+    }
+    .review-modal-title {
+      flex: 1;
+      font-weight: 600;
+    }
+    .review-modal-close {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      opacity: 0.7;
+      font-size: 1rem;
+      line-height: 1;
+    }
+    .review-modal-close:hover {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.08);
+    }
+    .review-modal-hint {
+      padding: 0.5rem 1rem;
+      font-size: 0.8125rem;
+      color: var(--text-secondary, #8b949e);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.06);
+    }
+    .review-modal-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0.35rem 0;
+    }
+    .review-modal-empty {
+      padding: 1.5rem;
+      text-align: center;
+      font-style: italic;
+      opacity: 0.6;
+    }
+    .review-branch-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.04);
+    }
+    .review-branch-row:hover {
+      background: rgba(240, 246, 252, 0.04);
+    }
+    .review-branch-row:last-child {
+      border-bottom: none;
+    }
+    .review-branch-info {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+    .review-branch-name {
+      font-weight: 500;
+      word-break: break-all;
+    }
+    .review-branch-name.current {
+      color: var(--accent-primary, #58a6ff);
+    }
+    .review-branch-sha {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      font-family: ui-monospace, SFMono-Regular, monospace;
+    }
+    .review-branch-badges {
+      display: flex;
+      gap: 0.25rem;
+      flex-wrap: wrap;
+    }
+    .review-branch-badge {
+      display: inline-block;
+      font-size: 0.6875rem;
+      padding: 0.05rem 0.35rem;
+      border-radius: 3px;
+      background: rgba(110, 118, 129, 0.2);
+      color: var(--text-secondary, #8b949e);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .review-branch-badge.current {
+      background: rgba(88, 166, 255, 0.2);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .review-branch-badge.remote {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+    }
+    .review-start-btn {
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      color: var(--accent-primary, #58a6ff);
+      padding: 0.35rem 0.7rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    .review-start-btn:hover:not([disabled]) {
+      background: rgba(88, 166, 255, 0.25);
+      border-color: var(--accent-primary, #58a6ff);
+    }
+    .review-start-btn[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .review-modal-loading {
+      padding: 1.5rem;
+      text-align: center;
+      opacity: 0.7;
     }
   `;
 
@@ -497,8 +707,17 @@ export class FilesTab extends RpcMixin(LitElement) {
     // explicit refresh) do not re-trigger auto-select.
     this._initialAutoSelect = true;
 
+    // Review selector state. Null when the modal is
+    // closed. The picker dispatches `open-review-selector`
+    // when the user clicks the Review button; we fetch
+    // branches and populate this object, which triggers
+    // a re-render of the modal template.
+    this._reviewSelector = null;
+
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
+    this._onOpenReviewSelector =
+      this._onOpenReviewSelector.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
@@ -2799,6 +3018,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @new-file-committed=${this._onNewFileCommitted}
           @new-directory-committed=${this._onNewDirectoryCommitted}
           @exit-review=${this._onExitReview}
+          @open-review-selector=${this._onOpenReviewSelector}
         ></ac-file-picker>
       </div>
       <div
@@ -2825,6 +3045,239 @@ export class FilesTab extends RpcMixin(LitElement) {
           @file-search-scroll=${this._onFileSearchScroll}
           @filter-from-chat=${this._onFilterFromChat}
         ></ac-chat-panel>
+      </div>
+      ${this._renderReviewSelectorModal()}
+    `;
+  }
+
+  // ---------------------------------------------------------------
+  // Review selector modal
+  // ---------------------------------------------------------------
+
+  /**
+   * Handle the picker's `open-review-selector` event.
+   * Runs the clean-tree gate first so dirty working
+   * trees bail out with a clear message instead of
+   * producing a modal that leads to an RPC failure.
+   * Then opens the modal — the commit-graph component
+   * fetches its own data via the RPC call proxy.
+   */
+  async _onOpenReviewSelector() {
+    try {
+      const readiness = await this.rpcExtract(
+        'LLMService.check_review_ready',
+      );
+      if (readiness && readiness.clean === false) {
+        const msg = readiness.message
+          || 'Working tree must be clean to start a review.';
+        this._showToast(msg, 'warning');
+        return;
+      }
+    } catch (err) {
+      console.error('[files-tab] check_review_ready failed', err);
+      this._showToast(
+        `Review check failed: ${err?.message || err}`,
+        'error',
+      );
+      return;
+    }
+    this._reviewSelector = {
+      open: true,
+      selected: null,
+      starting: false,
+    };
+  }
+
+  /**
+   * Commit-graph fired commit-selected — the user
+   * clicked a commit (optionally chose a branch via
+   * the disambiguation popover). Store the selection
+   * so the Start Review action bar can display the
+   * summary and fire start_review on confirm.
+   *
+   * Detail: `{commit, branch}`. `branch` may be null
+   * when no branch in the loaded history reaches the
+   * commit — the action bar handles that by
+   * disabling the Start button.
+   */
+  _onCommitSelectedFromGraph(event) {
+    if (!this._reviewSelector) return;
+    const detail = event.detail || {};
+    if (!detail.commit) return;
+    this._reviewSelector = {
+      ...this._reviewSelector,
+      selected: {
+        commit: detail.commit,
+        branch: detail.branch || null,
+      },
+    };
+  }
+
+  /**
+   * Graph fired graph-error — surface as a toast but
+   * keep the modal open so the user can retry or
+   * close it manually.
+   */
+  _onGraphError(event) {
+    const message = event.detail?.message || 'Graph load failed';
+    this._showToast(`Commit graph: ${message}`, 'error');
+  }
+
+  /**
+   * Close the modal — user clicked the backdrop, the
+   * close button, or pressed Escape. No RPC cleanup
+   * needed; an in-flight fetch's resolve will find
+   * `_reviewSelector` null and skip its update.
+   */
+  _closeReviewSelector() {
+    this._reviewSelector = null;
+  }
+
+  /**
+   * Start a review using the currently-selected
+   * commit from the graph. The confirm button in the
+   * action bar triggers this.
+   *
+   * `selected.branch` may be null when the graph
+   * walk couldn't find any branch reaching the
+   * commit — the confirm button is disabled in that
+   * case so this method is only reachable when both
+   * fields are populated. Defensive guard kept
+   * anyway.
+   *
+   * Backend's `start_review(branch, base_commit)`
+   * accepts any commit SHA as the base — not just
+   * branch tips — so the user can scroll down the
+   * graph and pick an older commit to widen the
+   * review scope.
+   */
+  async _confirmStartReview() {
+    if (!this._reviewSelector) return;
+    const selected = this._reviewSelector.selected;
+    if (!selected || !selected.branch || !selected.commit) return;
+    const branch = selected.branch.name;
+    const baseCommit = selected.commit.sha;
+    if (typeof branch !== 'string' || !branch) return;
+    if (typeof baseCommit !== 'string' || !baseCommit) return;
+    this._reviewSelector = {
+      ...this._reviewSelector,
+      starting: true,
+    };
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.start_review',
+        branch,
+        baseCommit,
+      );
+      if (this._isRestrictedError(result)) {
+        this._showToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        if (this._reviewSelector) {
+          this._reviewSelector = {
+            ...this._reviewSelector,
+            starting: false,
+          };
+        }
+        return;
+      }
+      if (result && result.error) {
+        this._showToast(
+          `Start review failed: ${result.error}`,
+          'error',
+        );
+        if (this._reviewSelector) {
+          this._reviewSelector = {
+            ...this._reviewSelector,
+            starting: false,
+          };
+        }
+        return;
+      }
+      this._closeReviewSelector();
+    } catch (err) {
+      console.error('[files-tab] start_review failed', err);
+      this._showToast(
+        `Start review failed: ${err?.message || err}`,
+        'error',
+      );
+      if (this._reviewSelector) {
+        this._reviewSelector = {
+          ...this._reviewSelector,
+          starting: false,
+        };
+      }
+    }
+  }
+
+  _onReviewBackdropClick(event) {
+    // Only close when the user clicks the backdrop
+    // itself — clicks that bubbled from inside the
+    // modal (buttons, rows) shouldn't close.
+    if (event.target === event.currentTarget) {
+      this._closeReviewSelector();
+    }
+  }
+
+  _renderReviewSelectorModal() {
+    const state = this._reviewSelector;
+    if (!state) return '';
+    const selected = state.selected;
+    const starting = !!state.starting;
+    const canStart =
+      !!selected && !!selected.branch && !!selected.commit && !starting;
+    return html`
+      <div
+        class="review-modal-backdrop"
+        @click=${this._onReviewBackdropClick}
+      >
+        <div
+          class="review-modal"
+          role="dialog"
+          aria-label="Start code review"
+        >
+          <div class="review-modal-header">
+            <span class="review-modal-title">
+              🔍 Start code review
+            </span>
+            <button
+              class="review-modal-close"
+              title="Close"
+              aria-label="Close review selector"
+              @click=${this._closeReviewSelector}
+            >✕</button>
+          </div>
+          <div class="review-modal-hint">
+            Click a commit to select it as the review base.
+            The review will compare the chosen branch tip
+            against its merge-base with your current
+            branch (or main / master).
+          </div>
+          <ac-commit-graph
+            .rpcCall=${(method, ...args) => this.rpcExtract(method, ...args)}
+            @commit-selected=${this._onCommitSelectedFromGraph}
+            @graph-error=${this._onGraphError}
+          ></ac-commit-graph>
+          <div class="review-action-bar">
+            <div class="review-action-summary">
+              ${selected
+                ? html`
+                    Reviewing
+                    <strong>${selected.branch?.name || '(no branch)'}</strong>
+                    from base
+                    <strong>${selected.commit.short_sha
+                      || selected.commit.sha?.slice(0, 7)}</strong>
+                  `
+                : html`<em>Click a commit to select it as the review base.</em>`}
+            </div>
+            <button
+              class="review-start-btn"
+              ?disabled=${!canStart}
+              @click=${this._confirmStartReview}
+            >${starting ? 'Starting…' : 'Start review'}</button>
+          </div>
+        </div>
       </div>
     `;
   }
