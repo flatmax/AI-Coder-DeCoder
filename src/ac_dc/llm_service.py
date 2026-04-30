@@ -2588,16 +2588,25 @@ class LLMService:
         if restricted is not None:
             return restricted  # type: ignore[return-value]
         self._excluded_index_files = list(files)
-        # Remove excluded items from the tracker immediately.
-        for path in files:
-            for prefix in ("symbol:", "doc:", "file:"):
-                key = prefix + path
-                if self._stability_tracker.has_item(key):
-                    all_items = self._stability_tracker.get_all_items()
-                    item = all_items.get(key)
-                    if item is not None:
-                        self._stability_tracker._items.pop(key, None)
-                        self._stability_tracker._broken_tiers.add(item.tier)
+        # Remove excluded items from EVERY mode's tracker,
+        # not just the currently-active one. Without this,
+        # excluding files in one mode leaves stale entries
+        # in the other mode's tracker — visible in the cache
+        # viewer after a mode switch. `_update_stability`
+        # step 0a eventually cleans them up on the next chat
+        # request, but the Context tab's breakdown call
+        # doesn't trigger that path, so users see excluded
+        # files rendered as cached tier entries in the UI.
+        for tracker in self._trackers.values():
+            for path in files:
+                for prefix in ("symbol:", "doc:", "file:"):
+                    key = prefix + path
+                    if tracker.has_item(key):
+                        all_items = tracker.get_all_items()
+                        item = all_items.get(key)
+                        if item is not None:
+                            tracker._items.pop(key, None)
+                            tracker._broken_tiers.add(item.tier)
         self._broadcast_event("filesChanged", list(self._selected_files))
         return list(self._excluded_index_files)
 
