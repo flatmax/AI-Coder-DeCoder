@@ -133,9 +133,9 @@ Layers 0–4 complete. Layer 5 is substantially delivered — core interaction l
 
 **Layer 6 (build & deployment) — on pause.** PyInstaller packaging, release workflow, Vite → webapp-dist bundling, and version baking are all deferred. The system needs more hardening at the application layer first — sharper edges in the existing features, deeper test coverage on the paths users actually exercise, and any latent correctness bugs surfaced in day-to-day use — before packaging cost becomes worth paying. Revisit after a hardening pass decides what's actually ready to ship. Related deferrals that land with Layer 6: the webapp-dist bundling rule (D7), the version-baking mechanism described in `specs4/6-deployment/build.md § Version Baking`, and the GitHub Actions release matrix described in `specs-reference/6-deployment/build.md § PyInstaller command — release build`.
 
-## UI polish work plan
+## UI polish work plan — complete
 
-Four commits, in order. Each is a standalone change with its own tests. Strike through the heading and add a one-line delivery note with the commit hash after each lands.
+All four commits delivered. Viewer relayout on resize (`7213ba4`), Alt+1..4 / Alt+M shortcuts (`e5dcf14`), file picker left-panel resizer (`f9a9856`), and the shell.md dialog-chrome catch-up (`c586d59`). Plan detail preserved below for reference.
 
 ### ~~Commit A — Viewer relayout on dialog/window resize~~ (delivered `7213ba4`)
 
