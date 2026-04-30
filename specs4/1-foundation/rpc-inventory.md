@@ -15,7 +15,7 @@ Authoritative catalog of every RPC method in the system. Other specs reference m
 - File manipulation — rename file, rename directory
 - Tree and listing — full file tree with git status, flat sorted file list
 - Diffs — staged, unstaged, to-branch (two-dot), for a single review file
-- Branches — current, list, list-all (local + remote), resolve ref, commit graph (paginated), commit log range, parent of commit, merge-base
+- Branches — current, list, list-all (local + remote), resolve ref, checkout (switch local, or create tracking branch from remote ref via DWIM; refuses dirty tree), commit graph (paginated), commit log range, parent of commit, merge-base
 - Commits — commit, reset-hard, search commits, stage-all
 - Review support — setup soft reset, exit review mode, changed files in review
 - Clean check — working tree cleanliness

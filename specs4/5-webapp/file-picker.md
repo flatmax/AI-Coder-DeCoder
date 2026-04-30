@@ -5,11 +5,24 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 ### Root Node — Branch Badge
 - Root row displays a checkbox, the repo name, and a compact pill showing the current git branch
 - Branch name prefixed with a branch icon
-- Normal branch — muted style
-- Detached HEAD — orange-tinted style, short SHA instead of branch name
+- Normal branch — muted style, rendered as a clickable button that opens the branch switcher popover (see below)
+- Detached HEAD — orange-tinted style, short SHA instead of branch name; non-interactive (switching out of detached HEAD goes through the commit graph, not the pill)
 - Long branch names truncated with ellipsis, full name in tooltip
 - Fetched via the current-branch RPC on every tree reload — stays current after commits, checkouts, and review entry/exit
 - Root checkbox aggregates over every file in the repo — same semantics as a directory checkbox applied to the whole tree: regular click toggles select-all (un-excluding any excluded descendants), shift+click toggles exclude-all (deselecting any selected descendants). Checked / indeterminate / unchecked reflect aggregate selection; strikethrough + dimmed checkbox reflect all-excluded; `✕` badge reflects partial exclusion
+
+### Branch Switcher
+- Clicking the branch pill opens a popover listing every local and remote branch
+- Pill disabled during review mode, active streaming, and in-flight commits — branch switching during any of these would invalidate in-progress state; tooltip adapts to explain why
+- Picker dispatches a branch-menu-requested event when the pill is clicked; files tab fetches branches via the list-all-branches RPC and populates the menu via the picker's public populate method
+- Menu shows a "Loading…" state until the branch list arrives
+- Each row tooltip leads with the full branch name so truncated rows are recoverable on hover
+- Current branch row disabled; clicking it is a no-op that closes the menu
+- Selecting a branch dispatches a branch-switch-requested event with the branch name and remote flag
+- Files tab performs a clean-tree probe before the switch — dirty tree produces a toast and aborts before the RPC (backend also enforces this; the frontend check avoids a round-trip and gives a clearer message)
+- Switch calls the checkout-branch RPC; on success, a toast confirms the new branch and the file tree reloads; on failure, the error message from the RPC surfaces as a toast
+- Popover position clamps to viewport; outside-click or Escape closes it
+- Remote-ref selection creates a local tracking branch via backend DWIM (see [repository.md](../1-foundation/repository.md#branch-operations))
 ### Directory Nodes
 - Expandable toggle
 - Checkbox selects/deselects all children

@@ -61,6 +61,7 @@ In single-agent operation, the lock is effectively never contended — only one 
 - List local branches
 - List all branches (local + remote) sorted by recency, deduplicated
 - Check working tree cleanliness (ignores untracked by default)
+- Checkout branch — switch to a local branch, or create a local tracking branch when given a remote ref like `origin/feature`. DWIM semantics: remote ref with existing local counterpart switches to the local branch without re-creating; remote ref without counterpart creates a tracking branch and switches to it; plain local names switch directly. Refuses dirty working trees. Returns `{status, branch, sha}` on success, `{error}` on failure
 - Commit graph (paginated, with parent relationships) — used by review selector
 - Commit log for a range
 - Parent of a commit
