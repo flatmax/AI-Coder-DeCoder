@@ -295,20 +295,16 @@ export class FilesTab extends RpcMixin(LitElement) {
     _treeLoaded: { type: Boolean, state: true },
     /**
      * Review selector modal state. Null when closed;
-     * when open, the shape is:
-     *   {
-     *     open: bool,
-     *     selected: {commit, branch} | null,
-     *     starting: bool,
-     *   }
-     * `selected` holds the commit/branch the user has
-     * clicked from the graph but hasn't yet confirmed
-     * with "Start review". `starting` gates the confirm
-     * button while the RPC is in flight.
+     * otherwise `{selected, starting}` where:
+     *   - selected: {commit, branch} | null — the
+     *     commit the user clicked (via the graph) but
+     *     hasn't yet confirmed with "Start review".
+     *   - starting: bool — gates the confirm button
+     *     while the start_review RPC is in flight.
      *
-     * The commit-graph component fetches its own data
-     * via the injected `call` prop; we don't preload
-     * branches here anymore.
+     * Non-null presence = modal open. The commit-graph
+     * component fetches its own data via the injected
+     * rpcCall prop; no branch preloading here.
      */
     _reviewSelector: { type: Object, state: true },
   };
@@ -3082,7 +3078,6 @@ export class FilesTab extends RpcMixin(LitElement) {
       return;
     }
     this._reviewSelector = {
-      open: true,
       selected: null,
       starting: false,
     };

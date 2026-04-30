@@ -656,29 +656,11 @@ export class CommitGraph extends LitElement {
     this._loading = false;
     this._popover = null;
     this._hiddenBranches = new Set();
-    // One-shot guard so the `updated` retry path
-    // doesn't re-fire _fetchInitial if an in-flight
-    // fetch hasn't resolved yet but some other
-    // property changed.
-    this._initialFetchStarted = false;
     this._onScroll = this._onScroll.bind(this);
     this._onDocumentClickForPopover =
       this._onDocumentClickForPopover.bind(this);
     this._onDocumentKeyDownForPopover =
       this._onDocumentKeyDownForPopover.bind(this);
-  }
-
-  connectedCallback() {
-    super.connectedCallback();
-    // First fetch kicks off as soon as the rpcCall
-    // prop is set. If already set on mount (parent
-    // assigned before append), fetch synchronously.
-    // Otherwise `updated()` picks it up when the
-    // prop lands from the parent's template binding.
-    if (this.rpcCall && !this._initialFetchStarted) {
-      this._initialFetchStarted = true;
-      this._fetchInitial();
-    }
   }
 
   disconnectedCallback() {
@@ -688,33 +670,31 @@ export class CommitGraph extends LitElement {
 
   updated(changedProps) {
     super.updated?.(changedProps);
-    // Kick off the initial fetch as soon as rpcCall
-    // is available. Checking on every `updated` (not
-    // just when rpcCall itself changed) handles the
-    // case where Lit's first-render change detection
-    // is missing a property bound via `.rpcCall=${fn}`
-    // — the property lands but changedProps doesn't
-    // flag it. The one-shot guard prevents the retry
-    // from re-firing after a successful fetch.
+    // Fire the initial fetch once rpcCall has landed
+    // from the parent's `.rpcCall=${fn}` binding.
+    // Lit assigns properties between `connectedCallback`
+    // and the first `updated()`, so `connectedCallback`
+    // can't see rpcCall yet — this is the right hook.
+    // The `_commits.length === 0 && !_loading` guard
+    // prevents re-entry: `_fetchInitial` sets
+    // `_loading = true` synchronously, so a same-tick
+    // updated() call can't reach a second fetch.
     if (
       this.rpcCall
       && this._commits.length === 0
       && !this._loading
-      && !this._initialFetchStarted
     ) {
-      this._initialFetchStarted = true;
       this._fetchInitial();
     }
     if (changedProps.has('includeRemote')) {
       // Remote-toggle change forces a full reload.
+      // Reset state synchronously; the guard above
+      // will pick up the next fetch on the subsequent
+      // updated() pass.
       this._commits = [];
       this._branches = [];
       this._hasMore = true;
-      this._initialFetchStarted = false;
-      if (this.rpcCall) {
-        this._initialFetchStarted = true;
-        this._fetchInitial();
-      }
+      if (this.rpcCall) this._fetchInitial();
     }
   }
 
@@ -767,40 +747,12 @@ export class CommitGraph extends LitElement {
 
   async _callGetCommitGraph(offset) {
     if (!this.rpcCall) return null;
-    const raw = await this.rpcCall(
+    return this.rpcCall(
       'LLMService.get_commit_graph',
       _PAGE_SIZE,
       offset,
       !!this.includeRemote,
     );
-    // Defensive envelope unwrap — rpcExtract is
-    // supposed to handle single-key JRPC envelopes,
-    // but if the wrapper passes through raw
-    // responses for some shapes we'd see a
-    // `{LLMService: {commits: [...], ...}}` dict
-    // here instead of the inner object. Only
-    // unwrap when the outer shape DOESN'T already
-    // look like a graph response (has no `commits`
-    // array).
-    if (
-      raw
-      && typeof raw === 'object'
-      && !Array.isArray(raw)
-      && !Array.isArray(raw.commits)
-    ) {
-      const keys = Object.keys(raw);
-      if (keys.length === 1) {
-        const inner = raw[keys[0]];
-        if (
-          inner
-          && typeof inner === 'object'
-          && !Array.isArray(inner)
-        ) {
-          return inner;
-        }
-      }
-    }
-    return raw;
   }
 
   _onScroll(event) {
