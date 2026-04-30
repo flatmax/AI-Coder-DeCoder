@@ -94,6 +94,19 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 ### Review Summary and Action
 - After selection, the area below the graph shows the review summary — branch name, commit range, commit count
 - A single Start Review button initiates the review
+
+### Review History Graph (Read-Only)
+- Available during an active review via the "View graph" button on the review banner
+- Uses the same commit-graph component as the selector, but in read-only mode — clicks emit `commit-inspected` rather than `commit-selected`
+- No branch-disambiguation popover — clicks immediately inspect the commit
+- Two commits are highlighted with coloured rings around their nodes:
+  - **Amber ring** (`BASE` label) — the review's merge-base, which is the current git HEAD during the review
+  - **Green ring** (`TIP` label) — the branch tip being reviewed
+- Clicking any commit fetches its diff via `Repo.get_diff_to_branch(sha)` and routes it to the diff viewer's left panel via `load-diff-panel`
+- The modal closes on commit click so the diff viewer takes focus — the fetch completes asynchronously and populates the panel when it lands
+- Escape, backdrop click, and the close button all dismiss the modal
+- Remote branches are included by default (the `includeRemote` flag is true) so the user can see where their review sits relative to remote tracking branches
+
 ## Commit Graph Data
 - Paginated fetch with limit and offset
 - Each commit carries SHA, short SHA, message, author, date, relative date, parent SHAs
@@ -137,6 +150,7 @@ Review context is inserted as a dedicated section in the message array, between 
 - Displayed at the top of the file picker when review active
 - Shows branch name, commit range, file/line stats, exit button
 - Synchronized with review state from the review-state RPC
+- A "View graph" button opens the Review History Graph modal — the same commit-graph component as the selector, rendered in read-only mode with the review's merge-base (amber) and branch tip (green) highlighted
 ### Git Graph Selector
 - Floating resizable dialog, not modal-blocking
 - File picker and chat panel remain usable underneath
@@ -163,6 +177,14 @@ Review context is inserted as a dedicated section in the message array, between 
 - Left side (original) — file content from HEAD (pre-review state)
 - Right side (modified) — file content from disk (reviewed code)
 - Standard staged-diff view
+
+### Commit Inspection from Review History Graph
+- Commit clicks in the read-only graph modal dispatch `commit-inspected` events with the commit dict
+- Files-tab catches these and calls `Repo.get_diff_to_branch(sha)` to fetch the commit's diff
+- The diff is routed to the diff viewer's left panel via a `load-diff-panel` window event (same mechanism the history browser uses for ad-hoc comparisons)
+- The modal closes before the fetch resolves so the user sees the diff arrive in the viewer immediately
+- Empty diffs surface as an info toast ("No diff available for that commit")
+- The diff shown is `commit..working-tree`, not a pure parent-diff — useful during review because the user is asking "what did this commit touch in my current view's context"
 ### Review Snippets
 - Review-mode snippets stored alongside code and doc snippets in the unified snippets file
 - Snippet RPC checks review state first and returns review snippets when in review mode
@@ -181,6 +203,12 @@ Held in memory on the LLM service:
 - Aggregate stats — commit count, files, additions, deletions
 - Pre-change symbol map
 State is not persisted across server restarts.
+
+### Broadcast Events
+- On successful `start_review`, the backend broadcasts `reviewStarted` with the full review-state payload (pre-change symbol map stripped, matching `get_review_state()`)
+- On `end_review` the backend broadcasts `reviewEnded` with the empty-state review shape (`active: false`, null fields)
+- Both events are broadcast to every connected client — the frontend shell re-dispatches as `review-started` / `review-ended` window events, which the files-tab listens for
+- Files-tab's handlers populate / clear the picker's `reviewState` prop (driving the banner) and trigger a file-tree reload so the picker reflects the soft-reset state
 ## Integration with Existing Systems
 ### File Picker
 - No changes — staged files appear naturally with their normal badges and diff stats
@@ -250,3 +278,5 @@ State is not persisted across server restarts.
 - File selection is cleared on review entry by both server and frontend
 - Review context is re-injected on every message during the review session
 - Review state is never persisted across server restarts
+- `reviewStarted` and `reviewEnded` are broadcast to every connected client whenever the server-side review state changes — frontends never infer entry/exit from the RPC return value alone
+- The review-history graph is read-only — clicking a commit never mutates review state or triggers selection changes; it only drives the diff viewer's ad-hoc comparison panel

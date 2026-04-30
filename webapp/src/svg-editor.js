@@ -1191,6 +1191,18 @@ export class SvgEditor {
     this._selectedSet = resolved ? new Set([resolved]) : new Set();
     this._renderHandles();
     this._onSelectionChange();
+    // When a selection becomes active, blur any currently-
+    // focused editable element so the document-level
+    // keydown listener's `_isEditableTarget` guard stops
+    // swallowing Delete / Backspace. Without this, clicking
+    // an SVG element while focus remains in the chat
+    // textarea (the common case) leaves Delete routed to
+    // the textarea — it does nothing visible because there's
+    // no text to delete, and the user concludes "delete
+    // doesn't work on SVGs." A move-drag coincidentally
+    // fixes it because `setPointerCapture` on the SVG
+    // pulls focus away from the textarea.
+    if (resolved) this._blurEditableFocus();
   }
 
   /**
@@ -1298,6 +1310,9 @@ export class SvgEditor {
     }
     this._renderHandles();
     this._onSelectionChange();
+    // See setSelection for the rationale on blurring
+    // editable focus whenever a selection becomes active.
+    if (this._selectedSet.size > 0) this._blurEditableFocus();
   }
 
   /**
@@ -4045,6 +4060,55 @@ export class SvgEditor {
     this._selectedSet = new Set();
     this._renderHandles();
     this._onSelectionChange();
+  }
+
+  /**
+   * Blur the currently-focused editable element, if any.
+   * Called when an SVG selection becomes active so the
+   * document-level keydown listener's editable-target
+   * guard stops swallowing Delete / Backspace.
+   *
+   * The common trigger is the chat textarea retaining
+   * focus after the user clicks an SVG element. Without
+   * this, Delete routes to the textarea (which has no
+   * text to delete, producing a silent no-op) rather
+   * than to the editor. A move-drag coincidentally
+   * works around the bug because `setPointerCapture`
+   * on the SVG pulls focus away from the textarea; the
+   * bug only reproduces on click-then-delete.
+   *
+   * We walk `activeElement` across shadow roots so the
+   * chat panel's nested textarea (inside <ac-chat-panel>'s
+   * shadow) is found. Non-editable focus (body, a
+   * button) is left alone — it isn't the cause.
+   */
+  _blurEditableFocus() {
+    try {
+      let active = document.activeElement;
+      // Walk into shadow roots — activeElement on a
+      // shadow host returns the host element, not the
+      // real focused descendant.
+      while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      if (!active) return;
+      const tag = active.tagName?.toLowerCase();
+      const isEditable =
+        tag === 'input' ||
+        tag === 'textarea' ||
+        tag === 'select' ||
+        active.isContentEditable;
+      if (isEditable && typeof active.blur === 'function') {
+        active.blur();
+      }
+    } catch (_) {
+      // Focus manipulation can throw on detached nodes or
+      // in headless environments without a real focus
+      // system. The editor still works without the blur;
+      // it just falls back to the old "delete only works
+      // after a drag" behaviour, which is what the user
+      // already reported and worked around.
+    }
   }
 
   // ---------------------------------------------------------------

@@ -115,6 +115,71 @@ function _laneColor(index) {
   return _LANE_COLORS[index % _LANE_COLORS.length];
 }
 
+/**
+ * Build the hover tooltip text for a commit row. Native
+ * SVG `<title>` elements display whatever text they
+ * contain verbatim (line breaks preserved), so we
+ * assemble a multi-line string here.
+ *
+ * Shape:
+ *
+ *   {full sha}
+ *   Parents: {p1} {p2}          (omitted when root commit)
+ *
+ *   {author}
+ *   {iso date}  ({relative})
+ *
+ *   {full commit message}
+ *
+ * Parents section uses short SHAs (7 chars) so the line
+ * fits on typical tooltip widths. Author email isn't
+ * surfaced — the backend returns `author` as a display
+ * name only, so there's no email to include.
+ *
+ * Defensive against missing fields — any unavailable
+ * field drops its line rather than rendering "undefined".
+ */
+function _buildCommitTooltip(commit) {
+  if (!commit || typeof commit !== 'object') return '';
+  const parts = [];
+  if (typeof commit.sha === 'string' && commit.sha) {
+    parts.push(commit.sha);
+  }
+  if (
+    Array.isArray(commit.parents) &&
+    commit.parents.length > 0
+  ) {
+    const shorts = commit.parents
+      .filter((p) => typeof p === 'string' && p)
+      .map((p) => p.slice(0, 7));
+    if (shorts.length > 0) {
+      parts.push(`Parents: ${shorts.join(' ')}`);
+    }
+  }
+  parts.push('');
+  if (typeof commit.author === 'string' && commit.author) {
+    parts.push(commit.author);
+  }
+  const dateLine = [];
+  if (typeof commit.date === 'string' && commit.date) {
+    dateLine.push(commit.date);
+  }
+  if (
+    typeof commit.relative_date === 'string' &&
+    commit.relative_date
+  ) {
+    dateLine.push(`(${commit.relative_date})`);
+  }
+  if (dateLine.length > 0) {
+    parts.push(dateLine.join('  '));
+  }
+  if (typeof commit.message === 'string' && commit.message) {
+    parts.push('');
+    parts.push(commit.message);
+  }
+  return parts.join('\n');
+}
+
 // ---------------------------------------------------------------
 // Graph layout computation
 // ---------------------------------------------------------------
@@ -401,6 +466,32 @@ export class CommitGraph extends LitElement {
      */
     includeRemote: { type: Boolean },
     /**
+     * Read-only display mode. In this mode:
+     *   - Clicking a commit dispatches
+     *     `commit-inspected` instead of
+     *     `commit-selected` — no branch
+     *     disambiguation popover, the commit is
+     *     returned directly.
+     *   - No disambiguation popover is shown even
+     *     when the commit is reachable from multiple
+     *     branches. The embedding context decides
+     *     what to do with the selection.
+     * Used by the review-history modal; the review
+     * selector (the original use case) leaves this
+     * false for the selection flow.
+     */
+    readOnly: { type: Boolean },
+    /**
+     * Optional highlight map. Shape:
+     *   { base?: sha, tip?: sha }
+     * Commits whose full SHA matches either field get
+     * a distinct visual treatment (thicker stroke, ring
+     * badge) plus a tooltip annotation. Used by the
+     * review-history modal to mark the review's merge-
+     * base and branch tip.
+     */
+    highlightedCommits: { attribute: false },
+    /**
      * Loaded commits, accumulated across pages.
      */
     _commits: { type: Array, state: true },
@@ -554,6 +645,37 @@ export class CommitGraph extends LitElement {
     .commit-node:hover {
       filter: brightness(1.3);
     }
+    /* Highlight rings — drawn as a separate circle
+     * outside the commit node. Base (merge-base) is
+     * amber; tip (branch tip under review) is a
+     * brighter accent. Both non-interactive so clicks
+     * fall through to the node itself. */
+    .commit-highlight {
+      fill: none;
+      pointer-events: none;
+    }
+    .commit-highlight.base {
+      stroke: #d29922;
+      stroke-width: 2.5;
+    }
+    .commit-highlight.tip {
+      stroke: #7ee787;
+      stroke-width: 2.5;
+    }
+    .commit-highlight-label {
+      fill: var(--text-primary, #c9d1d9);
+      font-size: 0.65rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-weight: 600;
+      pointer-events: none;
+      dominant-baseline: central;
+    }
+    .commit-highlight-label.base {
+      fill: #d29922;
+    }
+    .commit-highlight-label.tip {
+      fill: #7ee787;
+    }
 
     .commit-text {
       fill: var(--text-primary, #c9d1d9);
@@ -650,6 +772,8 @@ export class CommitGraph extends LitElement {
     super();
     this.rpcCall = null;
     this.includeRemote = false;
+    this.readOnly = false;
+    this.highlightedCommits = null;
     this._commits = [];
     this._branches = [];
     this._hasMore = true;
@@ -784,6 +908,21 @@ export class CommitGraph extends LitElement {
     event.stopPropagation();
     // Close any stale popover first.
     if (this._popover) this._closePopover();
+    // Read-only mode (review history display) dispatches
+    // commit-inspected with no branch-disambiguation
+    // popover. The embedding context decides what to do
+    // with the click; typically route the commit to the
+    // diff viewer's ad-hoc comparison pane.
+    if (this.readOnly) {
+      this.dispatchEvent(
+        new CustomEvent('commit-inspected', {
+          detail: { commit },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
+    }
     const candidates = findBranchesReachingCommit(
       commit.sha,
       this._branches,
@@ -1053,6 +1192,35 @@ export class CommitGraph extends LitElement {
     const tipBranches = this._branches.filter(
       (b) => b && b.sha === commit.sha,
     );
+    // Build the full hover tooltip. Native SVG <title>
+    // child — browser handles positioning, delay, and
+    // dismissal. Content: full SHA, parent SHAs, author,
+    // ISO and relative date, then the full commit message
+    // preserving line breaks so conventional-commit
+    // bodies stay readable.
+    let tooltipText = _buildCommitTooltip(commit);
+    // Highlight role — "base" when this commit is the
+    // review's merge-base, "tip" when it's the branch
+    // tip under review, null otherwise. Drives the
+    // ring rendering and appends an annotation to the
+    // tooltip so hovering explains why the ring is
+    // there.
+    const highlighted = this.highlightedCommits || null;
+    let highlightRole = null;
+    if (highlighted && typeof commit.sha === 'string') {
+      if (highlighted.tip && highlighted.tip === commit.sha) {
+        highlightRole = 'tip';
+      } else if (
+        highlighted.base && highlighted.base === commit.sha
+      ) {
+        highlightRole = 'base';
+      }
+    }
+    if (highlightRole === 'base') {
+      tooltipText = `[Review base]\n${tooltipText}`;
+    } else if (highlightRole === 'tip') {
+      tooltipText = `[Branch tip under review]\n${tooltipText}`;
+    }
     // Check whether any branch reaching this commit
     // is hidden — muted rendering for filtered-out
     // branches. We only dim when ALL reaching
@@ -1083,6 +1251,7 @@ export class CommitGraph extends LitElement {
     // browser renders as zero-size unknown tags.
     return svg`
       <g>
+        <title>${tooltipText}</title>
         <rect
           class="row-hit"
           x="0"
@@ -1091,6 +1260,22 @@ export class CommitGraph extends LitElement {
           height=${_ROW_HEIGHT}
           @click=${(e) => this._onCommitClick(e, commit, layout)}
         />
+        ${highlightRole
+          ? svg`
+            <circle
+              class="commit-highlight ${highlightRole}"
+              cx=${nodeX}
+              cy=${row.y}
+              r=${_NODE_RADIUS + 4}
+            />
+            <text
+              class="commit-highlight-label ${highlightRole}"
+              x=${nodeX - _NODE_RADIUS - 10}
+              y=${row.y}
+              text-anchor="end"
+            >${highlightRole === 'base' ? 'BASE' : 'TIP'}</text>
+          `
+          : ''}
         <circle
           class="commit-node"
           cx=${nodeX}
@@ -1176,6 +1361,7 @@ customElements.define('ac-commit-graph', CommitGraph);
 
 // Exports for unit tests.
 export {
+  _buildCommitTooltip,
   computeGraphLayout,
   findBranchesReachingCommit,
 };

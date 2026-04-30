@@ -2141,6 +2141,20 @@ class LLMService:
         }
         self._review_active = True
 
+        # Broadcast review state to all clients. Payload
+        # matches what get_review_state() returns —
+        # active=True, branch, commits, changed_files,
+        # stats, etc. The pre_change_symbol_map is
+        # stripped (large, server-only) by the helper.
+        # Without this event, the frontend's review
+        # banner never appears — files-tab listens on
+        # a window event that the app-shell only
+        # dispatches in response to the corresponding
+        # server-push RPC.
+        self._broadcast_event(
+            "reviewStarted", self.get_review_state()
+        )
+
         # Step 9 — system event.
         event_text = (
             f"Entered review mode for `{branch}` "
@@ -2238,6 +2252,16 @@ class LLMService:
         self._review_active = False
         # Clear review context that was injected into prompts.
         self._context.clear_review_context()
+
+        # Broadcast the exit so frontend clients clear
+        # their review UI (banner, commit-button gate).
+        # The get_review_state() payload is the empty-
+        # state shape — active=False with null fields —
+        # matching what the initial snapshot carries
+        # before any review has started.
+        self._broadcast_event(
+            "reviewEnded", self.get_review_state()
+        )
 
         # Step 5 — system event. Different phrasing depending
         # on whether exit succeeded cleanly.

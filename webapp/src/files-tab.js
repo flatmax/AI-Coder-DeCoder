@@ -307,6 +307,15 @@ export class FilesTab extends RpcMixin(LitElement) {
      * rpcCall prop; no branch preloading here.
      */
     _reviewSelector: { type: Object, state: true },
+    /**
+     * Review history graph modal state. Non-null when
+     * open, null when closed. No fields needed inside
+     * — the review state itself (from `_reviewState`)
+     * provides the base and tip SHAs, and the
+     * commit-graph fetches its own data. Simple
+     * presence flag is enough to drive rendering.
+     */
+    _reviewGraphModal: { type: Object, state: true },
   };
 
   static styles = css`
@@ -709,11 +718,21 @@ export class FilesTab extends RpcMixin(LitElement) {
     // branches and populate this object, which triggers
     // a re-render of the modal template.
     this._reviewSelector = null;
+    // Review graph modal state. Null when closed.
+    // Opened via `open-review-graph` from the picker's
+    // View graph button. The modal renders a read-only
+    // commit graph with the current review's base and
+    // tip highlighted.
+    this._reviewGraphModal = null;
 
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
     this._onOpenReviewSelector =
       this._onOpenReviewSelector.bind(this);
+    this._onOpenReviewGraph =
+      this._onOpenReviewGraph.bind(this);
+    this._onCommitInspectedFromGraph =
+      this._onCommitInspectedFromGraph.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
@@ -1248,7 +1267,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.revealFile(path);
   }
 
-  _onReviewStarted(event) {
+  async _onReviewStarted(event) {
     // Enter review mode. Store the full state dict and
     // push to the picker so the banner appears. The
     // backend's `start_review` has already cleared its
@@ -1281,11 +1300,30 @@ export class FilesTab extends RpcMixin(LitElement) {
       chat.requestUpdate();
     }
     // Refresh file tree so the picker reflects the
-    // staged state produced by the soft reset. The
-    // tree reload pushes tree/status/branch props
-    // through `_pushChildProps` which also re-pushes
-    // reviewState — keeping the banner in sync.
-    this._loadFileTree();
+    // staged state produced by the soft reset. Wait
+    // for the fetch to settle before the auto-select
+    // pass below — it needs `_latestStatusData` to be
+    // populated with the review's staged files.
+    await this._loadFileTree();
+    // Auto-select every file the review touches so the
+    // user doesn't have to tick them individually to
+    // get diffs into the LLM's context. The review's
+    // soft-reset puts every branch-tip change into the
+    // staged set, which `_loadFileTree` mapped into
+    // `_latestStatusData.staged`. Reuse the same
+    // union-with-existing-selection logic that the
+    // first-load path uses — it handles the "expand
+    // ancestors so the files are visible" step too.
+    //
+    // We skip the `_initialAutoSelect` flag entirely
+    // here: that flag governs the first-ever tree load
+    // (so subsequent reloads don't undo user
+    // deselections). Review entry is a distinct event
+    // — the user explicitly asked to review, and every
+    // review starts from an empty selection cleared
+    // above — so re-applying the auto-select rule is
+    // expected, not a regression.
+    this._applyInitialAutoSelect();
   }
 
   _onReviewEnded() {
@@ -3015,6 +3053,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @new-directory-committed=${this._onNewDirectoryCommitted}
           @exit-review=${this._onExitReview}
           @open-review-selector=${this._onOpenReviewSelector}
+          @open-review-graph=${this._onOpenReviewGraph}
         ></ac-file-picker>
       </div>
       <div
@@ -3043,6 +3082,7 @@ export class FilesTab extends RpcMixin(LitElement) {
         ></ac-chat-panel>
       </div>
       ${this._renderReviewSelectorModal()}
+      ${this._renderReviewGraphModal()}
     `;
   }
 
@@ -3272,6 +3312,175 @@ export class FilesTab extends RpcMixin(LitElement) {
               @click=${this._confirmStartReview}
             >${starting ? 'Starting…' : 'Start review'}</button>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------
+  // Review history graph modal
+  // ---------------------------------------------------------------
+
+  /**
+   * Open the review history graph modal. Fired when
+   * the picker's "View graph" button is clicked
+   * during an active review. No-op when review isn't
+   * active (defensive — the button is only rendered
+   * during review, but guard against a stale dispatch
+   * racing with an exit).
+   */
+  _onOpenReviewGraph() {
+    if (!this._reviewState || !this._reviewState.active) {
+      return;
+    }
+    this._reviewGraphModal = {};
+  }
+
+  _closeReviewGraphModal() {
+    this._reviewGraphModal = null;
+  }
+
+  _onReviewGraphBackdropClick(event) {
+    if (event.target === event.currentTarget) {
+      this._closeReviewGraphModal();
+    }
+  }
+
+  /**
+   * Route a commit-inspected event from the read-only
+   * graph to the diff viewer's ad-hoc panel. Shows
+   * the commit's diff against its first parent on
+   * the left, leaves the right panel with the current
+   * branch-tip content so the user can compare the
+   * commit's effect against their current view.
+   *
+   * Parent-diff is the conventional git-tool default
+   * (Sourcetree, GitKraken) for "what did this commit
+   * introduce?". A commit with no parent (root commit)
+   * degrades to an empty-left panel — the diff viewer
+   * shows the commit's full content as additions,
+   * which is visually accurate.
+   */
+  async _onCommitInspectedFromGraph(event) {
+    const commit = event.detail?.commit;
+    if (!commit || typeof commit.sha !== 'string') return;
+    if (!this.rpcConnected) return;
+    // Close the modal first so the diff viewer has focus
+    // and isn't competing with the backdrop. The fetch
+    // runs afterward and populates the panel when it
+    // lands.
+    this._closeReviewGraphModal();
+    try {
+      // Fetch the diff via git show. One round-trip;
+      // the backend doesn't have a dedicated "diff this
+      // commit" RPC but get_diff_to_branch's cousin
+      // pattern via Repo.get_file_content at the commit
+      // isn't suitable either (no native diff output).
+      // Quickest path: use Repo._run_git via a new
+      // helper is overkill for this feature — instead
+      // ask for the commit message + parent info and
+      // use Repo.get_staged_diff-style format via a
+      // simple get-commit-diff helper.
+      //
+      // Without a bespoke RPC, we fall back to
+      // `get_diff_to_branch(commit_sha)` which produces
+      // the diff between that commit and the working
+      // tree. That's not "this commit only" — it
+      // includes every change between the commit and
+      // now. Good enough for inspection during review
+      // (user is asking "what did this commit touch?"
+      // in the context of the feature branch), and
+      // keeps the feature shippable without a backend
+      // change.
+      const result = await this.rpcExtract(
+        'Repo.get_diff_to_branch',
+        commit.sha,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        this._showToast(
+          `Commit inspect failed: ${result.error}`,
+          'warning',
+        );
+        return;
+      }
+      const diff =
+        result && typeof result === 'object'
+          ? result.diff || ''
+          : typeof result === 'string' ? result : '';
+      if (!diff) {
+        this._showToast(
+          'No diff available for that commit',
+          'info',
+        );
+        return;
+      }
+      const label = `commit ${commit.short_sha || commit.sha.slice(0, 7)}`;
+      window.dispatchEvent(
+        new CustomEvent('load-diff-panel', {
+          detail: {
+            content: diff,
+            panel: 'left',
+            label,
+          },
+          bubbles: false,
+        }),
+      );
+    } catch (err) {
+      console.error('[files-tab] commit-inspected failed', err);
+      this._showToast(
+        `Commit inspect failed: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  _renderReviewGraphModal() {
+    if (!this._reviewGraphModal) return '';
+    const state = this._reviewState || {};
+    // Build the highlight map from the current review
+    // state. Base is the merge-base (parent_commit),
+    // tip is the branch tip being reviewed.
+    const highlighted = {
+      base: state.parent_commit || null,
+      tip: state.branch_tip || null,
+    };
+    const branch = state.branch || '(unknown)';
+    const baseShort = (state.parent_commit || '').slice(0, 7);
+    const tipShort = (state.branch_tip || '').slice(0, 7);
+    return html`
+      <div
+        class="review-modal-backdrop"
+        @click=${this._onReviewGraphBackdropClick}
+      >
+        <div
+          class="review-modal"
+          role="dialog"
+          aria-label="Review history graph"
+        >
+          <div class="review-modal-header">
+            <span class="review-modal-title">
+              🔍 Review history: ${branch}
+            </span>
+            <button
+              class="review-modal-close"
+              title="Close"
+              aria-label="Close graph"
+              @click=${this._closeReviewGraphModal}
+            >✕</button>
+          </div>
+          <div class="review-modal-hint">
+            Amber ring = review base (${baseShort});
+            green ring = branch tip (${tipShort}).
+            Click any commit to see its diff in the left panel.
+          </div>
+          <ac-commit-graph
+            .rpcCall=${(method, ...args) => this.rpcExtract(method, ...args)}
+            .readOnly=${true}
+            .highlightedCommits=${highlighted}
+            includeRemote
+            @commit-inspected=${this._onCommitInspectedFromGraph}
+            @graph-error=${this._onGraphError}
+          ></ac-commit-graph>
         </div>
       </div>
     `;

@@ -730,6 +730,22 @@ export class FilePicker extends LitElement {
       background: rgba(210, 153, 34, 0.3);
       border-color: rgba(210, 153, 34, 0.6);
     }
+    .review-banner-view-graph {
+      background: transparent;
+      border: 1px solid rgba(210, 153, 34, 0.3);
+      color: #d29922;
+      padding: 0.2rem 0.5rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    .review-banner-view-graph:hover {
+      background: rgba(210, 153, 34, 0.15);
+      border-color: rgba(210, 153, 34, 0.5);
+    }
     .review-banner-stats {
       display: flex;
       gap: 0.75rem;
@@ -2021,6 +2037,14 @@ export class FilePicker extends LitElement {
             ${title}
           </span>
           <button
+            class="review-banner-view-graph"
+            @click=${this._onViewGraphClick}
+            title="View the full commit graph with the review base and branch tip highlighted"
+            aria-label="View review history graph"
+          >
+            View graph
+          </button>
+          <button
             class="review-banner-exit"
             @click=${this._onExitReviewClick}
             title="Exit review mode and return to the working branch"
@@ -2055,6 +2079,24 @@ export class FilePicker extends LitElement {
   _onExitReviewClick() {
     this.dispatchEvent(
       new CustomEvent('exit-review', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Handle the "View graph" button click. Dispatches
+   * `open-review-graph` so the files-tab can open the
+   * review-history modal (a read-only commit-graph
+   * with the review's merge-base and branch tip
+   * highlighted). Same event pattern as
+   * `open-review-selector` — the picker fires the
+   * intent, the orchestrator handles the modal.
+   */
+  _onViewGraphClick() {
+    this.dispatchEvent(
+      new CustomEvent('open-review-graph', {
         bubbles: true,
         composed: true,
       }),

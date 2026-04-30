@@ -1566,6 +1566,31 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  reviewStarted(data) {
+    // Re-dispatch as a window event so files-tab's
+    // `_onReviewStarted` handler fires. files-tab
+    // stores the review state, pushes it to the
+    // picker (which renders the amber banner), and
+    // triggers a tree reload + auto-select pass so
+    // the staged review files get ticked.
+    window.dispatchEvent(
+      new CustomEvent('review-started', { detail: data }),
+    );
+    return true;
+  }
+
+  reviewEnded(data) {
+    // Symmetric with reviewStarted. The `data`
+    // payload is the empty-state review shape
+    // (active=False); files-tab's handler clears its
+    // local state and reloads the tree to reflect the
+    // restored HEAD.
+    window.dispatchEvent(
+      new CustomEvent('review-ended', { detail: data }),
+    );
+    return true;
+  }
+
   navigateFile(data) {
     // The `_remote: true` flag lets the frontend distinguish
     // broadcast-driven navigation from user-initiated, so
