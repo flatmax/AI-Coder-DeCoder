@@ -53,9 +53,9 @@ Open carried over:
 
 - **Layer 6 wiring.** `main.py` will construct the Settings service alongside Repo and LLMService, register it via `server.add_class(settings)`, and (in collab mode) set `settings._collab = collab_instance`. The collab reference is runtime-attached just like Repo's and LLMService's; in single-user mode `_collab` stays None and every caller is treated as localhost.
 
-### 4.6 — DocConvert — **in progress (Pass A foundation + Pass A2 markitdown delivered)**
+### 4.6 — DocConvert — **delivered**
 
-Ships the Doc Convert backend incrementally. Pass A delivered the foundation (scanning, availability probing, provenance-header infrastructure); Pass A2 adds real conversion for the three simplest formats (`.docx`, `.rtf`, `.odt`) via markitdown. Passes A3–A5 will follow: openpyxl for xlsx colours, python-pptx fallback, LibreOffice + PyMuPDF for the full PDF pipeline.
+Shipped the Doc Convert backend incrementally across six passes. Pass A delivered the foundation (scanning, availability probing, provenance-header infrastructure); Pass A2 added markitdown conversion for `.docx`/`.rtf`/`.odt`/`.csv`; Pass A3 added the colour-aware openpyxl pipeline for `.xlsx`; Pass A4 added the python-pptx fallback for `.pptx`; Pass A5a added the direct PyMuPDF pipeline for `.pdf`; Pass A5b added the LibreOffice + PyMuPDF primary path for `.pptx`/`.odp` with graceful fallback to A4/markitdown when either dep is missing. Backend is complete for the scope specs4/4-features/doc-convert.md covers — the Doc Convert tab UI lands with Layer 5.
 
 #### Pass A — foundation (delivered)
 
