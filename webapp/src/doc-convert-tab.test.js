@@ -1216,6 +1216,234 @@ describe('DocConvertTab summary', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Commit 6 — clickable output paths in summary view
+// ---------------------------------------------------------------------------
+//
+// After a successful conversion, the summary view's per-file
+// progress rows carry a link element on `ok` rows pointing at
+// the converted output. Clicking dispatches `navigate-file`
+// which the app shell routes to the diff viewer. Matches the
+// post-conversion workflow specs4/4-features/doc-convert.md
+// documents: "User reviews diffs in the diff viewer, edits
+// if needed, commits normally."
+//
+// Failed and skipped rows keep plain-text detail — there's
+// no output file to navigate to.
+
+describe('DocConvertTab clickable output paths', () => {
+  async function convertAndComplete(results) {
+    publishFakeRpc({
+      'DocConvert.scan_convertible_files': () => [
+        fileEntry('a.docx'),
+        fileEntry('b.pdf'),
+        fileEntry('c.docx'),
+      ],
+      'DocConvert.convert_files': () => ({
+        status: 'ok',
+        results,
+      }),
+    });
+    const t = mountTab();
+    await settle(t);
+    t._selected = new Set(['a.docx', 'b.pdf', 'c.docx']);
+    await t.updateComplete;
+    await t._startConversion();
+    await settle(t);
+    return t;
+  }
+
+  it('ok rows with output_path render a clickable button', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const row = t.shadowRoot.querySelector('.progress-row');
+    const btn = row.querySelector('.progress-detail .open-output');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain('a.md');
+  });
+
+  it('button text carries the arrow prefix for continuity', async () => {
+    // Keeps the visual shape compatible with prior releases
+    // so users who've internalised "arrow = output path"
+    // don't lose the cue.
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const btn = t.shadowRoot.querySelector('.open-output');
+    expect(btn.textContent.trim().startsWith('→')).toBe(true);
+  });
+
+  it('button title names the output path and diff viewer', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const btn = t.shadowRoot.querySelector('.open-output');
+    expect(btn.title).toContain('a.md');
+    expect(btn.title.toLowerCase()).toContain('diff');
+  });
+
+  it('ok rows without output_path fall back to no detail', async () => {
+    // Defensive — the backend always populates output_path
+    // on ok status, but a partial response shouldn't crash
+    // or render garbage. Empty detail is the graceful fallback.
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok' },
+    ]);
+    const row = t.shadowRoot.querySelector('.progress-row');
+    expect(row.querySelector('.open-output')).toBeNull();
+  });
+
+  it('error rows render plain text without button', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'error', message: 'bad file' },
+    ]);
+    const row = t.shadowRoot.querySelector('.progress-row');
+    expect(row.querySelector('.open-output')).toBeNull();
+    const detail = row.querySelector('.progress-detail');
+    expect(detail.textContent).toContain('bad file');
+    expect(detail.classList.contains('error-text')).toBe(true);
+  });
+
+  it('skipped rows render plain text without button', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'skipped', message: 'over size' },
+    ]);
+    const row = t.shadowRoot.querySelector('.progress-row');
+    expect(row.querySelector('.open-output')).toBeNull();
+    const detail = row.querySelector('.progress-detail');
+    expect(detail.textContent).toContain('over size');
+  });
+
+  it('clicking button dispatches navigate-file with output path', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const btn = t.shadowRoot.querySelector('.open-output');
+      btn.click();
+      // Event needs to propagate through shadow DOM to
+      // the window listener.
+      expect(listener).toHaveBeenCalledOnce();
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.path).toBe('a.md');
+      expect(detail._source).toBe('doc-convert');
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('event bubbles and composes across shadow DOM', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const btn = t.shadowRoot.querySelector('.open-output');
+      btn.click();
+      const event = listener.mock.calls[0][0];
+      expect(event.bubbles).toBe(true);
+      expect(event.composed).toBe(true);
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('multiple ok rows each get independent buttons', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+      { path: 'b.pdf', status: 'ok', output_path: 'b.md' },
+      { path: 'c.docx', status: 'ok', output_path: 'c.md' },
+    ]);
+    const buttons = t.shadowRoot.querySelectorAll('.open-output');
+    expect(buttons.length).toBe(3);
+    expect(buttons[0].textContent).toContain('a.md');
+    expect(buttons[1].textContent).toContain('b.md');
+    expect(buttons[2].textContent).toContain('c.md');
+  });
+
+  it('mixed batch only buttons ok rows', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+      { path: 'b.pdf', status: 'error', message: 'bad' },
+      { path: 'c.docx', status: 'skipped', message: 'too big' },
+    ]);
+    const buttons = t.shadowRoot.querySelectorAll('.open-output');
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].textContent).toContain('a.md');
+  });
+
+  it('each button fires an independent event', async () => {
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+      { path: 'b.pdf', status: 'ok', output_path: 'b.md' },
+    ]);
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const buttons = t.shadowRoot.querySelectorAll('.open-output');
+      buttons[0].click();
+      buttons[1].click();
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(listener.mock.calls[0][0].detail.path).toBe('a.md');
+      expect(listener.mock.calls[1][0].detail.path).toBe('b.md');
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('_openOutput silently no-ops on empty path', async () => {
+    // Defense-in-depth — the render path only produces the
+    // button when output_path is set, but a direct call with
+    // a bad argument shouldn't throw or dispatch garbage.
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      t._openOutput('');
+      t._openOutput(null);
+      t._openOutput(undefined);
+      t._openOutput(42);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('summary still shows tally alongside clickable rows', async () => {
+    // The tally footer is unchanged by Commit 6 — pin that
+    // the clickable rows coexist with it rather than
+    // replacing it.
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+      { path: 'b.pdf', status: 'ok', output_path: 'b.md' },
+    ]);
+    const footer = t.shadowRoot.querySelector('.summary-footer');
+    expect(footer).toBeTruthy();
+    expect(footer.textContent).toContain('2 converted');
+    const buttons = t.shadowRoot.querySelectorAll('.open-output');
+    expect(buttons.length).toBe(2);
+  });
+
+  it('clickable state reflected in keyboard-focusable elements', async () => {
+    // Buttons are focusable by default — verify the render
+    // produces a real <button> so keyboard users get the
+    // same affordance mouse users do. Tab order is managed
+    // by the browser; no explicit tabindex needed.
+    const t = await convertAndComplete([
+      { path: 'a.docx', status: 'ok', output_path: 'a.md' },
+    ]);
+    const btn = t.shadowRoot.querySelector('.open-output');
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.type).toBe('button');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 

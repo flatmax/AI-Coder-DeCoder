@@ -28,12 +28,16 @@
 //     UX is consistent across tabs
 //   - Info banner showing dependency availability
 //
-// Deferred to later commits:
-//   - Commit 3 — app-shell tab registration + visibility gate
-//   - Commit 4 — conversion trigger + progress view + event
-//     subscription + results summary
-//   - Commit 5 — clean-tree gate display, conflict warning
-//     tooltips, per-file size/over-size rendering polish
+// Delivered in Commit 6:
+//   - Clickable output paths in the summary view's progress
+//     rows — successful conversions get a link element that
+//     dispatches `navigate-file` so the user can jump directly
+//     into the diff viewer to review the result. Failed /
+//     skipped rows keep their plain-text detail since there's
+//     no output file to navigate to. Matches the end-to-end
+//     flow specs4/4-features/doc-convert.md describes:
+//     "User reviews diffs in the diff viewer, edits if needed,
+//     commits normally."
 
 import { LitElement, css, html } from 'lit';
 
@@ -457,6 +461,36 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     }
     .progress-detail.error-text {
       color: #f85149;
+    }
+    /* Clickable output path on successful rows — upgrades the
+     * plain-text "→ path" to a button-styled link that jumps
+     * into the diff viewer. Stays inside the existing
+     * .progress-detail flex slot so layout doesn't shift.
+     * Button element (not anchor) because the destination is
+     * an in-app viewer, not a URL — anchors would produce
+     * browser tooltips showing a fake href and would confuse
+     * assistive tech. */
+    .progress-detail .open-output {
+      background: transparent;
+      border: none;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      color: var(--accent-primary, #58a6ff);
+      cursor: pointer;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .progress-detail .open-output:hover {
+      text-decoration: underline;
+    }
+    .progress-detail .open-output:focus-visible {
+      outline: 2px solid var(--accent-primary, #58a6ff);
+      outline-offset: 2px;
+      border-radius: 2px;
     }
 
     .summary-footer {
@@ -1168,16 +1202,36 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       icon = '✗';
       iconColor = '#f85149';
     }
-    // Detail line — for ok entries show the output path;
-    // for errors/skips show the message. Keeps the row
-    // dense without sacrificing diagnosability.
-    let detail = '';
-    let detailClass = 'progress-detail';
+    // Detail slot — three shapes depending on status:
+    //   - ok with output_path: clickable button that
+    //     dispatches `navigate-file` so the user jumps
+    //     straight into the diff viewer to review the
+    //     result. Matches the post-conversion workflow
+    //     specs4/4-features/doc-convert.md documents.
+    //   - error: plain text, red-tinted, carrying the
+    //     failure message.
+    //   - skipped: plain text, muted, carrying the skip
+    //     reason.
+    // The three forms share the same flex slot so row
+    // layout stays consistent; only the content inside
+    // changes.
+    const detailClass =
+      status === 'error'
+        ? 'progress-detail error-text'
+        : 'progress-detail';
+    let detailContent;
     if (status === 'ok' && entry.output_path) {
-      detail = `→ ${entry.output_path}`;
+      const outputPath = entry.output_path;
+      detailContent = html`<button
+        type="button"
+        class="open-output"
+        title="Open ${outputPath} in diff viewer"
+        @click=${() => this._openOutput(outputPath)}
+      >→ ${outputPath}</button>`;
     } else if (entry.message) {
-      detail = entry.message;
-      if (status === 'error') detailClass += ' error-text';
+      detailContent = entry.message;
+    } else {
+      detailContent = '';
     }
     return html`
       <div class="progress-row" title=${path}>
@@ -1186,9 +1240,35 @@ export class DocConvertTab extends RpcMixin(LitElement) {
           style="color: ${iconColor}"
         >${icon}</span>
         <span class="progress-path">${path}</span>
-        <span class=${detailClass}>${detail}</span>
+        <span class=${detailClass}>${detailContent}</span>
       </div>
     `;
+  }
+
+  /**
+   * Dispatch a `navigate-file` event so the app shell routes
+   * the converted output to the diff viewer. Bubbles and
+   * composes out of the shadow DOM the same way the files
+   * tab and chat panel's navigation events do — the shell's
+   * window-level listener catches all three from one place.
+   *
+   * The `_source` field is informational; the shell doesn't
+   * branch on it today but carrying it means future viewers
+   * or telemetry could distinguish doc-convert-origin
+   * navigation from user-click navigation.
+   *
+   * Safe to call with an empty / malformed path — bails
+   * silently. The render path only produces the button for
+   * `status === 'ok' && entry.output_path`, so in practice
+   * the guard is defense-in-depth.
+   */
+  _openOutput(path) {
+    if (typeof path !== 'string' || !path) return;
+    this.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { path, _source: 'doc-convert' },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   _renderSummaryFooter() {
