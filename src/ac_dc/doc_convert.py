@@ -939,6 +939,36 @@ class DocConvert:
         if restricted is not None:
             return restricted
 
+        # Clean-tree gate — refuse conversion if the repo has
+        # uncommitted changes. Without a working tree to diff
+        # against, converted output can't be reviewed before
+        # commit. Only runs when a repo with is_clean() is
+        # attached; tests and CLI use without a full repo
+        # skip the gate (caller accepts the risk).
+        if self._repo is not None:
+            is_clean_fn = getattr(self._repo, "is_clean", None)
+            if callable(is_clean_fn):
+                try:
+                    clean = is_clean_fn()
+                except Exception as exc:
+                    logger.debug(
+                        "Repo is_clean() raised: %s", exc,
+                    )
+                    return {
+                        "error": (
+                            "Could not verify working tree "
+                            f"state: {exc}"
+                        ),
+                    }
+                if not clean:
+                    return {
+                        "error": (
+                            "Working tree has uncommitted "
+                            "changes. Commit or stash before "
+                            "converting."
+                        ),
+                    }
+
         # Decide execution mode. Background requires both a
         # running loop AND a wired callback — if either is
         # missing, fall back to inline so tests and CLI callers
@@ -2332,6 +2362,7 @@ class DocConvert:
                 display_name=source_abs.name,
                 hash_source=source_abs,
                 strip_text_when_present=False,
+                always_emit_svg=True,
             )
 
     def _libreoffice_fallback(
@@ -2384,6 +2415,7 @@ class DocConvert:
         display_name: str | None = None,
         hash_source: Path | None = None,
         strip_text_when_present: bool = True,
+        always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
 
@@ -2537,6 +2569,7 @@ class DocConvert:
                 rel_path=rel_path,
                 display_name=resolved_display_name,
                 strip_text_when_present=strip_text_when_present,
+                always_emit_svg=always_emit_svg,
             )
         finally:
             # Always close — PyMuPDF holds file handles.
@@ -2556,6 +2589,7 @@ class DocConvert:
         rel_path: str,
         display_name: str | None = None,
         strip_text_when_present: bool = True,
+        always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Walk the pages of an open PDF document and emit output.
 
@@ -2625,6 +2659,7 @@ class DocConvert:
                     assets_dir=assets_dir,
                     assets_created=assets_created,
                     strip_text_when_present=strip_text_when_present,
+                    always_emit_svg=always_emit_svg,
                 )
             except Exception as exc:
                 logger.debug(
@@ -2691,6 +2726,7 @@ class DocConvert:
         assets_dir: Path,
         assets_created: bool,
         strip_text_when_present: bool = True,
+        always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Emit markdown + optional SVG for one PDF page.
 
@@ -2741,8 +2777,16 @@ class DocConvert:
         )
 
         # Decide whether to emit an SVG for this page.
+        # The LibreOffice route (pptx/odp → PDF) passes
+        # always_emit_svg=True because every slide is a
+        # visual artefact — the direct-PDF heuristic would
+        # suppress SVGs for slides with text plus a single
+        # diagram element (below the significance threshold),
+        # which loses the visual representation of most
+        # presentation content.
         emit_svg = (
-            has_raster
+            always_emit_svg
+            or has_raster
             or has_significant_graphics
             or (not has_text and not has_raster)
         )

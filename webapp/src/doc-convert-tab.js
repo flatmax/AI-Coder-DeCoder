@@ -593,12 +593,14 @@ export class DocConvertTab extends RpcMixin(LitElement) {
    */
   _onConvertProgress(event) {
     // AppShell dispatches the backend's event payload
-    // directly as `event.detail` — shape matches
+    // under `event.detail.data` — shape matches
     // `_send_convert_event`'s dict: `{stage, count}` for
     // start, `{stage, index, total, result}` for file,
-    // `{stage, results}` for complete. No nested `.data`
-    // wrapper.
-    const data = event.detail || {};
+    // `{stage, results}` for complete. The `.data`
+    // wrapper is set by the RPC callback mechanism so
+    // test harnesses and AppShell use the same shape.
+    const detail = event?.detail || {};
+    const data = detail.data || detail || {};
     const stage = data.stage;
     if (stage === 'start') {
       // Seed progressByPath with 'pending' entries so the
@@ -884,9 +886,20 @@ export class DocConvertTab extends RpcMixin(LitElement) {
   }
 
   /**
-   * Compose the Convert button tooltip.
+   * Compose the Convert button tooltip. Dirty-tree state
+   * takes priority over the selection-count message so
+   * the user sees the actionable blocker (commit or
+   * stash) rather than a generic "convert N files"
+   * hint that would be misleading when the button is
+   * actually disabled by the gate.
    */
   _convertButtonTitle(selectedCount) {
+    if (this._treeClean === false) {
+      return (
+        'Working tree has uncommitted changes. '
+        + 'Commit or stash before converting.'
+      );
+    }
     if (selectedCount === 0) {
       return 'Select files to convert';
     }
@@ -899,14 +912,33 @@ export class DocConvertTab extends RpcMixin(LitElement) {
         || this._convertPhase === 'complete') {
       return html`
         ${this._renderInfoBanner()}
+        ${this._renderDirtyTreeBanner()}
         ${this._renderProgressView()}
       `;
     }
     return html`
       ${this._renderInfoBanner()}
+      ${this._renderDirtyTreeBanner()}
       ${this._renderToolbar()}
       ${this._renderFilterBar()}
       ${this._renderFileList()}
+    `;
+  }
+
+  _renderDirtyTreeBanner() {
+    // Only render when cleanliness is explicitly false.
+    // null (probe failed / not yet run) hides the banner —
+    // we don't warn when we don't know.
+    if (this._treeClean !== false) return null;
+    return html`
+      <div class="dirty-tree-banner">
+        <span class="dirty-tree-banner-icon">⚠</span>
+        <span>
+          Working tree has uncommitted changes. Commit or
+          stash them before converting so the output
+          appears as a reviewable diff.
+        </span>
+      </div>
     `;
   }
 
@@ -960,7 +992,8 @@ export class DocConvertTab extends RpcMixin(LitElement) {
         <button
           class="toolbar-button primary"
           ?disabled=${selectedCount === 0
-            || this._convertPhase !== 'idle'}
+            || this._convertPhase !== 'idle'
+            || this._treeClean === false}
           title=${this._convertButtonTitle(selectedCount)}
           @click=${this._startConversion}
         >Convert Selected (${selectedCount})</button>
