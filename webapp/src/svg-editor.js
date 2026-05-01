@@ -4439,12 +4439,24 @@ export class SvgEditor {
       // since those aren't draggable positions — dragging
       // a bbox corner on a line would need inverse math
       // to map back to endpoint coords).
+      //
+      // The attribute values are in the element's LOCAL
+      // coordinate space. If the element lives inside a
+      // transformed ancestor (e.g., a Y-flipping group
+      // in Y-up source SVGs), the local coords don't
+      // match the root-space coords where the handle
+      // group renders. Map through the element's CTM
+      // so handles land on the line visually rather
+      // than at mirrored positions elsewhere in the
+      // viewport.
       const x1 = _parseNum(el.getAttribute('x1'));
       const y1 = _parseNum(el.getAttribute('y1'));
       const x2 = _parseNum(el.getAttribute('x2'));
       const y2 = _parseNum(el.getAttribute('y2'));
-      group.appendChild(this._makeHandleDot(x1, y1, 'p1'));
-      group.appendChild(this._makeHandleDot(x2, y2, 'p2'));
+      const p1 = this._localToSvgRoot(el, x1, y1);
+      const p2 = this._localToSvgRoot(el, x2, y2);
+      group.appendChild(this._makeHandleDot(p1.x, p1.y, 'p1'));
+      group.appendChild(this._makeHandleDot(p2.x, p2.y, 'p2'));
       return;
     }
     if (tag === 'polyline' || tag === 'polygon') {
@@ -4454,10 +4466,18 @@ export class SvgEditor {
       // endpoints — bbox corners would be wrong targets).
       // Role format is `v{N}` so the resize dispatch can
       // parse the index and update only that vertex.
+      //
+      // Points are in local coords — map to root space
+      // so handles land on the actual vertices regardless
+      // of ancestor transforms. See the line branch for
+      // the full rationale.
       const points = _parsePoints(el.getAttribute('points'));
       for (let i = 0; i < points.length; i += 1) {
         const [px, py] = points[i];
-        group.appendChild(this._makeHandleDot(px, py, `v${i}`));
+        const mapped = this._localToSvgRoot(el, px, py);
+        group.appendChild(
+          this._makeHandleDot(mapped.x, mapped.y, `v${i}`),
+        );
       }
       return;
     }
@@ -4482,32 +4502,55 @@ export class SvgEditor {
       //
       // 3.2c.3b-iii will add handles for A arc endpoints
       // with the same `p{N}` role format.
+      // Endpoints and control points are in the element's
+      // local coordinate space — same as polyline vertices
+      // and line endpoints. Map each through the element's
+      // CTM before placing handles, so a path inside a
+      // transformed ancestor (common for Y-up source SVGs
+      // with a matrix(1,0,0,-1,...) root flip) gets handles
+      // visually aligned with the path rather than mirrored
+      // to the other side of the viewport.
       const commands = _parsePathData(el.getAttribute('d'));
       const endpoints = _computePathEndpoints(commands);
       const controls = _computePathControlPoints(commands);
       for (let i = 0; i < endpoints.length; i += 1) {
         const pt = endpoints[i];
         const cps = controls[i];
+        const mappedPt = pt
+          ? this._localToSvgRoot(el, pt.x, pt.y)
+          : null;
         // Render tangent lines and control-point handles
         // BEFORE the endpoint so the endpoint renders
         // on top — visually clearer when a control
         // point sits near its endpoint.
-        if (pt && Array.isArray(cps)) {
+        if (mappedPt && Array.isArray(cps)) {
           for (let k = 0; k < cps.length; k += 1) {
             const cp = cps[k];
+            const mappedCp = this._localToSvgRoot(el, cp.x, cp.y);
             // Tangent line from control point to
             // endpoint. Dotted so it doesn't clutter
             // when multiple curves overlap.
             group.appendChild(
-              this._makeTangentLine(cp.x, cp.y, pt.x, pt.y),
+              this._makeTangentLine(
+                mappedCp.x,
+                mappedCp.y,
+                mappedPt.x,
+                mappedPt.y,
+              ),
             );
             group.appendChild(
-              this._makeHandleDot(cp.x, cp.y, `c${i}-${k + 1}`),
+              this._makeHandleDot(
+                mappedCp.x,
+                mappedCp.y,
+                `c${i}-${k + 1}`,
+              ),
             );
           }
         }
-        if (pt) {
-          group.appendChild(this._makeHandleDot(pt.x, pt.y, `p${i}`));
+        if (mappedPt) {
+          group.appendChild(
+            this._makeHandleDot(mappedPt.x, mappedPt.y, `p${i}`),
+          );
         }
       }
       return;
@@ -4571,46 +4614,31 @@ export class SvgEditor {
    * Compute the bounding box of the selected element in
    * SVG root coordinates. Returns null when the element
    * has no geometry (empty group, detached).
+   *
+   * Delegates to `_elementBBoxInSvgRoot`, which uses
+   * `getBoundingClientRect` to sample the element's
+   * painted screen extent and maps it back through the
+   * root CTM. The alternative — `getBBox()` plus
+   * `_localToSvgRoot` corner mapping — gives the wrong
+   * result when the element lives inside a Y-flipping
+   * ancestor group (the common case for SVGs exported
+   * from CAD / plotting tools that use a Y-up coordinate
+   * system, transformed via `matrix(1,0,0,-1,0,H)` at
+   * the root).
+   *
+   * Symptom of using the local→root path: the outline
+   * rectangle renders at one location (because
+   * `_renderBBoxOverlay` uses `_elementBBoxInSvgRoot`
+   * directly) while resize handles render mirrored
+   * across the viewport. Both paths are supposed to
+   * produce identical root-space axis-aligned bboxes,
+   * but CTM composition with a flipping parent disagrees
+   * with the painted screen rect in practice. Using the
+   * screen-rect path for both keeps them in lockstep.
    */
   _getSelectionBBox() {
     if (!this._selected) return null;
-    let bbox;
-    try {
-      bbox = this._selected.getBBox?.();
-    } catch (_) {
-      return null;
-    }
-    if (!bbox) return null;
-    // Transform the local-coordinate bbox to root SVG
-    // coordinates. Four corners → new axis-aligned bbox.
-    const tl = this._localToSvgRoot(this._selected, bbox.x, bbox.y);
-    const tr = this._localToSvgRoot(
-      this._selected,
-      bbox.x + bbox.width,
-      bbox.y,
-    );
-    const bl = this._localToSvgRoot(
-      this._selected,
-      bbox.x,
-      bbox.y + bbox.height,
-    );
-    const br = this._localToSvgRoot(
-      this._selected,
-      bbox.x + bbox.width,
-      bbox.y + bbox.height,
-    );
-    const xs = [tl.x, tr.x, bl.x, br.x];
-    const ys = [tl.y, tr.y, bl.y, br.y];
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    return {
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY,
-    };
+    return this._elementBBoxInSvgRoot(this._selected);
   }
 }
 
