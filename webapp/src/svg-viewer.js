@@ -1041,10 +1041,96 @@ export class SvgViewer extends LitElement {
       }
       rightSvg.removeChild(viewport);
     }
+    // Swap inlined data-URI hrefs back to their original
+    // externalised values before serialising. The image
+    // resolver stashed the pre-rewrite href(s) on
+    // `data-ac-dc-original-href` and
+    // `data-ac-dc-original-xlink-href` when it inlined the
+    // binary content (`_resolveOneImageHref`). Without
+    // this, the multi-megabyte inlined payload ends up in
+    // file.modified — which then flows into saves, the
+    // `</>` text-diff handoff, and clipboard paste,
+    // appearing as a massive spurious diff against the
+    // clean externalised form on disk.
+    //
+    // Records what we changed so the finally block can
+    // put the inlined values back afterwards. The SVG
+    // viewer relies on the live DOM having data-URI hrefs
+    // for rendering; only the serialised snapshot uses
+    // the externalised form.
+    const restoreSwaps = [];
+    const inlinedImages = rightSvg.querySelectorAll('image');
+    for (const img of inlinedImages) {
+      const origHref = img.getAttribute('data-ac-dc-original-href');
+      const origXlink = img.getAttribute(
+        'data-ac-dc-original-xlink-href',
+      );
+      if (origHref === null && origXlink === null) continue;
+      const swap = { img, origHref, origXlink };
+      // Snapshot the current inlined values so they can
+      // be restored byte-identically. Using the DOM's
+      // returned strings rather than reconstructing from
+      // any in-memory source — whatever the browser is
+      // painting right now is what we must paint again.
+      if (origHref !== null) {
+        swap.inlinedHref = img.getAttribute('href');
+        img.setAttribute('href', origHref);
+      }
+      if (origXlink !== null) {
+        swap.inlinedXlink = img.getAttributeNS(
+          'http://www.w3.org/1999/xlink',
+          'href',
+        );
+        img.setAttributeNS(
+          'http://www.w3.org/1999/xlink',
+          'href',
+          origXlink,
+        );
+      }
+      // Strip the tracking attributes so they don't leak
+      // into the saved content. Re-added by the resolver
+      // on the next mount (since the file content on disk
+      // doesn't carry them).
+      img.removeAttribute('data-ac-dc-original-href');
+      img.removeAttribute('data-ac-dc-original-xlink-href');
+      restoreSwaps.push(swap);
+    }
     let html;
     try {
       html = rightContainer.innerHTML;
     } finally {
+      // Restore the inlined hrefs + tracking attributes.
+      // The viewer keeps painting data URIs; the resolver
+      // won't re-run for this file because the tracking
+      // attributes are back in place (conceptually — the
+      // resolver guards on href prefix, not on the data
+      // attribute, so it'd re-run harmlessly on the next
+      // mount anyway, but leaving the tracking attributes
+      // preserves the "already inlined" signal).
+      for (const swap of restoreSwaps) {
+        if (swap.origHref !== null) {
+          swap.img.setAttribute(
+            'data-ac-dc-original-href',
+            swap.origHref,
+          );
+          if (swap.inlinedHref !== null) {
+            swap.img.setAttribute('href', swap.inlinedHref);
+          }
+        }
+        if (swap.origXlink !== null) {
+          swap.img.setAttribute(
+            'data-ac-dc-original-xlink-href',
+            swap.origXlink,
+          );
+          if (swap.inlinedXlink !== null && swap.inlinedXlink !== '') {
+            swap.img.setAttributeNS(
+              'http://www.w3.org/1999/xlink',
+              'href',
+              swap.inlinedXlink,
+            );
+          }
+        }
+      }
       // Restore the viewport wrapper so pan-zoom's
       // next operation finds its expected DOM shape.
       if (viewport && viewportParent) {
@@ -1141,6 +1227,20 @@ export class SvgViewer extends LitElement {
    * Fetch a single image via Repo.get_file_base64 and
    * rewrite the `<image>` element's href attribute with
    * the resulting data URI.
+   *
+   * Before overwriting, stash the original (externalised)
+   * href on two data attributes — one per attribute form
+   * we might have to restore. `_onEditorChange` reads
+   * these back before serialising so saved content and
+   * any downstream handoff (the `</>` text-diff toggle,
+   * clipboard paste, copy-as-PNG) all see the on-disk
+   * form rather than the multi-megabyte inlined form.
+   *
+   * The original values are preserved verbatim — we don't
+   * parse, normalise, or canonicalise. A round-trip
+   * through the resolver and back out must be byte-
+   * identical to the source, or the file flips dirty on
+   * every SVG viewer mount.
    */
   async _resolveOneImageHref(imgEl, repoPath, call) {
     try {
@@ -1151,6 +1251,30 @@ export class SvgViewer extends LitElement {
           `[svg-viewer] image resolution failed for ${repoPath}: empty response`,
         );
         return;
+      }
+      // Snapshot the original externalised hrefs. An
+      // element may have href, xlink:href, or both — we
+      // track each form independently because restoration
+      // must preserve exactly the attribute shape the
+      // SVG generator produced (some generators use only
+      // xlink:href for SVG 1.1 compatibility; others use
+      // both).
+      const originalHref = imgEl.getAttribute('href');
+      if (originalHref !== null) {
+        imgEl.setAttribute(
+          'data-ac-dc-original-href',
+          originalHref,
+        );
+      }
+      const originalXlinkHref = imgEl.getAttributeNS(
+        'http://www.w3.org/1999/xlink',
+        'href',
+      );
+      if (originalXlinkHref !== null && originalXlinkHref !== '') {
+        imgEl.setAttribute(
+          'data-ac-dc-original-xlink-href',
+          originalXlinkHref,
+        );
       }
       // Rewrite both href forms so the browser picks up
       // the change regardless of which attribute the SVG
