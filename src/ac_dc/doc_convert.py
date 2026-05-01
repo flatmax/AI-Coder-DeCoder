@@ -2318,10 +2318,12 @@ class DocConvert:
             # next to the original, not in the temp dir. The
             # display_name and hash_source overrides ensure the
             # provenance header records the original file.
-            # source_is_presentation=True tells the PDF pipeline
-            # to skip glyph stripping — the intermediate PDF is
-            # a slide deck, not a text document, so the labels
-            # on shapes are structural content we can't drop.
+            # strip_text_when_present=False disables the
+            # direct-PDF text-dedup pass: presentation text
+            # labels the diagram shapes, so stripping it would
+            # leave meaningless coloured rectangles. See
+            # specs-reference/4-features/doc-convert.md
+            # § "SVG text preservation in PDF pipeline".
             return self._convert_via_pymupdf(
                 root=root,
                 source_abs=source_abs,
@@ -2329,7 +2331,7 @@ class DocConvert:
                 pdf_source=expected_pdf,
                 display_name=source_abs.name,
                 hash_source=source_abs,
-                source_is_presentation=True,
+                strip_text_when_present=False,
             )
 
     def _libreoffice_fallback(
@@ -2381,7 +2383,7 @@ class DocConvert:
         pdf_source: Path | None = None,
         display_name: str | None = None,
         hash_source: Path | None = None,
-        source_is_presentation: bool = False,
+        strip_text_when_present: bool = True,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
 
@@ -2395,10 +2397,16 @@ class DocConvert:
           has any raster images OR at least
           :data:`_PAGE_GRAPHICS_THRESHOLD` significant drawings,
           a companion SVG is exported for that page.
-        - SVGs have glyph elements stripped (text is already in
-          the markdown, rendering it twice bloats output without
-          benefit) but keep `<text>` elements readable via
-          ``text_as_path=0``.
+        - SVGs preserve ``<text>`` elements when the page has no
+          extractable text (figure-only pages, where the text
+          likely labels the figure itself) OR when the caller
+          sets ``strip_text_when_present=False`` (the LibreOffice
+          → PDF → PyMuPDF route for pptx/odp, where the text IS
+          the diagram). On direct-PDF pages that DO have
+          extractable text, the `<text>` and `<tspan>` elements
+          are stripped after export so the same prose doesn't
+          appear twice — once in the markdown paragraphs, once
+          embedded in the SVG.
         - Embedded raster images in the SVG are externalised —
           base64 data URIs replaced with relative file refs.
         - Text-only pages produce no SVG. Pages with no text AND
@@ -2449,19 +2457,18 @@ class DocConvert:
             source classifies as `current` regardless of whether
             LibreOffice produces byte-identical intermediate
             PDFs across runs (it doesn't — timestamps vary).
-        source_is_presentation:
-            When True, SVG glyph stripping is disabled for
-            every page. Presentation slides are diagrams —
-            the text IS the content ("Runtime Environment",
-            "Calibration Unit", etc. label the shapes). If
-            we stripped glyphs the way we do for real PDFs,
-            the SVG would show unlabelled rectangles and the
-            visual output would be meaningless. Real PDFs
-            (text that flows in paragraphs + the occasional
-            figure) keep the default False — the markdown
-            carries the paragraphs, the SVG carries only the
-            graphics, and duplicating text in both places
-            would bloat output without benefit.
+        strip_text_when_present:
+            When True (the default, used by the direct-PDF
+            path), pages that have extractable text get their
+            ``<text>`` / ``<tspan>`` elements stripped from the
+            generated SVG. The same text already appears in the
+            companion markdown, so duplicating it in the SVG
+            bloats output without benefit for real PDFs (papers,
+            reports). When False (used by the LibreOffice route
+            for pptx/odp), SVG text is preserved unconditionally
+            — presentation text labels the diagram shapes, and
+            stripping it would leave meaningless coloured
+            rectangles.
         """
         # Lazy import — PyMuPDF is optional in stripped-down
         # releases. Clean error with install hint on ImportError.
@@ -2529,7 +2536,7 @@ class DocConvert:
                 source_hash=source_hash,
                 rel_path=rel_path,
                 display_name=resolved_display_name,
-                source_is_presentation=source_is_presentation,
+                strip_text_when_present=strip_text_when_present,
             )
         finally:
             # Always close — PyMuPDF holds file handles.
@@ -2548,7 +2555,7 @@ class DocConvert:
         source_hash: str,
         rel_path: str,
         display_name: str | None = None,
-        source_is_presentation: bool = False,
+        strip_text_when_present: bool = True,
     ) -> dict[str, Any]:
         """Walk the pages of an open PDF document and emit output.
 
@@ -2561,10 +2568,9 @@ class DocConvert:
         converted pptx/odp (the provenance header shows the
         original filename, not the intermediate PDF's).
 
-        ``source_is_presentation`` propagates from
-        :meth:`_convert_via_libreoffice`'s pptx/odp route. True
-        disables glyph stripping on every page (see
-        :meth:`_process_pdf_page`).
+        ``strip_text_when_present`` is forwarded to
+        :meth:`_process_pdf_page`; see :meth:`_convert_via_pymupdf`
+        for the full rationale.
         """
         page_count = doc.page_count
         if page_count == 0:
@@ -2618,7 +2624,7 @@ class DocConvert:
                     pad_width=pad_width,
                     assets_dir=assets_dir,
                     assets_created=assets_created,
-                    source_is_presentation=source_is_presentation,
+                    strip_text_when_present=strip_text_when_present,
                 )
             except Exception as exc:
                 logger.debug(
@@ -2684,7 +2690,7 @@ class DocConvert:
         pad_width: int,
         assets_dir: Path,
         assets_created: bool,
-        source_is_presentation: bool = False,
+        strip_text_when_present: bool = True,
     ) -> dict[str, Any]:
         """Emit markdown + optional SVG for one PDF page.
 
@@ -2697,10 +2703,10 @@ class DocConvert:
 
         1. Extract text — if non-empty, emit as markdown paragraphs
         2. Detect images and significant drawings
-        3. If the page has ANY raster images, emit an SVG with
-           glyphs stripped AND embed image refs in markdown
-           (both places are visible to the LLM — markdown for
-           grep, SVG for visual fidelity)
+        3. If the page has ANY raster images, emit an SVG AND
+           embed image refs in markdown (both places are visible
+           to the LLM — markdown for grep, SVG for visual
+           fidelity)
         4. Else if the page has significant drawings AND text,
            emit a companion SVG (for the graphics)
         5. Else if the page has NO text AND NO detected content,
@@ -2709,12 +2715,15 @@ class DocConvert:
            threshold)
         6. Text-only pages emit no SVG
 
-        When ``source_is_presentation`` is True, glyph stripping
-        is disabled regardless of whether the page has text.
-        Presentation slides are diagrams — labels like "Runtime
-        Environment" and "Calibration Unit" ARE the content.
-        Stripping them leaves coloured rectangles with no meaning.
-        See :meth:`_export_pdf_page_svg` for the stripping logic.
+        ``<text>`` preservation in the emitted SVG depends on
+        ``strip_text_when_present`` AND whether the page has
+        extractable text. Direct-PDF pages with text strip the
+        SVG's ``<text>`` / ``<tspan>`` elements (the markdown
+        already carries the paragraphs); LibreOffice-routed
+        pptx/odp pages always keep text (it labels the diagram
+        shapes); figure-only pages keep text regardless of the
+        flag (the text likely labels the figure). See
+        :meth:`_export_pdf_page_svg` for the strip implementation.
         """
         page_number = page_index + 1
         slide_name = f"{str(page_number).zfill(pad_width)}_page.svg"
@@ -2763,18 +2772,22 @@ class DocConvert:
                         "assets_created": assets_created,
                     }
 
-            # Presentation slides always keep their glyphs —
-            # the text IS the diagram's meaning. Real PDFs
-            # strip glyphs when the page has text (the text is
-            # already in the markdown; duplicating it in the
-            # SVG bloats output). See _process_pdf_page
-            # docstring for the full rationale.
-            strip = has_text and not source_is_presentation
+            # Decide whether to strip SVG text for this page.
+            # Two conditions must both hold:
+            #   1. The caller asked for stripping (direct-PDF
+            #      path; LibreOffice route passes False to
+            #      preserve diagram labels).
+            #   2. The page has extractable text — otherwise
+            #      the SVG's <text> elements probably ARE the
+            #      figure labels and stripping would lose them.
+            # See specs-reference/4-features/doc-convert.md
+            # § "SVG text preservation in PDF pipeline".
+            strip_svg_text = strip_text_when_present and has_text
             svg_text, image_files = self._export_pdf_page_svg(
                 page=page,
                 svg_name_stem=slide_name.removesuffix(".svg"),
                 assets_dir=assets_dir,
-                strip_glyphs=strip,
+                strip_text=strip_svg_text,
             )
             svg_path = assets_dir / slide_name
             try:
@@ -2917,9 +2930,31 @@ class DocConvert:
         page: Any,
         svg_name_stem: str,
         assets_dir: Path,
-        strip_glyphs: bool,
+        strip_text: bool = False,
     ) -> tuple[str, list[str]]:
         """Export a page to SVG, externalizing any raster images.
+
+        PyMuPDF emits ``<text>`` elements (text_as_path=0) so the
+        output is compact and selectable. What happens next
+        depends on ``strip_text``:
+
+        - ``strip_text=False`` (figure-only pages, and every
+          page on the LibreOffice → PDF → PyMuPDF route):
+          ``<text>`` and ``<tspan>`` elements are preserved.
+          For presentations this matters — diagram labels like
+          "Runtime Environment" or "Calibration Unit" anchor
+          the coloured shapes, and dropping them leaves the
+          user staring at nameless rectangles.
+        - ``strip_text=True`` (direct-PDF pages with
+          extractable text): ``<text>`` and ``<tspan>``
+          elements are removed. The same prose already appears
+          in the companion markdown file as extracted
+          paragraphs, and duplicating it inside the SVG just
+          bloats output for real PDFs (papers, reports).
+
+        See specs-reference/4-features/doc-convert.md
+        § "SVG text preservation in PDF pipeline" for the
+        rationale behind the origin-aware behaviour.
 
         Parameters
         ----------
@@ -2930,19 +2965,20 @@ class DocConvert:
             (e.g. ``"02_page"`` → ``02_page_img01.png``).
         assets_dir:
             Directory to save externalized images into.
-        strip_glyphs:
-            When True, text glyph elements are removed from the
-            SVG (text content is already in the markdown). When
-            False (text-only page fallback), glyphs are kept so
-            the user sees SOMETHING if the markdown extraction
-            missed content.
+        strip_text:
+            When True, remove ``<text>`` / ``<tspan>`` elements
+            from the generated SVG. Default False so callers
+            that don't care (tests, figure-only pages) get the
+            safe preserve-everything behaviour.
 
         Returns
         -------
         tuple
             ``(svg_text, externalized_filenames)``.
             ``svg_text`` has any base64 raster images rewritten
-            to refer to externalized files.
+            to refer to externalized files and, when
+            ``strip_text`` is True, has ``<text>`` / ``<tspan>``
+            elements removed.
         """
         try:
             # text_as_path=0 keeps text as <text> elements rather
@@ -2957,11 +2993,6 @@ class DocConvert:
                 [],
             )
 
-        # Strip glyphs if requested — when text is already in
-        # markdown, the SVG shouldn't duplicate it.
-        if strip_glyphs:
-            svg_text = self._strip_svg_glyphs(svg_text)
-
         # Externalize embedded raster images.
         svg_text, image_files = self._externalize_svg_images(
             svg_text=svg_text,
@@ -2969,32 +3000,16 @@ class DocConvert:
             assets_dir=assets_dir,
         )
 
+        # Strip text elements on the direct-PDF path. Runs
+        # after image externalization so we can't accidentally
+        # strip text from inside an <image> tag's href (not
+        # that PyMuPDF would ever produce that, but the
+        # ordering keeps each pass independent and easy to
+        # reason about).
+        if strip_text:
+            svg_text = self._strip_svg_text_elements(svg_text)
+
         return svg_text, image_files
-
-    @staticmethod
-    def _strip_svg_glyphs(svg_text: str) -> str:
-        """Remove <text> elements from an SVG.
-
-        Used when text has already been extracted into markdown.
-        Keeping the text in both places would bloat the output
-        for no benefit. The SVG still carries layout, drawings,
-        and images — the visual structure without the redundant
-        words.
-
-        This regex approach is deliberately simple. SVG parsing
-        via lxml would be more principled but adds a dependency
-        and doesn't handle the nuance differently — PyMuPDF's
-        SVG output is well-formed and ``<text>`` elements don't
-        nest.
-        """
-        # Match <text ...>...</text> with optional attributes.
-        # DOTALL so multi-line text blocks are handled.
-        return re.sub(
-            r"<text\b[^>]*>.*?</text>",
-            "",
-            svg_text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
 
     def _externalize_svg_images(
         self,
@@ -3062,6 +3077,64 @@ class DocConvert:
         )
         modified = pattern.sub(_replace, svg_text)
         return modified, saved
+
+    @staticmethod
+    def _strip_svg_text_elements(svg_text: str) -> str:
+        """Remove ``<text>...</text>`` and any leftover ``<tspan>``
+        elements from an SVG string.
+
+        Used by :meth:`_export_pdf_page_svg` on the direct-PDF
+        path when the page has extractable text — the markdown
+        already carries the prose, so keeping it in the SVG too
+        is just duplication.
+
+        Regex rather than XML parse: PyMuPDF's output is
+        consistently structured and regex keeps us dependency-
+        free and fast. ``re.DOTALL`` matters for multi-line
+        ``<text>`` blocks where tspans span several lines.
+        ``re.IGNORECASE`` is defensive — SVG tag names are
+        normatively lowercase but case-insensitive matching
+        costs nothing and protects against edge cases.
+
+        Two passes:
+        1. Strip whole ``<text>...</text>`` blocks (which
+           includes any nested tspans).
+        2. Strip any stray ``<tspan>...</tspan>`` blocks that
+           somehow survived (e.g. tspan outside a text parent —
+           invalid but possible in malformed SVG).
+
+        Self-closing variants (``<text ... />``) are rare in
+        PyMuPDF output but handled by the first pass too.
+        """
+        # <text ... />  — self-closing.
+        svg_text = re.sub(
+            r"<text\b[^>]*/\s*>",
+            "",
+            svg_text,
+            flags=re.IGNORECASE,
+        )
+        # <text ...>...</text>  — block form.
+        svg_text = re.sub(
+            r"<text\b[^>]*>.*?</text\s*>",
+            "",
+            svg_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        # Stray <tspan>...</tspan> outside a parent text.
+        svg_text = re.sub(
+            r"<tspan\b[^>]*>.*?</tspan\s*>",
+            "",
+            svg_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        # Self-closing tspan.
+        svg_text = re.sub(
+            r"<tspan\b[^>]*/\s*>",
+            "",
+            svg_text,
+            flags=re.IGNORECASE,
+        )
+        return svg_text
 
     def _write_pdf_output(
         self,

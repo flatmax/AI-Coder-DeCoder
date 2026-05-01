@@ -297,7 +297,17 @@ Externalized image filenames are included in the parent `.md`'s `images=` field 
 
 ### SVG text preservation in PDF pipeline
 
-PyMuPDF's `page.get_svg_image()` emits text as `<text>` elements when called with `text_as_path=0`. This preserves selectable text and produces smaller SVGs. Text content is also duplicated into the companion markdown file for searchability — so the same text exists in both the SVG (for visual fidelity and selection) and the markdown (for grep and LLM context). This is deliberate, not a bug.
+PyMuPDF's `page.get_svg_image()` emits text as `<text>` elements when called with `text_as_path=0`. This preserves selectable text and produces smaller SVGs than glyph-path decomposition would. What happens next is origin-aware:
+
+| Source | Page has extractable text? | SVG `<text>`/`<tspan>` |
+|---|---|---|
+| Direct `.pdf` | yes | **stripped** after export |
+| Direct `.pdf` | no (figure-only) | kept (labels the figure) |
+| `.pptx`/`.odp` via LibreOffice → PDF | any | kept (labels the diagram) |
+
+The direct-PDF strip is implemented as a regex pass over the SVG string after image externalization, removing both `<text>...</text>` block forms and any stray `<tspan>` elements. The markdown always carries the extracted paragraphs, so the prose is never lost — it just lives in exactly one place per page per source type.
+
+The routing flag is `strip_text_when_present`: the direct-PDF dispatch defaults it to True; the LibreOffice dispatch passes False. Figure-only pages skip stripping regardless because the decision AND-combines the flag with "page has extractable text" — no text means nothing to dedup against.
 
 ### LibreOffice path dependency
 

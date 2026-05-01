@@ -36,10 +36,12 @@ For each PDF page:
 ### SVG Text Preservation
 - SVG export emits text as text elements rather than decomposing each character into individual glyph paths
 - Keeps sentences intact, produces smaller SVGs, makes text selectable and searchable in the SVG viewer
-- Extracted text also written to the companion markdown file for searchability and LLM context
-- For real PDFs (report pages where text flows in paragraphs), glyph-shaped text elements are stripped from the SVG when the page also has extractable text — the markdown carries the paragraphs, the SVG carries only the graphics, and duplicating text in both places would bloat output without benefit
-- For presentations (pptx/odp routed through LibreOffice → PDF → PyMuPDF), glyph stripping is disabled on every page — slide text like "Runtime Environment" or "Calibration Unit" labels the shapes in a diagram and dropping it leaves meaningless coloured rectangles
-- Result for PDFs — text in markdown, graphics in SVG, no duplication
+- Extracted text is always written to the companion markdown file for searchability and LLM context
+- Origin-aware dedup: whether SVG text survives depends on how the page reached the PyMuPDF stage
+- For real PDFs (report pages where text flows in paragraphs), `<text>` and `<tspan>` elements are stripped from the SVG when the page also has extractable text — the markdown carries the paragraphs, the SVG carries only the graphics, and duplicating text in both places would bloat output without benefit
+- For presentations (pptx/odp routed through LibreOffice → intermediate PDF → PyMuPDF), text stripping is disabled on every page — slide text like "Runtime Environment" or "Calibration Unit" labels the shapes in a diagram and dropping it leaves meaningless coloured rectangles
+- Figure-only pages (no extractable text) always keep their SVG text regardless of source — any `<text>` element there probably labels the figure itself (axis labels, legend entries)
+- Result for PDFs — text in markdown, graphics in SVG, no duplication on text pages
 - Result for presentations — text in both SVG (so the diagram renders correctly) and markdown (for grep)
 ### SVG Image Externalization
 - SVGs produced by the PDF pipeline may contain embedded base64 image data URIs
