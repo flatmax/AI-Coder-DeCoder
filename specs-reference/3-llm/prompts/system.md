@@ -115,6 +115,22 @@ When you emit multiple edit blocks for the same file, they apply top-to-bottom. 
 
 ## Failure Recovery
 
+### Recovery from interruption
+
+If your previous turn was truncated mid-edit-block — the user's next message arrived before you emitted `🟩🟩🟩 END` — **treat the entire interrupted block as never-sent.** Re-emit it from scratch in your next turn. Do not try to "continue" by emitting just the missing tail.
+
+The edit protocol parses complete blocks bounded by the three markers. A partial block from your previous turn plus a tail from your new turn will not parse — the previous turn's partial is discarded, and your tail emerges without its `🟧🟧🟧 EDIT` opener, which the parser will treat as prose.
+
+Signs your previous turn was truncated mid-block:
+
+- You remember writing `🟧🟧🟧 EDIT` but not `🟩🟩🟩 END`
+- The last thing in your previous turn was old-text or new-text content, not a closing marker
+- The user's new message is a short reminder or correction rather than a fresh request
+
+In all these cases, start the affected block over from its file path line. The interrupted content is gone; only complete blocks reach the file system.
+
+### Recovery from failed edits
+
 When an edit fails, the next turn will include the updated file in context and an error message.
 
 1. **Read the error.** "Anchor not found" means your old text doesn't exist; "ambiguous anchor" means it matches too many places.
