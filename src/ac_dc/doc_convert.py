@@ -1264,27 +1264,53 @@ class DocConvert:
                 f"markitdown conversion failed: {exc}",
             )
 
-        # DOCX workaround — markitdown truncates large embedded
-        # images to `data:image/png;base64...` with no payload.
-        # Pre-extract the real images from the zip archive and
-        # substitute the truncated references in order. Only
-        # runs for `.docx`; other formats don't have the same
-        # truncation issue.
-        if source_abs.suffix.lower() == ".docx":
-            markdown_text = self._replace_docx_truncated_uris(
-                source_abs, markdown_text
-            )
-
         # Assets subdirectory — `docs/architecture.docx` produces
         # `docs/architecture/` for image storage. Created on
         # demand; removed at the end if no images were saved.
         assets_dir = source_abs.with_suffix("")
         stem = source_abs.stem
 
+        # DOCX: unconditionally extract images from the zip's
+        # ``word/media/`` directory BEFORE running the data-URI
+        # pipeline. markitdown's behaviour with DOCX images is
+        # unreliable — for some files it emits truncated
+        # ``data:image/...base64...`` placeholders (handled by
+        # `_replace_docx_truncated_uris` below), for others it
+        # drops the reference entirely. The zip is the
+        # authoritative source of "what images does this .docx
+        # contain?", matching how the old AC-DC system worked.
+        #
+        # The data-URI pipeline runs afterwards to handle any
+        # real inline data URIs markitdown did successfully
+        # emit (small images sometimes survive intact). That
+        # pass uses a disjoint filename range — its counter
+        # starts at ``len(zip_extracted) + 1`` via the
+        # ``start_index`` parameter — so filenames stay unique
+        # across the two sources.
+        zip_extracted: list[str] = []
+        if source_abs.suffix.lower() == ".docx":
+            zip_extracted = self._save_docx_zip_images(
+                source_abs, assets_dir, stem
+            )
+            markdown_text = self._replace_docx_truncated_uris(
+                markdown_text,
+                zip_extracted,
+                assets_dir.name,
+            )
+
         # Extract data-URI images and rewrite the markdown.
-        markdown_text, saved_images = self._extract_data_uri_images(
-            markdown_text, assets_dir, stem
+        # Start numbering after the zip-extracted images so
+        # filenames don't collide when both paths produce
+        # output for the same source.
+        markdown_text, data_uri_saved = self._extract_data_uri_images(
+            markdown_text, assets_dir, stem,
+            start_index=len(zip_extracted) + 1,
         )
+        # Merge both sources in deterministic order: zip
+        # images first (document-order within the archive),
+        # then any data-URI extras. This list feeds the
+        # provenance header and the orphan-cleanup diff.
+        saved_images = tuple(zip_extracted) + data_uri_saved
 
         # Orphan cleanup — images listed in the prior provenance
         # header but NOT produced by this conversion are deleted.
@@ -1350,97 +1376,66 @@ class DocConvert:
         }
 
     # ------------------------------------------------------------------
-    # DOCX image pre-extraction (truncated-URI workaround)
+    # DOCX image pre-extraction (zip-based, unconditional)
     # ------------------------------------------------------------------
 
-    def _replace_docx_truncated_uris(
+    def _save_docx_zip_images(
         self,
         source_abs: Path,
-        markdown_text: str,
-    ) -> str:
-        """Substitute markitdown's truncated DOCX URIs with real images.
+        assets_dir: Path,
+        stem: str,
+    ) -> list[str]:
+        """Unconditionally extract images from ``word/media/``.
 
-        markitdown emits `data:image/png;base64...` (literal
-        ellipsis, no payload) for large embedded images in
-        `.docx` files. We work around by pre-extracting the
-        images from `word/media/` inside the zip archive and
-        substituting the truncated references in order.
+        DOCX files are zip archives; embedded images live
+        under ``word/media/``. markitdown does not reliably
+        surface these in the markdown output — for some
+        files it emits truncated ``data:image/...base64...``
+        placeholders (the ellipsis case handled below), for
+        others it drops the reference entirely, and for small
+        inline images it may inline a real data URI.
 
-        The order-of-appearance substitution is the best we can
-        do without deeper docx parsing — markitdown doesn't
-        surface the image relationship IDs that would let us
-        map each reference to its exact source. In practice the
-        order is correct because both markitdown and our zip
-        walker iterate in document order.
+        The old AC-DC system extracted every media file
+        unconditionally and then reconciled with the markdown
+        separately. That's what we do here too: the source of
+        truth for "what images does this .docx contain?" is
+        the zip, not markitdown's output.
 
-        Returns the modified markdown. When no truncated URIs
-        are present, or when the zip has no extractable images,
-        the input is returned unchanged.
+        Returns the list of saved filenames in document order
+        (as emitted by ``zipfile.namelist()``), with names of
+        the form ``{stem}_img{N}{ext}`` matching the
+        data-URI pipeline's convention so the provenance
+        header lists both sources with the same naming.
+
+        Empty list on any failure (not a zip, no media dir,
+        unreadable entries) — caller treats as "no images"
+        and proceeds.
         """
-        # Find truncated URIs in order of appearance.
-        truncated_matches = list(_TRUNCATED_URI_RE.finditer(markdown_text))
-        if not truncated_matches:
-            return markdown_text
-
-        # Extract images from the docx zip. Order matches
-        # `zipfile.namelist()`'s document-order return.
-        extracted_images = self._extract_docx_media(source_abs)
-        if not extracted_images:
-            # Truncated URIs but no zip images — odd, but we
-            # can't substitute. Leave the markdown as-is; the
-            # caller sees broken image refs which is better than
-            # silently dropping them.
-            return markdown_text
-
-        # Re-encode each extracted image as a full data URI so
-        # `_extract_data_uri_images` can handle it uniformly on
-        # the next pass. Match count to the min of truncated
-        # occurrences and available images.
-        count = min(len(truncated_matches), len(extracted_images))
-        for i in range(count):
-            mime, payload = extracted_images[i]
-            full_uri = f"data:image/{mime};base64,{payload}"
-            # Substitute only the first remaining truncated URI
-            # on each pass — multi-substitute with `re.sub` risks
-            # replacing all occurrences at once, which we don't
-            # want (each truncated ref maps to a different image).
-            markdown_text = _TRUNCATED_URI_RE.sub(
-                full_uri, markdown_text, count=1,
-            )
-        return markdown_text
-
-    @staticmethod
-    def _extract_docx_media(
-        source_abs: Path,
-    ) -> list[tuple[str, str]]:
-        """Extract (mime_subtype, base64_payload) pairs from a docx zip.
-
-        Walks the zip archive's `word/media/` directory in
-        document order (zipfile's `namelist` preserves storage
-        order, which for well-formed docx matches the order
-        image refs appear in the document). Returns pairs suitable
-        for re-encoding as `data:image/{mime};base64,{payload}`.
-
-        Failures (not a valid zip, no media directory,
-        unreadable members) return an empty list — caller treats
-        as "no substitutions possible" and leaves the markdown
-        as-is.
-        """
-        images: list[tuple[str, str]] = []
+        saved: list[str] = []
         try:
             with zipfile.ZipFile(source_abs, "r") as zf:
-                for name in zf.namelist():
-                    if not name.startswith("word/media/"):
-                        continue
-                    # Extract the extension to derive the MIME
-                    # subtype. `word/media/image1.png` → `png`.
-                    ext = Path(name).suffix.lstrip(".").lower()
+                # Sort media entries so the output is stable
+                # across extractions of the same file —
+                # zipfile.namelist preserves storage order
+                # which for well-formed docx matches document
+                # order, but a belt-and-braces sort costs
+                # nothing and protects against oddly-assembled
+                # archives.
+                media_names = sorted(
+                    name for name in zf.namelist()
+                    if name.startswith("word/media/")
+                )
+                if not media_names:
+                    return []
+                for name in media_names:
+                    ext = Path(name).suffix.lower()
                     if not ext:
                         continue
-                    # Normalise `jpg` → `jpeg` for the MIME
-                    # subtype — browsers accept both but the
-                    # canonical form is `jpeg`.
-                    mime_sub = "jpeg" if ext == "jpg" else ext
+                    # Normalise `.jpeg` → `.jpg` to match the
+                    # old system's convention; leaves other
+                    # extensions untouched.
+                    if ext == ".jpeg":
+                        ext = ".jpg"
                     try:
                         raw = zf.read(name)
                     except (KeyError, RuntimeError) as exc:
@@ -1449,8 +1444,31 @@ class DocConvert:
                             name, exc,
                         )
                         continue
-                    payload = base64.b64encode(raw).decode("ascii")
-                    images.append((mime_sub, payload))
+                    # Create assets dir lazily — only if we
+                    # have at least one byte to write, so
+                    # image-free docs still skip the dir.
+                    try:
+                        assets_dir.mkdir(
+                            parents=True, exist_ok=True,
+                        )
+                    except OSError as exc:
+                        logger.debug(
+                            "Assets dir create failed %s: %s",
+                            assets_dir, exc,
+                        )
+                        return saved
+                    image_index = len(saved) + 1
+                    image_name = f"{stem}_img{image_index}{ext}"
+                    image_path = assets_dir / image_name
+                    try:
+                        image_path.write_bytes(raw)
+                    except OSError as exc:
+                        logger.debug(
+                            "Image write failed %s: %s",
+                            image_path, exc,
+                        )
+                        continue
+                    saved.append(image_name)
         except zipfile.BadZipFile:
             logger.debug(
                 "Not a valid zip: %s (docx extraction skipped)",
@@ -1461,7 +1479,49 @@ class DocConvert:
                 "DOCX media extraction failed for %s: %s",
                 source_abs, exc,
             )
-        return images
+        return saved
+
+    def _replace_docx_truncated_uris(
+        self,
+        markdown_text: str,
+        extracted_names: list[str],
+        assets_dir_name: str,
+    ) -> str:
+        """Substitute truncated ``data:image`` placeholders.
+
+        markitdown emits ``data:image/png;base64...`` (literal
+        ellipsis, no payload) for large embedded images.
+        Now that we've already extracted the real images from
+        the zip in :meth:`_save_docx_zip_images`, simply
+        rewrite each truncated reference to point at the
+        corresponding extracted file.
+
+        Order-of-appearance matching is the best we can do
+        without docx relationship parsing — markitdown
+        doesn't surface rIds. In practice the zip's document
+        order and markitdown's emission order align for
+        well-formed files.
+
+        Returns the markdown unchanged when no truncated
+        URIs are present.
+        """
+        if not extracted_names:
+            return markdown_text
+        truncated_matches = list(
+            _TRUNCATED_URI_RE.finditer(markdown_text)
+        )
+        if not truncated_matches:
+            return markdown_text
+        count = min(len(truncated_matches), len(extracted_names))
+        for i in range(count):
+            rel_ref = f"{assets_dir_name}/{extracted_names[i]}"
+            # Substitute one at a time so each truncated
+            # reference gets its own filename, not all
+            # replaced with the same one.
+            markdown_text = _TRUNCATED_URI_RE.sub(
+                rel_ref, markdown_text, count=1,
+            )
+        return markdown_text
 
     # ------------------------------------------------------------------
     # Data-URI image extraction
@@ -1472,6 +1532,7 @@ class DocConvert:
         markdown_text: str,
         assets_dir: Path,
         stem: str,
+        start_index: int = 1,
     ) -> tuple[str, tuple[str, ...]]:
         """Decode data-URI images, save to disk, rewrite references.
 
@@ -1488,6 +1549,12 @@ class DocConvert:
         stem:
             Source file stem for naming extracted images
             (e.g. `architecture` → `architecture_img1.png`).
+        start_index:
+            First image counter value. DOCX callers pass
+            ``len(zip_extracted) + 1`` so data-URI images
+            numbered after the zip-extracted images and
+            filenames stay unique across the two sources.
+            Defaults to 1 for non-DOCX callers.
 
         Returns
         -------
@@ -1554,9 +1621,12 @@ class DocConvert:
                 continue
 
             # Name the image. `{stem}_img{N}{ext}` — `N` is
-            # 1-indexed for user-friendliness.
+            # 1-indexed for user-friendliness. DOCX callers
+            # offset past zip-extracted images via
+            # ``start_index``; other callers get the default
+            # of 1.
             ext = _MIME_TO_EXT.get(mime_sub, ".bin")
-            image_index = len(saved) + 1
+            image_index = len(saved) + start_index
             image_name = f"{stem}_img{image_index}{ext}"
             image_path = assets_dir / image_name
 
@@ -2248,6 +2318,10 @@ class DocConvert:
             # next to the original, not in the temp dir. The
             # display_name and hash_source overrides ensure the
             # provenance header records the original file.
+            # source_is_presentation=True tells the PDF pipeline
+            # to skip glyph stripping — the intermediate PDF is
+            # a slide deck, not a text document, so the labels
+            # on shapes are structural content we can't drop.
             return self._convert_via_pymupdf(
                 root=root,
                 source_abs=source_abs,
@@ -2255,6 +2329,7 @@ class DocConvert:
                 pdf_source=expected_pdf,
                 display_name=source_abs.name,
                 hash_source=source_abs,
+                source_is_presentation=True,
             )
 
     def _libreoffice_fallback(
@@ -2306,6 +2381,7 @@ class DocConvert:
         pdf_source: Path | None = None,
         display_name: str | None = None,
         hash_source: Path | None = None,
+        source_is_presentation: bool = False,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
 
@@ -2373,6 +2449,19 @@ class DocConvert:
             source classifies as `current` regardless of whether
             LibreOffice produces byte-identical intermediate
             PDFs across runs (it doesn't — timestamps vary).
+        source_is_presentation:
+            When True, SVG glyph stripping is disabled for
+            every page. Presentation slides are diagrams —
+            the text IS the content ("Runtime Environment",
+            "Calibration Unit", etc. label the shapes). If
+            we stripped glyphs the way we do for real PDFs,
+            the SVG would show unlabelled rectangles and the
+            visual output would be meaningless. Real PDFs
+            (text that flows in paragraphs + the occasional
+            figure) keep the default False — the markdown
+            carries the paragraphs, the SVG carries only the
+            graphics, and duplicating text in both places
+            would bloat output without benefit.
         """
         # Lazy import — PyMuPDF is optional in stripped-down
         # releases. Clean error with install hint on ImportError.
@@ -2440,6 +2529,7 @@ class DocConvert:
                 source_hash=source_hash,
                 rel_path=rel_path,
                 display_name=resolved_display_name,
+                source_is_presentation=source_is_presentation,
             )
         finally:
             # Always close — PyMuPDF holds file handles.
@@ -2458,6 +2548,7 @@ class DocConvert:
         source_hash: str,
         rel_path: str,
         display_name: str | None = None,
+        source_is_presentation: bool = False,
     ) -> dict[str, Any]:
         """Walk the pages of an open PDF document and emit output.
 
@@ -2469,6 +2560,11 @@ class DocConvert:
         basename when None — used by Pass A5b to override for
         converted pptx/odp (the provenance header shows the
         original filename, not the intermediate PDF's).
+
+        ``source_is_presentation`` propagates from
+        :meth:`_convert_via_libreoffice`'s pptx/odp route. True
+        disables glyph stripping on every page (see
+        :meth:`_process_pdf_page`).
         """
         page_count = doc.page_count
         if page_count == 0:
@@ -2522,6 +2618,7 @@ class DocConvert:
                     pad_width=pad_width,
                     assets_dir=assets_dir,
                     assets_created=assets_created,
+                    source_is_presentation=source_is_presentation,
                 )
             except Exception as exc:
                 logger.debug(
@@ -2587,6 +2684,7 @@ class DocConvert:
         pad_width: int,
         assets_dir: Path,
         assets_created: bool,
+        source_is_presentation: bool = False,
     ) -> dict[str, Any]:
         """Emit markdown + optional SVG for one PDF page.
 
@@ -2610,6 +2708,13 @@ class DocConvert:
            vector graphics that don't reach the "significant"
            threshold)
         6. Text-only pages emit no SVG
+
+        When ``source_is_presentation`` is True, glyph stripping
+        is disabled regardless of whether the page has text.
+        Presentation slides are diagrams — labels like "Runtime
+        Environment" and "Calibration Unit" ARE the content.
+        Stripping them leaves coloured rectangles with no meaning.
+        See :meth:`_export_pdf_page_svg` for the stripping logic.
         """
         page_number = page_index + 1
         slide_name = f"{str(page_number).zfill(pad_width)}_page.svg"
@@ -2658,11 +2763,18 @@ class DocConvert:
                         "assets_created": assets_created,
                     }
 
+            # Presentation slides always keep their glyphs —
+            # the text IS the diagram's meaning. Real PDFs
+            # strip glyphs when the page has text (the text is
+            # already in the markdown; duplicating it in the
+            # SVG bloats output). See _process_pdf_page
+            # docstring for the full rationale.
+            strip = has_text and not source_is_presentation
             svg_text, image_files = self._export_pdf_page_svg(
                 page=page,
                 svg_name_stem=slide_name.removesuffix(".svg"),
                 assets_dir=assets_dir,
-                strip_glyphs=has_text,
+                strip_glyphs=strip,
             )
             svg_path = assets_dir / slide_name
             try:

@@ -37,7 +37,10 @@ For each PDF page:
 - SVG export emits text as text elements rather than decomposing each character into individual glyph paths
 - Keeps sentences intact, produces smaller SVGs, makes text selectable and searchable in the SVG viewer
 - Extracted text also written to the companion markdown file for searchability and LLM context
-- Result — text appears in both SVG (visual fidelity) and markdown (grep-friendly)
+- For real PDFs (report pages where text flows in paragraphs), glyph-shaped text elements are stripped from the SVG when the page also has extractable text — the markdown carries the paragraphs, the SVG carries only the graphics, and duplicating text in both places would bloat output without benefit
+- For presentations (pptx/odp routed through LibreOffice → PDF → PyMuPDF), glyph stripping is disabled on every page — slide text like "Runtime Environment" or "Calibration Unit" labels the shapes in a diagram and dropping it leaves meaningless coloured rectangles
+- Result for PDFs — text in markdown, graphics in SVG, no duplication
+- Result for presentations — text in both SVG (so the diagram renders correctly) and markdown (for grep)
 ### SVG Image Externalization
 - SVGs produced by the PDF pipeline may contain embedded base64 image data URIs
 - Externalization scans the SVG, extracts the embedded images, saves them as separate files
@@ -71,10 +74,15 @@ Dedicated openpyxl-based pipeline instead of markitdown, preserving cell backgro
 ### Fallback
 - If openpyxl is not installed or fails to read the file, fall back to markitdown
 ## DOCX Image Extraction
-markitdown's handling of embedded images produces truncated data URIs — references where the base64 payload is replaced with an ellipsis (no actual image data). Two-step workaround:
-1. **Extract real images** — open the docx as a zip archive, find all files under the media directory, save them with sequential names; JPEG extensions normalized; corrupt (non-zip) docx handled gracefully
-2. **Replace truncated references** — scan markdown for truncated patterns and replace each with the next filename from the extracted images list, in order; real data URIs (with actual payloads) left unchanged — handled by the standard data-URI pipeline
-After these two steps, the standard image extraction pipeline handles any remaining real data URIs markitdown did successfully inline.
+markitdown's handling of embedded images is unreliable — for some images it emits truncated data URIs (references where the base64 payload is replaced with an ellipsis), for others it drops the reference entirely, and for small images it may successfully inline a real data URI. The zip archive is the authoritative source of "what images does this .docx contain?", not markitdown's output.
+
+Unconditional three-step pipeline:
+
+1. **Extract all media from the zip** — open the docx as a zip archive, find every file under the media directory, save each with sequential names (`{stem}_img{N}{ext}`); JPEG extensions normalized to `.jpg`; corrupt (non-zip) docx handled gracefully by skipping extraction. Runs even when markdown output appears to reference no images — the zip may contain images markitdown dropped.
+2. **Replace truncated references** — scan markdown for truncated patterns (the ellipsis form) and rewrite each to point at the corresponding already-extracted file, in document order. When no truncated references exist, this step is a no-op; the images are still on disk from step 1.
+3. **Process any remaining real data URIs** — the standard data-URI extraction pipeline handles images markitdown did successfully inline. Its image counter is offset past the zip-extracted images (starts at `len(zip_extracted) + 1`) so filenames don't collide across the two sources.
+
+All saved images from both steps 1 and 3 are listed in the provenance header so orphan cleanup on re-conversion diffs against the complete set. When markitdown drops an image reference entirely (no truncated marker, no real data URI), the file still lands on disk and appears in provenance — but no markdown link points at it. A future enhancement could parse the docx relationship table (`word/_rels/document.xml.rels`) to map rIds to media paths and inject links, but that requires walking `document.xml` and isn't part of the current pipeline.
 ## Image Extraction Pipeline
 Images embedded in source documents (e.g. figures in docx) are extracted alongside converted markdown.
 ### Pipeline
