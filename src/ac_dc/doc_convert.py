@@ -939,20 +939,6 @@ class DocConvert:
         if restricted is not None:
             return restricted
 
-        # Clean-tree gate — matches the Code Review pattern. When
-        # no repo is attached (tests, CLI use), we skip — caller
-        # owns the consistency guarantee in that case.
-        if self._repo is not None:
-            is_clean_fn = getattr(self._repo, "is_clean", None)
-            if is_clean_fn is not None and not is_clean_fn():
-                return {
-                    "error": (
-                        "Working tree has uncommitted changes. "
-                        "Commit or stash before converting — "
-                        "converted files must produce a clean diff."
-                    )
-                }
-
         # Decide execution mode. Background requires both a
         # running loop AND a wired callback — if either is
         # missing, fall back to inline so tests and CLI callers
@@ -999,15 +985,14 @@ class DocConvert:
     ) -> None:
         """Background conversion task with progress events.
 
-        Runs in the main event loop (not an executor) because
-        per-file conversion dispatches to blocking library calls
-        inside each `_convert_one`. For Layer 4.6 we accept the
-        event-loop blocking during each file — conversions
-        typically take 200ms-8s per file, and the progress
-        events between files give the UI enough liveness. If
-        this becomes a problem, a later pass can move the
-        actual conversion work into a dedicated executor and
-        keep the event dispatch on the loop.
+        Each file is converted in the default thread executor so
+        the event loop stays responsive — individual file
+        conversions (especially PDFs via PyMuPDF) routinely block
+        for many seconds, and running them directly on the loop
+        would stall the websocket and prevent the ``start`` and
+        ``file`` events from reaching the browser until the
+        whole batch finished. That produced a "Converting 0 of
+        N…" hang with no progress events visible in the UI.
 
         Emits three event stages:
 
@@ -1022,6 +1007,8 @@ class DocConvert:
         Event failures are swallowed so a broken frontend
         subscriber can't abort an in-flight conversion batch.
         """
+        import asyncio
+
         root = self._root()
         total = len(paths)
         await self._send_convert_event({
@@ -1029,10 +1016,23 @@ class DocConvert:
             "count": total,
         })
 
+        loop = asyncio.get_running_loop()
         results: list[dict[str, Any]] = []
         for index, rel_path in enumerate(paths):
             try:
-                result = self._convert_one(root, rel_path)
+                # Run the blocking conversion off-loop. The
+                # default executor is a ThreadPoolExecutor, so
+                # libraries that release the GIL (PyMuPDF's C
+                # core does) actually run in parallel with the
+                # loop — not that we need parallelism here; we
+                # just need the loop to stay free to deliver
+                # the progress events queued above and below.
+                result = await loop.run_in_executor(
+                    None,
+                    self._convert_one,
+                    root,
+                    rel_path,
+                )
             except Exception as exc:
                 # Defensive — a bug in a per-file conversion
                 # shouldn't abort the whole batch. Surface as an
