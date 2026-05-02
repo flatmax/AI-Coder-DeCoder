@@ -3022,6 +3022,66 @@ class Repo:
         """
         return shutil.which("make4ht") is not None
 
+    # Cached result of the tex4ht.sty package probe. ``None`` means
+    # "not yet probed"; True / False mean the probe ran and the
+    # package was / wasn't found. Cached at class level because
+    # the answer doesn't change during a session — TeX package
+    # installation is out-of-band of AC-DC.
+    _tex4ht_package_cached: "bool | None" = None
+
+    @classmethod
+    def is_tex4ht_package_available(cls) -> bool:
+        """Return True when the ``tex4ht.sty`` package is installed.
+
+        ``make4ht`` is only the driver — it needs ``tex4ht.sty``
+        from the TeX Live ``texlive-plain-generic`` package (on
+        Debian / Ubuntu) to actually transform documents. Users
+        with make4ht on PATH but no tex4ht package see an
+        obscure LaTeX error mid-compile ("File `tex4ht.sty' not
+        found"). This probe surfaces the missing package up-front
+        so the preview UI can show a targeted install hint.
+
+        Implementation uses ``kpsewhich tex4ht.sty`` — the
+        standard TeX Live tool for locating installed packages.
+        Exits non-zero when the file isn't on the TEXMF search
+        path; we treat that as "missing" along with any
+        subprocess failure (kpsewhich not installed, timeout,
+        etc). Result is cached class-side so the subprocess
+        cost is paid at most once per Python process.
+
+        Never raises.
+        """
+        if cls._tex4ht_package_cached is not None:
+            return cls._tex4ht_package_cached
+        # kpsewhich ships with every TeX Live install; if it's
+        # missing, tex4ht.sty can't be there either.
+        if shutil.which("kpsewhich") is None:
+            cls._tex4ht_package_cached = False
+            return False
+        try:
+            result = subprocess.run(
+                ["kpsewhich", "tex4ht.sty"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            # Exit 0 AND non-empty stdout means the file was
+            # resolved. Exit 0 with empty output shouldn't happen
+            # for kpsewhich but guard defensively.
+            found = (
+                result.returncode == 0
+                and bool(result.stdout.strip())
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            # Subprocess blew up for reasons unrelated to
+            # whether the package exists. Treat as missing —
+            # the user will see the install hint, which is
+            # the actionable path either way.
+            found = False
+        cls._tex4ht_package_cached = found
+        return found
+
     # ------------------------------------------------------------------
     # TeX preview compilation
     # ------------------------------------------------------------------
@@ -3120,12 +3180,34 @@ class Repo:
             )
 
             # Build the environment with TEXINPUTS.
+            #
+            # Critical: TEXINPUTS must end with an OS path
+            # separator (``:`` on Unix, ``;`` on Windows) so
+            # the TeX engine APPENDS its default search paths
+            # rather than REPLACING them. Without the trailing
+            # separator, setting TEXINPUTS to a single directory
+            # means htlatex searches only that directory and
+            # fails to find system packages like ``tex4ht.sty``,
+            # producing a mid-compile "File `tex4ht.sty' not
+            # found" error even when kpsewhich resolves the
+            # file correctly from a shell.
+            #
+            # The trailing separator appears in both branches:
+            # when ``existing`` is set, the value is
+            # ``"${texinputs}:${existing}:"``; when empty, it's
+            # just ``"${texinputs}:"``. Either way, the TeX
+            # engine appends its defaults after our explicit
+            # paths.
             env = dict(os.environ)
             if texinputs:
                 existing = env.get("TEXINPUTS", "")
-                env["TEXINPUTS"] = texinputs + (
-                    os.pathsep + existing if existing else ""
-                )
+                if existing:
+                    env["TEXINPUTS"] = (
+                        texinputs + os.pathsep + existing
+                        + os.pathsep
+                    )
+                else:
+                    env["TEXINPUTS"] = texinputs + os.pathsep
 
             # Run make4ht. Working directory is the temp dir so
             # all intermediate files stay contained.

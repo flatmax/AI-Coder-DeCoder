@@ -2721,22 +2721,44 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def is_tex_preview_available(self) -> dict[str, Any]:
-        """Check if make4ht is installed for TeX preview.
+        """Check if TeX preview dependencies are installed.
 
-        Returns ``{"available": True}`` or
-        ``{"available": False, "install_hint": "..."}`` so the
-        frontend can show or hide the preview toggle immediately
-        on file open.
+        Two-stage probe: ``make4ht`` binary on PATH, and the
+        ``tex4ht.sty`` package resolvable via ``kpsewhich``. Both
+        must be present for compilation to succeed — a common
+        failure mode is ``make4ht`` installed standalone (e.g.
+        from ``luatex`` on a minimal TeX install) but the
+        ``tex4ht`` package missing, which produces a confusing
+        mid-compile LaTeX error about ``tex4ht.sty`` rather than
+        an upfront "not installed" message.
+
+        Returns ``{"available": True}`` when both present, or
+        ``{"available": False, "install_hint": "..."}`` with a
+        targeted hint naming the specific missing piece so the
+        user knows which package to install.
         """
         from ac_dc.repo import Repo
-        available = Repo.is_make4ht_available()
-        result: dict[str, Any] = {"available": available}
-        if not available:
-            result["install_hint"] = (
-                "Install TeX Live or MiKTeX with make4ht. "
-                "On Ubuntu: sudo apt install texlive-full"
-            )
-        return result
+        if not Repo.is_make4ht_available():
+            return {
+                "available": False,
+                "install_hint": (
+                    "make4ht not found on PATH. "
+                    "Install TeX Live or MiKTeX with make4ht. "
+                    "On Ubuntu/Debian: sudo apt install texlive-full"
+                ),
+            }
+        if not Repo.is_tex4ht_package_available():
+            return {
+                "available": False,
+                "install_hint": (
+                    "make4ht is installed, but the tex4ht package "
+                    "is missing. "
+                    "On Ubuntu/Debian: "
+                    "sudo apt install texlive-plain-generic "
+                    "(or texlive-full for everything)."
+                ),
+            }
+        return {"available": True}
 
     def compile_tex_preview(
         self,
