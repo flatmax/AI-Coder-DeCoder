@@ -29,7 +29,7 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Load files into context
 - Re-index symbol or doc index (mtime-based; only changed files re-parsed)
 - Initialize stability tracker lazily on first request (if eager init failed)
-- Detect and fetch URLs from the prompt (up to a per-message limit)
+- Detect and fetch URLs from the prompt (up to a per-message limit); honour the per-turn exclusion set supplied by the client so unchecked URLs are absent from the prompt's URL section while remaining in the session-scoped fetched dict for later re-inclusion
 - Persist user message to JSONL and add to in-memory context before streaming begins
 - Broadcast user message to all clients
 - Build and inject review context when review mode is active
