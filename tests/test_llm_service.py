@@ -3094,6 +3094,213 @@ class TestURLIntegration:
 
         assert len(fetched_urls) == 3
 
+    async def test_excluded_urls_omitted_from_prompt_context(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``excluded_urls`` kwarg drops URLs from this turn's prompt.
+
+        End-to-end contract for the chip UI's include checkbox.
+        The user has two fetched URLs from a prior turn; on
+        send they uncheck one. The streaming handler receives
+        the exclusion list and threads it through to
+        :meth:`URLService.format_url_context` so the excluded
+        URL's content doesn't appear in ``_url_context`` on the
+        context manager.
+
+        The URLs themselves STAY in the URL service's
+        session-scoped ``_fetched`` dict — the chip remains
+        visible so the user can re-include on a later turn by
+        rechecking the box. This is the distinguishing behaviour
+        from :meth:`remove_fetched_url`, which drops the chip
+        entirely.
+        """
+        from ac_dc.url_service.models import URLContent
+
+        # Pre-populate two fetched URLs from prior turns.
+        service._url_service._fetched["https://keep.example.com"] = (
+            URLContent(
+                url="https://keep.example.com",
+                url_type="generic",
+                content="keep body",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+        )
+        service._url_service._fetched["https://drop.example.com"] = (
+            URLContent(
+                url="https://drop.example.com",
+                url_type="generic",
+                content="drop body",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+        )
+
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        # User sends a message with no new URLs but asks to
+        # exclude drop.example.com from this turn.
+        await service.chat_streaming(
+            request_id="r1",
+            message="tell me about what we discussed",
+            excluded_urls=["https://drop.example.com"],
+        )
+        await asyncio.sleep(0.3)
+
+        # URL context built for the LLM contains only the kept
+        # URL's content.
+        url_context = service._context.get_url_context()
+        assert len(url_context) == 1
+        joined = url_context[0]
+        assert "keep body" in joined
+        assert "keep.example.com" in joined
+        # Excluded URL's content is ABSENT.
+        assert "drop body" not in joined
+        assert "drop.example.com" not in joined
+
+        # Both URLs still in the session-scoped fetched dict —
+        # chips stay visible, user can re-include on next turn.
+        fetched_keys = set(service._url_service._fetched.keys())
+        assert "https://keep.example.com" in fetched_keys
+        assert "https://drop.example.com" in fetched_keys
+
+    async def test_excluded_urls_empty_list_is_noop(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Empty exclusion list → all fetched URLs contribute.
+
+        Regression guard: a falsy-but-not-None argument must
+        behave the same as no argument. The `or []` coalescing
+        in :meth:`chat_streaming` handles the None case; this
+        test pins the explicit empty list behaviour so a future
+        refactor that collapses the two paths doesn't
+        accidentally treat `[]` as "exclude everything".
+        """
+        from ac_dc.url_service.models import URLContent
+
+        service._url_service._fetched["https://a.example.com"] = (
+            URLContent(
+                url="https://a.example.com",
+                url_type="generic",
+                content="a body",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+        )
+        service._url_service._fetched["https://b.example.com"] = (
+            URLContent(
+                url="https://b.example.com",
+                url_type="generic",
+                content="b body",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+        )
+
+        fake_litellm.set_streaming_chunks(["ok"])
+        await service.chat_streaming(
+            request_id="r1",
+            message="ask something",
+            excluded_urls=[],
+        )
+        await asyncio.sleep(0.3)
+
+        url_context = service._context.get_url_context()
+        assert len(url_context) == 1
+        joined = url_context[0]
+        # Both URLs contribute when nothing is excluded.
+        assert "a body" in joined
+        assert "b body" in joined
+
+    async def test_excluded_urls_multiple_all_omitted(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Multiple excluded URLs are all dropped.
+
+        Covers the set-conversion path in
+        :meth:`_detect_and_fetch_urls`: the list arrives as a
+        list, gets converted to a set, and every member is
+        filtered by :meth:`URLService.format_url_context`.
+        """
+        from ac_dc.url_service.models import URLContent
+
+        for i, url in enumerate(
+            [
+                "https://a.example.com",
+                "https://b.example.com",
+                "https://c.example.com",
+            ]
+        ):
+            service._url_service._fetched[url] = URLContent(
+                url=url,
+                url_type="generic",
+                content=f"body {i}",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+
+        fake_litellm.set_streaming_chunks(["ok"])
+        await service.chat_streaming(
+            request_id="r1",
+            message="ask",
+            excluded_urls=[
+                "https://a.example.com",
+                "https://c.example.com",
+            ],
+        )
+        await asyncio.sleep(0.3)
+
+        url_context = service._context.get_url_context()
+        assert len(url_context) == 1
+        joined = url_context[0]
+        # Only b survives.
+        assert "body 1" in joined
+        assert "body 0" not in joined
+        assert "body 2" not in joined
+
+    async def test_excluded_urls_all_fetched_clears_context(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Excluding every fetched URL → empty URL context.
+
+        When the exclusion set covers all fetched URLs,
+        :meth:`URLService.format_url_context` returns an empty
+        string. The streaming handler's branch on
+        ``if url_context:`` then calls
+        :meth:`ContextManager.clear_url_context` instead of
+        attaching — so the prompt has no URL section at all.
+        """
+        from ac_dc.url_service.models import URLContent
+
+        service._url_service._fetched["https://only.example.com"] = (
+            URLContent(
+                url="https://only.example.com",
+                url_type="generic",
+                content="only body",
+                fetched_at="2025-01-01T00:00:00Z",
+            )
+        )
+
+        fake_litellm.set_streaming_chunks(["ok"])
+        await service.chat_streaming(
+            request_id="r1",
+            message="ask",
+            excluded_urls=["https://only.example.com"],
+        )
+        await asyncio.sleep(0.3)
+
+        # No URL context attached — format returned empty.
+        assert service._context.get_url_context() == []
+        # URL still in fetched dict.
+        assert (
+            "https://only.example.com"
+            in service._url_service._fetched
+        )
+
 
 class TestReview:
     """Code review mode — Layer 4.3."""

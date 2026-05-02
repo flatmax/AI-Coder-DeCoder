@@ -1173,6 +1173,31 @@ Spec updates landed alongside the code change:
 
 Implementation work tracked in `/IMPLEMENTATION_NOTES.md` under "DiffViewer redesign plan".
 
+### 5.30 — Phase 3.7 URL chips UI — **delivered**
+
+Wires the frontend counterpart for Layer 4.1's URL service. The backend's in-stream URL detection / fetching was complete (LLMService auto-fetches URLs from user prompts and injects content into the LLM context), but users had no visibility into what got fetched or control over what rode along in the next turn. The chips strip surfaces both.
+
+- `webapp/src/url-chips.js` — new `URLChips` LitElement. Holds a `Map<url, chipState>` keyed by URL. Four states — `detected` (fetch button + dismiss), `fetching` (spinner), `fetched` (include/exclude checkbox + clickable label + remove), `errored` (error message + dismiss). Public API: `updateDetected(list)`, `clearDetected()`, `reset()`, `markFetching(url)`, `markFetched(url, content)`, `markErrored(url, message)`, `remove(url)`, `getActiveFetchedUrls()`. Dispatches four bubbling events — `url-fetch-requested`, `url-remove-requested`, `url-view-requested`, `url-exclusion-changed` — that the chat panel handles.
+
+- `webapp/src/chat-panel.js` — additions:
+  - Imports `./url-chips.js` and registers `<ac-url-chips>` in the template between the pending-images strip and the input row.
+  - `_onInputChange` calls `_scheduleUrlDetection` which debounces (300ms, matching the file-search pattern) and calls `LLMService.detect_urls` on the debounce fire. Stale responses discarded via `_urlDetectGeneration` counter.
+  - `_onUrlFetchRequested` transitions the chip through `fetching` → `fetched` / `errored` via `LLMService.fetch_url(url, true, true)`. Distinguishes RPC rejection (toast + errored chip with "Network error") from backend-reported errors on the URLContent payload (errored chip with the payload's error message) from restricted-caller errors (errored chip + warning toast).
+  - `_onUrlRemoveRequested` optimistically removes the chip, then calls `LLMService.remove_fetched_url` — the backend's `removed: false` for unknown URLs makes the call safely idempotent.
+  - `_onUrlViewRequested` opens a modal overlay showing the URLContent payload. Body priority summary → readme → content, with symbol map rendered as a separate code block for GitHub repos. Falls back to `get_url_content` when the chip's cached payload is missing (edge case).
+  - `_urlViewDialog` reactive state drives the overlay; `_renderUrlViewDialog` emits the modal with Escape / backdrop-click dismissal.
+  - Session-changed and send both clear chips — `session-changed` calls `reset()`, send calls `clearDetected()` (fetched chips survive per specs4).
+  - `disconnectedCallback` cleans up the debounce timer.
+
+Governing spec: specs4/4-features/url-content.md § "URL Chips UI". Mirror section added to specs4/5-webapp/chat.md § "URL Chips" pointing back to the primary spec.
+
+Design points:
+
+- **Two detection paths, one truth.** The backend's `_stream_chat` runs its own URL detection on the outgoing user message — that's the authoritative path for injecting URL content into the LLM context. The frontend chip detection is awareness + control; it doesn't tell the backend what to fetch during streaming. Consequence: a URL fetched via the chip's fetch button IS in the backend's `_fetched` dict when the next stream fires, so the backend's own detection skips the re-fetch (session memoization in the URL service). Chip fetches and stream fetches converge on the same state.
+- **Exclusion checkbox is UX-only today.** Toggling the checkbox updates local chip state and dispatches `url-exclusion-changed`, but the backend's `format_url_context` call in `_stream_chat` doesn't take an exclusion list. Threading the exclusion set through to the streaming handler is a separate increment. Users who toggle a fetched chip to "excluded" see the UI change but the backend still includes the URL in the next prompt. Acceptable for a first pass — the common case (user wants to see what was fetched) is fully served, and the less-common case (user wants to exclude after fetching) needs backend plumbing we can add without changing the chip UI.
+- **Errored chips stay visible until dismissed.** Matches the pending-images pattern — users need to see that a fetch failed and decide whether to retry (future enhancement) or dismiss. Auto-clearing after a timeout would hide real problems.
+- **Component decoupling.** The chip component doesn't know about RPC, the chat panel doesn't know about chip state shape. Pattern matches `ac-input-history` + chat-panel host and `ac-file-picker` + files-tab host. Makes chip testing straightforward (drive via public methods, observe rendered DOM) and chat-panel testing simpler (no chip-state bookkeeping).
+
 ## Remaining Layer 5 work
 
 Tracked in `/IMPLEMENTATION_NOTES.md`:
@@ -1183,5 +1208,6 @@ Tracked in `/IMPLEMENTATION_NOTES.md`:
 - **File picker enhancements plan** — 12 increments, all delivered or documented
 - **App shell polish** — window resize handling, global keyboard shortcuts
 - **Collaboration UI** — admission flow, participant indicators
+- **URL chips exclusion → streaming handler** — ✅ delivered. The chat panel's `_send` reads the chip component's `_chips` map before dispatching `LLMService.chat_streaming`, collects every entry whose `status === 'fetched'` and `excluded === true`, and passes the URL list as the 5th positional arg. The backend threads it through `chat_streaming` → `_stream_chat` → `_detect_and_fetch_urls` → `URLService.format_url_context(excluded=…)` so unchecked URLs are absent from the turn's prompt section. The URLs themselves stay in the service's session-scoped `_fetched` dict so the chip remains visible and the user can re-include on a later turn by checking the box.
 
 The active working log in `/IMPLEMENTATION_NOTES.md` carries the file-picker completion plan and the compaction UI plan (both delivered) plus current Layer 5 remaining scope.

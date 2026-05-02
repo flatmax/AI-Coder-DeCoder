@@ -190,6 +190,17 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Re-attach button on thumbnails and in lightbox (see [images.md](../4-features/images.md))
 - Token counting via provider formula with fallback estimate
 - Not automatically re-sent on subsequent messages — display-only after original send
+### URL Chips
+- Strip of chips between the pending-images strip and the textarea showing URLs detected in the current input or previously fetched during the session
+- Debounced detection via `LLMService.detect_urls` on input change (~300ms); stale responses discarded via generation counter
+- Four chip states — detected (fetch button + dismiss), fetching (spinner), fetched (include/exclude checkbox + clickable label + remove), errored (error message + dismiss)
+- Clicking the fetched chip label opens a modal showing the URLContent payload (title, summary/readme/content body, symbol map for GitHub repos)
+- Remove calls `LLMService.remove_fetched_url` so the backend's in-memory fetched dict stays in sync
+- Detected chips are pruned when the URL is no longer in input; fetched and errored chips survive input edits
+- On send, detected and fetching chips clear; fetched and errored survive
+- On session-changed, all chips clear
+- The streaming handler's own URL detection (during `_stream_chat`) is the authoritative path for injecting URL content into the LLM context; the chip UI is an awareness and control surface layered on top. The exclusion checkbox is honoured — on send, the chat panel collects every fetched chip whose include checkbox is unchecked and passes the URL list as the 5th positional arg to `LLMService.chat_streaming`. The backend threads the list through `_stream_chat` → `_detect_and_fetch_urls` → `URLService.format_url_context(excluded=…)` so unchecked URLs stay out of the prompt for that turn. The URLs themselves remain in the URL service's session-scoped `_fetched` dict so the chip stays visible and the user can re-include by re-checking the box on a later turn
+- See [url-content.md](../4-features/url-content.md) for the full URL service behaviour
 ## Action Bar
 
 Two visual groups separated by a thin vertical divider:

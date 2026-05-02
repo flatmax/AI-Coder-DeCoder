@@ -219,10 +219,12 @@ Streaming:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.chat_streaming` | `request_id: str, message: str, files?: list[str], images?: list[str]` | `{status: "started"}` — immediately; content arrives via `streamChunk`/`streamComplete` events |
+| `LLMService.chat_streaming` | `request_id: str, message: str, files?: list[str], images?: list[str], excluded_urls?: list[str]` | `{status: "started"}` — immediately; content arrives via `streamChunk`/`streamComplete` events |
 | `LLMService.cancel_streaming` | `request_id: str` | `{status: str}` or `{error: str}` |
 
 Images in the `chat_streaming` call are base64 data URIs. The synchronous return is `{status: "started"}`; actual response delivery is via server-push events.
+
+`excluded_urls` is the per-turn exclusion set from the chip UI's include checkbox. Fetched URLs the user has unchecked are omitted from the prompt's URL section for that turn via `URLService.format_url_context(excluded=…)`. The URLs stay in the service's session-scoped fetched dict — chips remain visible and can be re-included on a later turn by re-checking the box. See `specs4/4-features/url-content.md` § URL Chips UI for the chip-state lifecycle.
 
 Sessions:
 

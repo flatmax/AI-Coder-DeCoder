@@ -82,6 +82,7 @@ import { findMessageMatches } from './message-search.js';
 import './history-browser.js';
 import './input-history.js';
 import './speech-to-text.js';
+import './url-chips.js';
 
 /**
  * Generate a request ID matching the specs3 format so the
@@ -427,6 +428,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * the files-tab wires up the push.
      */
     reviewActive: { type: Boolean },
+    /**
+     * URL content dialog state. When non-null, the content
+     * viewer overlay is open showing the URL's fetched
+     * content. Set by the `url-view-requested` handler,
+     * cleared by Escape or backdrop click.
+     */
+    _urlViewDialog: { type: Object, state: true },
+    /**
+     * Active tab within the URL view dialog. `'content'`
+     * shows title + body (summary/readme/content); `'symbols'`
+     * shows the symbol map. Only relevant when the fetched
+     * URL is a GitHub repo with a symbol map — generic URLs
+     * hide the tab bar since there's only one panel to show.
+     */
+    _urlViewTab: { type: String, state: true },
   };
 
   static styles = css`
@@ -1707,6 +1723,28 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // clicking a file to scroll the overlay). Prevents
     // feedback loops. Cleared after a short timeout.
     this._fileSearchScrollPaused = false;
+
+    // URL chip detection state. Debounce handle for the
+    // detect_urls RPC — fires ~300ms after the user stops
+    // typing. Per specs4/4-features/url-content.md the UI
+    // "chips" feature runs a detection scan independent of
+    // the backend's streaming-time detection; this is the
+    // frontend's half.
+    this._urlDetectDebounceTimer = null;
+    // Generation counter guards against stale responses. If
+    // the user types faster than the RPC returns, later
+    // responses arrive after earlier ones; comparing against
+    // the current gen discards the stale ones.
+    this._urlDetectGeneration = 0;
+    // Dialog state for the "view URL content" overlay. Null
+    // when closed; populated with `{url, content}` when open.
+    // Matches the lightbox pattern used for pending-image
+    // inspection.
+    this._urlViewDialog = null;
+    // Active tab when the dialog is open. Reset to 'content'
+    // each time the dialog opens so users always see the
+    // human-readable body first.
+    this._urlViewTab = 'content';
     // Commit state. `_committing` flips true on click, false
     // when the `commit-result` window event fires. Review
     // state defaults false and is driven by the parent
@@ -1828,6 +1866,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (this._fileSearchDebounceTimer != null) {
       clearTimeout(this._fileSearchDebounceTimer);
       this._fileSearchDebounceTimer = null;
+    }
+    if (this._urlDetectDebounceTimer != null) {
+      clearTimeout(this._urlDetectDebounceTimer);
+      this._urlDetectDebounceTimer = null;
     }
     super.disconnectedCallback();
   }
@@ -2339,6 +2381,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // messages. A new session (empty messages) is a no-op;
     // a loaded session populates recall with prior prompts.
     this._seedInputHistory(msgs);
+    // Clear URL chips — a new session starts fresh. The
+    // backend's URL service session state is cleared
+    // server-side on new_session via URLService.clear_fetched;
+    // we mirror that on the client.
+    const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
+    if (chipsEl) chipsEl.reset();
   }
 
   /**
@@ -2752,23 +2800,43 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._snippetDrawerOpen = false;
       _saveDrawerOpen(false);
     }
+    // Clear detected / fetching URL chips per specs4 —
+    // fetched and errored chips survive because they
+    // represent work the user already committed to.
+    const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
+    if (chipsEl) chipsEl.clearDetected();
 
     try {
+      // Compute the per-turn URL exclusion set from the chip
+      // component. Every fetched chip whose include checkbox is
+      // unchecked ends up here. The chip stays visible in the
+      // strip — only this turn's prompt omits its content.
+      // See specs4/4-features/url-content.md § URL Chips UI.
+      const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
+      const excludedUrls = [];
+      if (chipsEl && chipsEl._chips) {
+        for (const chip of chipsEl._chips.values()) {
+          if (chip.status === 'fetched' && chip.excluded) {
+            excludedUrls.push(chip.url);
+          }
+        }
+      }
       await this.rpcExtract(
         'LLMService.chat_streaming',
         requestId,
         text,
         // Passed positionally as the 4th arg to match the
         // backend's `chat_streaming(request_id, message,
-        // files=None, images=None)` signature. Phase 2c's
-        // selected-files list lives on this component
-        // as `selectedFiles` (set by the files-tab
-        // orchestrator); passing it through keeps the
-        // backend aware of the current context.
+        // files=None, images=None, excluded_urls=None)`
+        // signature. Phase 2c's selected-files list lives on
+        // this component as `selectedFiles` (set by the
+        // files-tab orchestrator); passing it through keeps
+        // the backend aware of the current context.
         Array.isArray(this.selectedFiles)
           ? this.selectedFiles
           : [],
         images,
+        excludedUrls,
       );
       // Response is {status: "started"}. Chunks and completion
       // arrive via server-push events; nothing more to do here.
@@ -3041,6 +3109,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // `filter-from-chat` events so the files-tab can
     // forward to the picker's setFilter.
     this._updateMentionFilter(ta);
+    // URL detection debounce. Defer the detect_urls RPC
+    // until the user stops typing so rapid keystrokes
+    // don't thrash the server. Empty input cancels any
+    // pending scan and leaves fetched chips intact.
+    this._scheduleUrlDetection();
   }
 
   /**
@@ -3092,6 +3165,209 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+  }
+
+  /**
+   * Schedule a debounced URL detection scan. 300ms matches
+   * the file-search debounce and is long enough to avoid
+   * thrashing on fast typing, short enough to feel
+   * responsive when the user pauses.
+   *
+   * An empty input cancels the pending timer and leaves the
+   * chip strip's existing state (fetched chips survive).
+   * Detection is idempotent — the chip component's
+   * updateDetected merges with existing state rather than
+   * replacing.
+   */
+  _scheduleUrlDetection() {
+    if (this._urlDetectDebounceTimer != null) {
+      clearTimeout(this._urlDetectDebounceTimer);
+      this._urlDetectDebounceTimer = null;
+    }
+    const text = this._input;
+    if (typeof text !== 'string' || !text.trim()) {
+      // Empty input — let the chip component drop any
+      // lingering detected entries. Pass an empty array
+      // rather than skipping so the "no longer in input"
+      // pruning rule fires.
+      this.updateComplete.then(() => {
+        const chips = this.shadowRoot?.querySelector('ac-url-chips');
+        if (chips) chips.updateDetected([]);
+      });
+      return;
+    }
+    this._urlDetectDebounceTimer = setTimeout(() => {
+      this._urlDetectDebounceTimer = null;
+      this._runUrlDetection(text);
+    }, 300);
+  }
+
+  /**
+   * Call LLMService.detect_urls and feed the results to the
+   * chip component. Guards against stale responses via the
+   * generation counter — the user may have typed more since
+   * the RPC was issued, and an earlier response arriving
+   * after a later one would roll back detected state.
+   *
+   * Silently no-ops when RPC isn't connected — detection is
+   * a best-effort enhancement, not critical path.
+   */
+  async _runUrlDetection(text) {
+    if (!this.rpcConnected) return;
+    const gen = ++this._urlDetectGeneration;
+    let detected;
+    try {
+      detected = await this.rpcExtract('LLMService.detect_urls', text);
+    } catch (err) {
+      // Silent failure — detection retries on the next
+      // keystroke. Don't toast; this would be noisy for a
+      // feature the user didn't explicitly invoke.
+      console.debug('[chat] detect_urls failed', err);
+      return;
+    }
+    if (gen !== this._urlDetectGeneration) return;
+    const chips = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chips) return;
+    chips.updateDetected(Array.isArray(detected) ? detected : []);
+  }
+
+  /**
+   * Handle the chip component's `url-fetch-requested` event.
+   * Fires the fetch_url RPC and transitions the chip through
+   * fetching → fetched/errored states based on the result.
+   *
+   * The backend's URLContent carries a (possibly empty)
+   * `error` field; an error record still fetches successfully
+   * but should render as an errored chip, not a fetched one.
+   * This distinguishes "HTTP 404" (errored chip, user can
+   * retry or dismiss) from "network failure" (RPC rejected,
+   * we toast).
+   */
+  async _onUrlFetchRequested(event) {
+    const url = event.detail?.url;
+    if (typeof url !== 'string' || !url) return;
+    if (!this.rpcConnected) {
+      this._emitToast('Not connected — cannot fetch', 'warning');
+      return;
+    }
+    const chips = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chips) return;
+    chips.markFetching(url);
+    let result;
+    try {
+      // Positional args per LLMService.fetch_url signature:
+      // (url, use_cache=True, summarize=True, user_text=None).
+      // We default to cache + summarize — matches the
+      // streaming handler's own fetch path.
+      result = await this.rpcExtract(
+        'LLMService.fetch_url', url, true, true,
+      );
+    } catch (err) {
+      console.error('[chat] fetch_url failed', err);
+      chips.markErrored(url, err?.message || 'Network error');
+      this._emitToast(
+        `Fetch failed: ${err?.message || 'unknown error'}`,
+        'error',
+      );
+      return;
+    }
+    if (result && typeof result === 'object' && result.error) {
+      // Restricted-caller shape in collab mode. Treat as
+      // errored chip so the user sees why the fetch didn't
+      // happen; also toast since this may not be obvious.
+      if (result.error === 'restricted') {
+        chips.markErrored(url, 'Not allowed');
+        this._emitToast(
+          result.reason || 'Restricted operation',
+          'warning',
+        );
+        return;
+      }
+      // The URLContent payload itself may carry an error
+      // (HTTP 404, clone failure, etc.). render as an
+      // errored chip.
+      chips.markErrored(url, result.error);
+      return;
+    }
+    chips.markFetched(url, result);
+  }
+
+  /**
+   * Handle `url-remove-requested`. Two responsibilities:
+   *
+   *   1. Tell the backend to drop the URL from its
+   *      in-memory fetched dict (remove_fetched_url).
+   *      Cache stays intact so a later re-fetch hits it.
+   *   2. Remove the chip from the local component.
+   *
+   * Fetched and errored chips need the RPC call; detected
+   * chips haven't been fetched yet so the backend has
+   * nothing to clean up. We call remove_fetched_url
+   * unconditionally — the backend returns `removed: false`
+   * for unknown URLs, which is a safe idempotent no-op.
+   */
+  async _onUrlRemoveRequested(event) {
+    const url = event.detail?.url;
+    if (typeof url !== 'string' || !url) return;
+    const chips = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chips) return;
+    // Optimistic local remove — responsiveness first, the
+    // RPC follows. If the RPC rejects we log but don't
+    // restore the chip; the user clicked remove and expects
+    // it to stay gone.
+    chips.remove(url);
+    if (!this.rpcConnected) return;
+    try {
+      await this.rpcExtract('LLMService.remove_fetched_url', url);
+    } catch (err) {
+      console.debug('[chat] remove_fetched_url failed', err);
+    }
+  }
+
+  /**
+   * Handle `url-view-requested`. Opens the content dialog
+   * with the chip's cached URLContent payload. The payload
+   * was stored when the chip transitioned to fetched, so
+   * no additional RPC is needed for the common case.
+   *
+   * If the chip's content is missing (edge case — e.g. the
+   * chip was restored from a future persistence layer
+   * without the payload), fall back to get_url_content.
+   */
+  async _onUrlViewRequested(event) {
+    const url = event.detail?.url;
+    if (typeof url !== 'string' || !url) return;
+    const chips = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chips) return;
+    const chip = chips._chips?.get(url);
+    let content = chip?.content;
+    if (!content && this.rpcConnected) {
+      try {
+        content = await this.rpcExtract(
+          'LLMService.get_url_content', url,
+        );
+      } catch (err) {
+        this._emitToast(
+          `View failed: ${err?.message || 'unknown error'}`,
+          'error',
+        );
+        return;
+      }
+    }
+    if (!content) return;
+    this._urlViewDialog = { url, content };
+    this._urlViewTab = 'content';
+  }
+
+  _closeUrlViewDialog() {
+    this._urlViewDialog = null;
+  }
+
+  _onUrlViewKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._closeUrlViewDialog();
+    }
   }
 
   /**
@@ -4826,6 +5102,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
         ${this._pendingImages.length > 0
           ? this._renderPendingImages()
           : ''}
+        <ac-url-chips
+          @url-fetch-requested=${this._onUrlFetchRequested}
+          @url-remove-requested=${this._onUrlRemoveRequested}
+          @url-view-requested=${this._onUrlViewRequested}
+        ></ac-url-chips>
         <div class="input-row">
           <textarea
             class="input-textarea"
@@ -4865,6 +5146,237 @@ export class ChatPanel extends RpcMixin(LitElement) {
       ${this._lightboxImage
         ? this._renderLightbox()
         : ''}
+      ${this._urlViewDialog
+        ? this._renderUrlViewDialog()
+        : ''}
+    `;
+  }
+
+  /**
+   * Render the URL content viewer overlay. Shows the
+   * URLContent payload's most useful fields — title, body
+   * (summary preferred over readme over content), and (for
+   * GitHub repos) a symbol map. Styling mirrors the lightbox
+   * overlay since the interaction contract is the same
+   * (modal, Escape to close, backdrop click to close).
+   *
+   * Layout when a symbol map is present: tabbed, with
+   * "Content" and "Symbol Map" tabs. Each tab panel fills
+   * the dialog's available body height and scrolls
+   * independently — users switching to the symbol map get
+   * the full dialog area to read a (typically long)
+   * map rather than a cramped scroll box inside a single
+   * column. Generic URLs (no symbol map) skip the tab bar
+   * entirely — there's only one panel, so tabs would be
+   * useless chrome.
+   */
+  _renderUrlViewDialog() {
+    const { url, content } = this._urlViewDialog;
+    const title = content.title || url;
+    const body =
+      content.summary || content.readme || content.content || '';
+    const hasSymbolMap = !!content.symbol_map;
+    const activeTab = this._urlViewTab || 'content';
+    return html`
+      <div
+        class="lightbox-backdrop"
+        tabindex="0"
+        @click=${(e) => {
+          if (e.target === e.currentTarget) {
+            this._closeUrlViewDialog();
+          }
+        }}
+        @keydown=${this._onUrlViewKeyDown}
+        aria-modal="true"
+        role="dialog"
+        aria-label="URL content viewer"
+      >
+        <div
+          class="lightbox-content url-view-dialog"
+          style="
+            background: rgba(22, 27, 34, 0.98);
+            border: 1px solid rgba(240, 246, 252, 0.15);
+            border-radius: 8px;
+            padding: 1.5rem;
+            max-width: 60rem;
+            width: 90vw;
+            height: 80vh;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            color: var(--text-primary, #c9d1d9);
+            text-align: left;
+            overflow: hidden;
+          "
+        >
+          <div style="
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-shrink: 0;
+          ">
+            <div style="flex: 1; min-width: 0;">
+              <h3 style="
+                margin: 0 0 0.25rem 0;
+                font-size: 1.125rem;
+                overflow: hidden;
+                text-overflow: ellipsis;
+              ">${title}</h3>
+              <a
+                href=${url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style="
+                  font-size: 0.8125rem;
+                  color: var(--accent-primary, #58a6ff);
+                  word-break: break-all;
+                "
+              >${url} ↗</a>
+            </div>
+            <button
+              class="lightbox-button"
+              @click=${this._closeUrlViewDialog}
+              title="Close (Escape)"
+            >✕ Close</button>
+          </div>
+          ${hasSymbolMap
+            ? html`<div
+                role="tablist"
+                aria-label="URL content sections"
+                style="
+                  display: flex;
+                  gap: 0.25rem;
+                  border-bottom: 1px solid rgba(240, 246, 252, 0.15);
+                  margin-bottom: 1rem;
+                  flex-shrink: 0;
+                "
+              >
+                <button
+                  role="tab"
+                  aria-selected=${activeTab === 'content'}
+                  @click=${() => { this._urlViewTab = 'content'; }}
+                  style=${this._urlTabStyle(activeTab === 'content')}
+                >Content</button>
+                <button
+                  role="tab"
+                  aria-selected=${activeTab === 'symbols'}
+                  @click=${() => { this._urlViewTab = 'symbols'; }}
+                  style=${this._urlTabStyle(activeTab === 'symbols')}
+                >Symbol Map</button>
+              </div>`
+            : ''}
+          ${hasSymbolMap && activeTab === 'symbols'
+            ? this._renderUrlViewSymbolsTab(content.symbol_map)
+            : this._renderUrlViewContentTab(content, body)}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Styling for a URL-view tab button. Active tab gets an
+   * accent underline + brighter text; inactive tabs are
+   * muted. Inline styles rather than a class because the
+   * dialog body itself is inlined (no stylesheet entries
+   * for `.url-view-dialog *`); keeping everything inline
+   * keeps the component's CSS surface small.
+   */
+  _urlTabStyle(active) {
+    const baseColor = active
+      ? 'var(--accent-primary, #58a6ff)'
+      : 'var(--text-secondary, #8b949e)';
+    const border = active
+      ? '2px solid var(--accent-primary, #58a6ff)'
+      : '2px solid transparent';
+    return `
+      background: transparent;
+      border: none;
+      border-bottom: ${border};
+      color: ${baseColor};
+      padding: 0.5rem 1rem;
+      font: inherit;
+      font-weight: ${active ? '600' : '400'};
+      cursor: pointer;
+      margin-bottom: -1px;
+    `;
+  }
+
+  /**
+   * Content tab — summary / readme / content body plus the
+   * optional summary-type badge. Fills the dialog body
+   * and scrolls internally so long bodies don't push the
+   * header offscreen.
+   */
+  _renderUrlViewContentTab(content, body) {
+    return html`
+      <div style="
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      ">
+        ${content.summary_type
+          ? html`<div style="
+              font-size: 0.75rem;
+              color: var(--text-secondary, #8b949e);
+              margin-bottom: 0.5rem;
+              text-transform: uppercase;
+              letter-spacing: 0.05em;
+              flex-shrink: 0;
+            ">Summary (${content.summary_type})</div>`
+          : ''}
+        <pre style="
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          max-width: 100%;
+          box-sizing: border-box;
+          font-family: inherit;
+          font-size: 0.875rem;
+          line-height: 1.5;
+          margin: 0;
+          padding: 0;
+          background: transparent;
+          border: none;
+        ">${body || '(no content)'}</pre>
+      </div>
+    `;
+  }
+
+  /**
+   * Symbol map tab — monospace, wraps long comma-joined
+   * identifier runs, fills the dialog body. Overflow-y
+   * on the outer wrapper means the user gets a single
+   * scrollbar for the whole map rather than nested
+   * scrolls.
+   */
+  _renderUrlViewSymbolsTab(symbolMap) {
+    return html`
+      <div style="
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      ">
+        <pre style="
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          max-width: 100%;
+          box-sizing: border-box;
+          font-family: 'SFMono-Regular', Consolas, monospace;
+          font-size: 0.8125rem;
+          line-height: 1.4;
+          background: rgba(13, 17, 23, 0.6);
+          border: 1px solid rgba(240, 246, 252, 0.1);
+          border-radius: 4px;
+          padding: 0.75rem;
+          margin: 0;
+        ">${symbolMap}</pre>
+      </div>
     `;
   }
 

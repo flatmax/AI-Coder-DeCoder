@@ -4061,6 +4061,7 @@ class LLMService:
         message: str,
         files: list[str] | None = None,
         images: list[str] | None = None,
+        excluded_urls: list[str] | None = None,
     ) -> dict[str, Any]:
         """Start a streaming chat request.
 
@@ -4070,6 +4071,13 @@ class LLMService:
 
         Rejects if the service isn't fully initialised, or if
         another user-initiated stream is active.
+
+        ``excluded_urls`` carries the set of fetched URLs the user
+        has unchecked in the chip UI. These URLs stay in the URL
+        service's session-scoped ``_fetched`` dict (so the chip
+        remains visible and can be re-included on a later turn)
+        but are omitted from this turn's injected URL context.
+        See specs4/4-features/url-content.md § URL Chips UI.
         """
         # Capture event loop on the RPC thread — this is the
         # event-loop thread. D10 contract: the capture happens
@@ -4103,7 +4111,11 @@ class LLMService:
         # await so we return {"status": "started"} immediately.
         asyncio.ensure_future(
             self._stream_chat(
-                request_id, message, files or [], images or []
+                request_id,
+                message,
+                files or [],
+                images or [],
+                excluded_urls or [],
             )
         )
         return {"status": "started"}
@@ -4134,8 +4146,17 @@ class LLMService:
         message: str,
         files: list[str],
         images: list[str],
+        excluded_urls: list[str] | None = None,
     ) -> None:
-        """Background task — the actual streaming logic."""
+        """Background task — the actual streaming logic.
+
+        ``excluded_urls`` is the per-turn exclusion list passed
+        in from :meth:`chat_streaming`. Threaded through to
+        :meth:`_detect_and_fetch_urls` so
+        :meth:`URLService.format_url_context` can omit them from
+        the prompt's URL section while leaving the chip state
+        untouched.
+        """
         error: str | None = None
         full_content = ""
         cancelled = False
@@ -4231,7 +4252,16 @@ class LLMService:
             # prompt budget or hammering upstream. Fetches run
             # sequentially via the aux executor so the event loop
             # stays free for WebSocket I/O during the fetch.
-            await self._detect_and_fetch_urls(request_id, message)
+            #
+            # ``excluded_urls`` is the chip-level exclusion set
+            # the user unchecked in the UI before send. The URL
+            # service's format_url_context honours it when
+            # building the prompt section; the URLs stay in the
+            # session-scoped fetched dict so chips remain visible
+            # and the user can re-include on a later turn.
+            await self._detect_and_fetch_urls(
+                request_id, message, excluded_urls or []
+            )
 
             # Review context injection. When review mode is
             # active, build a block with the review summary,
@@ -4417,6 +4447,7 @@ class LLMService:
         self,
         request_id: str,
         message: str,
+        excluded_urls: list[str] | None = None,
     ) -> None:
         """Detect URLs in the user message and fetch new ones.
 
@@ -4425,6 +4456,14 @@ class LLMService:
         message array is built. Sequential per-URL — the spec's
         per-message cap (3 URLs) keeps this bounded at a few
         hundred milliseconds in the worst case.
+
+        ``excluded_urls`` is the user's chip-level exclusion set
+        for this turn. Passed through to
+        :meth:`URLService.format_url_context` so unchecked URLs
+        stay out of the LLM's prompt. The URLs themselves remain
+        in the service's session-scoped fetched dict — the chip
+        UI still shows them and the user can re-include on the
+        next turn by checking the box.
 
         Progress events fire for each URL that actually gets
         fetched (not for cache-hit / already-fetched skips):
@@ -4448,14 +4487,23 @@ class LLMService:
         from ac_dc.url_service import display_name as _display_name
 
         urls = _detect_urls(message)
-        if not urls:
-            return
 
         # Cap per-message. Extra URLs are silently skipped — the
         # UI chip rendering covers them via the detected-chips
         # path, which is independent of the streaming fetch.
         urls = urls[:_URL_PER_MESSAGE_LIMIT]
 
+        # Fetch loop only runs when the current message contains
+        # URLs. But the format-and-attach step at the end runs
+        # every turn regardless — URLs fetched via the frontend
+        # chip's Fetch button (a separate RPC path that doesn't
+        # go through _stream_chat) need to be surfaced to the
+        # LLM on the next turn even if the user's follow-up
+        # message has no URL text in it. Without this, chip-
+        # fetched content silently stays in _url_service._fetched
+        # without ever reaching the prompt — the Budget UI
+        # shows the URL's tokens (because it reads from _fetched
+        # directly) but the LLM never sees the content.
         assert self._main_loop is not None
         loop = self._main_loop
 
@@ -4505,10 +4553,19 @@ class LLMService:
             )
 
         # Attach the formatted URL context to the context manager.
-        # format_url_context with no args uses all fetched URLs and
-        # skips error records. A blank result clears the URL
-        # section cleanly.
-        url_context = self._url_service.format_url_context()
+        # Runs every turn (not gated on `urls` being non-empty)
+        # so chip-fetched URLs and URLs carried over from prior
+        # turns continue to appear in the prompt. format_url_context
+        # with no args uses all fetched URLs and skips error
+        # records; the ``excluded`` set drops URLs the user
+        # unchecked in the chip UI for this turn. A blank result
+        # clears the URL section cleanly.
+        excluded_set = (
+            set(excluded_urls) if excluded_urls else None
+        )
+        url_context = self._url_service.format_url_context(
+            excluded=excluded_set
+        )
         if url_context:
             self._context.set_url_context([url_context])
         else:
@@ -5744,8 +5801,33 @@ class LLMService:
             except Exception:
                 pass
         files_tokens = self._file_context.count_tokens(self._counter)
+        # URL tokens — match the Budget sub-view's computation.
+        # Prefer the context manager's live URL context
+        # (matches what the assembler injects into THIS prompt),
+        # fall back to the sum across fetched URLs when the
+        # context is empty (URLs fetched in earlier turns that
+        # are in cached tiers).
+        url_tokens = 0
+        url_context_parts = self._context.get_url_context()
+        if url_context_parts:
+            url_tokens = self._counter.count(
+                "\n---\n".join(url_context_parts)
+            )
+        else:
+            try:
+                for content in self._url_service.get_fetched_urls():
+                    if content.error:
+                        continue
+                    rendered = content.format_for_prompt()
+                    if rendered:
+                        url_tokens += self._counter.count(rendered)
+            except Exception:
+                pass
         history_tokens = self._context.history_token_count()
-        total_est = system_tokens + symbol_map_tokens + files_tokens + history_tokens
+        total_est = (
+            system_tokens + symbol_map_tokens + files_tokens
+            + url_tokens + history_tokens
+        )
         max_input = self._counter.max_input_tokens
 
         usage_lines = [
@@ -5753,9 +5835,15 @@ class LLMService:
             f"System:    {system_tokens:>10,}",
             f"Symbol Map:{symbol_map_tokens:>10,}",
             f"Files:     {files_tokens:>10,}",
+        ]
+        # Only show URL line when non-zero — keeps the HUD tidy
+        # in the common case (no URLs fetched this session).
+        if url_tokens > 0:
+            usage_lines.append(f"URLs:      {url_tokens:>10,}")
+        usage_lines.extend([
             f"History:   {history_tokens:>10,}",
             f"Total:     {total_est:>10,} / {max_input:,}",
-        ]
+        ])
         input_tok = st.get("input_tokens", 0)
         output_tok = st.get("output_tokens", 0)
         if input_tok or output_tok:
@@ -5965,16 +6053,26 @@ class LLMService:
             logger.debug(
                 "URL details enumeration failed: %s", exc
             )
-        # Aggregate url_tokens from the existing url_context on
-        # the context manager. This matches what the assembler
-        # injects into prompts, which may differ from the sum
-        # of per-URL details (different formatting rules). The
-        # Budget UI's bar uses url_tokens; the details list is
-        # informational.
+        # Aggregate url_tokens — prefer the context manager's
+        # live URL context when attached (matches what the
+        # assembler injects into THIS request's prompt), falling
+        # back to the sum of per-URL details when the context is
+        # empty. The fallback path matters because the URL
+        # service's fetched dict persists across turns — URLs
+        # fetched in an earlier turn are still in cached tiers
+        # (as meta:url:* rows) and contribute tokens to the
+        # prompt via the cached blocks, but get_url_context()
+        # may return empty between turns. Without the fallback
+        # the Budget view shows 0 URL tokens whenever the
+        # context was cleared between requests, which is
+        # confusing because the Cache sub-view shows the same
+        # URLs consuming tokens in L1/L2/L3.
         url_context = self._context.get_url_context()
         if url_context:
             joined = "\n---\n".join(url_context)
             url_tokens = self._counter.count(joined)
+        elif url_details:
+            url_tokens = sum(d.get("tokens", 0) for d in url_details)
 
         # History tokens.
         history = self._context.get_history()

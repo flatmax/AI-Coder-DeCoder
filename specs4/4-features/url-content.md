@@ -215,6 +215,14 @@ Interactive chips below the chat input showing detected and fetched URLs.
 
 - Clicking a fetched URL chip label dispatches an event
 - Chat panel fetches full content and shows it in a dedicated dialog
+- Dialog layout:
+  - Header with URL title, open-in-browser link, and close button
+  - Tabbed body when the payload carries a symbol map (GitHub repos) — `Content` tab and `Symbol Map` tab. Each tab panel fills available dialog height and scrolls independently
+  - Single-panel body when no symbol map is present (generic URLs, GitHub files, documentation)
+  - Content panel shows summary-type badge (when summarised) and body text with priority `summary → readme → content`
+  - Symbol Map panel renders the map in monospace with per-character wrapping so long comma-joined identifier runs stay readable
+- Dialog state — active tab resets to `Content` each time the dialog opens so users always see the human-readable body first
+- Dismissal — Escape key, backdrop click, or explicit close button
 
 ## Message Integration
 
@@ -233,6 +241,6 @@ Interactive chips below the chat input showing detected and fetched URLs.
 - Error results are never cached to filesystem
 - A URL appearing as fetched is always fully populated (or has an error field)
 - The sentinel "URL not yet fetched" error string is never stored in cache
-- Excluded URLs never appear in the LLM prompt
+- Excluded URLs never appear in the LLM prompt — the chip UI's include checkbox is the control surface; on send, unchecked fetched URLs are collected into a per-turn exclusion set and passed to `LLMService.chat_streaming` as the `excluded_urls` arg, which flows through `_detect_and_fetch_urls` to `URLService.format_url_context(excluded=…)` so the omitted URLs are absent from that turn's prompt. The URLs themselves stay in the service's `_fetched` dict and the chip remains visible so the user can re-include on a later turn
 - Already-fetched URLs are never re-fetched within a session unless cache is invalidated
 - Summary generation on a cached entry updates the cache in-place without re-fetching source content

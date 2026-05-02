@@ -825,6 +825,24 @@ export class DocConvertTab extends RpcMixin(LitElement) {
    */
   _applyCompletion(results) {
     this._convertResults = results;
+    // Fold per-file results into the progress map so the
+    // summary's progress rows render final status,
+    // output_path, and message. Inline (sync) mode never
+    // fires per-file events, so without this the rows
+    // would stay stuck on their seeded 'pending' state.
+    // Background mode already populated the map via file
+    // events; merging here is idempotent for those rows.
+    const nextProgress = new Map(this._progressByPath);
+    for (const result of results) {
+      if (!result || typeof result.path !== 'string') continue;
+      nextProgress.set(result.path, {
+        status: result.status || 'ok',
+        message: result.message,
+        output_path: result.output_path,
+        images: result.images,
+      });
+    }
+    this._progressByPath = nextProgress;
     this._convertPhase = 'complete';
     // Let the rest of the app know disk state changed.
     // The file picker, doc index watcher, etc. subscribe
