@@ -53,19 +53,35 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Document-mode extras: keyword enrichment, format conversion, PDF/SVG pipeline.
-# Users can `pip install "ac-dc[docs]"` or `uv sync --extra docs`.
-# Missing these packages produces visible, informative failure messages in the
-# UI (see IMPLEMENTATION_NOTES.md D1) — features are never silently hidden.
-docs = [
-    "keybert>=0.8",
-    "sentence-transformers>=3.0",
-    "scikit-learn>=1.3",
-    "huggingface_hub>=0.24",
+# Document-mode extras are split into two groups so release binaries
+# can bundle the small conversion libraries without dragging in
+# torch/sentence-transformers (~250MB per platform).
+#
+# docs-convert: format-conversion path (Word/PDF/PowerPoint/Excel →
+# Markdown). Small, ~60MB total, bundled in PyInstaller releases.
+#
+# docs-enrich: keyword enrichment via KeyBERT + sentence-transformers.
+# Pulls torch (CUDA wheel by default, ~800MB — use PyTorch's CPU
+# index to keep installs sane). Not bundled in releases; users who
+# want it install via `pip install "ac-dc[docs-enrich]"`. Missing
+# keyword enrichment degrades gracefully with a toast pointing at
+# the install command (per IMPLEMENTATION_NOTES.md D1).
+#
+# docs: back-compat alias, installs both sub-groups.
+docs-convert = [
     "markitdown[all]>=0.0.1a3",
     "python-pptx>=1.0",
     "pymupdf>=1.24",
     "openpyxl>=3.1",
+]
+docs-enrich = [
+    "keybert>=0.8",
+    "sentence-transformers>=3.0",
+    "scikit-learn>=1.3",
+    "huggingface_hub>=0.24",
+]
+docs = [
+    "ac-dc[docs-convert,docs-enrich]",
 ]
 
 # Developer tooling: test runner, linters.

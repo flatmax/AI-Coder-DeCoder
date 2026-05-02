@@ -1,0 +1,269 @@
+# Release — PyInstaller binaries on merge from dev4b → master.
+#
+# Triggered automatically when a pull request from the `dev4b`
+# branch is merged into `master`. Also exposes `workflow_dispatch`
+# for manual reruns. Never triggers on direct pushes to master or
+# merges from other branches.
+#
+# Builds per-platform single-file binaries in parallel, then
+# attaches all artefacts to a GitHub Release. The release tag on
+# github.com is the computed version string (not a local git tag
+# — no `git tag` / `git push --tags` steps).
+#
+# Version string format (specs-reference/6-deployment/build.md):
+#     {YYYY.MM.DD}-{HH.MM}-{short_sha}
+# Date/time UTC, short_sha is the first 8 chars of HEAD.
+# Written to src/ac_dc/VERSION before PyInstaller runs so the
+# baked binary self-identifies. Dev checkouts leave VERSION as
+# the literal "dev".
+#
+# Docs extras split into two groups in pyproject.toml:
+#   [docs-convert] — markitdown, pymupdf, python-pptx, openpyxl
+#                    (small, ~60MB, bundled in releases)
+#   [docs-enrich]  — keybert, sentence-transformers, torch
+#                    (large, ~250MB+, NOT bundled; pip-install path)
+#
+# Users missing docs-enrich get a visible "install with
+# pip install 'ac-dc[docs-enrich]'" toast per decision D1.
+
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create releases and attach artefacts
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    # Gate: PR closed events only trigger the build when the PR
+    # was actually merged (not just closed) AND came from dev4b.
+    # workflow_dispatch bypasses the guard (manual trigger).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'dev4b')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+            binary-name: ac-dc-linux
+            pyinstaller-sep: ":"
+          - os: windows-latest
+            label: windows
+            binary-name: ac-dc-windows.exe
+            pyinstaller-sep: ";"
+          - os: macos-latest
+            label: macos
+            binary-name: ac-dc-macos
+            pyinstaller-sep: ":"
+    runs-on: ${{ matrix.os }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git rev-parse HEAD` returns the merge
+          # commit's full SHA, not a shallow stub.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webapp/package-lock.json
+
+      # Version string: YYYY.MM.DD-HH.MM-{short_sha}
+      # UTC, no seconds, 8-char SHA. Written to VERSION so the
+      # baked binary self-identifies. Emitted as a step output
+      # for the release job to consume.
+      - name: Compute version string
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(date -u +%Y.%m.%d-%H.%M)-$(git rev-parse --short=8 HEAD)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "$VERSION" > src/ac_dc/VERSION
+          echo "Baked version: $VERSION"
+
+      - name: Install webapp dependencies
+        working-directory: webapp
+        run: npm ci
+
+      - name: Build webapp (Vite)
+        working-directory: webapp
+        run: npm run build
+
+      # docs-convert only — no sentence-transformers/torch. Ships
+      # markitdown, pymupdf, python-pptx, openpyxl so real users
+      # get Word/PDF/PowerPoint/Excel conversion out of the box.
+      - name: Install project with build + docs-convert extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[build,docs-convert]"
+
+      # PyInstaller command. Hidden-imports list enumerates every
+      # ac_dc submodule; PyInstaller's static analysis misses
+      # modules registered dynamically via add_class() or imported
+      # by string. Belt-and-braces — extra entries cost nothing.
+      - name: Build PyInstaller binary
+        shell: bash
+        run: |
+          SEP="${{ matrix.pyinstaller-sep }}"
+          pyinstaller --onefile \
+            --name "${{ matrix.binary-name }}" \
+            --add-data "src/ac_dc/VERSION${SEP}ac_dc" \
+            --add-data "src/ac_dc/config${SEP}ac_dc/config" \
+            --add-data "webapp/dist${SEP}ac_dc/webapp_dist" \
+            --collect-all=litellm \
+            --collect-all=tiktoken \
+            --collect-all=tiktoken_ext \
+            --collect-all=tree_sitter \
+            --collect-all=tree_sitter_python \
+            --collect-all=tree_sitter_javascript \
+            --collect-all=tree_sitter_typescript \
+            --collect-all=tree_sitter_c \
+            --collect-all=tree_sitter_cpp \
+            --collect-all=trafilatura \
+            --collect-all=markitdown \
+            --collect-all=fitz \
+            --collect-all=pptx \
+            --collect-all=openpyxl \
+            --hidden-import=boto3 \
+            --hidden-import=botocore \
+            --hidden-import=jrpc_oo \
+            --hidden-import=ac_dc \
+            --hidden-import=ac_dc.base_cache \
+            --hidden-import=ac_dc.base_formatter \
+            --hidden-import=ac_dc.cli \
+            --hidden-import=ac_dc.collab \
+            --hidden-import=ac_dc.config \
+            --hidden-import=ac_dc.context_manager \
+            --hidden-import=ac_dc.doc_convert \
+            --hidden-import=ac_dc.edit_pipeline \
+            --hidden-import=ac_dc.edit_protocol \
+            --hidden-import=ac_dc.file_context \
+            --hidden-import=ac_dc.history_compactor \
+            --hidden-import=ac_dc.history_store \
+            --hidden-import=ac_dc.llm_service \
+            --hidden-import=ac_dc.logging_setup \
+            --hidden-import=ac_dc.main \
+            --hidden-import=ac_dc.repo \
+            --hidden-import=ac_dc.rpc \
+            --hidden-import=ac_dc.settings \
+            --hidden-import=ac_dc.stability_tracker \
+            --hidden-import=ac_dc.token_counter \
+            --hidden-import=ac_dc.doc_index \
+            --hidden-import=ac_dc.doc_index.cache \
+            --hidden-import=ac_dc.doc_index.formatter \
+            --hidden-import=ac_dc.doc_index.index \
+            --hidden-import=ac_dc.doc_index.keyword_enricher \
+            --hidden-import=ac_dc.doc_index.models \
+            --hidden-import=ac_dc.doc_index.reference_index \
+            --hidden-import=ac_dc.doc_index.extractors \
+            --hidden-import=ac_dc.doc_index.extractors.base \
+            --hidden-import=ac_dc.doc_index.extractors.markdown \
+            --hidden-import=ac_dc.doc_index.extractors.svg \
+            --hidden-import=ac_dc.doc_index.extractors.svg_geometry \
+            --hidden-import=ac_dc.symbol_index \
+            --hidden-import=ac_dc.symbol_index.cache \
+            --hidden-import=ac_dc.symbol_index.compact_format \
+            --hidden-import=ac_dc.symbol_index.import_resolver \
+            --hidden-import=ac_dc.symbol_index.index \
+            --hidden-import=ac_dc.symbol_index.models \
+            --hidden-import=ac_dc.symbol_index.parser \
+            --hidden-import=ac_dc.symbol_index.reference_index \
+            --hidden-import=ac_dc.symbol_index.extractors \
+            --hidden-import=ac_dc.symbol_index.extractors.base \
+            --hidden-import=ac_dc.symbol_index.extractors.c \
+            --hidden-import=ac_dc.symbol_index.extractors.cpp \
+            --hidden-import=ac_dc.symbol_index.extractors.javascript \
+            --hidden-import=ac_dc.symbol_index.extractors.python \
+            --hidden-import=ac_dc.symbol_index.extractors.typescript \
+            --hidden-import=ac_dc.url_service \
+            --hidden-import=ac_dc.url_service.cache \
+            --hidden-import=ac_dc.url_service.detection \
+            --hidden-import=ac_dc.url_service.fetchers \
+            --hidden-import=ac_dc.url_service.models \
+            --hidden-import=ac_dc.url_service.service \
+            --hidden-import=ac_dc.url_service.summarizer \
+            src/ac_dc/__main__.py
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary-name }}
+          path: dist/${{ matrix.binary-name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artefacts
+        run: find artifacts -type f -ls
+
+      # Release notes: short description + per-platform download
+      # table + optional-extras hint. Matches the style of the
+      # previous runnable releases so existing users see a
+      # familiar layout.
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          SHORT_SHA="$(echo "$VERSION" | rev | cut -d- -f1 | rev)"
+          COMMITS_URL="https://github.com/${{ github.repository }}/commits/${SHORT_SHA}"
+          cat > release_notes.md <<EOF
+          ## AC-DC ${VERSION}
+
+          [View commit history](${COMMITS_URL})
+
+          ### Downloads
+
+          | Platform | File | Instructions |
+          |----------|------|--------------|
+          | Linux | \`ac-dc-linux\` | \`chmod +x ac-dc-linux && ./ac-dc-linux\` |
+          | macOS | \`ac-dc-macos\` | \`chmod +x ac-dc-macos && ./ac-dc-macos\` |
+          | Windows | \`ac-dc-windows.exe\` | Double-click or run from command prompt |
+
+          ### Requirements
+
+          - Run from within a git repository directory.
+
+          ### Optional: keyword-enriched document mode
+
+          Document mode works out of the box with heading outlines and
+          cross-references. For keyword-enriched headings (better
+          disambiguation when sections repeat), install from source:
+
+          \`\`\`
+          pip install "ac-dc[docs-enrich]"
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
+          body_path: release_notes.md
+          files: artifacts/**/*
+          fail_on_unmatched_files: true
+          make_latest: true

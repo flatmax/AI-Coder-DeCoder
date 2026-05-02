@@ -910,8 +910,8 @@ export class FilePicker extends LitElement {
     .diff-stats.diff-stats-pre {
       position: absolute;
       right: auto;
-      left: calc(var(--row-indent, 0px) - 1.6rem);
-      width: 2.4rem;
+      left: calc(var(--row-indent, 0px) + 0.1rem);
+      width: 1.8rem;
       justify-content: flex-end;
       margin: 0;
       pointer-events: none;
@@ -2392,7 +2392,7 @@ export class FilePicker extends LitElement {
     const isActive = node.path === this.activePath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
-    const tooltip = this._tooltipFor(node, isExcluded);
+    const tooltip = this._tooltipFor(node, isExcluded, diff);
     // Checkbox tooltip adapts so shift+click guidance
     // surfaces on hover. Users discover the exclusion
     // gesture without needing to read docs.
@@ -2637,12 +2637,24 @@ export class FilePicker extends LitElement {
    * the state is visible on hover without needing to
    * squint at the row's strikethrough styling.
    */
-  _tooltipFor(node, isExcluded = false) {
+  _tooltipFor(node, isExcluded = false, diff = null) {
     if (!node || typeof node !== 'object') return '';
     const name = typeof node.name === 'string' ? node.name : '';
     const path = typeof node.path === 'string' ? node.path : '';
     if (!name && !path) return '';
-    const base = !path || path === name ? name : `${path} — ${name}`;
+    let base = !path || path === name ? name : `${path} — ${name}`;
+    // Append diff stats when the caller supplied them —
+    // lets users see line-change counts on hover without
+    // having to squint at the narrow pre-checkbox gutter.
+    // The `title` attribute renders as plain text (no
+    // colour), so the +/- glyphs carry the semantic
+    // distinction alone.
+    if (diff && (diff.added > 0 || diff.removed > 0)) {
+      const parts = [];
+      if (diff.added > 0) parts.push(`+${diff.added}`);
+      if (diff.removed > 0) parts.push(`-${diff.removed}`);
+      base = `${base} (${parts.join(' ')})`;
+    }
     return isExcluded ? `${base} (excluded)` : base;
   }
 
