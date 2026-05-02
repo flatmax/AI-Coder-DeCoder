@@ -1591,7 +1591,7 @@ export class DiffViewer extends LitElement {
     }
     if (this._texPreviewAvailable === null) {
       try {
-        const result = await call['LLMService.is_tex_preview_available']();
+        const result = await call['Repo.is_tex_preview_available']();
         const unwrapped = this._unwrapRpc(result);
         if (unwrapped &&
             typeof unwrapped === 'object' &&
@@ -1631,7 +1631,7 @@ export class DiffViewer extends LitElement {
     // Run the compile.
     let result;
     try {
-      result = await call['LLMService.compile_tex_preview'](
+      result = await call['Repo.compile_tex_preview'](
         file.modified || '',
         path,
       );

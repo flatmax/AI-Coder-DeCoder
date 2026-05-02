@@ -147,10 +147,22 @@ export function cleanTexForKatex(raw) {
   // separators in align bodies (those have no letters
   // after the backslash).
   text = text.replace(/(\\[a-zA-Z]+)\s+\{/g, '$1{');
-  // Same fix for script operators — ``_ 0`` and ``^ 2``
-  // are emitted as space-separated by make4ht, KaTeX
-  // needs them adjacent.
-  text = text.replace(/([_^])\s+/g, '$1');
+  // Also collapse whitespace between a closing brace and
+  // an opening brace. make4ht emits ``\frac {a} {b}``
+  // where the space between the two args also needs
+  // removing; the macro-name collapse above only handles
+  // the first brace. Handles chains of multi-arg macros
+  // like ``\frac {a} {\frac {b} {c}}``.
+  text = text.replace(/\}\s+\{/g, '}{');
+  // Collapse whitespace BEFORE script operators — make4ht
+  // emits ``\varepsilon _0`` and ``x ^2`` with a space
+  // between the base and the ``_`` / ``^``, which KaTeX
+  // rejects. The space is to the LEFT of the operator,
+  // so the regex must be ``\s+[_^]``, not ``[_^]\s+``.
+  // Pattern does NOT include ``{`` in the preceding-char
+  // class because ``{_ ... }`` is a legitimate LaTeX
+  // construct we don't want to mangle.
+  text = text.replace(/\s+([_^])/g, '$1');
   // Strip unsupported commands. Order matters — commands
   // with braces first, then bare commands.
   text = stripUnsupportedCommands(text);
@@ -261,9 +273,44 @@ function _renderMathDelimiters(html) {
   // 1. Display environments. Non-greedy match with
   //    [\s\S] to span newlines. Environment name groups
   //    handle star variants.
+  //
+  // Environment-to-KaTeX translation: LaTeX's ``align``
+  // and friends are top-level math-mode environments.
+  // KaTeX's ``renderToString`` doesn't accept the
+  // top-level forms — it treats the input as already
+  // inside math mode, so ``\begin{align}`` isn't
+  // recognized. The KaTeX-native equivalents for
+  // alignment columns are ``aligned`` / ``gathered`` /
+  // etc. (the "-ed" variants). Translating keeps the
+  // visual result identical while giving KaTeX a
+  // construct it can parse.
+  //
+  // ``equation`` has no columnar body and doesn't
+  // need a KaTeX-specific wrapper — the body renders
+  // as plain display math.
+  const envMap = {
+    align: 'aligned',
+    'align*': 'aligned',
+    gather: 'gathered',
+    'gather*': 'gathered',
+    multline: 'aligned',
+    'multline*': 'aligned',
+    eqnarray: 'aligned',
+    'eqnarray*': 'aligned',
+  };
   out = out.replace(
-    /\\begin\{(equation|align|gather|multline|eqnarray)\*?\}([\s\S]*?)\\end\{\1\*?\}/g,
-    (_m, _env, body) => _renderMath(body, true),
+    /\\begin\{(equation|align|gather|multline|eqnarray)(\*?)\}([\s\S]*?)\\end\{\1\2\}/g,
+    (_m, envName, star, body) => {
+      const full = envName + star;
+      const katexEnv = envMap[full];
+      if (katexEnv) {
+        const wrapped =
+          `\\begin{${katexEnv}}${body}\\end{${katexEnv}}`;
+        return _renderMath(wrapped, true);
+      }
+      // equation / equation* — no wrapper needed.
+      return _renderMath(body, true);
+    },
   );
   // 2. \[ ... \] — display.
   out = out.replace(

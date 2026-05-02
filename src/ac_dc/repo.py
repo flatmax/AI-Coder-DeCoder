@@ -3022,6 +3022,56 @@ class Repo:
         """
         return shutil.which("make4ht") is not None
 
+    def is_tex_preview_available(self) -> dict[str, Any]:
+        """Combined probe for the TeX preview feature.
+
+        The frontend calls this once per session to decide whether
+        to enable the Preview button on ``.tex`` files. It combines
+        :meth:`is_make4ht_available` (binary on PATH) and
+        :meth:`is_tex4ht_package_available` (``tex4ht.sty`` resolvable
+        by ``kpsewhich``) because make4ht without the tex4ht package
+        produces a confusing mid-compile error rather than a clean
+        "not installed" signal.
+
+        Returns
+        -------
+        dict
+            ``{"available": True}`` when both pieces are present.
+            ``{"available": False, "install_hint": "..."}`` when
+            something's missing; the hint names the specific
+            missing piece so the user knows what to install.
+            The frontend renders ``install_hint`` verbatim.
+
+        Notes
+        -----
+        This is a read-only probe — no localhost gate. Participants
+        in a collaboration session see the same Preview button
+        availability as the host, even though only the host can
+        trigger a compile.
+        """
+        if not self.is_make4ht_available():
+            return {
+                "available": False,
+                "install_hint": (
+                    "make4ht is not on PATH. Install TeX Live "
+                    "(texlive-full on Debian/Ubuntu, or the "
+                    "texlive-plain-generic package for a smaller "
+                    "footprint) or MiKTeX on Windows."
+                ),
+            }
+        if not self.is_tex4ht_package_available():
+            return {
+                "available": False,
+                "install_hint": (
+                    "make4ht is installed but the tex4ht package "
+                    "(tex4ht.sty) is missing. On Debian/Ubuntu: "
+                    "sudo apt install texlive-plain-generic. "
+                    "On other TeX Live installs, use tlmgr "
+                    "install tex4ht."
+                ),
+            }
+        return {"available": True}
+
     # Cached result of the tex4ht.sty package probe. ``None`` means
     # "not yet probed"; True / False mean the probe ran and the
     # package was / wasn't found. Cached at class level because
