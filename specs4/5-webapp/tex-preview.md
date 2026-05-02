@@ -32,6 +32,9 @@ Process math delimiters in priority order, appending a sentinel HTML comment aft
 ### Entity and Command Handling
 - Helper reverses HTML entity escaping that make4ht applies inside math regions before passing to KaTeX
 - Strips unsupported commands (label, tag, nonumber, notag)
+- Collapses whitespace between a TeX macro name and its following braced argument — make4ht emits `\mathbf {E}` and `\frac {a}{b}` with a space that the LaTeX engine tolerates but KaTeX's stricter parser rejects, producing `katex-error` spans that render as raw red source
+- Collapses whitespace after subscript and superscript operators (`_ 0` → `_0`, `^ 2` → `^2`) for the same reason
+- Macro-collapse regex matches `\name` followed by whitespace followed by `{` — uses a letter-only name pattern so row separators (`\\` in align bodies) are never touched
 ## Save-Triggered Compilation
 - TeX compilation is expensive (spawns subprocess)
 - Unlike markdown preview which updates on every keystroke, TeX preview only recompiles when the file is saved
@@ -74,8 +77,17 @@ Server-side helper converts relative paths in make4ht output to inline data URIs
 - Linked stylesheets → inlined style blocks
 Working directory for make4ht set to the file's parent directory so that input, include, and includegraphics resolve relative paths correctly.
 ## Availability Check
-- Before enabling TeX preview, the diff viewer calls a tex-preview-availability RPC to check if make4ht is installed
-- If not installed, preview pane displays installation instructions instead of an error
+
+Two-stage probe run server-side before the preview UI enables the toggle:
+
+1. `make4ht` binary on PATH (via `shutil.which`)
+2. `tex4ht.sty` package resolvable via `kpsewhich tex4ht.sty`
+
+Both must succeed. A common failure mode is make4ht installed standalone (from a `luatex` or minimal TeX install) but the `tex4ht` package missing — without the two-stage check, this produces a confusing mid-compile LaTeX error about `tex4ht.sty` rather than an upfront "not installed" message.
+
+The RPC returns either `{available: true}` or `{available: false, install_hint: "..."}` with a hint naming the specific missing piece. The frontend renders the hint verbatim in the preview pane instead of a compile error, so the user knows which package to install.
+
+Package-probe result is cached at class scope — subprocess runs at most once per Python process since TeX package installation is out-of-band of AC-DC.
 ## Temp Directory Lifecycle
 - Each compilation creates a temp directory under the per-repo working directory (already gitignored)
 - Previous compilation's temp dir cleaned up at the start of the next compilation
@@ -87,7 +99,8 @@ Working directory for make4ht set to the file's parent directory so that input, 
 - make4ht runs with working directory set to the temp directory, not the file's parent
 - Critical because make4ht and TeX write numerous intermediate files (aux, dvi, 4ct, 4tc, log, etc.) to the current working directory — the output flag only controls the final HTML location
 - Without this, every preview compilation would litter the repository with TeX build artifacts
-- For input, include, and includegraphics resolution, an environment variable is set to the original file's parent directory (with a trailing separator to append system defaults)
+- For input, include, and includegraphics resolution, an environment variable is set to the original file's parent directory
+- The environment variable **must end with an OS path separator** (`:` on Unix, `;` on Windows) — without the trailing separator, the TeX engine replaces the default search paths instead of appending to them, so system packages like `tex4ht.sty` become unresolvable mid-compile even when `kpsewhich` finds them from a shell
 - Gives TeX the same path resolution it would have if running in the file's directory, while keeping all output in the temp dir
 
 ## CSS Styling

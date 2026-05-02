@@ -131,6 +131,26 @@ export function cleanTexForKatex(raw) {
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
+  // Collapse whitespace between a TeX macro name and its
+  // following braced argument. make4ht emits math with a
+  // space inserted between macros and arguments —
+  // ``\mathbf {E}`` and ``\frac {a}{b}`` — which is
+  // syntactically meaningful whitespace in LaTeX the
+  // engine but which KaTeX's stricter parser rejects,
+  // producing a ``katex-error`` span that renders as raw
+  // red source. Collapsing the space restores the
+  // canonical ``\mathbf{E}`` form KaTeX expects.
+  //
+  // The regex matches ``\name`` followed by one or more
+  // spaces followed by ``{``. Using ``[a-zA-Z]+`` for
+  // the name keeps it from affecting ``\\`` row
+  // separators in align bodies (those have no letters
+  // after the backslash).
+  text = text.replace(/(\\[a-zA-Z]+)\s+\{/g, '$1{');
+  // Same fix for script operators — ``_ 0`` and ``^ 2``
+  // are emitted as space-separated by make4ht, KaTeX
+  // needs them adjacent.
+  text = text.replace(/([_^])\s+/g, '$1');
   // Strip unsupported commands. Order matters — commands
   // with braces first, then bare commands.
   text = stripUnsupportedCommands(text);

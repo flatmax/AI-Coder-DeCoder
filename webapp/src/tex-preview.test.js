@@ -117,6 +117,57 @@ describe('cleanTexForKatex', () => {
       cleanTexForKatex('a &lt; b \\label{foo} &amp; c'),
     ).toBe('a < b  & c');
   });
+
+  it('collapses space between macro name and braced arg', () => {
+    // make4ht emits `\mathbf {E}` — KaTeX needs `\mathbf{E}`.
+    expect(cleanTexForKatex('\\mathbf {E}')).toBe(
+      '\\mathbf{E}',
+    );
+  });
+
+  it('collapses space for multi-arg macros', () => {
+    expect(cleanTexForKatex('\\frac {a}{b}')).toBe(
+      '\\frac{a}{b}',
+    );
+    expect(cleanTexForKatex('\\frac {a} {b}')).toBe(
+      '\\frac{a}{b}',
+    );
+  });
+
+  it('collapses nested macro calls', () => {
+    const src = '\\frac {\\partial \\mathbf {B}}{\\partial t}';
+    const want = '\\frac{\\partial \\mathbf{B}}{\\partial t}';
+    expect(cleanTexForKatex(src)).toBe(want);
+  });
+
+  it('leaves macro without following brace alone', () => {
+    // `\alpha` bare has no argument — unchanged.
+    expect(cleanTexForKatex('\\alpha + \\beta')).toBe(
+      '\\alpha + \\beta',
+    );
+  });
+
+  it('leaves row separator `\\\\` alone', () => {
+    // In align bodies we have `\\` as row separator
+    // before whitespace. The backslash-pair has no
+    // letters after the first backslash, so the macro
+    // collapse regex must not touch it.
+    expect(cleanTexForKatex('a = 1 \\\\ b = 2')).toBe(
+      'a = 1 \\\\ b = 2',
+    );
+  });
+
+  it('collapses space after subscript operator', () => {
+    expect(cleanTexForKatex('\\varepsilon _0')).toBe(
+      '\\varepsilon_0',
+    );
+    expect(cleanTexForKatex('\\mu _0')).toBe('\\mu_0');
+  });
+
+  it('collapses space after superscript operator', () => {
+    expect(cleanTexForKatex('x ^2')).toBe('x^2');
+    expect(cleanTexForKatex('e ^{i\\pi}')).toBe('e^{i\\pi}');
+  });
 });
 
 // -------------------------------------------------------
@@ -201,6 +252,30 @@ describe('renderTexMath', () => {
     // KaTeX output is either successful (katex class)
     // or an error (katex-error class); both are fine.
     expect(out).toMatch(/class="katex(-error)?"/);
+  });
+
+  it('renders make4ht-style align with spaced macros', () => {
+    // Regression — pins the align-environment failure
+    // where make4ht output with `\mathbf {E}` spacing
+    // produced `katex-error` spans that displayed as
+    // raw red source on the page. After cleanTexForKatex
+    // learned to collapse the spacing, this should
+    // render as real KaTeX output, not an error.
+    const src = [
+      '\\begin{align}',
+      '\\nabla \\cdot \\mathbf {E} &= \\frac {\\rho }{\\varepsilon _0} \\\\',
+      '\\nabla \\cdot \\mathbf {B} &= 0 \\\\',
+      '\\nabla \\times \\mathbf {E} &= -\\frac {\\partial \\mathbf {B}}{\\partial t}',
+      '\\end{align}',
+    ].join('\n');
+    const out = renderTexMath(src);
+    expect(out).not.toContain('\\begin{align}');
+    expect(out).not.toContain('\\end{align}');
+    // Must be successful KaTeX output, not an error.
+    // The whole point of the fix is eliminating the
+    // katex-error fallback for this shape of input.
+    expect(out).toContain('class="katex"');
+    expect(out).not.toContain('class="katex-error"');
   });
 
   it('renders gather environment', () => {

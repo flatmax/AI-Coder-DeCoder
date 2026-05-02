@@ -301,6 +301,22 @@ Direct dependency of the diff viewer's TeX preview and markdown preview math ext
 
 Import path for raw CSS (Vite): `katex/dist/katex.min.css?raw`. The package's CSS file lives at `dist/katex.min.css` relative to the package root; the `?raw` suffix is Vite's loader directive.
 
+### TEXINPUTS trailing separator
+
+The `TEXINPUTS` environment variable set by the TeX preview compile path **must end with an OS path separator** (`:` on Unix, `;` on Windows). Without the trailing separator, an explicit `TEXINPUTS` value replaces the TeX engine's default search paths entirely rather than being prepended to them. System packages installed in the standard TeX trees — most notably `tex4ht.sty` itself — become unresolvable mid-compile, producing a `File `tex4ht.sty' not found` error even when `kpsewhich tex4ht.sty` from a shell resolves it correctly.
+
+The separator rule is a property of every TeX engine (pdfTeX, XeTeX, LuaTeX, htlatex), not something AC-DC chose. It's documented in kpathsea's search-path rules but easy to miss when implementing the compile wrapper. Reimplementers should handle three cases: no existing `TEXINPUTS` → `"${scratch}:"`; existing `TEXINPUTS` → `"${scratch}:${existing}:"`; Windows → same with `;`.
+
+### TeX4HT package detection via `kpsewhich`
+
+`make4ht` is only the driver — it needs the `tex4ht.sty` file from the `tex4ht` TeX package to actually transform documents. `which make4ht` returning a path is necessary but not sufficient for the preview to work.
+
+Probe the package with `kpsewhich tex4ht.sty` — exit code 0 AND non-empty stdout means the file is resolvable. Exit non-zero or empty stdout means the package is missing. On Debian/Ubuntu the package ships in `texlive-plain-generic`; `texlive-full` is the belt-and-braces alternative.
+
+`kpsewhich` ships with every TeX Live distribution, so `shutil.which("kpsewhich") is None` is a reliable "no TeX install at all" signal and should be treated as "package missing" (probe returns False). Subprocess failures (timeout, OSError) should also fail closed as "missing" — the install hint the frontend shows is the actionable path regardless of the specific failure.
+
+Cache the probe result class-side — TeX package installation is out-of-band of the application, so one subprocess per Python process suffices.
+
 ## Cross-references
 
 - Behavioral contracts — layout, modes, single-file no-cache model, LSP integration, markdown/TeX preview, concurrent-openFile generation counter, save pipeline, file navigation grid, invariants: `specs4/5-webapp/diff-viewer.md`
