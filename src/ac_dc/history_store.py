@@ -173,6 +173,29 @@ class HistoryStore:
         return f"sess_{epoch_ms}_{suffix}"
 
     @staticmethod
+    def new_turn_id() -> str:
+        """Generate a fresh turn ID.
+
+        Format — ``turn_{epoch_ms}_{6-char-hex}``. Matches the
+        session ID convention (same prefix-epoch-suffix shape)
+        so IDs from the two namespaces are visually
+        distinguishable but structurally uniform. Per
+        specs4/3-llm/history.md § Turns and
+        specs-reference/3-llm/history.md § Session ID, turn IDs
+        are globally unique across sessions and agent archives
+        are keyed by them.
+
+        A turn covers one user request from the user message
+        through the final assistant response. In non-agent mode
+        a turn contains a single LLM call; in agent mode a turn
+        may spawn N agents across multiple iteration rounds —
+        the turn ID groups every record the request produces.
+        """
+        epoch_ms = int(time.time() * 1000)
+        suffix = uuid.uuid4().hex[:6]
+        return f"turn_{epoch_ms}_{suffix}"
+
+    @staticmethod
     def _new_message_id() -> str:
         """Generate a message ID.
 
@@ -313,6 +336,7 @@ class HistoryStore:
         files_modified: list[str] | None = None,
         edit_results: list[dict[str, Any]] | None = None,
         system_event: bool = False,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         """Append one message to the JSONL store.
 
@@ -351,6 +375,19 @@ class HistoryStore:
             When True, marks this message as a system event
             (commit, reset, mode switch) — rendered distinctly
             in the chat UI.
+        turn_id:
+            Optional turn identifier grouping this record with
+            other records produced by the same user request.
+            Per specs4/3-llm/history.md § Turns, every record
+            in a turn (user message, assistant response, any
+            system events fired during the turn, and the
+            compaction event if one fires post-response) carries
+            the same turn_id. The turn_id is generated at the
+            top of the streaming pipeline and propagated
+            through. Omitted from records whose callers haven't
+            yet adopted turn propagation — readers tolerate its
+            absence and the chat panel simply does not offer
+            the "show agents" affordance for records lacking it.
 
         Returns
         -------
@@ -390,6 +427,11 @@ class HistoryStore:
         }
         if system_event:
             record["system_event"] = True
+        if turn_id:
+            # Omitted when None or empty so records predating
+            # turn-ID adoption stay byte-identical to their
+            # current shape; readers tolerate the absence.
+            record["turn_id"] = turn_id
         if files:
             record["files"] = list(files)
         if image_refs is not None:
@@ -586,6 +628,13 @@ class HistoryStore:
                 "role": rec.get("role", "user"),
                 "content": rec.get("content", ""),
             }
+            # turn_id rides along so a restored session keeps
+            # the "show agents" affordance for records that
+            # had it. Records predating turn-ID adoption omit
+            # the field; readers must tolerate its absence.
+            turn_id = rec.get("turn_id")
+            if isinstance(turn_id, str) and turn_id:
+                shape["turn_id"] = turn_id
             refs = rec.get("image_refs")
             if isinstance(refs, list) and refs:
                 uris: list[str] = []

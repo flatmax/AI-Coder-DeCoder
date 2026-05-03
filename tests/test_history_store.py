@@ -789,6 +789,193 @@ class TestSearch:
 
 
 # ---------------------------------------------------------------------------
+# Turn IDs
+# ---------------------------------------------------------------------------
+
+
+class TestTurnIds:
+    """Turn ID generation and round-trip through records."""
+
+    def test_turn_id_format(self) -> None:
+        """Turn IDs start with ``turn_`` and include an epoch.
+
+        Format — ``turn_{epoch_ms}_{6-char-hex}``. Pinning the
+        prefix keeps turn IDs visually distinct from session
+        IDs while sharing the structural shape documented in
+        specs-reference/3-llm/history.md.
+        """
+        tid = HistoryStore.new_turn_id()
+        assert tid.startswith("turn_")
+        parts = tid.split("_")
+        assert len(parts) == 3
+        assert parts[1].isdigit()
+
+    def test_turn_ids_are_unique(self) -> None:
+        """Back-to-back calls produce distinct IDs.
+
+        Same rationale as session IDs — random suffix breaks
+        same-millisecond ties.
+        """
+        ids = {HistoryStore.new_turn_id() for _ in range(100)}
+        assert len(ids) == 100
+
+    def test_turn_id_distinct_from_session_id(self) -> None:
+        """Turn and session IDs never alias.
+
+        Different prefixes are the only guarantee; the uuid
+        space is shared. Assert the prefix invariant directly
+        so a future refactor that tries to unify the
+        generators trips the test.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        assert sid.startswith("sess_")
+        assert tid.startswith("turn_")
+        assert not sid.startswith("turn_")
+        assert not tid.startswith("sess_")
+
+    def test_append_without_turn_id_omits_field(
+        self, store: HistoryStore
+    ) -> None:
+        """Records without a turn_id argument don't persist the field.
+
+        Pins the backwards-compat invariant: before turn
+        propagation lands in the streaming handler, records
+        must stay byte-identical to their current shape.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(sid, "user", "hi")
+        msgs = store.get_session_messages(sid)
+        assert "turn_id" not in msgs[0]
+
+    def test_append_with_turn_id_persists(
+        self, store: HistoryStore
+    ) -> None:
+        """turn_id is written to the record and reads back."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(sid, "user", "hi", turn_id=tid)
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("turn_id") == tid
+
+    def test_turn_id_none_omits_field(
+        self, store: HistoryStore
+    ) -> None:
+        """Explicit None omits the field (not ``"None"``).
+
+        Callers that haven't yet adopted turn propagation may
+        pass None; the record must match the
+        didn't-pass-the-arg shape byte-for-byte so tests and
+        downstream consumers can't distinguish the two.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(sid, "user", "hi", turn_id=None)
+        msgs = store.get_session_messages(sid)
+        assert "turn_id" not in msgs[0]
+
+    def test_turn_id_empty_string_omits_field(
+        self, store: HistoryStore
+    ) -> None:
+        """Empty string is treated as "no turn_id".
+
+        Defensive against a caller that initialises a variable
+        to ``""`` before deciding to populate it and forgets
+        to replace it. The persisted record matches the None
+        case.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(sid, "user", "hi", turn_id="")
+        msgs = store.get_session_messages(sid)
+        assert "turn_id" not in msgs[0]
+
+    def test_turn_id_groups_multiple_messages(
+        self, store: HistoryStore
+    ) -> None:
+        """A turn's user + assistant messages share one turn_id.
+
+        Simulates the streaming-handler pattern: generate one
+        turn_id, thread it through every append for that
+        request.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(sid, "user", "q", turn_id=tid)
+        store.append_message(sid, "assistant", "a", turn_id=tid)
+        msgs = store.get_session_messages(sid)
+        assert len(msgs) == 2
+        assert all(m.get("turn_id") == tid for m in msgs)
+
+    def test_different_turns_have_different_ids(
+        self, store: HistoryStore
+    ) -> None:
+        """Two turns in one session have distinct turn_ids.
+
+        Pins the grouping contract: records in the same turn
+        share an ID; records in different turns don't.
+        """
+        sid = HistoryStore.new_session_id()
+        tid1 = HistoryStore.new_turn_id()
+        tid2 = HistoryStore.new_turn_id()
+        store.append_message(sid, "user", "q1", turn_id=tid1)
+        store.append_message(sid, "assistant", "a1", turn_id=tid1)
+        store.append_message(sid, "user", "q2", turn_id=tid2)
+        store.append_message(sid, "assistant", "a2", turn_id=tid2)
+        msgs = store.get_session_messages(sid)
+        assert [m.get("turn_id") for m in msgs] == [
+            tid1, tid1, tid2, tid2,
+        ]
+
+    def test_context_retrieval_carries_turn_id(
+        self, store: HistoryStore
+    ) -> None:
+        """Context-load shape includes turn_id when present.
+
+        Needed so a session restored via session-load keeps the
+        "show agents" affordance for records that had it.
+        Records without turn_id still round-trip through the
+        minimal role/content shape.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(sid, "user", "q", turn_id=tid)
+        msgs = store.get_session_messages_for_context(sid)
+        assert msgs[0].get("turn_id") == tid
+
+    def test_context_retrieval_omits_when_absent(
+        self, store: HistoryStore
+    ) -> None:
+        """Context-load shape has no turn_id when record had none.
+
+        Backwards-compat — the minimal role/content shape
+        stays minimal for pre-turn records.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(sid, "user", "q")
+        msgs = store.get_session_messages_for_context(sid)
+        assert "turn_id" not in msgs[0]
+
+    def test_system_event_carries_turn_id(
+        self, store: HistoryStore
+    ) -> None:
+        """System events accept and persist turn_id.
+
+        Per specs4/3-llm/history.md § Main Store Records, system
+        events fired during a turn (commit, reset, mode switch,
+        compaction) inherit the triggering user message's
+        turn_id so all records for the turn group together.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(
+            sid, "user", "Committed abc1234",
+            system_event=True, turn_id=tid,
+        )
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("system_event") is True
+        assert msgs[0].get("turn_id") == tid
+
+
+# ---------------------------------------------------------------------------
 # JSONL resilience
 # ---------------------------------------------------------------------------
 
