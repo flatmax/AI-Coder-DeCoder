@@ -4568,14 +4568,15 @@ class LLMService:
         ``_post_response`` (Step 3), ``_update_stability``
         (Step 4), ``_sync_file_context`` (Step 5),
         ``_build_tiered_content`` / ``_assemble_tiered`` /
-        ``_assemble_messages_flat`` (Step 6). Remaining callees
+        ``_assemble_messages_flat`` (Step 6),
+        ``_detect_and_fetch_urls`` (Step 7). Remaining callees
         (``_build_completion_result``,
-        ``_build_and_set_review_context``,
-        ``_detect_and_fetch_urls``) still read per-conversation
-        state from ``self.*`` directly. They get threaded the
-        scope in subsequent refactor steps. For the default-
-        scope case the objects match exactly, so the behaviour
-        is byte-identical to the pre-refactor implementation.
+        ``_build_and_set_review_context``) still read
+        per-conversation state from ``self.*`` directly. They
+        get threaded the scope in subsequent refactor steps.
+        For the default-scope case the objects match exactly,
+        so the behaviour is byte-identical to the pre-refactor
+        implementation.
         """
         # Defensive default for callers that predate the scope
         # parameter. Every shipping call site supplies a scope
@@ -4716,8 +4717,14 @@ class LLMService:
             # building the prompt section; the URLs stay in the
             # session-scoped fetched dict so chips remain visible
             # and the user can re-include on a later turn.
+            #
+            # Scope threads through so an agent scope attaches
+            # the URL context to its own ContextManager. The
+            # URL service itself stays shared — fetched URLs
+            # are session-scoped and reused across conversations
+            # within a turn per specs4/7-future/parallel-agents.md.
             await self._detect_and_fetch_urls(
-                request_id, message, excluded_urls or []
+                request_id, message, excluded_urls or [], scope=scope
             )
 
             # Review context injection. When review mode is
@@ -4959,6 +4966,7 @@ class LLMService:
         request_id: str,
         message: str,
         excluded_urls: list[str] | None = None,
+        scope: ConversationScope | None = None,
     ) -> None:
         """Detect URLs in the user message and fetch new ones.
 
@@ -4975,6 +4983,24 @@ class LLMService:
         in the service's session-scoped fetched dict — the chip
         UI still shows them and the user can re-include on the
         next turn by checking the box.
+
+        ``scope`` carries the per-conversation ContextManager
+        that receives the formatted URL context. The default-
+        None fallback builds a scope from ``self`` so direct
+        callers (none today; future entry points) can skip
+        the scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_url_service`` is session-scoped by design — sharing
+        the fetched dict across agents within a turn is
+        desirable, so the URL cache, per-URL fetch state, and
+        the fetched-URLs dict are all main-service state rather
+        than per-conversation. ``_aux_executor`` and
+        ``_main_loop`` are also shared. Only the final
+        ``set_url_context`` / ``clear_url_context`` call
+        targets the scope's ContextManager. For the default-
+        scope case ``scope.context`` is ``self._context``, so
+        single-agent behaviour is byte-identical.
 
         Progress events fire for each URL that actually gets
         fetched (not for cache-hit / already-fetched skips):
@@ -4994,6 +5020,8 @@ class LLMService:
         fetches don't pollute the LLM's view — they appear in
         the URL chip UI with an error state instead.
         """
+        if scope is None:
+            scope = self._default_scope()
         from ac_dc.url_service import detect_urls as _detect_urls
         from ac_dc.url_service import display_name as _display_name
 
@@ -5077,10 +5105,15 @@ class LLMService:
         url_context = self._url_service.format_url_context(
             excluded=excluded_set
         )
+        # Attach the formatted context to the scope's
+        # ContextManager so an agent scope sees the URL
+        # block in its own prompt assembly. For the default
+        # scope, scope.context is self._context — unchanged
+        # behaviour for the main conversation.
         if url_context:
-            self._context.set_url_context([url_context])
+            scope.context.set_url_context([url_context])
         else:
-            self._context.clear_url_context()
+            scope.context.clear_url_context()
 
     def _fetch_url_sync(self, url: str) -> None:
         """Blocking fetch — called from the aux executor.
