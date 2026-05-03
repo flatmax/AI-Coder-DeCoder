@@ -4566,16 +4566,16 @@ class LLMService:
 
         Callees refactored to take scope explicitly:
         ``_post_response`` (Step 3), ``_update_stability``
-        (Step 4), ``_sync_file_context`` (Step 5). Remaining
-        callees (``_build_completion_result``,
+        (Step 4), ``_sync_file_context`` (Step 5),
+        ``_build_tiered_content`` / ``_assemble_tiered`` /
+        ``_assemble_messages_flat`` (Step 6). Remaining callees
+        (``_build_completion_result``,
         ``_build_and_set_review_context``,
-        ``_detect_and_fetch_urls``, ``_build_tiered_content``,
-        ``_assemble_tiered``, ``_assemble_messages_flat``) still
-        read per-conversation state from ``self.*`` directly.
-        They get threaded the scope in subsequent refactor
-        steps. For the default-scope case the objects match
-        exactly, so the behaviour is byte-identical to the
-        pre-refactor implementation.
+        ``_detect_and_fetch_urls``) still read per-conversation
+        state from ``self.*`` directly. They get threaded the
+        scope in subsequent refactor steps. For the default-
+        scope case the objects match exactly, so the behaviour
+        is byte-identical to the pre-refactor implementation.
         """
         # Defensive default for callers that predate the scope
         # parameter. Every shipping call site supplies a scope
@@ -4768,11 +4768,11 @@ class LLMService:
             # (narrow startup window). Fall back to flat in that
             # case so early requests still work.
             #
-            # _build_tiered_content / _assemble_tiered /
-            # _assemble_messages_flat still read per-conversation
-            # state from self.* directly (refactored in Step 6).
-            # For the default scope those are the same objects.
-            tiered_content = self._build_tiered_content()
+            # All three tier-assembly methods thread the scope
+            # through so agents' own ContextManagers and
+            # trackers drive their own assembly. For the default
+            # scope the behaviour is byte-identical.
+            tiered_content = self._build_tiered_content(scope)
             if tiered_content is None:
                 # Diagnose why we're falling back. A persistent
                 # fall-back-to-flat condition usually means the
@@ -4802,11 +4802,11 @@ class LLMService:
                     self._init_complete,
                 )
                 messages = self._assemble_messages_flat(
-                    message, images
+                    message, images, scope
                 )
             else:
                 messages = self._assemble_tiered(
-                    message, images, tiered_content
+                    message, images, tiered_content, scope
                 )
 
             # Run the LLM call in the stream executor.
@@ -6865,6 +6865,7 @@ class LLMService:
 
     def _build_tiered_content(
         self,
+        scope: ConversationScope | None = None,
     ) -> dict[str, dict[str, Any]] | None:
         """Walk the stability tracker and build per-tier content dicts.
 
@@ -6874,6 +6875,24 @@ class LLMService:
         returns an empty-but-non-None dict (all tiers with empty
         content lists), so the fallback only fires during a
         narrow pre-init window.
+
+        ``scope`` bundles the per-conversation state this method
+        reads — the stability tracker (for tier item iteration),
+        the ContextManager (for history lookup and file context
+        reads), and the selected-files list (for the uniqueness-
+        invariant filter that skips selected files' index
+        blocks). The default-None fallback builds a scope from
+        ``self`` so direct callers (future entry points) can
+        skip the scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_symbol_index`` and ``_doc_index`` produce the per-
+        file blocks regardless of whose conversation is
+        rendering; ``_excluded_index_files`` is session-level
+        UI state. For the default-scope case every ``scope.X``
+        resolves to the same object as the corresponding
+        ``self._X``, so single-agent behaviour is byte-
+        identical.
 
         Each tier entry has keys:
 
@@ -6905,9 +6924,14 @@ class LLMService:
         check prevents leakage if the two passes ever
         desynchronise.
         """
-        if self._stability_tracker is None:
+        # Defensive default for callers that predate the scope
+        # parameter. Every shipping call site (_stream_chat)
+        # supplies a scope explicitly.
+        if scope is None:
+            scope = self._default_scope()
+        if scope.tracker is None:
             return None
-        all_items = self._stability_tracker.get_all_items()
+        all_items = scope.tracker.get_all_items()
         if not all_items:
             return None
 
@@ -6925,7 +6949,10 @@ class LLMService:
             for tier in ("L0", "L1", "L2", "L3")
         }
 
-        history = self._context.get_history()
+        # History comes from the scope's ContextManager so an
+        # agent scope walks its own conversation's history
+        # rather than the main session's.
+        history = scope.context.get_history()
 
         # Walk items once, dispatching by tier + prefix. Each
         # tier builds lists of fragments first, then joins at
@@ -6950,7 +6977,10 @@ class LLMService:
         # suspenders checks here catch any leakage from races,
         # cross-reference rebuild edge cases, or future code
         # paths that forget the invariant.
-        selected_set = set(self._selected_files)
+        #
+        # Selected-set comes from scope (per-conversation);
+        # excluded-set stays on self (session-level UI state).
+        selected_set = set(scope.selected_files)
         excluded_set = set(getattr(self, "_excluded_index_files", []))
 
         for key in sorted(all_items.keys()):
@@ -7047,7 +7077,7 @@ class LLMService:
                     result[tier_name]["graduated_files"].append(path)
             elif key.startswith("file:"):
                 path = key[len("file:"):]
-                content = self._file_context.get_content(path)
+                content = scope.context.file_context.get_content(path)
                 if content is None:
                     # Tracker has an entry for this file but the
                     # file context doesn't. Most common cause:
@@ -7111,6 +7141,7 @@ class LLMService:
         user_prompt: str,
         images: list[str],
         tiered_content: dict[str, dict[str, Any]],
+        scope: ConversationScope | None = None,
     ) -> list[dict[str, Any]]:
         """Build the tiered message array.
 
@@ -7121,7 +7152,25 @@ class LLMService:
 
         System reminder is appended to the user prompt here so
         the tier assembler doesn't need to know about it.
+
+        ``scope`` bundles the per-conversation state this method
+        reads — the ContextManager (for mode dispatch and the
+        tier-message assembler) and the selected-files list
+        (for the exclusion set). The default-None fallback
+        builds a scope from ``self`` so direct callers can skip
+        the scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_config`` (system reminder), ``_symbol_index`` /
+        ``_doc_index`` (map + legend generation), ``_repo``
+        (file tree), ``_cross_ref_enabled`` (shared UI toggle).
+        For the default-scope case every ``scope.X`` resolves
+        to the same object as ``self._X``, so single-agent
+        behaviour is byte-identical.
         """
+        if scope is None:
+            scope = self._default_scope()
+
         # Append the system reminder before assembly so it lands
         # at the end of the user's text — closest to where the
         # model generates.
@@ -7134,7 +7183,11 @@ class LLMService:
         # has graduated into a cached tier as a file: item (full
         # content present in that tier, so neither the active
         # section NOR the main symbol map should render it).
-        exclude_files: set[str] = set(self._selected_files)
+        #
+        # Selected-files come from scope (per-conversation);
+        # graduated_files comes from the tiered_content dict
+        # which was built against scope by _build_tiered_content.
+        exclude_files: set[str] = set(scope.selected_files)
         for tier_name in ("L0", "L1", "L2", "L3"):
             tier = tiered_content.get(tier_name) or {}
             for path in tier.get("graduated_files", ()) or ():
@@ -7157,7 +7210,7 @@ class LLMService:
         #   manager as the *primary* legend via symbol_legend.
         #   The context manager's assembler picks the mode-
         #   appropriate header (DOC_MAP_HEADER) based on
-        #   self._context.mode.
+        #   scope.context.mode.
         # - Code mode + cross-reference: doc is the *secondary*
         #   index; the assembler places it under the opposite
         #   mode's header (DOC_MAP_HEADER).
@@ -7173,8 +7226,12 @@ class LLMService:
         # (which is misnamed historically but correct in the
         # primary slot). The doc legend goes to doc_legend only
         # for cross-ref scenarios.
+        #
+        # Mode read from scope.context so an agent scope with
+        # its own ContextManager drives its own mode dispatch.
+        # _cross_ref_enabled stays on self (shared UI toggle).
         doc_legend = ""
-        if self._context.mode == Mode.DOC:
+        if scope.context.mode == Mode.DOC:
             # Doc mode primary: swap the legends so the primary
             # slot carries the doc legend.
             doc_legend_text = self._doc_index.get_legend()
@@ -7201,7 +7258,12 @@ class LLMService:
                     "Failed to fetch file tree for prompt: %s", exc
                 )
 
-        return self._context.assemble_tiered_messages(
+        # Delegate to the scope's ContextManager so an agent
+        # scope assembles via its own ContextManager's mode +
+        # history + URL/review context. For the default scope,
+        # scope.context is self._context and behaviour is
+        # unchanged.
+        return scope.context.assemble_tiered_messages(
             user_prompt=augmented_prompt,
             images=images if images else None,
             symbol_map=symbol_map,
@@ -7219,6 +7281,7 @@ class LLMService:
         self,
         user_prompt: str,
         images: list[str],
+        scope: ConversationScope | None = None,
     ) -> list[dict[str, Any]]:
         """Build a flat message array for the LLM call.
 
@@ -7234,8 +7297,25 @@ class LLMService:
         context-free prompt and the LLM has no view of the repo.
         Without this the user's selection is silently dropped
         on every flat-mode request.
+
+        ``scope`` bundles the per-conversation state this method
+        reads — the ContextManager (for system prompt, mode,
+        history, URL context, review context, file context) and
+        the selected-files list (for symbol-map exclusion). The
+        default-None fallback builds a scope from ``self`` so
+        direct callers can skip the scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_config`` (system reminder), ``_symbol_index``
+        (symbol map + legend), ``_repo`` (file tree). For the
+        default-scope case every ``scope.X`` resolves to the
+        same object as ``self._X``, so single-agent behaviour
+        is byte-identical.
         """
-        system_prompt = self._context.get_system_prompt()
+        if scope is None:
+            scope = self._default_scope()
+
+        system_prompt = scope.context.get_system_prompt()
         reminder = self._config.get_system_reminder()
         augmented_prompt = user_prompt + (reminder or "")
 
@@ -7246,12 +7326,15 @@ class LLMService:
         # message body.
         system_parts: list[str] = [system_prompt]
 
-        # Symbol map + legend (mode-aware header).
+        # Symbol map + legend (mode-aware header). Mode comes
+        # from scope.context; selected-files come from scope;
+        # the symbol index itself is shared infrastructure on
+        # self.
         if self._symbol_index is not None:
             try:
                 legend = self._symbol_index.get_legend()
                 symbol_map = self._symbol_index.get_symbol_map(
-                    exclude_files=set(self._selected_files)
+                    exclude_files=set(scope.selected_files)
                 )
                 if legend or symbol_map:
                     from ac_dc.context_manager import (
@@ -7260,7 +7343,7 @@ class LLMService:
                     )
                     header = (
                         DOC_MAP_HEADER
-                        if self._context.mode == Mode.DOC
+                        if scope.context.mode == Mode.DOC
                         else REPO_MAP_HEADER
                     )
                     system_parts.append(header + legend)
@@ -7286,7 +7369,7 @@ class LLMService:
                 )
 
         # URL context.
-        url_parts = self._context.get_url_context()
+        url_parts = scope.context.get_url_context()
         if url_parts:
             from ac_dc.context_manager import URL_CONTEXT_HEADER
             system_parts.append(
@@ -7294,7 +7377,7 @@ class LLMService:
             )
 
         # Review context.
-        review = self._context.get_review_context()
+        review = scope.context.get_review_context()
         if review:
             from ac_dc.context_manager import REVIEW_CONTEXT_HEADER
             system_parts.append(REVIEW_CONTEXT_HEADER + review)
@@ -7302,8 +7385,10 @@ class LLMService:
         # Active files — full content of everything the user
         # selected. This is the load-bearing piece that was
         # missing. Without it, flat mode silently forgets the
-        # selection every request.
-        file_body = self._file_context.format_for_prompt()
+        # selection every request. File context lives on the
+        # scope's ContextManager so an agent scope reads from
+        # its own file_context.
+        file_body = scope.context.file_context.format_for_prompt()
         if file_body:
             from ac_dc.context_manager import FILES_ACTIVE_HEADER
             system_parts.append(FILES_ACTIVE_HEADER + file_body)
@@ -7317,8 +7402,10 @@ class LLMService:
         # Active history — already includes the user message we
         # just added via add_message. Strip it off before appending
         # so we don't duplicate; we add the current prompt with
-        # images as the final message.
-        history = self._context.get_history()
+        # images as the final message. History comes from the
+        # scope's ContextManager so agent scopes walk their own
+        # conversation.
+        history = scope.context.get_history()
         if history and history[-1].get("role") == "user":
             history = history[:-1]
         messages.extend(history)
