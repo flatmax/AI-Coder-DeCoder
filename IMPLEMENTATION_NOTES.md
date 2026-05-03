@@ -103,6 +103,35 @@ Canonical contracts live in three places: `specs4/7-future/parallel-agents.md` (
 
 No code changes from this decision — the current `EditParser`'s state machine already treats unknown lines in `SCANNING` as prose, which is the behaviour the invariant requires. A future agent-spawning implementation will add parser branches that dispatch on the `AGENT` / `AGEND` keywords after the three orange / green emoji.
 
+### D22 — Parallel-agents foundation uses the existing streaming pipeline
+
+Earlier iteration of the parallel-agents foundation built three new modules: `agent_runner.py` (Slice 6a — runs one agent end-to-end), `agent_orchestrator.py` (Slice 6b — dispatches N agents concurrently), and a planned `agent_edit_applier.py` (Slice 6c — applies agent edits to disk). 6a and 6b shipped with full test coverage; 6c was partially written.
+
+All three are being removed. The shipped work is being reverted.
+
+The problem: each agent is a chat session (per D21). A chat session has a streaming pipeline — `LLMService._stream_chat` — that already handles message assembly, litellm invocation, edit parsing, edit application, persistence, stability tracking, and post-response work. Building a parallel runner / orchestrator / applier duplicates that pipeline while missing the features it provides.
+
+The right foundation is a refactor of `_stream_chat` so its ContextManager is a parameter rather than hardcoded to `self._context`. Once that lands, agent mode becomes:
+
+- Parse agent-spawn blocks (existing edit_protocol work — already landed)
+- Construct N agent ContextManagers via `build_agent_context_manager` (Slice 5 — already landed)
+- Invoke `_stream_chat` N times in parallel with different ContextManagers and child request IDs
+
+No new runner. No new orchestrator. No new applier. Each agent benefits automatically from every feature `_stream_chat` has — URL fetching, review-mode gating, edit-block retry prompts, session totals tracking, terminal HUD, compaction triggers — and from any future improvements to that pipeline.
+
+The `AgentBlock` marker parsing (Slice 3) and per-agent ContextManager factory (Slice 5) stay — they're genuine foundation work that the eventual `_stream_chat` refactor will consume. The turn-ID propagation (Slice 1) and archive persistence (Slice 2) also stay — same reason.
+
+Files deleted:
+
+- `src/ac_dc/agent_runner.py`
+- `src/ac_dc/agent_orchestrator.py`
+- `tests/test_agent_runner.py`
+- `tests/test_agent_orchestrator.py`
+
+Also reverted: the `cancelled` and `apply_report` fields added to `AgentResult` (the dataclass itself goes with agent_runner.py).
+
+Spec change: `specs4/7-future/parallel-agents.md` § Foundation Requirements gains a pointer to the ContextManager factory invariant and adds a short paragraph describing the refactor-based implementation approach.
+
 ### D21 — Parallel agents interact through the existing chat panel via tabs
 
 The `specs4/7-future/parallel-agents.md` spec originally described an "agent region" — a horizontally-scrolling strip of columns alongside the main chat, one column per spawned agent of the active turn. During design review of how a user would interact with a paused agent (answer a question, grant access to a file, kill a stuck agent), an elaborate protocol was considered: a dedicated `🟦🟦🟦 ASK` / `🟪🟪🟪 KSA` block format, a four-state agent lifecycle with `awaiting_user`, dedicated RPCs for replies and file grants, dedicated UI cards for question rendering.

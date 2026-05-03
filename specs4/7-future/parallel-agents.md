@@ -16,10 +16,13 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | Request IDs are the multiplexing primitive | [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics) | All server-push events route by exact request ID |
 | Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
+| Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive |
 | Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
 | Edit parser tolerates unknown markers as prose | [edit-protocol.md](../3-llm/edit-protocol.md#agent-spawn-blocks-reserved-marker) | `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` lines are ignored by the current parser; future agent-spawn handling adds branches without breaking existing edit parsing |
 
 None of these invariants cost anything in single-agent operation. Preserving them in the initial build means agent mode can be added later without refactoring the foundation layers.
+
+The agent implementation itself reduces to: refactor `_stream_chat` so its ContextManager is a parameter rather than hardcoded to `self._context`, then invoke it N times in parallel with N agent ContextManagers. Each agent runs through the existing streaming pipeline — same edit parsing, same apply path, same persistence, same post-response work. No separate runner, no separate orchestrator, no separate applier.
 
 AC⚡DC could execute multiple LLM agents in parallel to accelerate large tasks. The main LLM — the same instance that handles ordinary user turns — decomposes a user request into independent sub-tasks, spawns N agents to execute them in parallel, observes their results, decides whether to iterate (spawn different agents with revised scope) or synthesize, and produces the final assistant response. There is no separate "planner" or "assessor" role; decomposition, review, iteration decisions, and synthesis are all things the main LLM does within a single turn, using its normal conversation store.
 
