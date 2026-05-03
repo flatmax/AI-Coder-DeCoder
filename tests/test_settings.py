@@ -438,3 +438,137 @@ class TestIsReloadable:
 
     def test_unknown_type_not_reloadable(self):
         assert Settings.is_reloadable("bogus") is False
+
+
+# ---------------------------------------------------------------------------
+# Commit 3 — LLMService wiring for system prompt refresh
+# ---------------------------------------------------------------------------
+
+
+class _StubLLMService:
+    """Minimal stub capturing refresh_system_prompt calls.
+
+    We don't want to construct a real LLMService in these
+    tests — that pulls in the full Layer 3 stack (context
+    manager, stability tracker, compactor, URL service, etc.)
+    just to verify a single method gets called. A stub with
+    the same ducktype surface is enough.
+    """
+
+    def __init__(self, should_raise: bool = False) -> None:
+        self.refresh_calls = 0
+        self._should_raise = should_raise
+
+    def refresh_system_prompt(self) -> dict[str, Any]:
+        self.refresh_calls += 1
+        if self._should_raise:
+            raise RuntimeError("simulated refresh failure")
+        return {"status": "ok", "mode": "code"}
+
+
+class TestSettingsWithLlmService:
+    """Wiring: Settings calls LLMService.refresh_system_prompt.
+
+    Specs: after Commit 3 of the agent-mode toggle work, the
+    Settings service's app-config reload path asks the LLM
+    service to refresh its system prompt. Without this, the
+    ``agents.enabled`` toggle only takes effect on the next
+    mode switch or session restart.
+    """
+
+    def test_no_llm_service_skips_refresh(
+        self, config
+    ):
+        """Omitting llm_service keeps pre-commit-3 behaviour.
+
+        Existing tests construct Settings(config) without the
+        new kwarg; they must keep passing. Reload still works,
+        no refresh fires, no crash.
+        """
+        svc = Settings(config)
+        assert svc._llm_service is None
+        result = svc.reload_app_config()
+        assert result == {"status": "ok"}
+
+    def test_llm_service_refresh_called_on_reload(
+        self, config
+    ):
+        """Wired LLMService gets refresh_system_prompt on reload."""
+        stub = _StubLLMService()
+        svc = Settings(config, llm_service=stub)
+        result = svc.reload_app_config()
+        assert result == {"status": "ok"}
+        assert stub.refresh_calls == 1
+
+    def test_refresh_not_called_when_config_reload_fails(
+        self, config, monkeypatch
+    ):
+        """If reload_app_config raises, refresh is NOT attempted.
+
+        Rationale: the config state is inconsistent, so
+        refreshing the prompt against it would install
+        whatever partial state the failure left. Better to
+        leave the prompt alone and let the user retry the
+        save.
+        """
+        stub = _StubLLMService()
+        svc = Settings(config, llm_service=stub)
+
+        def _boom():
+            raise RuntimeError("simulated reload failure")
+        monkeypatch.setattr(config, "reload_app_config", _boom)
+
+        result = svc.reload_app_config()
+        assert "error" in result
+        assert stub.refresh_calls == 0
+
+    def test_refresh_failure_does_not_invalidate_reload(
+        self, config
+    ):
+        """A raising refresh is swallowed — reload still reports ok.
+
+        The config reload already succeeded; the prompt-refresh
+        failure is a secondary concern. Next mode switch or
+        session restart will pick up the new state anyway.
+        Surfacing the error back to the caller would leave
+        the user thinking the save failed when it didn't.
+        """
+        stub = _StubLLMService(should_raise=True)
+        svc = Settings(config, llm_service=stub)
+        result = svc.reload_app_config()
+        # Reload itself reports success.
+        assert result == {"status": "ok"}
+        # Refresh was attempted.
+        assert stub.refresh_calls == 1
+
+    def test_refresh_not_called_on_reload_llm_config(
+        self, config
+    ):
+        """LLM config reload does NOT trigger prompt refresh.
+
+        Prompt composition depends on app-config (agents.enabled)
+        and on prompt files (system.md, system_extra.md,
+        system_agentic_appendix.md). Changing the model name or
+        env vars in llm.json doesn't affect prompt composition,
+        so reloading it shouldn't fire refresh_system_prompt.
+        Pin this so a future refactor that accidentally routes
+        all reloads through the same helper doesn't silently
+        start firing redundant refreshes.
+        """
+        stub = _StubLLMService()
+        svc = Settings(config, llm_service=stub)
+        result = svc.reload_llm_config()
+        assert result == {"status": "ok"}
+        assert stub.refresh_calls == 0
+
+    def test_non_localhost_rejects_before_refresh(
+        self, config
+    ):
+        """Restricted caller never reaches the refresh call."""
+        stub = _StubLLMService()
+        svc = Settings(config, llm_service=stub)
+        svc._collab = _StubCollab(is_localhost=False)
+        result = svc.reload_app_config()
+        _assert_restricted(result)
+        # No config reload, no prompt refresh.
+        assert stub.refresh_calls == 0

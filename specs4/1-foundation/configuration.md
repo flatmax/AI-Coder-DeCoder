@@ -72,8 +72,25 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - App config loaded once and cached; hot-reload available
 - Downstream consumers read config values through accessor methods, not snapshot dicts — allows hot-reloaded values to take effect immediately
 - LLM config read on init and on explicit reload; env vars applied on load
-- System prompts read fresh from files; concatenated at assembly time — edits take effect on next LLM request
+- System prompts read fresh from files; concatenated at assembly time — edits to prompt files (e.g. `system.md`, `system_extra.md`) take effect on next LLM request without any explicit reload
 - Snippets loaded on request with two-location fallback: repo-local first, then app config directory
+
+### System Prompt Refresh on App-Config Reload
+
+Some prompt composition depends on app-config values rather than prompt files. The agent-mode toggle (`agents.enabled`) is the canonical example — flipping it changes whether `get_system_prompt()` appends the agentic appendix.
+
+The context manager caches the assembled prompt: at session start, at mode switches, and at review entry / exit. Without explicit refresh, an app-config change that affects prompt composition only takes effect on the next mode switch or session restart — a confusing UX where the Settings tab says the toggle is on but the LLM doesn't see the agentic appendix for several turns.
+
+The Settings service handles this by calling `LLMService.refresh_system_prompt()` after a successful `reload_app_config()`. The refresh re-reads the current mode's prompt from the config manager and installs it on the context manager. The change is visible on the very next user turn.
+
+Refresh semantics:
+
+- Respects review mode — if review is active, the refresh is skipped. The review prompt was installed via `save_and_replace_system_prompt` and remains authoritative until review exit, at which point `restore_system_prompt` re-reads the current base prompt from config.
+- Respects the active mode — refreshes the doc-mode prompt in doc mode, the code-mode prompt otherwise.
+- Best-effort from the Settings side — a refresh failure logs a warning but doesn't invalidate the config reload. The next mode switch or session restart picks up the new prompt regardless.
+- Localhost-only — the same gate as all other mutation-class operations.
+
+Reloading LLM config (`reload_llm_config`) does NOT trigger a prompt refresh. LLM config affects model selection and provider credentials; it doesn't affect prompt composition.
 
 ### User-Dir-Only Read for the Agentic Appendix
 

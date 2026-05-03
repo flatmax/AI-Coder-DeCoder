@@ -3312,6 +3312,73 @@ class LLMService:
             "cross_ref_enabled": self._cross_ref_enabled,
         }
 
+    def refresh_system_prompt(self) -> dict[str, Any]:
+        """Re-read the current mode's system prompt from config.
+
+        Called by the Settings service after a successful
+        ``reload_app_config`` so that app-config changes which
+        affect prompt composition take effect on the next LLM
+        request — not on the next mode switch.
+
+        Specifically covers the ``agents.enabled`` toggle in
+        ``app.json``: flipping it changes whether
+        :meth:`ConfigManager.get_system_prompt` appends the
+        agentic appendix, but the change is only visible to
+        the LLM after the context manager reloads the prompt.
+        Without this method, the prompt stays cached at
+        whatever value was installed at last mode switch (or
+        session start) and the toggle only takes effect on
+        the NEXT mode switch — a confusing UX where the UI
+        says "agents on" but the LLM doesn't see the
+        appendix for several turns.
+
+        Non-localhost callers are rejected with the standard
+        restricted-error shape. The Settings service applies
+        its own localhost gate on its reload methods, but a
+        future caller that skips Settings and goes straight
+        to this method must still be gated.
+
+        Idempotent — calling multiple times in succession
+        produces the same final state as one call. The
+        read-from-config path is cheap (config is cached; the
+        prompt-assembly step is string concatenation).
+
+        Respects the active mode: in review mode the review
+        prompt was installed via
+        :meth:`ContextManager.save_and_replace_system_prompt`
+        and should not be disturbed. We skip the refresh when
+        ``_review_active`` is True; the review exit path will
+        restore the original prompt via
+        :meth:`restore_system_prompt` at which point the
+        next turn picks up the current config. Mode switch
+        and session restore both read from config too, so
+        refresh is always eventually consistent.
+
+        Returns a small status dict. Broadcasts nothing —
+        Settings already broadcasts a settings-changed event
+        (via the modeChanged channel) for the toggle's UI
+        state; the prompt refresh is invisible backend
+        plumbing that surfaces on the next turn.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if self._review_active:
+            # Review prompt is authoritative; don't clobber.
+            # Exit path will restore the current base prompt
+            # via restore_system_prompt → ContextManager reads
+            # it from config at that point.
+            return {
+                "status": "skipped",
+                "reason": "review mode active",
+            }
+        if self._context.mode == Mode.DOC:
+            prompt = self._config.get_doc_system_prompt()
+        else:
+            prompt = self._config.get_system_prompt()
+        self._context.set_system_prompt(prompt)
+        return {"status": "ok", "mode": self._context.mode.value}
+
     def switch_mode(self, mode: str) -> dict[str, Any]:
         """Switch between code and document mode.
 

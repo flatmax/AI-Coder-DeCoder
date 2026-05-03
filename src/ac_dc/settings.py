@@ -120,7 +120,11 @@ class Settings:
     collab reference (for localhost checks).
     """
 
-    def __init__(self, config: "ConfigManager") -> None:
+    def __init__(
+        self,
+        config: "ConfigManager",
+        llm_service: "Any | None" = None,
+    ) -> None:
         """Construct against an existing ConfigManager.
 
         Parameters
@@ -129,8 +133,22 @@ class Settings:
             The central config manager. Settings never replaces
             the instance; saves write to disk and then (optionally)
             ask the config manager to reload.
+        llm_service:
+            Optional :class:`LLMService` reference. When provided,
+            :meth:`reload_app_config` calls
+            :meth:`LLMService.refresh_system_prompt` after the
+            config reload succeeds, so app-config changes that
+            affect prompt composition (notably the
+            ``agents.enabled`` toggle) take effect on the next
+            LLM request rather than waiting for the next mode
+            switch or session restart. When None, config reload
+            still works — the prompt refresh just doesn't fire,
+            matching the pre-commit-3 behaviour. Tests that
+            construct Settings without an LLM service continue
+            to pass unchanged.
         """
         self._config = config
+        self._llm_service = llm_service
         # Collaboration reference — set by main.py when collab mode
         # is active, None otherwise. When None, every caller is
         # treated as localhost. Matches the pattern on Repo and
@@ -345,12 +363,29 @@ class Settings:
         return {"status": "ok"}
 
     def reload_app_config(self) -> dict[str, Any]:
-        """Re-read ``app.json``.
+        """Re-read ``app.json`` and refresh the system prompt.
 
         Called by the Settings UI after a successful save of
         ``app.json``. Downstream consumers (compactor, doc index,
         URL cache config) read values through accessor methods, so
         hot-reloaded values take effect on the next access.
+
+        Also asks the LLM service (if wired) to refresh its
+        context manager's system prompt. This covers the
+        ``agents.enabled`` toggle — flipping it changes
+        whether the agentic appendix is appended during
+        prompt assembly, but the context manager caches the
+        assembled prompt. Without the refresh, the toggle
+        would only take effect on the next mode switch or
+        session restart — a confusing UX where the Settings
+        tab says "agents on" but the LLM doesn't see the
+        appendix for several turns.
+
+        The refresh is best-effort: a failing refresh logs a
+        warning but doesn't propagate an error back to the
+        caller. The config reload itself already succeeded;
+        the next mode switch or session restart will pick up
+        the new prompt state.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -362,6 +397,17 @@ class Settings:
                 "App config reload failed: %s", exc
             )
             return {"error": f"Reload failed: {exc}"}
+        # Refresh the system prompt so app-config changes
+        # that affect prompt composition take effect
+        # immediately. Best-effort — a failure here doesn't
+        # invalidate the config reload.
+        if self._llm_service is not None:
+            try:
+                self._llm_service.refresh_system_prompt()
+            except Exception as exc:
+                logger.warning(
+                    "System prompt refresh failed: %s", exc
+                )
         return {"status": "ok"}
 
     # ------------------------------------------------------------------

@@ -490,6 +490,14 @@ async def run(
         deferred_init=True,
     )
 
+    # Wire the LLMService reference into Settings so
+    # reload_app_config can refresh the system prompt when
+    # app-config changes affect prompt composition (notably
+    # the agents.enabled toggle). Done post-construction
+    # because Settings is built before LLMService; matches
+    # the pattern used for _collab on every service.
+    settings._llm_service = llm_service
+
     # Step 6: Restore last session BEFORE starting the server
     # (already done in LLMService.__init__ via _restore_last_session)
 
