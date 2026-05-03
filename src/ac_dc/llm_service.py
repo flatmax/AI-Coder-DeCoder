@@ -4077,6 +4077,36 @@ class LLMService:
     # Public RPC — streaming
     # ------------------------------------------------------------------
 
+    def _is_child_request(self, request_id: str) -> bool:
+        """Return True when ``request_id`` is a child of the active parent.
+
+        Per specs4/7-future/parallel-agents.md § Transport, agent
+        streams spawned under a user-initiated turn carry request
+        IDs of the form ``{parent_id}-agent-N`` — the parent's ID
+        as a prefix followed by a dash and a child suffix. This
+        helper is the single place the child-vs-user
+        classification happens; the single-stream guard uses it
+        to let child streams through.
+
+        Returns False when no user-initiated stream is active
+        (nothing to be a child of). Returns False when the
+        request ID is the parent ID itself — a reconnect or
+        duplicate that matches the parent exactly is treated as
+        a conflicting user-initiated request, not a child.
+
+        Today no code path produces child request IDs, so this
+        method always returns False in practice. Landing it now
+        keeps the guard's shape correct for when agent spawning
+        arrives; the guard is a single-line diff instead of a
+        gate rewrite.
+        """
+        parent = self._active_user_request
+        if parent is None:
+            return False
+        if request_id == parent:
+            return False
+        return request_id.startswith(parent + "-")
+
     async def chat_streaming(
         self,
         request_id: str,
@@ -4117,7 +4147,20 @@ class LLMService:
                     "a moment"
                 )
             }
-        if self._active_user_request is not None:
+        # User-initiated single-stream guard. Per
+        # specs4/7-future/parallel-agents.md § Foundation
+        # Requirements ("Single-stream guard gates user-
+        # initiated requests only"), the guard blocks a second
+        # USER-initiated stream but must allow internal streams
+        # that share an active parent's request ID prefix.
+        # Today no code path produces child request IDs, so the
+        # ``_is_child_request`` branch never fires; when agent
+        # spawning lands, each agent's request ID will be
+        # ``{parent_id}-agent-N`` and pass this gate naturally.
+        if (
+            self._active_user_request is not None
+            and not self._is_child_request(request_id)
+        ):
             return {
                 "error": (
                     f"Another stream is active (request "
@@ -4126,8 +4169,15 @@ class LLMService:
             }
 
         # Register the active request. Cleared in the background
-        # task's finally block.
-        self._active_user_request = request_id
+        # task's finally block. Only user-initiated requests
+        # register here — child requests share their parent's
+        # slot and don't overwrite it. A future agent-spawning
+        # path will track child streams in a separate
+        # per-request accumulator; this slot stays the
+        # authoritative "is a user-initiated stream active?"
+        # signal for the guard itself.
+        if not self._is_child_request(request_id):
+            self._active_user_request = request_id
 
         # Launch the background task. ensure_future rather than
         # await so we return {"status": "started"} immediately.
