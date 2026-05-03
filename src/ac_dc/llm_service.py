@@ -7457,12 +7457,15 @@ class LLMService:
             scope = self._default_scope()
 
         # Stability update — builds the full active items list
-        # and runs the tracker update cycle. Reads the main
-        # conversation's state from self.* directly; Step 4
-        # threads the scope through. For the default scope,
-        # self._stability_tracker is scope.tracker and the
-        # behaviour is identical.
-        self._update_stability()
+        # and runs the tracker update cycle. Scope threads
+        # through so agents' own trackers and selected-file
+        # lists drive the tier assignments for their
+        # conversation. For the default scope, scope.tracker /
+        # scope.context / scope.selected_files resolve to the
+        # same objects as self._stability_tracker /
+        # self._context / self._selected_files, so single-agent
+        # behaviour is byte-identical.
+        self._update_stability(scope)
 
         # Print terminal HUD — three sections per specs3.
         # Shared infrastructure plus main-conversation state;
@@ -7567,7 +7570,10 @@ class LLMService:
                     },
                 )
 
-    def _update_stability(self) -> None:
+    def _update_stability(
+        self,
+        scope: ConversationScope | None = None,
+    ) -> None:
         """Build active items and run the tracker update.
 
         Full implementation per specs4/3-llm/streaming.md —
@@ -7577,6 +7583,25 @@ class LLMService:
         history messages), removes user-excluded items, and runs
         the tracker update with the current repo file set for
         stale-removal.
+
+        ``scope`` bundles the per-conversation state this
+        method reads — the ContextManager (for history + mode),
+        the stability tracker (for tier assignments), the
+        selected-files list (for content hashes and exclusion
+        of index entries). The default-None fallback builds a
+        scope from ``self`` so direct callers (the eager
+        startup init path, future entry points) can skip the
+        scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_excluded_index_files`` is session-level UI state
+        shared across conversations; ``_symbol_index``,
+        ``_doc_index``, ``_repo``, ``_config``, ``_counter``,
+        ``_cross_ref_enabled`` are shared indexes / config /
+        toggle. For the default-scope case every ``scope.X``
+        resolves to the same object as the corresponding
+        ``self._X``, so single-agent behaviour is byte-
+        identical.
 
         Order of operations (from specs-reference/3-llm/
         streaming.md § Order of Operations (Per Request)):
@@ -7603,17 +7628,30 @@ class LLMService:
         5. History messages.
         6. Run tracker.update().
         """
+        # Defensive default for callers that predate the scope
+        # parameter (eager-init path in _try_initialize_stability,
+        # future direct entry points). Every shipping call site
+        # from within _stream_chat's post-response flow supplies
+        # a scope explicitly.
+        if scope is None:
+            scope = self._default_scope()
         # Step 0a — defensive excluded-files removal. Runs
         # BEFORE active_items construction so an excluded file
         # can't be re-registered as a fresh active entry below.
+        #
+        # _excluded_index_files is session-level UI state
+        # shared across conversations (one file picker on the
+        # frontend, one excluded list). Stays on self. The
+        # tracker that gets the cleanup belongs to this
+        # scope's conversation.
         excluded = getattr(self, "_excluded_index_files", None) or ()
         for path in excluded:
             for prefix in ("symbol:", "doc:", "file:"):
                 entry_key = prefix + path
-                existing = self._stability_tracker._items.get(entry_key)
+                existing = scope.tracker._items.get(entry_key)
                 if existing is not None:
-                    self._stability_tracker._broken_tiers.add(existing.tier)
-                    self._stability_tracker._items.pop(entry_key, None)
+                    scope.tracker._broken_tiers.add(existing.tier)
+                    scope.tracker._items.pop(entry_key, None)
 
         active_items: dict[str, dict[str, Any]] = {}
 
@@ -7622,7 +7660,11 @@ class LLMService:
         # includes path aliases that change when file selections
         # change, which would prevent the prompt from stabilizing).
         # Token count includes both prompt + legend.
-        if self._context.mode == Mode.DOC:
+        #
+        # Mode read from scope.context so an agent scope with
+        # its own ContextManager picks the right prompt. The
+        # config read stays on self (shared).
+        if scope.context.mode == Mode.DOC:
             system_prompt = self._config.get_doc_system_prompt()
         else:
             system_prompt = self._config.get_system_prompt()
@@ -7643,8 +7685,13 @@ class LLMService:
             }
 
         # Step 1 — Selected files: full content hash.
-        for path in self._selected_files:
-            content = self._file_context.get_content(path)
+        # Scope carries both the selection list and (via the
+        # ContextManager) the file context holding the loaded
+        # content. For the default scope, scope.selected_files
+        # is self._selected_files and scope.context.file_context
+        # is self._file_context — same objects, same behaviour.
+        for path in scope.selected_files:
+            content = scope.context.file_context.get_content(path)
             if content:
                 h = hashlib.sha256(
                     content.encode("utf-8")
@@ -7659,12 +7706,12 @@ class LLMService:
         # context — their index blocks are redundant. Both symbol:
         # and doc: entries are removed (handles cross-reference
         # mode correctly). Affected tiers are marked as broken.
-        for path in self._selected_files:
+        for path in scope.selected_files:
             for prefix in ("symbol:", "doc:"):
                 entry_key = prefix + path
-                if self._stability_tracker.has_item(entry_key):
+                if scope.tracker.has_item(entry_key):
                     # Get the item's tier before removing it.
-                    all_items = self._stability_tracker.get_all_items()
+                    all_items = scope.tracker.get_all_items()
                     item = all_items.get(entry_key)
                     if item is not None:
                         tier = item.tier
@@ -7673,8 +7720,8 @@ class LLMService:
                         # doesn't expose a remove method, so we
                         # use the same approach as the test suite:
                         # delete from _items and mark tier broken.
-                        self._stability_tracker._items.pop(entry_key, None)
-                        self._stability_tracker._broken_tiers.add(tier)
+                        scope.tracker._items.pop(entry_key, None)
+                        scope.tracker._broken_tiers.add(tier)
 
         # Step 3 — Primary index entries for ALL indexed files
         # NOT in selected files AND NOT in excluded files. These
@@ -7692,9 +7739,13 @@ class LLMService:
         # the formatted block — formatted output changes when
         # path aliases or exclude_files change, causing spurious
         # hash mismatches.
-        selected_set = set(self._selected_files)
+        #
+        # Selected-set and excluded-set membership checks use
+        # scope.selected_files (per-conversation) and self
+        # _excluded_index_files (session-level shared UI state).
+        selected_set = set(scope.selected_files)
         excluded_set = set(excluded)
-        if self._context.mode == Mode.DOC:
+        if scope.context.mode == Mode.DOC:
             # Doc mode primary: iterate doc index outlines.
             for path in list(self._doc_index._all_outlines.keys()):
                 if path in selected_set or path in excluded_set:
@@ -7741,8 +7792,13 @@ class LLMService:
         # Selected files excluded from both to honour the
         # "never appears twice" invariant — their full content
         # is already in the active "Working Files" section.
+        #
+        # _cross_ref_enabled stays on self — it's a shared UI
+        # toggle, not per-conversation state. Mode comes from
+        # scope to drive the primary/secondary dispatch for this
+        # conversation.
         if self._cross_ref_enabled:
-            if self._context.mode == Mode.CODE:
+            if scope.context.mode == Mode.CODE:
                 # Add doc: entries as secondary.
                 for path in list(
                     self._doc_index._all_outlines.keys()
@@ -7784,7 +7840,7 @@ class LLMService:
 
         # Step 5 — History messages (all — the tracker handles
         # graduated history internally via its own tier checks).
-        history = self._context.get_history()
+        history = scope.context.get_history()
         for i, msg in enumerate(history):
             role = msg.get("role", "user")
             content = msg.get("content", "") or ""
@@ -7802,6 +7858,12 @@ class LLMService:
         # Phase 0 stale removal works. (Defensive excluded-
         # files removal now happens in step 0a above; nothing
         # further needed here.)
+        #
+        # Repo is shared infrastructure — the file-list fetch
+        # is identical regardless of whose conversation scope
+        # we're running. The tracker update itself goes
+        # through scope.tracker so agents update their own
+        # tier state.
         existing_files: set[str] | None = None
         if self._repo is not None:
             try:
@@ -7809,7 +7871,7 @@ class LLMService:
                 existing_files = set(flat.split("\n")) if flat else set()
             except Exception:
                 pass
-        self._stability_tracker.update(
+        scope.tracker.update(
             active_items, existing_files=existing_files
         )
 
