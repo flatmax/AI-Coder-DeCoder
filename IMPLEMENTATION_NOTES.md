@@ -91,6 +91,18 @@ Both directory names are in `.gitignore` so a developer running both implementat
 
 Specs4 documents the per-repo directory abstractly ("the per-repo working directory") without pinning the name, which is the right altitude for a behavioral spec. Specs3 correctly documents `.ac-dc/` because it describes the previous implementation. Neither suite needs updating for this rename.
 
+### D20 — Agent-spawn block shape: minimal `{id, task}` + distinct `🟩🟩🟩 AGEND` end marker
+
+Parallel agents (`specs4/7-future/parallel-agents.md`) are speculative future work — no implementation planned in the current scope — but the decomposition format had to be pinned concretely so edit-protocol parsers could reserve the marker bytes and so MCP integration (`specs4/7-future/mcp-integration.md`) had a shape to extend. Two decisions settled during design consolidation:
+
+**Option A — minimal fields.** Agent-spawn blocks carry two required fields, `id` and `task`. No `read:`, `edit:`, or file-set pre-declaration. Agents navigate the repo with the same affordances the main LLM has (symbol map, reference graph, doc index, edit protocol), discovering files via the existing `files_auto_added` / `files_created` mechanisms. Alternatives considered: explicit file lists (rejected — error-prone, brittle, wastes planner reasoning budget), scope hints as non-binding suggestions (rejected — adds a field that duplicates what `task` already implies), independence declaration for sequencing (rejected — sequencing within a turn can be expressed as a second decomposition round). Unknown fields land in an `extras` dict for forward-compatibility; MCP uses this slot for its optional `tools:` field.
+
+**Distinct end marker `🟩🟩🟩 AGEND`.** Agent blocks close with `🟩🟩🟩 AGEND` rather than sharing edit blocks' `🟩🟩🟩 END`. Shared end markers would force the parser to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input, and would force frontend display parsers and backend apply parsers to stay in lockstep on state tracking. Distinct end markers let each parser dispatch on the literal line. The practical trigger was the edit protocol itself: a response (or a spec document) quoting both block types in the same region would have one marker accidentally terminate the other's. The `AGEND` keyword preserves the orange→green color progression and matches the four-character keyword convention (`EDIT`, `REPL`, `END`), while unambiguously differentiating the two block families.
+
+Canonical contracts live in three places: `specs4/7-future/parallel-agents.md` (the behavioural spec, including the Foundation Requirements invariant that the current edit parser must tolerate `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` as prose), `specs4/3-llm/edit-protocol.md` (the edit-protocol spec marks agent blocks as reserved and cross-references the future spec), and `specs-reference/3-llm/edit-protocol.md` (the reference twin documents the exact marker bytes). `specs4/7-future/mcp-integration.md` uses the `extras` slot for `tools:` without introducing new marker syntax.
+
+No code changes from this decision — the current `EditParser`'s state machine already treats unknown lines in `SCANNING` as prose, which is the behaviour the invariant requires. A future agent-spawning implementation will add parser branches that dispatch on the `AGENT` / `AGEND` keywords after the three orange / green emoji.
+
 
 unnecessary — let me also add the work plan
 

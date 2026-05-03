@@ -24,6 +24,19 @@ The orange → yellow → green color progression is deliberate — malformed bl
 
 No ASCII substitution is permitted. Parsers match on exact byte sequences including the emoji codepoints. Text processors that strip emoji will silently break the protocol.
 
+### Agent-spawn marker sequences (reserved)
+
+A second block type — agent-spawn blocks — is defined in `specs4/7-future/parallel-agents.md` § Agent-spawn block format. The current single-agent implementation does NOT parse these blocks; the marker bytes are documented here for forward-compatibility so a future parallel-agent implementation inherits the same byte-level discipline.
+
+| Marker | Literal bytes | Unicode codepoints |
+|---|---|---|
+| Start | `🟧🟧🟧 AGENT` | U+1F7E7 U+1F7E7 U+1F7E7 U+0020 U+0041 U+0047 U+0045 U+004E U+0054 |
+| End | `🟩🟩🟩 AGEND` | U+1F7E9 U+1F7E9 U+1F7E9 U+0020 U+0041 U+0047 U+0045 U+004E U+0044 |
+
+Agent blocks have no middle separator — the body is a YAML-ish `key: value` payload directly between the start and end markers. The distinct end marker (`AGEND` rather than `END`) deliberately differs from edit blocks so a parser scanning line-by-line can dispatch on the literal line without tracking which start marker opened the current block. See the behavioural spec for field semantics.
+
+The current `EditParser` treats both `🟧🟧🟧 AGENT` and `🟩🟩🟩 AGEND` as prose (unrecognised lines in the `SCANNING` state do not transition). This is the parser-tolerance invariant documented in `specs4/7-future/parallel-agents.md` § Foundation Requirements.
+
 ### Block structure
 
 Complete block byte layout:
