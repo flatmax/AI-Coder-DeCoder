@@ -2488,12 +2488,43 @@ class LLMService:
             "deletions": deletions,
         }
 
-    def _build_and_set_review_context(self) -> None:
+    def _build_and_set_review_context(
+        self,
+        scope: ConversationScope | None = None,
+    ) -> None:
         """Build the review context block and attach to context manager.
 
         Called from ``_stream_chat`` on every request during
         review mode. Rebuilds from scratch so the reverse-diff
         set reflects the CURRENT file selection.
+
+        ``scope`` bundles the per-conversation state this method
+        reads — the ContextManager (for the review-context
+        attachment write) and the selected-files list (for
+        choosing which files contribute reverse diffs). The
+        default-None fallback builds a scope from ``self`` so
+        direct callers (future entry points) can skip the scope
+        argument.
+
+        Review mode is main-conversation-only per
+        specs4/4-features/code-review.md § "Limitations — No
+        Concurrent Editing". Agents never enter review, so
+        ``self._review_active`` is always True when this method
+        is called and always refers to the main conversation.
+        Threading scope through is primarily for consistency
+        with the surrounding refactor — the ``scope.selected_files``
+        read drives which files contribute reverse diffs, and
+        the ``scope.context.set_review_context`` write attaches
+        to the conversation's own ContextManager.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_review_state`` is session-scoped review metadata
+        (branch, commits, changed files, pre-change symbol map)
+        populated by ``start_review`` and cleared by
+        ``end_review``; ``_repo`` is the shared git handle that
+        produces the reverse diffs. For the default-scope case
+        every ``scope.X`` resolves to the same object as
+        ``self._X``, so single-agent behaviour is byte-identical.
 
         Block structure:
 
@@ -2513,6 +2544,8 @@ class LLMService:
         full content in the active "Working Files" section via
         the normal tier assembly, not here.
         """
+        if scope is None:
+            scope = self._default_scope()
         state = self._review_state
         if not state.get("active") or self._repo is None:
             return
@@ -2588,7 +2621,7 @@ class LLMService:
             if f.get("path")
         }
         diff_blocks: list[str] = []
-        for path in self._selected_files:
+        for path in scope.selected_files:
             if path not in changed_paths:
                 continue
             try:
@@ -2620,12 +2653,14 @@ class LLMService:
                 + "\n\n".join(diff_blocks)
             )
 
-        # Install on the context manager. The tiered assembler
-        # renders this as a uncached user/assistant pair between
-        # URL context and active files (see
-        # specs4/3-llm/prompt-assembly.md).
+        # Install on the scope's ContextManager. The tiered
+        # assembler renders this as an uncached user/assistant
+        # pair between URL context and active files (see
+        # specs4/3-llm/prompt-assembly.md). For the default
+        # scope, scope.context is self._context — unchanged
+        # behaviour for the main conversation.
         review_text = "\n\n".join(parts)
-        self._context.set_review_context(review_text)
+        scope.context.set_review_context(review_text)
 
     # ------------------------------------------------------------------
     # Public RPC — snippets
@@ -4564,21 +4599,22 @@ class LLMService:
         main-conversation-only per spec; agents never enter
         review.
 
-        Callees refactored to take scope explicitly:
+        All per-conversation callees now take scope explicitly:
         ``_post_response`` (Step 3), ``_update_stability``
         (Step 4), ``_sync_file_context`` (Step 5),
         ``_build_tiered_content`` / ``_assemble_tiered`` /
         ``_assemble_messages_flat`` (Step 6),
         ``_detect_and_fetch_urls`` (Step 7),
-        ``_build_completion_result`` (Step 8). Remaining callee
-        ``_build_and_set_review_context`` still reads
-        per-conversation state from ``self.*`` directly;
-        review is main-conversation-only per spec, so Step 9
-        threads scope through primarily for the
-        ``_selected_files`` read that drives reverse-diff
-        inclusion. For the default-scope case the objects
-        match exactly, so the behaviour is byte-identical to
-        the pre-refactor implementation.
+        ``_build_completion_result`` (Step 8),
+        ``_build_and_set_review_context`` (Step 9). For the
+        default-scope case every ``scope.X`` resolves to the
+        same object as the corresponding ``self._X``, so the
+        behaviour is byte-identical to the pre-refactor
+        implementation. Future agent spawning constructs
+        per-agent scopes via
+        :func:`ac_dc.agent_factory.build_agent_context_manager`
+        and invokes this method once per agent in parallel; no
+        further refactor of ``_stream_chat`` is required.
         """
         # Defensive default for callers that predate the scope
         # parameter. Every shipping call site supplies a scope
@@ -4742,12 +4778,12 @@ class LLMService:
             # Review mode is main-conversation-only per spec;
             # self._review_active is the authoritative flag and
             # stays on self. The review-context attachment
-            # still happens via the main ContextManager, which
-            # for the default scope is scope.context — the
-            # current helper reads self._context directly; Step
-            # 9 threads the scope through.
+            # targets scope.context so an agent scope would
+            # receive the block on its own ContextManager; in
+            # practice agents never review, so this reduces to
+            # the main conversation for every real call today.
             if self._review_active:
-                self._build_and_set_review_context()
+                self._build_and_set_review_context(scope)
             else:
                 # Defensive: ensure review context is cleared
                 # when review mode isn't active. Normally
