@@ -44,6 +44,22 @@ Agent conversations are persisted to the per-turn archive (see [history.md — A
 
 The archive is the **audit trail** for agent execution, not the runtime state. When a turn completes, the only data that matters for subsequent turns is what landed in the main store (the final assistant response and any applied edits). The archive exists purely so users can inspect what each spawned agent did after the fact. The main LLM's own conversation for the turn is in the main store by design — it's an ordinary assistant message, visible in chat scrollback, preserved across session restore.
 
+## User-Visible Agent Browsing and Interaction
+
+Agents surface as additional tabs in the existing chat panel — one "Main" tab plus one tab per spawned agent in the active turn (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The tab strip IS the agent browser. Each agent tab is a full chat panel targeting that agent's `ContextManager`; interaction is identical to the main chat (type in the input box, hit send).
+
+This means agents that need clarification, a file, or a decision just say so as normal assistant messages — no dedicated question protocol, no pause-resume state machine. The user answers by replying in that agent's tab, or by ticking a file in the (per-tab-scoped) picker, or by leaving the agent alone until they come back to it. Agents persist for the lifetime of the turn — their ContextManager and StabilityTracker stay warm in memory, so provider cache benefits accrue across interactions.
+
+Agents from a previous agentic turn are reachable via the history browser: scrolling the main chat back to that turn surfaces a "View agents" affordance which loads read-only tabs from the archive. Archives stay on disk across server restarts; read-only tabs are fully browsable but their input boxes are disabled because the ContextManager is long gone.
+
+The backend exposes one RPC to support this:
+
+- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
+
+No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and surfaces historical agent tabs.
+
+Archived conversations are NOT used during session restore. Session restore reads only `history.jsonl` and produces the same in-memory context as before — the user continues where they left off, seeing only their own conversation. Historical agent tabs are populated on demand via `get_turn_archive` when the user navigates to a previous turn, not eagerly at startup.
+
 ## Core Principle: Anchor-Based Non-Overlapping Edits
 
 The edit protocol uses exact text anchors (old text → new text), not line numbers. Two agents can safely edit the same file provided their anchors target non-overlapping text regions. The main LLM's job when decomposing is to assign independent work units — classes, functions, documentation sections — not disjoint file sets.
@@ -190,7 +206,7 @@ All agents share the existing single WebSocket connection. Each agent's stream c
 
 Bandwidth is not a constraint — N agents at a typical generation rate produce aggregate throughput well within WebSocket frame limits.
 
-The existing per-animation-frame coalescing in the chat panel handles DOM update batching. The main LLM's output streams to the chat panel's primary message card; each agent's output streams to its column in the agent region (see [agent-browser.md](../5-webapp/agent-browser.md)), each with independent coalescing.
+The existing per-animation-frame coalescing in the chat panel handles DOM update batching. The main LLM's output streams to the Main tab's message list; each agent's output streams to its own tab in the chat panel's tab strip (see [agent-browser.md](../5-webapp/agent-browser.md)), each tab with independent coalescing.
 
 ## No Git Branches or Worktrees
 

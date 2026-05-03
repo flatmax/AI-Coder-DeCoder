@@ -103,10 +103,49 @@ Canonical contracts live in three places: `specs4/7-future/parallel-agents.md` (
 
 No code changes from this decision — the current `EditParser`'s state machine already treats unknown lines in `SCANNING` as prose, which is the behaviour the invariant requires. A future agent-spawning implementation will add parser branches that dispatch on the `AGENT` / `AGEND` keywords after the three orange / green emoji.
 
+### D21 — Parallel agents interact through the existing chat panel via tabs
 
-unnecessary — let me also add the work plan
+The `specs4/7-future/parallel-agents.md` spec originally described an "agent region" — a horizontally-scrolling strip of columns alongside the main chat, one column per spawned agent of the active turn. During design review of how a user would interact with a paused agent (answer a question, grant access to a file, kill a stuck agent), an elaborate protocol was considered: a dedicated `🟦🟦🟦 ASK` / `🟪🟪🟪 KSA` block format, a four-state agent lifecycle with `awaiting_user`, dedicated RPCs for replies and file grants, dedicated UI cards for question rendering.
 
-Wait, I need to separate this into two edits — one for D18 and one for the work plan section. Let me redo.
+All of that was rejected in favour of a much simpler model: **each agent is a chat conversation, surfaced as another tab in the existing chat panel**.
+
+The insight is that the chat panel already IS a one-agent conversation UI with every affordance an agent interaction needs — streaming messages, file mentions, copy/paste, input history, snippets, image paste, URL chips, file picker integration. Building a separate ASK-block protocol with dedicated reply paths duplicates most of that work for questionable gain.
+
+**What collapses:**
+
+- No `ASK` / `KSA` marker protocol. Agents that need clarification just emit a normal assistant message — "I need to see `src/auth.py` to understand the token flow" — and stop streaming. This is indistinguishable at the protocol level from an agent that finished its work.
+- No pause/resume state machine. An agent's "state" is whatever its `ContextManager` holds. "Waiting for user input" is just "the conversation hasn't had a follow-up user message added yet." Same as the main chat between user turns.
+- No dedicated reply or file-grant RPCs. Replying to an agent is `chat_streaming(request_id, message)` routed at the active tab's `{turn_id, agent_idx}` identifier instead of the main conversation. Granting a file is ticking the box in the file picker while that agent's tab is active — the picker's selection state scopes to the active tab.
+- No dedicated confirmation cards for file requests. Agent asks for a file in English; user clicks it in the picker; agent's next turn has it. The picker already does this job for the main conversation.
+
+**Lifecycle simplification:**
+
+- Agents persist for the lifetime of their turn, not the lifetime of a single LLM call. An agent that stops streaming doesn't vanish — its tab stays, its ContextManager and stability tracker stay, its provider cache stays warm. The user can walk away, come back hours later, reply to the agent, and the next call benefits from the cached prefix.
+- The turn's agents all disappear when the user starts the next agentic turn in the main tab. New decomposition, new turn_id, new agent tabs. Previous turn's archive persists on disk and is readable via the history browser.
+- A user can explicitly close an individual agent tab to free its ContextManager early (equivalent to killing that agent). The archive file stays.
+- Synthesis happens when the user asks for it — a "synthesise now" button in the main tab's action bar, or an explicit message to the main LLM. Not auto-triggered by some heuristic, because the user is the authority on "have I heard enough from the agents."
+
+**Provider-level implications (the reason this works at all):**
+
+- litellm is stateless — each `completion()` call is independent. Multiple ContextManagers making concurrent calls never cross-contaminate.
+- Provider chat-completion APIs are stateless — the full message array ships with each request. Two agents holding different conversations really are different conversations to the provider.
+- Cache breakpoints are per-agent because StabilityTrackers are per-ContextManager (the D10 "trackers scope to their owning context manager, not a singleton" invariant). Agent 2's fifteenth turn reuses Agent 2's accumulated L0/L1/L2/L3 cache prefixes — the persistence of the agent across interactions is exactly what makes the cache useful.
+- Tab switching on the frontend is pure UI state. No tracker invalidation, no cache eviction, no backend notification. Switching to agent 3's tab just changes which ContextManager's history renders in the chat panel.
+
+**What the frontend still needs to build:**
+
+1. Tab strip in the chat panel. One "Main" tab plus dynamically-added agent tabs for the active turn. Scrollable / overflow-menu when tab count exceeds viewport width.
+2. Per-tab state — active request ID, message list, selection set — keyed by `{turn_id, agent_idx}` for agents or `"main"` for the main conversation. Streaming-state routing (D10's request-ID-keyed model, already in place) surfaces each agent's chunks into its own tab.
+3. Per-tab RPC routing. `chat_streaming`, `cancel_streaming`, file selection operations all operate on the active tab's scope rather than an implicit singleton.
+4. Tab lifecycle — spawn on agent-spawn blocks, remove when a new turn begins in the main tab, allow explicit per-tab close, surface the archive via history-browser scroll for closed turns.
+
+None of this requires backend protocol changes beyond what Slices 1-3 of the parallel-agents foundation have already landed. The AGENT/AGEND block format stays as specced; the agent archive format stays as specced; the tab strip is the surface through which the archived conversations become live, interactive, cache-warm conversations while the turn is active.
+
+**What this means for `specs4/7-future/parallel-agents.md` and `specs4/5-webapp/agent-browser.md`:**
+
+- The "Agent region" model in agent-browser.md is replaced with a tabbed-chat model (D21 delivery).
+- The "User-Visible Agent Browsing" section in parallel-agents.md updates to reference tabs rather than regions.
+- The ASK-block / pause-resume thinking is NOT in any spec — it got rejected before it was written down. This decision log is the record that we considered it and chose differently.
 
 ## Build order
 

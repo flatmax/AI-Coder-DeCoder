@@ -89,6 +89,26 @@ _MARKER_EDIT = "🟧🟧🟧 EDIT"
 _MARKER_REPL = "🟨🟨🟨 REPL"
 _MARKER_END = "🟩🟩🟩 END"
 
+# Agent-spawn block markers — reserved for the future
+# parallel-agents feature (specs4/7-future/parallel-agents.md).
+# Distinct end marker (``AGEND`` vs ``END``) so the parser can
+# dispatch on the literal line without tracking which start
+# marker opened the current block — see the rationale in
+# specs-reference/3-llm/edit-protocol.md § Agent-spawn marker
+# sequences. Agent blocks have no middle separator — the body
+# is a YAML-ish payload of ``key: value`` pairs directly
+# between the start and end markers.
+_MARKER_AGENT = "🟧🟧🟧 AGENT"
+_MARKER_AGEND = "🟩🟩🟩 AGEND"
+
+# Matches ``key: value`` on a line — the field-start pattern
+# inside an agent block. A line that doesn't match this
+# pattern is a continuation of the previous field's value
+# (supports multi-line ``task``). The ``\w`` class excludes
+# leading whitespace so indented continuation lines don't
+# accidentally match as new fields.
+_AGENT_FIELD_REGEX = re.compile(r"^(\w+):\s*(.*)$")
+
 
 # ---------------------------------------------------------------------------
 # File path detection — Python-side authoritative heuristic
@@ -223,6 +243,52 @@ class EditBlock:
 
 
 @dataclass
+class AgentBlock:
+    """A parsed agent-spawn block.
+
+    Reserved for the future parallel-agents feature (see
+    ``specs4/7-future/parallel-agents.md``). The current
+    single-agent implementation does NOT execute these blocks
+    — the parser surfaces them so a future agent-spawning path
+    can pick them up without a parser rewrite.
+
+    Two required fields:
+
+    - ``id`` — identifier the main LLM uses to reference this
+      agent in subsequent review / synthesis. Scoped to the
+      turn; unique within the turn's decomposition. Convention
+      is ``agent-N`` (zero-indexed) but the parser accepts any
+      non-empty string.
+    - ``task`` — the initial prompt handed to the agent. May
+      span multiple lines (continuation lines without a
+      ``key:`` prefix are appended to the current field's
+      value with a newline separator).
+
+    ``extras`` carries forward-compatible unknown fields. Per
+    ``specs4/7-future/mcp-integration.md``, a future MCP
+    integration uses this slot for the optional ``tools:``
+    field without requiring a parser change. The current
+    implementation doesn't interpret these — it just captures
+    them.
+
+    ``valid`` flags whether the block had both required fields
+    on emission. Missing required fields don't silently drop
+    the block — callers can surface the malformed output to
+    the user / LLM as feedback.
+
+    ``completed`` mirrors :class:`EditBlock.completed` —
+    ``False`` when the stream ended mid-block (no closing
+    ``🟩🟩🟩 AGEND`` seen).
+    """
+
+    id: str = ""
+    task: str = ""
+    extras: dict[str, str] = field(default_factory=dict)
+    valid: bool = True
+    completed: bool = True
+
+
+@dataclass
 class EditResult:
     """Outcome of applying one edit block.
 
@@ -245,17 +311,32 @@ class ParseResult:
     """The output of a complete parse pass.
 
     - ``blocks`` — complete edit blocks ready for apply.
-    - ``incomplete`` — blocks where the stream ended before the
-      end marker. The streaming handler renders these as "pending"
-      cards so the user can see the partial LLM output.
+    - ``incomplete`` — edit blocks where the stream ended before
+      the end marker. The streaming handler renders these as
+      "pending" cards so the user can see the partial LLM
+      output.
     - ``shell_commands`` — detected shell command suggestions
       (extracted from fenced code blocks and ``$``/``>``
       prefixes). See :func:`detect_shell_commands`.
+    - ``agent_blocks`` — parsed agent-spawn blocks. Reserved for
+      the future parallel-agents feature. Callers that don't
+      support agent spawning can ignore this field — the
+      parser never raises on agent blocks, even when they
+      carry malformed fields (those are flagged via
+      ``AgentBlock.valid``).
+    - ``incomplete_agents`` — agent blocks where the stream
+      ended before the closing ``🟩🟩🟩 AGEND`` marker. Parallel
+      to ``incomplete`` for edit blocks. Not currently surfaced
+      to the frontend (the agent-browser UI doesn't render
+      pending agents) but kept in the ParseResult so a future
+      UI surface can pick them up.
     """
 
     blocks: list[EditBlock] = field(default_factory=list)
     incomplete: list[EditBlock] = field(default_factory=list)
     shell_commands: list[str] = field(default_factory=list)
+    agent_blocks: list[AgentBlock] = field(default_factory=list)
+    incomplete_agents: list[AgentBlock] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +351,12 @@ class _State:
     EXPECT_EDIT = "expect_edit"     # Path found, waiting for 🟧🟧🟧 EDIT
     READING_OLD = "reading_old"     # Inside old-text section
     READING_NEW = "reading_new"     # Inside new-text section
+    # Inside an agent-spawn block's body, accumulating
+    # ``key: value`` lines until 🟩🟩🟩 AGEND. No expect-start
+    # state is needed — the AGENT marker triggers this
+    # transition directly from SCANNING (or EXPECT_EDIT, if
+    # the parser just saw a bogus path candidate).
+    READING_AGENT = "reading_agent"
 
 
 class EditParser:
@@ -296,12 +383,30 @@ class EditParser:
         # when the next line is 🟧🟧🟧 EDIT. Cleared on blank line
         # or any other non-path content.
         self._pending_path: str | None = None
-        # Accumulating state for the block currently being built.
+        # Accumulating state for the edit block currently being
+        # built.
         self._current_path: str | None = None
         self._old_lines: list[str] = []
         self._new_lines: list[str] = []
-        # Completed blocks and incomplete tail.
+        # Completed edit blocks.
         self._blocks: list[EditBlock] = []
+        # Agent-block state. Reserved for the future
+        # parallel-agents feature. The parser recognises and
+        # accumulates these blocks; the current streaming
+        # handler ignores ``ParseResult.agent_blocks`` entirely.
+        #
+        # ``_agent_fields`` holds the fields parsed so far —
+        # keys map to their accumulated values. Multi-line
+        # field values are joined with newlines as continuation
+        # lines arrive.
+        # ``_agent_current_field`` is the name of the field
+        # that's currently receiving continuation lines (None
+        # before the first ``key:`` line, or after a previous
+        # field was terminated by encountering another ``key:``
+        # line).
+        self._agent_fields: dict[str, str] = {}
+        self._agent_current_field: str | None = None
+        self._agent_blocks: list[AgentBlock] = []
 
     def feed(self, chunk: str) -> None:
         """Consume a streaming chunk.
@@ -328,7 +433,10 @@ class EditParser:
         Any partially-received block at the end of the stream
         becomes an ``incomplete`` entry rather than being
         silently dropped. Callers (the streaming handler) render
-        these as "pending" edit cards.
+        these as "pending" edit cards. Agent blocks get the same
+        treatment via ``incomplete_agents`` — not currently
+        surfaced to the UI but preserved for future agent-
+        spawning code.
         """
         # Flush any buffered partial line by treating it as a
         # final line. This is safe — the state machine handles
@@ -339,9 +447,11 @@ class EditParser:
             self._buffer = ""
 
         incomplete: list[EditBlock] = []
+        incomplete_agents: list[AgentBlock] = []
         if self._state in (_State.READING_OLD, _State.READING_NEW):
-            # Block was mid-stream when input ended. Surface it
-            # as incomplete so the UI can show a pending card.
+            # Edit block was mid-stream when input ended.
+            # Surface as incomplete so the UI can show a pending
+            # card.
             if self._current_path is not None:
                 old_text = "\n".join(self._old_lines)
                 new_text = "\n".join(self._new_lines)
@@ -352,10 +462,18 @@ class EditParser:
                     is_create=not old_text.strip(),
                     completed=False,
                 ))
+        elif self._state == _State.READING_AGENT:
+            # Agent block was mid-stream. Produce an incomplete
+            # agent block using whatever fields we'd parsed.
+            incomplete_agents.append(
+                self._build_agent_block(completed=False)
+            )
 
         return ParseResult(
             blocks=list(self._blocks),
             incomplete=incomplete,
+            agent_blocks=list(self._agent_blocks),
+            incomplete_agents=incomplete_agents,
         )
 
     # ------------------------------------------------------------------
@@ -372,27 +490,43 @@ class EditParser:
             self._handle_reading_old(line)
         elif self._state == _State.READING_NEW:
             self._handle_reading_new(line)
+        elif self._state == _State.READING_AGENT:
+            self._handle_reading_agent(line)
 
     def _handle_scanning(self, line: str) -> None:
-        """Scan for a file-path candidate.
+        """Scan for a file-path candidate or an agent-spawn start.
 
-        The path must be followed (possibly after blank lines) by
-        a 🟧🟧🟧 EDIT marker. We record the path candidate; the
-        EXPECT_EDIT state resolves it.
+        The file-path path: a file path must be followed
+        (possibly after blank lines) by a 🟧🟧🟧 EDIT marker. We
+        record the candidate; the EXPECT_EDIT state resolves it.
 
-        Any non-path, non-blank line clears the pending candidate
-        — it means the previous candidate was just prose.
+        The agent-spawn path: a 🟧🟧🟧 AGENT marker on its own line
+        enters READING_AGENT directly. No path precedes an agent
+        block — the body is a YAML-ish payload of key:value
+        pairs bracketed by the start and end markers.
+
+        Any non-path, non-marker, non-blank line clears the
+        pending candidate and stays in SCANNING.
         """
+        stripped = line.strip()
+        if stripped == _MARKER_AGENT:
+            self._begin_agent_block()
+            return
         if _is_file_path(line):
             self._pending_path = line.strip()
             self._state = _State.EXPECT_EDIT
             return
-        # Non-path line in SCANNING — ignore, stay in SCANNING.
+        # Non-path, non-marker line in SCANNING — ignore,
+        # stay in SCANNING.
 
     def _handle_expect_edit(self, line: str) -> None:
         """After a candidate path, look for 🟧🟧🟧 EDIT.
 
         - 🟧🟧🟧 EDIT → consume the path, enter READING_OLD.
+        - 🟧🟧🟧 AGENT → the pending path was prose; discard it
+          and start an agent block. Agents don't have a
+          preceding path, so seeing the AGENT marker here
+          unambiguously terminates the path-candidate state.
         - Blank line → stay in EXPECT_EDIT; the LLM sometimes
           emits a blank between the path and the marker.
         - Another path-like line → the previous was prose;
@@ -407,6 +541,13 @@ class EditParser:
             self._old_lines = []
             self._new_lines = []
             self._state = _State.READING_OLD
+            return
+        if stripped == _MARKER_AGENT:
+            # Pending path was prose that happened to precede
+            # an agent block. Discard it and route to the
+            # agent-body reader.
+            self._pending_path = None
+            self._begin_agent_block()
             return
         if not stripped:
             # Blank line between path and marker — tolerated.
@@ -447,6 +588,110 @@ class EditParser:
             self._state = _State.SCANNING
             return
         self._new_lines.append(line)
+
+    def _begin_agent_block(self) -> None:
+        """Enter READING_AGENT with fresh accumulator state.
+
+        Called from SCANNING or EXPECT_EDIT when a
+        🟧🟧🟧 AGENT marker is recognised. Resets the per-block
+        field dict and the current-field cursor. No path or
+        other setup — agents have no header beyond the marker.
+        """
+        self._agent_fields = {}
+        self._agent_current_field = None
+        self._state = _State.READING_AGENT
+
+    def _handle_reading_agent(self, line: str) -> None:
+        """Accumulate agent-block fields until 🟩🟩🟩 AGEND.
+
+        Two kinds of line:
+
+        1. Field-start — matches ``^\\w+:\\s*(.*)$``. Starts a
+           new field. The captured value portion becomes the
+           field's initial content (possibly empty if the value
+           is on subsequent continuation lines).
+        2. Continuation — any other non-marker line. Appended
+           to the current field's value with a leading newline
+           separator. Required for multi-line ``task`` values.
+
+        The 🟩🟩🟩 AGEND marker terminates the block; the
+        accumulated fields become an AgentBlock.
+
+        An agent block with no fields at all (end marker
+        immediately after start marker) produces a block with
+        ``valid=False`` and empty ``id``/``task`` — callers
+        can surface this as malformed output from the LLM.
+        """
+        stripped = line.strip()
+        if stripped == _MARKER_AGEND:
+            self._agent_blocks.append(
+                self._build_agent_block(completed=True)
+            )
+            self._agent_fields = {}
+            self._agent_current_field = None
+            self._state = _State.SCANNING
+            return
+
+        # Field-start detection. The regex matches leading
+        # word-character sequences followed by a colon; lines
+        # starting with whitespace or punctuation fall through
+        # to continuation handling.
+        match = _AGENT_FIELD_REGEX.match(line)
+        if match is not None:
+            field_name = match.group(1)
+            field_value = match.group(2)
+            self._agent_fields[field_name] = field_value
+            self._agent_current_field = field_name
+            return
+
+        # Continuation line. If we have a current field, append
+        # to it. Otherwise (continuation before any field
+        # started — malformed body), silently drop the line
+        # rather than raise; the block will be flagged invalid
+        # at emission time because ``id`` and ``task`` will be
+        # missing.
+        if self._agent_current_field is not None:
+            existing = self._agent_fields.get(
+                self._agent_current_field, ""
+            )
+            if existing:
+                self._agent_fields[
+                    self._agent_current_field
+                ] = existing + "\n" + line
+            else:
+                # Field started with empty value on its header
+                # line; continuation becomes the value without a
+                # leading newline separator.
+                self._agent_fields[
+                    self._agent_current_field
+                ] = line
+
+    def _build_agent_block(self, *, completed: bool) -> AgentBlock:
+        """Materialise an :class:`AgentBlock` from current fields.
+
+        Extracts ``id`` and ``task`` from the field dict,
+        dropping them from the dict so the remainder lands in
+        ``extras``. Missing required fields → ``valid=False``.
+        Blank values for required fields also count as missing.
+
+        ``completed`` mirrors the caller's state: True from the
+        normal-termination path, False from the stream-ended-
+        mid-block path in :meth:`finalize`.
+        """
+        fields = dict(self._agent_fields)
+        agent_id = fields.pop("id", "").strip()
+        task = fields.pop("task", "").strip()
+        valid = bool(agent_id and task)
+        # Strip extras values — multi-line extras get the same
+        # whitespace treatment as ``task``.
+        extras = {k: v.strip() for k, v in fields.items()}
+        return AgentBlock(
+            id=agent_id,
+            task=task,
+            extras=extras,
+            valid=valid,
+            completed=completed,
+        )
 
 
 # ---------------------------------------------------------------------------

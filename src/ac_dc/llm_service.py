@@ -2684,6 +2684,48 @@ class LLMService:
             return []
         return self._history_store.get_session_messages(session_id)
 
+    def get_turn_archive(
+        self, turn_id: str
+    ) -> list[dict[str, Any]]:
+        """Return the per-agent archive for a turn.
+
+        Reads ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl`` files
+        and returns one entry per agent, ordered by agent index.
+        Empty list when the turn didn't spawn agents or the
+        archive was deleted.
+
+        Per specs4/5-webapp/agent-browser.md, the frontend calls
+        this lazily as the user scrolls the chat — only the
+        turns in the active viewport (plus a small pre-fetch
+        window) have their archives loaded into memory at any
+        one time.
+
+        The response shape:
+
+        ```
+        [
+          {"agent_idx": 0, "messages": [{...}, {...}]},
+          {"agent_idx": 1, "messages": [{...}, {...}]},
+          ...
+        ]
+        ```
+
+        Messages within each agent are in write order, which
+        matches conversation order since timestamps are
+        monotonic within a single write stream. Re-iteration
+        within a turn (agents respawned with revised scope)
+        produces further messages appended to the same agent's
+        file — iteration boundaries are implicit in the
+        conversation flow, matching the spec.
+
+        Returns empty list when no history store is attached
+        (tests that skip the store) — the frontend treats this
+        as "no archive data" identically to a missing directory.
+        """
+        if self._history_store is None:
+            return []
+        return self._history_store.get_turn_archive(turn_id)
+
     def load_session_into_context(
         self, session_id: str
     ) -> dict[str, Any]:
@@ -4274,6 +4316,18 @@ class LLMService:
             "prompt_cached_tokens": 0,
             "cost_usd": None,
         }
+        # Generate the turn ID at the top of the pipeline and
+        # thread it through every record the request produces.
+        # Per specs4/3-llm/history.md § Turns, a turn covers the
+        # user request from the user message through the final
+        # assistant response; in single-agent mode that's one
+        # LLM call, but the turn ID groups every record
+        # (user, assistant, system events fired during the
+        # turn) so the main store has a consistent key for
+        # "records from this request". Foundation for Slice 2
+        # (agent archives keyed by turn_id).
+        from ac_dc.history_store import HistoryStore
+        turn_id = HistoryStore.new_turn_id()
         try:
             # File context sync — remove deselected files, load
             # selected ones. Defensive: skip files that don't exist
@@ -4326,9 +4380,12 @@ class LLMService:
                     content=message,
                     files=list(self._selected_files) or None,
                     images=images if images else None,
+                    turn_id=turn_id,
                 )
             self._context.add_message(
-                "user", message, files=list(self._selected_files) or None
+                "user", message,
+                files=list(self._selected_files) or None,
+                turn_id=turn_id,
             )
 
             # Broadcast user message to all clients (collaborator
@@ -4450,13 +4507,15 @@ class LLMService:
                 if cancelled and not content_to_store:
                     content_to_store = "[stopped]"
                 self._context.add_message(
-                    "assistant", content_to_store
+                    "assistant", content_to_store,
+                    turn_id=turn_id,
                 )
                 if self._history_store is not None:
                     self._history_store.append_message(
                         session_id=self._session_id,
                         role="assistant",
                         content=content_to_store,
+                        turn_id=turn_id,
                     )
         except Exception as exc:
             logger.exception(
@@ -4545,10 +4604,12 @@ class LLMService:
 
         # Post-response housekeeping — update stability, run
         # compaction. Only runs when the stream completed normally
-        # (not error, not cancelled).
+        # (not error, not cancelled). turn_id propagates so the
+        # compaction system event (if one fires) inherits the
+        # turn's ID per specs4/3-llm/history.md § Turns.
         if error is None and not cancelled:
             try:
-                await self._post_response(request_id)
+                await self._post_response(request_id, turn_id)
             except Exception as exc:
                 logger.exception(
                     "Post-response processing for %s failed: %s",
@@ -7013,8 +7074,17 @@ class LLMService:
     # Post-response processing
     # ------------------------------------------------------------------
 
-    async def _post_response(self, request_id: str) -> None:
-        """Stability tracker update, compaction, terminal HUD."""
+    async def _post_response(
+        self, request_id: str, turn_id: str
+    ) -> None:
+        """Stability tracker update, compaction, terminal HUD.
+
+        ``turn_id`` is threaded from ``_stream_chat`` so any
+        system event fired during post-response work (compaction
+        in particular) inherits the turn's ID. Per
+        specs4/3-llm/history.md § Turns, every record produced by
+        a user request shares the turn ID.
+        """
         # Stability update — builds the full active items list
         # and runs the tracker update cycle.
         self._update_stability()
@@ -7081,7 +7151,9 @@ class LLMService:
                         messages_after_count=len(result.messages),
                     )
                     self._context.add_message(
-                        "user", event_text, system_event=True
+                        "user", event_text,
+                        system_event=True,
+                        turn_id=turn_id,
                     )
                     if self._history_store is not None:
                         self._history_store.append_message(
@@ -7089,6 +7161,7 @@ class LLMService:
                             role="user",
                             content=event_text,
                             system_event=True,
+                            turn_id=turn_id,
                         )
                 except Exception:
                     logger.exception(

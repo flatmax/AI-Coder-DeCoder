@@ -12,6 +12,9 @@ Scope:
 - ``detect_shell_commands`` — fenced blocks, ``$`` / ``>``
   prefixes, prose filtering, dedup.
 - ``parse_text`` convenience entry.
+- Agent-spawn blocks — reserved marker recognition, field
+  parsing, multi-line task support, validity flag, streaming
+  chunk accumulation.
 
 Strategy — the parser is pure and deterministic. No mocks, no
 fixtures beyond assembled-string inputs. Each test feeds a
@@ -22,6 +25,7 @@ known text (or sequence of chunks) and asserts on the
 from __future__ import annotations
 
 from ac_dc.edit_protocol import (
+    AgentBlock,
     EditBlock,
     EditParser,
     ParseResult,
@@ -42,10 +46,27 @@ EDIT = "🟧🟧🟧 EDIT"
 REPL = "🟨🟨🟨 REPL"
 END = "🟩🟩🟩 END"
 
+# Agent-spawn markers — reserved for the future parallel-agents
+# feature. Same re-declaration discipline as the edit markers:
+# drift between this module and edit_protocol.py surfaces as
+# test failures rather than silent protocol violations.
+AGENT = "🟧🟧🟧 AGENT"
+AGEND = "🟩🟩🟩 AGEND"
+
 
 def _block(path: str, old: str, new: str) -> str:
     """Assemble one edit block as a complete response string."""
     return f"{path}\n{EDIT}\n{old}\n{REPL}\n{new}\n{END}\n"
+
+
+def _agent_block(body: str) -> str:
+    """Assemble one agent-spawn block as a complete response string.
+
+    ``body`` is inserted verbatim between the start and end
+    markers. Callers supply already-formatted YAML-ish
+    ``key: value`` lines including any trailing newlines.
+    """
+    return f"{AGENT}\n{body}{AGEND}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -644,3 +665,448 @@ class TestFinalize:
         )
         # Parser's internal list unaffected.
         assert len(parser._blocks) == 1
+
+
+# ---------------------------------------------------------------------------
+# Agent-spawn blocks — Slice 3 of the parallel-agents foundation
+# ---------------------------------------------------------------------------
+
+
+class TestAgentBlockShape:
+    """AgentBlock dataclass defaults and fields."""
+
+    def test_default_valid_true(self) -> None:
+        """A hand-constructed AgentBlock defaults to valid=True."""
+        b = AgentBlock(id="agent-0", task="do the thing")
+        assert b.valid is True
+
+    def test_default_completed_true(self) -> None:
+        """Hand-constructed blocks default to completed=True."""
+        b = AgentBlock(id="a", task="t")
+        assert b.completed is True
+
+    def test_default_extras_empty_dict(self) -> None:
+        """extras defaults to a fresh empty dict per instance."""
+        b1 = AgentBlock(id="a", task="t")
+        b2 = AgentBlock(id="b", task="t")
+        b1.extras["shared"] = "bad"
+        # Mutating one doesn't affect the other — separate
+        # default dicts, not a shared reference.
+        assert b2.extras == {}
+
+
+class TestAgentBlockParsing:
+    """Parser accepts a well-formed agent block."""
+
+    def test_minimal_agent_block(self) -> None:
+        """id + task only — minimum valid agent block."""
+        text = _agent_block("id: agent-0\ntask: do the thing\n")
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.id == "agent-0"
+        assert block.task == "do the thing"
+        assert block.extras == {}
+        assert block.valid is True
+        assert block.completed is True
+
+    def test_no_edit_blocks_produced(self) -> None:
+        """Agent block doesn't accidentally register as an edit block."""
+        text = _agent_block("id: a\ntask: t\n")
+        result = parse_text(text)
+        assert result.blocks == []
+        assert result.incomplete == []
+
+    def test_multiline_task(self) -> None:
+        """Continuation lines are appended to task with newlines.
+
+        Pins the load-bearing "task may span multiple lines"
+        behaviour from specs4/7-future/parallel-agents.md §
+        Agent-spawn block format.
+        """
+        body = (
+            "id: agent-0\n"
+            "task: Refactor the auth module to extract session\n"
+            "logic into a new SessionManager class. Update\n"
+            "callers of auth.Session to use the new class.\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.id == "agent-0"
+        # Multi-line task joined with newlines.
+        assert "Refactor the auth module" in block.task
+        assert "SessionManager class" in block.task
+        assert "callers of auth.Session" in block.task
+        assert "\n" in block.task
+
+    def test_task_before_id(self) -> None:
+        """Field order doesn't matter — task can come first."""
+        body = "task: do it\nid: agent-5\n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.id == "agent-5"
+        assert block.task == "do it"
+
+    def test_unknown_fields_captured_in_extras(self) -> None:
+        """Forward-compat: unknown keys land in ``extras``.
+
+        Per specs4/7-future/mcp-integration.md § Agent block
+        extension for MCP, a future ``tools:`` field uses the
+        extras slot without requiring a parser change. This
+        test uses ``tools`` as the representative unknown
+        field.
+        """
+        body = "id: a\ntask: t\ntools: gitlab, slack\n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.extras == {"tools": "gitlab, slack"}
+        # Required fields still populated.
+        assert block.id == "a"
+        assert block.task == "t"
+
+    def test_multiple_unknown_fields(self) -> None:
+        """Every unknown key is captured independently."""
+        body = (
+            "id: a\n"
+            "task: t\n"
+            "tools: jira\n"
+            "priority: high\n"
+            "timeout: 30s\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.extras == {
+            "tools": "jira",
+            "priority": "high",
+            "timeout": "30s",
+        }
+
+    def test_value_with_spaces(self) -> None:
+        """Values with internal whitespace round-trip verbatim."""
+        body = (
+            "id: agent-0\n"
+            "task: analyse src/foo.py and src/bar.py\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.task == "analyse src/foo.py and src/bar.py"
+
+    def test_empty_value_on_header_line_with_continuation(self) -> None:
+        """Field with no inline value takes its value from continuations.
+
+        LLMs sometimes emit ``task:\\n  the task text`` — the
+        value lives on the following line(s). The parser
+        handles this by treating the empty initial value as
+        "no leading newline separator" so the first
+        continuation line becomes the value directly.
+        """
+        body = (
+            "id: agent-0\n"
+            "task:\n"
+            "Do the thing.\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.task == "Do the thing."
+
+
+class TestAgentBlockValidation:
+    """Missing required fields produce valid=False, not silent drops."""
+
+    def test_missing_id_marks_invalid(self) -> None:
+        """task without id → block emitted with valid=False."""
+        body = "task: do the thing\n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.valid is False
+        assert block.id == ""
+        assert block.task == "do the thing"
+
+    def test_missing_task_marks_invalid(self) -> None:
+        """id without task → block emitted with valid=False."""
+        body = "id: agent-0\n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.valid is False
+        assert block.id == "agent-0"
+        assert block.task == ""
+
+    def test_empty_body_marks_invalid(self) -> None:
+        """AGENT / AGEND with nothing between → invalid block emitted."""
+        text = _agent_block("")
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.valid is False
+        assert block.id == ""
+        assert block.task == ""
+
+    def test_blank_values_count_as_missing(self) -> None:
+        """``id:`` or ``task:`` with only whitespace → invalid."""
+        body = "id:   \ntask:   \n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.valid is False
+
+
+class TestAgentBlockStreaming:
+    """Streaming chunk accumulation for agent blocks."""
+
+    def test_split_across_two_chunks(self) -> None:
+        """An agent block split mid-body parses correctly."""
+        parser = EditParser()
+        full = _agent_block("id: a\ntask: do the thing\n")
+        mid = len(full) // 2
+        parser.feed(full[:mid])
+        parser.feed(full[mid:])
+        result = parser.finalize()
+        assert len(result.agent_blocks) == 1
+        assert result.agent_blocks[0].id == "a"
+
+    def test_split_one_char_at_a_time(self) -> None:
+        """Pathological per-char streaming still produces a valid block."""
+        parser = EditParser()
+        for ch in _agent_block("id: x\ntask: t\n"):
+            parser.feed(ch)
+        result = parser.finalize()
+        assert len(result.agent_blocks) == 1
+        assert result.agent_blocks[0].valid is True
+
+    def test_split_mid_marker(self) -> None:
+        """Chunk boundary inside the AGEND marker — still works."""
+        parser = EditParser()
+        full = _agent_block("id: a\ntask: t\n")
+        agend_pos = full.index(AGEND)
+        split = agend_pos + 3  # mid-marker
+        parser.feed(full[:split])
+        parser.feed(full[split:])
+        result = parser.finalize()
+        assert len(result.agent_blocks) == 1
+
+    def test_incomplete_agent_block_surfaced(self) -> None:
+        """Stream ending mid-agent-block produces an incomplete entry.
+
+        Mirrors the edit-block incomplete-surfacing behaviour.
+        The agent block has no AGEND when the stream ends, so
+        whatever fields were parsed become an incomplete block
+        with ``completed=False``.
+        """
+        parser = EditParser()
+        # AGENT + partial body, no AGEND.
+        parser.feed(f"{AGENT}\nid: agent-0\ntask: partial")
+        result = parser.finalize()
+        # No completed agent blocks.
+        assert result.agent_blocks == []
+        # Incomplete captures whatever we had.
+        assert len(result.incomplete_agents) == 1
+        block = result.incomplete_agents[0]
+        assert block.completed is False
+        assert block.id == "agent-0"
+        assert "partial" in block.task
+
+    def test_incomplete_agent_block_preserves_partial_fields(
+        self,
+    ) -> None:
+        """Incomplete block carries the fields parsed so far."""
+        parser = EditParser()
+        parser.feed(f"{AGENT}\nid: agent-0\n")
+        # Stream ends after id, before task.
+        result = parser.finalize()
+        assert len(result.incomplete_agents) == 1
+        block = result.incomplete_agents[0]
+        assert block.id == "agent-0"
+        assert block.task == ""
+        # Missing required task → flagged invalid.
+        assert block.valid is False
+
+
+class TestAgentBlockMixedWithEditBlocks:
+    """Responses containing both block types parse independently."""
+
+    def test_edit_then_agent(self) -> None:
+        """Edit block followed by agent block — both produced."""
+        text = (
+            _block("foo.py", "old", "new")
+            + _agent_block("id: a\ntask: t\n")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "foo.py"
+        assert len(result.agent_blocks) == 1
+        assert result.agent_blocks[0].id == "a"
+
+    def test_agent_then_edit(self) -> None:
+        """Agent block followed by edit block — both produced."""
+        text = (
+            _agent_block("id: a\ntask: t\n")
+            + _block("foo.py", "old", "new")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert len(result.agent_blocks) == 1
+
+    def test_interleaved_with_prose(self) -> None:
+        """Prose between blocks doesn't confuse the parser."""
+        text = (
+            "First I'll edit:\n\n"
+            + _block("a.py", "old", "new")
+            + "\nThen spawn some agents:\n\n"
+            + _agent_block("id: agent-0\ntask: task1\n")
+            + "\n"
+            + _agent_block("id: agent-1\ntask: task2\n")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert len(result.agent_blocks) == 2
+        ids = [b.id for b in result.agent_blocks]
+        assert ids == ["agent-0", "agent-1"]
+
+    def test_multiple_agent_blocks(self) -> None:
+        """Multiple agent blocks in one response all captured."""
+        text = (
+            _agent_block("id: agent-0\ntask: task0\n")
+            + _agent_block("id: agent-1\ntask: task1\n")
+            + _agent_block("id: agent-2\ntask: task2\n")
+        )
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 3
+        assert [b.id for b in result.agent_blocks] == [
+            "agent-0", "agent-1", "agent-2",
+        ]
+
+
+class TestAgentBlockEdgeCases:
+    """Parser tolerance for malformed or unusual agent blocks."""
+
+    def test_agent_block_with_pending_path_before(self) -> None:
+        """A file-path-like line before AGENT is discarded.
+
+        Agents don't take preceding paths. If the parser sees
+        ``src/foo.py`` then ``🟧🟧🟧 AGENT``, the path was prose
+        and should be ignored — not attached to the agent block.
+        """
+        text = (
+            "src/foo.py\n"
+            + _agent_block("id: a\ntask: t\n")
+        )
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        # No edit blocks produced — the path was discarded.
+        assert result.blocks == []
+
+    def test_continuation_before_first_field_dropped(self) -> None:
+        """Continuation line before any ``key:`` header is dropped.
+
+        Defensive against malformed LLM output — a block body
+        starting with a non-field line shouldn't crash the
+        parser. The block will end up with no fields and be
+        flagged invalid.
+        """
+        body = (
+            "random text before any field\n"
+            "id: a\n"
+            "task: t\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        # id and task still parsed.
+        assert block.id == "a"
+        assert block.task == "t"
+        # Random text silently dropped — no crash, no extras
+        # key for it.
+        assert "random" not in block.task
+        assert "random" not in " ".join(block.extras.values())
+
+    def test_colon_in_value(self) -> None:
+        """Values containing colons round-trip correctly.
+
+        The field-start regex matches ``^\\w+:`` — a leading
+        word then colon. Subsequent colons within the value
+        stay as part of the value.
+        """
+        body = "id: a\ntask: Parse key:value pairs in config.\n"
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.task == "Parse key:value pairs in config."
+
+    def test_indented_continuation_line(self) -> None:
+        """Indented lines after a field-start are continuations.
+
+        The regex anchors on ``^\\w+:`` so leading whitespace
+        prevents field-start recognition — the line is treated
+        as a continuation. Preserves exact text including the
+        leading whitespace.
+        """
+        body = (
+            "id: a\n"
+            "task: Do the work\n"
+            "  with nested indentation\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert "with nested indentation" in block.task
+
+    def test_agent_marker_with_trailing_whitespace(self) -> None:
+        """Trailing whitespace on the start marker is tolerated.
+
+        Pragmatic — LLMs occasionally emit ``🟧🟧🟧 AGENT `` with
+        a stray trailing space. The state machine strips lines
+        before comparison.
+        """
+        # Start marker with trailing space.
+        text = f"{AGENT} \nid: a\ntask: t\n{AGEND}\n"
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        assert result.agent_blocks[0].valid is True
+
+    def test_agend_marker_with_trailing_whitespace(self) -> None:
+        """Trailing whitespace on the end marker is tolerated."""
+        text = f"{AGENT}\nid: a\ntask: t\n{AGEND}  \n"
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        assert result.agent_blocks[0].completed is True
+
+
+class TestParseResultAgentFields:
+    """ParseResult carries agent_blocks and incomplete_agents."""
+
+    def test_empty_input_has_empty_agent_fields(self) -> None:
+        """No agent blocks in input → empty lists, not None."""
+        result = parse_text("")
+        assert result.agent_blocks == []
+        assert result.incomplete_agents == []
+
+    def test_agent_fields_present_on_every_result(self) -> None:
+        """Both fields always present, regardless of input shape."""
+        result = parse_text("just prose")
+        assert isinstance(result.agent_blocks, list)
+        assert isinstance(result.incomplete_agents, list)
+
+    def test_finalize_agent_blocks_is_copy(self) -> None:
+        """finalize's agent_blocks list is a copy — no state leak."""
+        parser = EditParser()
+        parser.feed(_agent_block("id: a\ntask: t\n"))
+        result = parser.finalize()
+        result.agent_blocks.append(
+            AgentBlock(id="fake", task="fake")
+        )
+        # Parser's internal list unaffected.
+        assert len(parser._agent_blocks) == 1

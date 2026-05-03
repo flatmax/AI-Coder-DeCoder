@@ -1080,3 +1080,463 @@ class TestJsonlResilience:
         msgs = store.get_session_messages(sid)
         assert len(msgs) == 2
         assert [m["content"] for m in msgs] == ["valid", "also valid"]
+
+
+# ---------------------------------------------------------------------------
+# Agent archive — Slice 2 of parallel-agents foundation
+# ---------------------------------------------------------------------------
+
+
+class TestAgentArchivePath:
+    """``get_agent_archive_path`` returns the correct directory.
+
+    Read-only accessor — must never create directories or fail
+    on missing turn IDs. The lazy-create contract lives in
+    :meth:`append_agent_message`.
+    """
+
+    def test_returns_path_under_ac_dc_agents(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Path is ``{ac_dc_dir}/agents/{turn_id}/``."""
+        tid = HistoryStore.new_turn_id()
+        path = store.get_agent_archive_path(tid)
+        assert path == ac_dc_dir / "agents" / tid
+
+    def test_does_not_create_directory(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Path accessor has no side effects.
+
+        Pins the "turns without agents leave no disk trace"
+        contract at the accessor level — a caller that just
+        probes the path can't accidentally materialise the
+        directory.
+        """
+        tid = HistoryStore.new_turn_id()
+        path = store.get_agent_archive_path(tid)
+        assert not path.exists()
+        # The agents/ root itself should also not exist yet —
+        # construction doesn't create it.
+        assert not (ac_dc_dir / "agents").exists()
+
+    def test_same_turn_id_returns_same_path(
+        self, store: HistoryStore
+    ) -> None:
+        """Deterministic — repeated calls with same ID agree."""
+        tid = HistoryStore.new_turn_id()
+        path1 = store.get_agent_archive_path(tid)
+        path2 = store.get_agent_archive_path(tid)
+        assert path1 == path2
+
+
+class TestAppendAgentMessage:
+    """``append_agent_message`` writes JSONL records lazily."""
+
+    def test_creates_directory_lazily(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """First write creates the per-turn directory.
+
+        Pins the lazy-create rule: before the first append,
+        no directory exists; after the first append, it does.
+        """
+        tid = HistoryStore.new_turn_id()
+        turn_dir = ac_dc_dir / "agents" / tid
+        assert not turn_dir.exists()
+
+        store.append_agent_message(tid, 0, "user", "task")
+        assert turn_dir.is_dir()
+
+    def test_creates_agent_file_with_zero_padded_name(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Agent file is ``agent-NN.jsonl`` with 2-digit padding."""
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "msg")
+        store.append_agent_message(tid, 7, "user", "msg")
+
+        turn_dir = ac_dc_dir / "agents" / tid
+        files = sorted(p.name for p in turn_dir.iterdir())
+        assert files == ["agent-00.jsonl", "agent-07.jsonl"]
+
+    def test_record_carries_turn_id_and_agent_idx(
+        self, store: HistoryStore
+    ) -> None:
+        """Persisted record has turn_id and agent_idx."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 3, "assistant", "reply"
+        )
+        assert record["turn_id"] == tid
+        assert record["agent_idx"] == 3
+        assert record["role"] == "assistant"
+        assert record["content"] == "reply"
+
+    def test_record_has_id_and_timestamp(
+        self, store: HistoryStore
+    ) -> None:
+        """Generated fields present on every record."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "hi"
+        )
+        assert record["id"]
+        assert record["timestamp"]
+        assert record["timestamp"].endswith("Z")
+
+    def test_optional_session_id_persisted(
+        self, store: HistoryStore
+    ) -> None:
+        """session_id round-trips when supplied."""
+        tid = HistoryStore.new_turn_id()
+        sid = HistoryStore.new_session_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "hi", session_id=sid
+        )
+        assert record.get("session_id") == sid
+
+    def test_session_id_omitted_when_none(
+        self, store: HistoryStore
+    ) -> None:
+        """session_id absent from record when not supplied.
+
+        Keeps records compact for the agent-archive case where
+        session_id isn't needed (turn_id is the primary key).
+        """
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "hi"
+        )
+        assert "session_id" not in record
+
+    def test_system_event_flag_persisted(
+        self, store: HistoryStore
+    ) -> None:
+        """system_event=True appears on the record."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "spawn", system_event=True
+        )
+        assert record.get("system_event") is True
+
+    def test_system_event_absent_when_false(
+        self, store: HistoryStore
+    ) -> None:
+        """Default system_event is omitted."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "hi"
+        )
+        assert "system_event" not in record
+
+    def test_image_refs_persisted(
+        self, store: HistoryStore
+    ) -> None:
+        """image_refs list round-trips when non-empty."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "look",
+            image_refs=["abc123.png", "def456.jpg"],
+        )
+        assert record.get("image_refs") == [
+            "abc123.png", "def456.jpg",
+        ]
+
+    def test_image_refs_absent_when_empty(
+        self, store: HistoryStore
+    ) -> None:
+        """Empty or None image_refs omits the field."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "hi", image_refs=[]
+        )
+        assert "image_refs" not in record
+
+    def test_extra_fields_preserved(
+        self, store: HistoryStore
+    ) -> None:
+        """extra dict merges into the record."""
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "assistant", "done",
+            extra={
+                "files_modified": ["a.py"],
+                "edit_results": [{"file": "a.py", "status": "applied"}],
+            },
+        )
+        assert record["files_modified"] == ["a.py"]
+        assert record["edit_results"][0]["file"] == "a.py"
+
+    def test_extra_cannot_override_reserved_fields(
+        self, store: HistoryStore
+    ) -> None:
+        """Reserved contract fields are immune to extras.
+
+        A caller passing ``extra={"turn_id": "sneaky"}`` or
+        ``extra={"role": "system"}`` must not corrupt the
+        record's core identity. The reserved-key filter
+        guarantees the record's shape across the archival
+        layer's contract.
+        """
+        tid = HistoryStore.new_turn_id()
+        record = store.append_agent_message(
+            tid, 0, "user", "content",
+            extra={
+                "turn_id": "sneaky",
+                "agent_idx": 999,
+                "role": "system",
+                "content": "overwritten",
+                "id": "fake-id",
+                "timestamp": "2000-01-01T00:00:00Z",
+            },
+        )
+        # All reserved fields carry the intended values.
+        assert record["turn_id"] == tid
+        assert record["agent_idx"] == 0
+        assert record["role"] == "user"
+        assert record["content"] == "content"
+        # id and timestamp were generated, not "fake-id".
+        assert record["id"] != "fake-id"
+        assert record["timestamp"] != "2000-01-01T00:00:00Z"
+
+    def test_appends_to_existing_agent_file(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Multiple calls append to the same file, not overwrite.
+
+        Pins the re-iteration contract: within one turn, agent
+        N's file accumulates all messages across iterations.
+        """
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "first")
+        store.append_agent_message(tid, 0, "assistant", "second")
+        store.append_agent_message(tid, 0, "user", "third")
+
+        agent_file = ac_dc_dir / "agents" / tid / "agent-00.jsonl"
+        content = agent_file.read_text(encoding="utf-8")
+        lines = [line for line in content.splitlines() if line]
+        assert len(lines) == 3
+
+    def test_different_agents_different_files(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Two agents in one turn write to separate files."""
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "a0 msg")
+        store.append_agent_message(tid, 1, "user", "a1 msg")
+
+        turn_dir = ac_dc_dir / "agents" / tid
+        a0_file = turn_dir / "agent-00.jsonl"
+        a1_file = turn_dir / "agent-01.jsonl"
+        assert a0_file.is_file()
+        assert a1_file.is_file()
+        assert "a0 msg" in a0_file.read_text(encoding="utf-8")
+        assert "a1 msg" in a1_file.read_text(encoding="utf-8")
+
+    def test_different_turns_different_directories(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Two turns produce two archive directories."""
+        tid1 = HistoryStore.new_turn_id()
+        tid2 = HistoryStore.new_turn_id()
+        store.append_agent_message(tid1, 0, "user", "turn1")
+        store.append_agent_message(tid2, 0, "user", "turn2")
+
+        agents_root = ac_dc_dir / "agents"
+        dirs = sorted(p.name for p in agents_root.iterdir())
+        assert tid1 in dirs
+        assert tid2 in dirs
+
+    def test_rejects_empty_turn_id(
+        self, store: HistoryStore
+    ) -> None:
+        """Empty turn_id raises ValueError."""
+        with pytest.raises(ValueError, match="turn_id"):
+            store.append_agent_message("", 0, "user", "hi")
+
+    def test_rejects_negative_agent_idx(
+        self, store: HistoryStore
+    ) -> None:
+        """Negative agent_idx raises ValueError."""
+        tid = HistoryStore.new_turn_id()
+        with pytest.raises(ValueError, match="agent_idx"):
+            store.append_agent_message(tid, -1, "user", "hi")
+
+    def test_rejects_invalid_role(
+        self, store: HistoryStore
+    ) -> None:
+        """Roles other than user/assistant raise ValueError."""
+        tid = HistoryStore.new_turn_id()
+        with pytest.raises(ValueError, match="role"):
+            store.append_agent_message(
+                tid, 0, "system", "hi"
+            )
+
+    def test_large_agent_idx_pads_to_two_digits(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """agent_idx=99 still uses 2-digit padding."""
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 99, "user", "msg")
+        turn_dir = ac_dc_dir / "agents" / tid
+        files = [p.name for p in turn_dir.iterdir()]
+        assert files == ["agent-99.jsonl"]
+
+
+class TestGetTurnArchive:
+    """``get_turn_archive`` reads per-agent files and orders them."""
+
+    def test_missing_directory_returns_empty(
+        self, store: HistoryStore
+    ) -> None:
+        """Turn with no archive directory produces empty list.
+
+        Covers both cases where it matters: a turn that didn't
+        spawn agents, and a turn whose archive was deleted.
+        Both return the same shape so the frontend has one
+        code path.
+        """
+        tid = HistoryStore.new_turn_id()
+        result = store.get_turn_archive(tid)
+        assert result == []
+
+    def test_single_agent_single_message(
+        self, store: HistoryStore
+    ) -> None:
+        """One agent, one message returns the expected shape."""
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "task")
+
+        result = store.get_turn_archive(tid)
+        assert len(result) == 1
+        assert result[0]["agent_idx"] == 0
+        assert len(result[0]["messages"]) == 1
+        assert result[0]["messages"][0]["content"] == "task"
+
+    def test_multiple_agents_sorted_by_idx(
+        self, store: HistoryStore
+    ) -> None:
+        """Agents returned in index-ascending order.
+
+        Critical for the frontend's left-to-right column
+        rendering: the iteration order of ``os.listdir`` is
+        not defined on many filesystems, so we must sort.
+        """
+        tid = HistoryStore.new_turn_id()
+        # Append out of order to stress the sort.
+        store.append_agent_message(tid, 2, "user", "a2")
+        store.append_agent_message(tid, 0, "user", "a0")
+        store.append_agent_message(tid, 1, "user", "a1")
+
+        result = store.get_turn_archive(tid)
+        assert [entry["agent_idx"] for entry in result] == [
+            0, 1, 2,
+        ]
+
+    def test_messages_in_write_order(
+        self, store: HistoryStore
+    ) -> None:
+        """An agent's messages come back in write order."""
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "first")
+        store.append_agent_message(tid, 0, "assistant", "second")
+        store.append_agent_message(tid, 0, "user", "third")
+
+        result = store.get_turn_archive(tid)
+        messages = result[0]["messages"]
+        assert [m["content"] for m in messages] == [
+            "first", "second", "third",
+        ]
+
+    def test_records_carry_full_metadata(
+        self, store: HistoryStore
+    ) -> None:
+        """Retrieved records preserve every field from append.
+
+        The retrieval path is lossless — optional fields
+        (system_event, image_refs, extras) all round-trip.
+        Agent-browser UI needs full metadata to render card
+        content correctly.
+        """
+        tid = HistoryStore.new_turn_id()
+        sid = HistoryStore.new_session_id()
+        store.append_agent_message(
+            tid, 0, "user", "task",
+            session_id=sid,
+            system_event=True,
+            image_refs=["foo.png"],
+            extra={"files_modified": ["x.py"]},
+        )
+
+        result = store.get_turn_archive(tid)
+        msg = result[0]["messages"][0]
+        assert msg["turn_id"] == tid
+        assert msg["agent_idx"] == 0
+        assert msg["session_id"] == sid
+        assert msg["system_event"] is True
+        assert msg["image_refs"] == ["foo.png"]
+        assert msg["files_modified"] == ["x.py"]
+
+    def test_corrupt_line_skipped(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Corrupt JSON lines inside an agent file don't break reads.
+
+        Mirrors :class:`TestJsonlResilience` — mid-write crashes
+        leave partial lines that the per-line parse tolerates.
+        The agent archive must be as robust as the main store.
+        """
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "first")
+        # Corrupt the file by appending a partial line.
+        agent_file = ac_dc_dir / "agents" / tid / "agent-00.jsonl"
+        with agent_file.open("a", encoding="utf-8") as fh:
+            fh.write('{"role": "user", "content": "partial\n')
+        # Append a valid line after.
+        store.append_agent_message(tid, 0, "user", "second")
+
+        result = store.get_turn_archive(tid)
+        contents = [
+            m["content"] for m in result[0]["messages"]
+        ]
+        assert contents == ["first", "second"]
+
+    def test_non_agent_files_ignored(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Files that don't match agent-NN.jsonl are skipped.
+
+        The directory could contain stray files (a user's
+        ``.DS_Store`` on macOS, a README someone dropped in).
+        The reader must tolerate them without breaking.
+        """
+        tid = HistoryStore.new_turn_id()
+        store.append_agent_message(tid, 0, "user", "hi")
+
+        # Drop a garbage file alongside.
+        turn_dir = ac_dc_dir / "agents" / tid
+        (turn_dir / "README").write_text("not an agent file")
+        (turn_dir / ".DS_Store").write_text("mac junk")
+        (turn_dir / "agent.jsonl").write_text(
+            "missing-NN suffix"
+        )
+
+        result = store.get_turn_archive(tid)
+        # Only agent-00.jsonl was read.
+        assert len(result) == 1
+        assert result[0]["agent_idx"] == 0
+
+    def test_empty_turn_directory_returns_empty(
+        self, store: HistoryStore, ac_dc_dir: Path
+    ) -> None:
+        """Turn directory exists but has no agent files.
+
+        Edge case: directory created by an earlier attempt that
+        failed before writing, or a manual mkdir. Don't crash,
+        just return nothing.
+        """
+        tid = HistoryStore.new_turn_id()
+        (ac_dc_dir / "agents" / tid).mkdir(parents=True)
+        result = store.get_turn_archive(tid)
+        assert result == []

@@ -1519,6 +1519,232 @@ class TestStreamingHappyPath:
         )
 
 
+class TestTurnIdPropagation:
+    """Turn ID propagation through the streaming pipeline.
+
+    Slice 1 of the parallel-agents foundation — per
+    specs4/3-llm/history.md § Turns, every record produced by a
+    user request carries a shared turn_id so the main store has
+    a consistent key for "records from this request". Lays the
+    groundwork for Slice 2 (agent archives keyed by turn_id).
+
+    Scope: verifies turn IDs are generated, match between
+    user/assistant records, appear in both the context manager
+    and the history store, and carry through to compaction
+    system events when compaction fires during post-response.
+    """
+
+    async def test_user_message_carries_turn_id(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Persisted user message has a turn_id starting with 'turn_'."""
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        user_msgs = [m for m in persisted if m["role"] == "user"]
+        assert user_msgs
+        tid = user_msgs[-1].get("turn_id")
+        assert isinstance(tid, str)
+        assert tid.startswith("turn_")
+
+    async def test_assistant_message_carries_turn_id(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Persisted assistant message has a turn_id."""
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        assistant_msgs = [
+            m for m in persisted if m["role"] == "assistant"
+        ]
+        assert assistant_msgs
+        tid = assistant_msgs[-1].get("turn_id")
+        assert isinstance(tid, str)
+        assert tid.startswith("turn_")
+
+    async def test_user_and_assistant_share_turn_id(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """User and assistant records from one turn share turn_id.
+
+        The key invariant — turn_id groups all records produced
+        by a single request. Without this, agent archives
+        (Slice 2) couldn't be keyed by turn_id because the key
+        wouldn't uniquely identify the turn.
+        """
+        fake_litellm.set_streaming_chunks(["reply"])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        user_tid = next(
+            m["turn_id"] for m in persisted
+            if m["role"] == "user" and m.get("turn_id")
+        )
+        assistant_tid = next(
+            m["turn_id"] for m in persisted
+            if m["role"] == "assistant" and m.get("turn_id")
+        )
+        assert user_tid == assistant_tid
+
+    async def test_two_turns_have_different_ids(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Back-to-back turns produce distinct turn_ids.
+
+        Pins the "one turn ID per user request" rule — reusing
+        an ID across turns would corrupt the agent archive
+        directory structure (Slice 2).
+        """
+        fake_litellm.set_streaming_chunks(["r1 reply"])
+        await service.chat_streaming(request_id="r1", message="one")
+        await asyncio.sleep(0.2)
+
+        fake_litellm.set_streaming_chunks(["r2 reply"])
+        await service.chat_streaming(request_id="r2", message="two")
+        await asyncio.sleep(0.2)
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        # Collect turn_ids from user records (one per turn).
+        turn_ids = [
+            m["turn_id"] for m in persisted
+            if m["role"] == "user" and m.get("turn_id")
+        ]
+        assert len(turn_ids) == 2
+        assert turn_ids[0] != turn_ids[1]
+
+    async def test_context_manager_records_turn_id(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Context manager's in-memory history carries turn_id too.
+
+        Both stores (context manager + JSONL) must agree on the
+        turn_id — otherwise a reader walking the context for
+        prompt assembly and a reader walking JSONL for the
+        agent-browser UI would see inconsistent grouping.
+        """
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        history = service.get_current_state()["messages"]
+        user_msg = next(
+            m for m in history if m["role"] == "user"
+        )
+        assistant_msg = next(
+            m for m in history if m["role"] == "assistant"
+        )
+        assert user_msg.get("turn_id")
+        assert user_msg["turn_id"] == assistant_msg.get("turn_id")
+
+    async def test_compaction_event_inherits_turn_id(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Compaction system event shares turn_id with its triggering turn.
+
+        Pins the "system events fired during a turn inherit the
+        turn_id" rule from specs4/3-llm/history.md § Turns. Uses
+        the same low-threshold config trick as
+        ``TestCompactionSystemEvent`` to force compaction to
+        fire on the first real turn.
+        """
+        # Lower the compaction threshold so compaction fires
+        # after the first turn. Reuse the helper pattern from
+        # TestCompactionSystemEvent.
+        import json as _json
+        app_path = config.config_dir / "app.json"
+        app_data = _json.loads(app_path.read_text())
+        app_data.setdefault("history_compaction", {})
+        app_data["history_compaction"]["enabled"] = True
+        app_data["history_compaction"]["compaction_trigger_tokens"] = 500
+        app_data["history_compaction"]["verbatim_window_tokens"] = 200
+        app_data["history_compaction"]["min_verbatim_exchanges"] = 1
+        app_data["history_compaction"]["summary_budget_tokens"] = 500
+        app_path.write_text(_json.dumps(app_data))
+        config._app_config = None
+
+        # Seed enough history to cross the trigger.
+        long_content = "x " * 150
+        for _ in range(10):
+            service._context.add_message("user", long_content)
+            service._context.add_message("assistant", long_content)
+
+        # Canned detector — truncate case so the event fires.
+        def _detector(messages):
+            return TopicBoundary(
+                boundary_index=18,
+                boundary_reason="topic shift",
+                confidence=0.9,
+                summary="",
+            )
+        service._compactor._detect = _detector
+
+        fake_litellm.set_streaming_chunks(["reply"])
+        await service.chat_streaming(
+            request_id="r1", message="trigger"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        # The compaction system event is a user-role record
+        # with system_event=True and "History compacted" in
+        # the content.
+        compaction_events = [
+            m for m in persisted
+            if m.get("system_event")
+            and "History compacted" in m.get("content", "")
+        ]
+        assert len(compaction_events) == 1
+        # User message carries the turn ID; the compaction
+        # event must inherit it.
+        user_tid = next(
+            m["turn_id"] for m in persisted
+            if m["role"] == "user"
+            and m.get("content") == "trigger"
+            and m.get("turn_id")
+        )
+        assert compaction_events[0].get("turn_id") == user_tid
+
+
 # ---------------------------------------------------------------------------
 # cancel_streaming
 # ---------------------------------------------------------------------------
@@ -8003,7 +8229,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         # System event present in context.
         history = service._context.get_history()
@@ -8036,7 +8263,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         sid = service.get_current_state()["session_id"]
         persisted = history_store.get_session_messages(sid)
@@ -8068,7 +8296,8 @@ class TestCompactionSystemEvent:
             ),
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         history = service._context.get_history()
         events = [
@@ -8118,7 +8347,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         history = service._context.get_history()
         events = [
@@ -8158,7 +8388,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         history = service._context.get_history()
         events = [
@@ -8206,7 +8437,8 @@ class TestCompactionSystemEvent:
         service._compactor.compact_history_if_needed = _raise  # type: ignore[method-assign]
 
         try:
-            await service._post_response("r1")
+            tid = HistoryStore.new_turn_id()
+            await service._post_response("r1", tid)
         finally:
             service._compactor.compact_history_if_needed = original  # type: ignore[method-assign]
 
@@ -8251,7 +8483,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         history = service._context.get_history()
         assert len(history) > 0
@@ -8285,7 +8518,8 @@ class TestCompactionSystemEvent:
             summary="",
         )
 
-        await service._post_response("r1")
+        tid = HistoryStore.new_turn_id()
+        await service._post_response("r1", tid)
 
         # Find the compacted broadcast.
         completes = [
@@ -8391,6 +8625,123 @@ class TestCompactionSystemEvent:
         assert "summarize" in text
         assert "<details>" not in text
         assert "No clear topic boundary" in text
+
+
+class TestGetTurnArchiveRPC:
+    """LLMService.get_turn_archive exposes the history-store method.
+
+    Slice 2 of the parallel-agents foundation — per
+    specs4/3-llm/history.md § User-Visible Agent Browsing, the
+    frontend calls this RPC lazily as the user scrolls the chat.
+    The wrapper is a thin delegation to
+    :meth:`HistoryStore.get_turn_archive`; tests verify the
+    delegation, the no-history-store fallback, and the ordered
+    multi-agent shape.
+    """
+
+    def test_empty_when_no_history_store(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """No history store attached → empty list, no crash.
+
+        Tests that skip the store should still be able to call
+        this RPC without errors. Matches the pattern used by
+        ``history_list_sessions`` / ``history_get_session``.
+        """
+        svc = LLMService(
+            config=config, repo=repo, history_store=None
+        )
+        assert svc.get_turn_archive("turn_anything") == []
+
+    def test_missing_archive_returns_empty(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Turn ID with no archive directory returns empty."""
+        tid = HistoryStore.new_turn_id()
+        result = service.get_turn_archive(tid)
+        assert result == []
+
+    def test_returns_archive_when_present(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Archive populated via the store surfaces through the RPC."""
+        tid = HistoryStore.new_turn_id()
+        history_store.append_agent_message(
+            tid, 0, "user", "task for agent zero"
+        )
+        history_store.append_agent_message(
+            tid, 0, "assistant", "done"
+        )
+        history_store.append_agent_message(
+            tid, 1, "user", "task for agent one"
+        )
+
+        result = service.get_turn_archive(tid)
+        assert len(result) == 2
+        assert result[0]["agent_idx"] == 0
+        assert len(result[0]["messages"]) == 2
+        assert result[1]["agent_idx"] == 1
+
+    def test_preserves_agent_order(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Agents returned in index-ascending order.
+
+        The frontend renders one column per agent left-to-right;
+        the RPC must preserve the order so the UI doesn't need
+        to re-sort.
+        """
+        tid = HistoryStore.new_turn_id()
+        # Append out of order.
+        history_store.append_agent_message(tid, 2, "user", "a2")
+        history_store.append_agent_message(tid, 0, "user", "a0")
+        history_store.append_agent_message(tid, 1, "user", "a1")
+
+        result = service.get_turn_archive(tid)
+        assert [entry["agent_idx"] for entry in result] == [
+            0, 1, 2,
+        ]
+
+    def test_record_metadata_preserved_through_rpc(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Records arrive at the frontend with full metadata.
+
+        Pins the contract that the RPC is lossless: everything
+        the store persisted is visible through the wrapper.
+        The agent-browser UI needs file-mention detection in
+        the transcripts, which depends on seeing the
+        ``files_modified`` field.
+        """
+        tid = HistoryStore.new_turn_id()
+        sid = HistoryStore.new_session_id()
+        history_store.append_agent_message(
+            tid, 0, "assistant", "edited the files",
+            session_id=sid,
+            extra={
+                "files_modified": ["src/auth.py"],
+                "edit_results": [
+                    {"file": "src/auth.py", "status": "applied"},
+                ],
+            },
+        )
+
+        result = service.get_turn_archive(tid)
+        msg = result[0]["messages"][0]
+        assert msg["turn_id"] == tid
+        assert msg["session_id"] == sid
+        assert msg["files_modified"] == ["src/auth.py"]
+        assert msg["edit_results"][0]["status"] == "applied"
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -60,6 +61,22 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_FILENAME = "history.jsonl"
 _IMAGES_DIRNAME = "images"
+
+# Agent turn archive layout. Per specs4/3-llm/history.md § Agent
+# Turn Archive, agent conversations live under
+# ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl`` — one directory per
+# turn that spawned agents, one JSONL file per agent. The
+# directories are created lazily on first write so turns that
+# didn't spawn agents never touch the agents/ tree.
+_AGENTS_DIRNAME = "agents"
+
+# Agent file name pattern. Zero-padded to 2 digits so
+# filesystem-sort order matches agent-index order. Beyond
+# 99 agents the padding would need to extend, but realistic
+# turns spawn 2-8 agents; a future refactor can widen without
+# breaking existing archives because the pattern validates
+# "digits only" rather than "exactly two digits".
+_AGENT_FILE_REGEX = re.compile(r"^agent-(\d+)\.jsonl$")
 
 # Preview length in the session-list summary. Long enough to
 # disambiguate sessions, short enough to fit one line in the
@@ -149,6 +166,12 @@ class HistoryStore:
         self._ac_dc_dir = Path(ac_dc_dir)
         self._history_file = self._ac_dc_dir / _HISTORY_FILENAME
         self._images_dir = self._ac_dc_dir / _IMAGES_DIRNAME
+        # Agents root — parent of per-turn subdirectories. Not
+        # created here; we create it lazily on the first
+        # per-turn write so turns that never spawn agents leave
+        # no trace on disk (per spec). The per-turn subdirectory
+        # itself is the lazy-create boundary.
+        self._agents_dir = self._ac_dc_dir / _AGENTS_DIRNAME
         # Create directories on construction. This is idempotent —
         # ConfigManager also creates .ac-dc/images/ on init, so
         # whichever runs first wins and the other is a no-op.
@@ -712,3 +735,298 @@ class HistoryStore:
             if limit is not None and len(hits) >= limit:
                 break
         return hits
+
+    # ------------------------------------------------------------------
+    # Agent turn archive — Slice 2 of parallel-agents foundation
+    # ------------------------------------------------------------------
+
+    def get_agent_archive_path(self, turn_id: str) -> Path:
+        """Return the archive directory path for ``turn_id``.
+
+        Does NOT create the directory — this is a path accessor,
+        not a mutator. Callers that intend to write use
+        :meth:`append_agent_message` which creates the directory
+        lazily as part of the append.
+
+        Used by read-side callers (loader, UI RPC) to check
+        existence without side effects. A future cleanup affordance
+        (per specs4/3-llm/history.md § Disk Usage Monitoring) will
+        iterate the agents/ directory and use this helper to map
+        turn IDs back to their on-disk locations.
+
+        Parameters
+        ----------
+        turn_id:
+            The turn identifier. Must match
+            :meth:`new_turn_id`'s format — non-empty string
+            matching ``turn_{digits}_{hex}``. Invalid turn IDs
+            still return a path (the helper doesn't validate
+            the shape), but callers that plan to write should
+            supply IDs produced by :meth:`new_turn_id`.
+
+        Returns
+        -------
+        Path
+            ``{ac_dc_dir}/agents/{turn_id}/``. The directory may
+            or may not exist on disk.
+        """
+        return self._agents_dir / turn_id
+
+    def append_agent_message(
+        self,
+        turn_id: str,
+        agent_idx: int,
+        role: str,
+        content: str,
+        *,
+        session_id: str | None = None,
+        system_event: bool = False,
+        image_refs: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one message to an agent's archive file.
+
+        Creates the turn's archive directory lazily on first call —
+        the path ``{ac_dc_dir}/agents/{turn_id}/`` materialises only
+        when a turn actually produces agent output. Per spec, turns
+        that did not spawn agents leave no trace on disk.
+
+        Writes to ``agent-NN.jsonl`` where ``NN`` is
+        ``agent_idx`` zero-padded to 2 digits. Re-iteration within
+        a turn (main LLM spawns agents, reviews, spawns different
+        agents with revised scope) appends to the existing per-agent
+        file rather than creating a new one — so ``agent-00.jsonl``
+        contains ALL iterations of agent 0 within that turn, with
+        iteration boundaries implicit in the conversation flow.
+
+        Parameters
+        ----------
+        turn_id:
+            The turn identifier from
+            :meth:`HistoryStore.new_turn_id`. The archive directory
+            is keyed by this value.
+        agent_idx:
+            Zero-based agent index within the turn. Stable across
+            iterations — agent 0 in iteration 2 writes to the same
+            file as agent 0 in iteration 1. Must be non-negative.
+        role:
+            ``"user"`` or ``"assistant"``. Agent ContextManagers
+            record their initial prompt as ``role="user"`` (the
+            task string from the main LLM's spawn block) and their
+            responses as ``role="assistant"``.
+        content:
+            The message text.
+        session_id:
+            Optional session identifier for back-reference to the
+            user session that triggered this turn. Matches the
+            main store's convention — every record carries a
+            session_id. When None, the record omits the field
+            (legal for agent archives since they're scoped by
+            turn_id rather than session_id).
+        system_event:
+            Marks operational events (agent spawn, review
+            directives). Distinct from the main store's system
+            events — agents rarely fire them, but the flag exists
+            for symmetry.
+        image_refs:
+            Optional list of image filenames (from the main
+            store's images/ directory). Agents can reference
+            images the user pasted into the triggering turn; the
+            archive records the reference but the image bytes
+            stay in the shared images/ directory, not duplicated
+            per agent.
+        extra:
+            Additional fields to stash on the record (e.g.,
+            ``edit_results``, ``files_modified`` if the agent
+            emitted edits). Forwarded unchanged; the store
+            doesn't interpret them.
+
+        Returns
+        -------
+        dict
+            The full record that was persisted. Includes the
+            generated ``id``, ``timestamp``, and ``turn_id`` so
+            callers can use the ID for follow-up correlation.
+
+        Raises
+        ------
+        ValueError
+            If ``turn_id`` is empty, ``agent_idx`` is negative, or
+            ``role`` is not one of the expected values. These are
+            programmer errors — the agent-spawning path should
+            never produce invalid inputs.
+        """
+        if not turn_id:
+            raise ValueError("turn_id must be non-empty")
+        if agent_idx < 0:
+            raise ValueError(
+                f"agent_idx must be non-negative, got {agent_idx}"
+            )
+        if role not in ("user", "assistant"):
+            raise ValueError(
+                f"role must be 'user' or 'assistant', got {role!r}"
+            )
+
+        # Lazy directory creation. Two-level mkdir — agents/ and
+        # agents/{turn_id}/ — handled by a single ``parents=True``
+        # call. exist_ok covers concurrent writes from multiple
+        # agents on the same turn (the Slice 6 parallel-execution
+        # case).
+        turn_dir = self._agents_dir / turn_id
+        turn_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_file = turn_dir / f"agent-{agent_idx:02d}.jsonl"
+
+        # Build the record. Shape mirrors ``append_message`` so a
+        # future loader can reuse the parsing path. Optional
+        # fields are omitted when unset to keep records compact.
+        record: dict[str, Any] = {
+            "id": self._new_message_id(),
+            "turn_id": turn_id,
+            "agent_idx": agent_idx,
+            "timestamp": self._now_iso(),
+            "role": role,
+            "content": content,
+        }
+        if session_id:
+            record["session_id"] = session_id
+        if system_event:
+            record["system_event"] = True
+        if image_refs:
+            record["image_refs"] = list(image_refs)
+        if extra:
+            # Shallow merge. Caller-supplied keys take precedence
+            # over defaults except the ones we've already set
+            # above — those are contract fields and must not be
+            # overridden by extras. Filter defensively.
+            reserved = {
+                "id", "turn_id", "agent_idx", "timestamp",
+                "role", "content",
+            }
+            for key, value in extra.items():
+                if key not in reserved:
+                    record[key] = value
+
+        # Append one line. Same atomic-within-pipe-buffer guarantee
+        # as the main store's append_message. Mid-write crashes
+        # leave partial lines that the reader's per-line try/except
+        # tolerates.
+        line = json.dumps(record, ensure_ascii=False)
+        with agent_file.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return record
+
+    def get_turn_archive(
+        self, turn_id: str
+    ) -> list[dict[str, Any]]:
+        """Return every agent's conversation for a turn.
+
+        Reads every ``agent-NN.jsonl`` file under
+        ``{ac_dc_dir}/agents/{turn_id}/`` and returns them as an
+        ordered list keyed by agent index. Missing directory
+        (turn did not spawn agents, or archive was deleted)
+        produces an empty list.
+
+        Returns
+        -------
+        list[dict]
+            One entry per agent, sorted by ``agent_idx`` ascending.
+            Each entry:
+
+            - ``agent_idx`` — zero-based integer index
+            - ``messages`` — list of record dicts in write order
+
+            Empty list when the turn has no archive directory or
+            the directory exists but contains no readable
+            ``agent-NN.jsonl`` files.
+
+        Notes
+        -----
+        Returns a list rather than a dict because JSON-RPC doesn't
+        serialise integer keys and the frontend's agent-browser
+        iterates in order anyway. A list preserves ordering across
+        the transport boundary without the frontend having to
+        re-sort.
+
+        Corrupt JSON lines within a file are skipped with a warning
+        log (same discipline as :meth:`_iter_records` for the
+        main store). A file that fails to open entirely is also
+        logged and skipped — the other agents' files still load.
+        """
+        turn_dir = self._agents_dir / turn_id
+        if not turn_dir.is_dir():
+            return []
+
+        # Collect and sort agent files. Sort by the captured
+        # agent_idx rather than the filename so padding changes
+        # (if we ever widen past 2 digits) don't break ordering.
+        agent_entries: list[tuple[int, Path]] = []
+        try:
+            for entry in turn_dir.iterdir():
+                if not entry.is_file():
+                    continue
+                match = _AGENT_FILE_REGEX.match(entry.name)
+                if match is None:
+                    continue
+                agent_idx = int(match.group(1))
+                agent_entries.append((agent_idx, entry))
+        except OSError as exc:
+            logger.warning(
+                "Failed to list agent archive for turn %s: %s",
+                turn_id, exc,
+            )
+            return []
+
+        agent_entries.sort(key=lambda pair: pair[0])
+
+        result: list[dict[str, Any]] = []
+        for agent_idx, agent_file in agent_entries:
+            messages = self._read_agent_file(agent_file)
+            result.append({
+                "agent_idx": agent_idx,
+                "messages": messages,
+            })
+        return result
+
+    def _read_agent_file(
+        self, path: Path
+    ) -> list[dict[str, Any]]:
+        """Parse one agent archive file, skipping corrupt lines.
+
+        Mirrors :meth:`_iter_records` for the main store —
+        per-line try/except, corrupt lines logged at warning,
+        non-dict records skipped. Missing file returns an empty
+        list rather than raising (defensive — the caller just
+        enumerated the directory, but a concurrent delete is
+        possible).
+        """
+        records: list[dict[str, Any]] = []
+        try:
+            with path.open(
+                "r", encoding="utf-8", errors="replace"
+            ) as fh:
+                for i, raw in enumerate(fh, start=1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        logger.warning(
+                            "Skipping corrupt agent line %s:%d: %s",
+                            path.name, i, exc,
+                        )
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+                    else:
+                        logger.warning(
+                            "Skipping agent line %s:%d: not an object",
+                            path.name, i,
+                        )
+        except OSError as exc:
+            logger.warning(
+                "Failed to read agent archive file %s: %s",
+                path, exc,
+            )
+        return records
