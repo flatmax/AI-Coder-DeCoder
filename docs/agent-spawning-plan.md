@@ -7,7 +7,7 @@ Decision log: IMPLEMENTATION_NOTES.md D20 (block format), D21 (chat-panel tabs),
 
 ## Goal
 
-Wire the execution plane behind the `agents.enabled` toggle. When the toggle is on and the main LLM emits agent-spawn blocks, the backend spawns N parallel `_stream_chat` invocations — each with its own `ConversationScope` pointing at a per-agent `ContextManager`, `StabilityTracker`, and selection list — and threads their transcripts back into the main conversation for synthesis.
+Wire the execution plane behind the `agents.enabled` toggle. When the toggle is on and the main LLM emits agent-spawn blocks, the backend spawns N parallel `_stream_chat` invocations — each with its own `ConversationScope` pointing at a per-agent `ContextManager`, `StabilityTracker`, and selection list. After all agents complete, the backend mechanically assimilates their file changes into the parent's context and selection; there is no automatic synthesis LLM call. Review and iteration are user-driven on follow-up turns — see [parallel-agents.md § Review Step](../specs4/7-future/parallel-agents.md#review-step--user-driven).
 
 The toggle-off path stays byte-identical to today: the agentic appendix is absent from the system prompt, the LLM never emits spawn blocks, and even if a malformed response somehow contained `🟧🟧🟧 AGENT` markers they'd parse as prose and never reach a dispatch path.
 
@@ -41,17 +41,29 @@ When the toggle is off, the branch is skipped and agent blocks parse as-usual in
 
 After scheduling all N tasks, `_spawn_agents_for_turn` awaits `asyncio.gather(*tasks, return_exceptions=True)`. Each agent runs through the full streaming pipeline independently — same edit parsing, same apply path (against the shared repo, serialised by the per-path mutex), same persistence (to the per-agent archive), same post-response stability update (against the agent's own tracker).
 
-### Synthesis
+### Post-agent assimilation (no synthesis LLM call)
 
-After all agents complete, control returns to the parent `_stream_chat` call with the agent transcripts available via `history_store.get_turn_archive(turn_id)`. The main LLM needs to SEE those transcripts to synthesise.
+After all agents complete, control returns to the parent `_stream_chat` call. The backend does NOT run a second LLM call to synthesise the agents' output. Per the decision in [parallel-agents.md § Review Step](../specs4/7-future/parallel-agents.md#review-step--user-driven), synthesis is user-driven on the next turn — the backend only assimilates changes mechanically so the parent's next LLM call has the post-change file state in its context.
 
-Step 4 handles this by:
+Step 4 handles assimilation by:
 
-1. Fetching the archive via `get_turn_archive(turn_id)`.
-2. Formatting the per-agent transcripts as a synthesis prompt — "Here is what each agent produced: [agent 0 transcript] [agent 1 transcript] ... Synthesise a response to the original user request."
-3. Running a SECOND LLM call from the parent scope with that synthesis prompt as additional context. This call produces the user-visible assistant message for the turn.
+1. Reading `history_store.get_turn_archive(turn_id)` to collect the union of `files_modified` and `files_created` across every agent's assistant messages.
+2. For each path in the union:
+   - If it's not already in `parent_scope.selected_files`, append it.
+   - Refresh its content in `parent_scope.context.file_context` — load for newly-added files, re-read for already-present files. Agent edits landed on disk during their own `_stream_chat` runs; the parent's cached content is stale until this refresh.
+3. Broadcast `filesChanged` with the updated parent selection so connected clients' pickers reflect the new selection state.
+4. Broadcast `filesModified` with the union of agent-modified paths so pickers reload their tree (git-status badges, line counts).
 
-The synthesis call goes through the existing `_run_completion_sync` → streamChunk → streamComplete path — the frontend sees streaming chunks arriving under the parent request ID throughout the whole turn (first the agent transcripts stream under child IDs, then the synthesis streams under the parent). Edit-apply from the synthesis step lands in the working tree as usual; edits from agent runs already landed during their own `_stream_chat` calls.
+The parent's initial response text is the turn's final assistant message — there's no concatenation, no second-round streaming. The user sees the main LLM's decomposition narration, then sees the file-picker update with modified-file badges as the broadcasts arrive, then (when they're ready) types a follow-up like "review what the agents did" to drive review on the next turn.
+
+Implementation surface:
+
+- New private method `_assimilate_agent_changes(parent_scope, turn_id)` on `LLMService`.
+- Called from `_stream_chat` after `_spawn_agents_for_turn` returns and before the completion result is built.
+- The `filesModified` broadcast path already exists (each agent's own `_stream_chat` fires it when their edits land); the parent-level broadcast here is belt-and-braces to catch any post-gather race where an earlier broadcast might have been missed by a just-reconnected client.
+- No new event types. No frontend changes.
+
+Chat-panel snippet support: add one snippet to `src/ac_dc/config/snippets.json` under the `code` array — icon 🤖, tooltip "Review agent work", message "Review what the agents did and tell me whether the work is complete." Users click it into their textarea on the follow-up turn. Pure backend-side change; the frontend's existing snippet renderer picks it up automatically.
 
 ### What the user sees (backend-observable today)
 
@@ -75,9 +87,9 @@ Each step is a small, reviewable diff that leaves the codebase working and tests
 
 **Step 4 — Synthesis step.** After all agents complete, fetch transcripts via `get_turn_archive(turn_id)`, format them into a synthesis prompt, run a second LLM call under the parent request ID. The second call goes through `_run_completion_sync` + streaming callbacks + edit-apply + persistence. The parent scope's `_stream_chat` invocation continues with the synthesis result as its final response text.
 
-**Step 5 — Test hardening.** Add end-to-end tests covering: single-agent turn (happy path), two-agent turn with independent edits, agent emitting no edits (synthesis only), toggle-off turn (no spawning happens), malformed agent block (dropped before spawn), agent raising mid-stream (sibling agents complete, synthesis proceeds with available transcripts).
+**Step 5 — Test hardening.** Add end-to-end tests covering: single-agent turn (happy path — one agent, one file modified, parent's context picks it up), two-agent turn with independent edits (both files land in parent's selection, `filesChanged` + `filesModified` fire with the union), agent emitting no edits (assimilation is a no-op, no spurious broadcasts), agent creating a new file (both `files_created` and `files_modified` paths assimilate correctly), toggle-off turn (no spawning, no assimilation), malformed agent block (dropped before spawn), agent raising mid-stream (sibling agents complete, assimilation proceeds with whatever survived, exception doesn't corrupt parent state), user's follow-up turn after agent run (parent LLM sees the new files in its context and can reason about them).
 
-**Step 6 — Update D24 and add a completion note to IMPLEMENTATION_NOTES.md.** Mark agent execution as delivered. The frontend tab strip (D21) remains deferred; add a note pointing at that future work.
+**Step 6 — Update D24 and add a completion note to IMPLEMENTATION_NOTES.md.** Mark agent execution as delivered. Call out the two deliberate deferrals: (1) the frontend tab strip (D21) — agent conversations exist only in the archive JSONL files until that lands; (2) automatic synthesis — replaced by user-driven review, see parallel-agents.md § Review Step and the `🤖 Review agent work` snippet in snippets.json.
 
 ## Invariants
 
@@ -88,7 +100,7 @@ Each step is a small, reviewable diff that leaves the codebase working and tests
 - The parent's scope (context, tracker, session_id, selected_files, archival_append) is never mutated by agent runs. Agent runs mutate their own scopes.
 - Main-conversation-only state (`_review_active`, `_review_state`, `_committing`) stays on `self`. Agents never enter review, never commit.
 - Child request IDs follow the `{parent}-agent-{NN}` shape so `_is_child_request` returns true and the single-stream guard allows them through.
-- Synthesis is a parent-scope LLM call, not an agent call. Its output is the turn's user-visible assistant message; its edits land in the parent's file context.
+- No automatic synthesis LLM call runs after agents complete. The parent's initial response (containing the spawn blocks as prose) IS the turn's final assistant message. Assimilation of agent changes into the parent's context and selection is a mechanical post-agent step, not an LLM call. Review and iteration happen on subsequent user turns driven by the user (typically via the `🤖 Review agent work` snippet in code-mode snippets).
 
 ## Progress log
 

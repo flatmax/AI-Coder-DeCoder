@@ -74,16 +74,16 @@ If an agent's edit fails validation (anchor not found, or anchor became ambiguou
 ## Execution Model
 
 - User request arrives; the main LLM (the same ContextManager handling all user turns) begins streaming its response
-- Main LLM decides whether the task benefits from parallel decomposition. This is a per-turn judgment based on the request, the symbol map, and any document index; there is no user-facing toggle
+- Main LLM decides whether the task benefits from parallel decomposition. This is a per-turn judgment based on the request, the symbol map, and any document index; gated by the `agents.enabled` config toggle — when the toggle is off the agentic appendix is absent from the system prompt and the LLM never emits spawn blocks
 - If yes — main LLM emits a decomposition describing N sub-tasks, each specifying work units (classes, functions, doc sections) to create or modify, plus read context
 - Main LLM spawns N agent ContextManagers, each with its own turn-scoped archival sink, a focused sub-task, and shared read-only access to indexes and repo
 - Agents execute in parallel; no inter-agent communication
 - Edits applied to the working directory via the existing edit-block apply pipeline (per-path mutex ensures atomic writes)
-- Main LLM waits for all agents to complete, then continues streaming — reviews the combined forward diff, decides whether to iterate (spawn different agents) or synthesize
-- On iterate — new decomposition, new agent ContextManagers, another round
-- On synthesize — main LLM writes the final synthesis; the assistant message for this turn is complete; user sees the full reasoning and synthesis in chat scrollback
+- When all agents complete, the backend assimilates their work into the parent conversation: the union of agent-modified and agent-created files is loaded (or refreshed) into the parent's file context, added to the parent's selection, and broadcast via `filesChanged` and `filesModified` so the frontend picker reloads. No automatic second LLM call fires
+- The main LLM's assistant message for the turn consists only of its initial response (which contains the spawn blocks as prose narrating what it delegated). The user reads that, inspects the working-tree changes via the picker and diff viewer, and drives review in a follow-up turn — "review what the agents did" is a one-click snippet in the chat panel's code-mode snippets (see [chat.md § Snippet Drawer](../5-webapp/chat.md#snippet-drawer))
+- On the next user turn, the parent LLM sees the newly-assimilated files in its context and can synthesise, iterate, or fix as the user directs. Iteration rounds (main LLM spawns a fresh decomposition after seeing the results) happen through the normal multi-turn flow, not as backend-driven recursion
 
-## Main LLM — Decomposition and Synthesis
+## Main LLM — Decomposition
 
 The main LLM's system prompt (the normal user-facing prompt, extended for agent-mode turns) describes agent-spawning as a tool-like capability. When the main LLM judges a task worth parallelizing, it emits one or more agent-spawn blocks, each declaring a sub-task.
 
@@ -169,24 +169,36 @@ Each agent's ContextManager operates correctly while other agents concurrently m
 - No shared cache tiers — each agent's stability tracker is independent during parallel execution
 - The main LLM's ContextManager is not an agent — it's the user-facing session ContextManager. It runs on the main event loop thread; agents run on worker threads. The main LLM observes agent completion, reviews diffs, and decides next steps via the same streaming path used for ordinary user turns
 
-## Review Step — Handled by the Main LLM
+## Review Step — User-Driven
 
-After all spawned agents complete, the main LLM observes the combined forward diff (current state vs HEAD before the turn) and decides what to do next. This is NOT a separate LLM call with a dedicated prompt — it's the main LLM continuing its own conversation on the main event loop, with the agent output injected as observation into its context. The next chunks it streams are either a synthesis (turn complete) or a revised decomposition (iterate).
+There is no automatic synthesis LLM call after agents complete. The backend's post-agent work is purely mechanical: assimilate the union of agent-modified and agent-created files into the parent conversation's file context and selection, emit `filesChanged` and `filesModified` broadcasts so the picker reloads, and let the turn end with the main LLM's initial response as the turn's final assistant message.
 
-What the main LLM sees when agents complete:
+The user drives review on the next turn. They see:
 
-- Forward diff of everything the agents changed
-- Per-agent completion status and per-edit result flags (applied / failed / not-in-context)
-- Changed files' current content (re-indexed since the agents ran)
-- Symbol map and document index refreshed for changed files
+- The main LLM's initial response in the chat, including the spawn blocks as prose (they render as ordinary markdown — a future frontend pass per [agent-browser.md](../5-webapp/agent-browser.md) will render them as tabs)
+- The files the agents touched, now visible in the picker with modified-file badges
+- The diffs, visible in the diff viewer
+- The newly-selected files in the parent's context on their next LLM call
 
-What the main LLM decides:
+On the next turn the user can:
 
-- **Synthesize** — the work is complete; write the synthesis and end the turn
-- **Iterate** — decompose again with revised scope; spawn fresh agents
-- **Recover from mechanical failure** — some edits failed anchor-match (text moved because another agent edited nearby); reissue edits with updated anchors, possibly via a single follow-up agent rather than a full re-decomposition
+- Ask the main LLM to review the agents' work ("review what the agents did" is a one-click snippet). Because the agent-modified files are now in the parent's context, the main LLM sees the post-change content and can judge completeness, flag inconsistencies, and suggest fixes — the same way the user would manually.
+- Ask for iteration ("the auth changes are good but the session handling needs another pass"). The main LLM may emit a fresh agent-spawn decomposition if the task still warrants parallelism, or finish the work itself.
+- Ask for specific fixes ("agent 1's edit to `src/logging.py` introduced a bug; fix it"). The main LLM has the full post-change file content and can produce a normal edit block.
+- Ignore the agents' output and continue with something else.
 
-The main LLM's review is informed by any test output the user chose to feed into the conversation. The system does not run tests automatically — the user drives test execution, and test results are an ordinary input to the main LLM's next prompt, just like any other user message in a normal session.
+The system does not run tests automatically — the user drives test execution, and test results are an ordinary input to the main LLM's next prompt, just like any other user message in a normal session.
+
+### Why not automatic synthesis
+
+Earlier designs had the backend automatically fire a second LLM call after agents completed, feeding the transcripts into a synthesis prompt. Dropped because:
+
+- The main LLM already SAW what it was going to delegate (it wrote the spawn blocks). Having it re-read transcripts to summarise its own plan's execution is redundant token spend.
+- The interesting judgment — "is this complete, are the pieces consistent, what's left to do" — benefits from user context. The user knows which parts of the task they care about most, which tests they ran, which tradeoffs they'd accept. A synthesis LLM call without that context produces a plausible-sounding summary that might miss the point.
+- Stopping after the initial response leaves a natural checkpoint. The user sees the file changes before any further LLM work, which means they can catch agents that went off the rails before spending more tokens on a synthesis of bad work.
+- Frontend UX is simpler: one assistant message per turn, agent activity surfaced through file-picker state and (eventually) the agent tab strip, user follow-ups driven by the existing chat loop.
+
+Future work may revisit this — e.g., an auto-synthesis setting for users who prefer it, or a heuristic-driven auto-review when all agents succeed cleanly with small diffs. For now, user-driven review is simpler and more correct.
 
 ## System Prompt
 
@@ -284,7 +296,7 @@ Agent mode is an opt-in capability gated by a user setting. Users who prefer pre
 - User drives test execution — the system does not run tests automatically
 - Git state is unchanged by parallel execution — no branches, worktrees, or auto-commits
 - Final review and commit always happen via the existing manual workflow
-- Every turn produces exactly one assistant message in the main history store, regardless of how many agents ran and how many iteration rounds occurred. The main LLM's decomposition narration, review commentary, and synthesis all land in the same assistant message's `content` field
+- Every turn produces exactly one assistant message in the main history store, regardless of how many agents ran. The main LLM's decomposition narration (including the agent-spawn blocks as prose) IS that message; there is no automatic synthesis LLM call that would produce a second message. Review and iteration happen on subsequent user turns, each producing their own single assistant message per the normal chat flow
 - Agent archive files are append-only within a turn; re-iteration within the turn appends rather than overwrites
 - Archive existence is optional for main-store correctness — an archive can be deleted at any time without invalidating chat playback or session restore
-- There is no separate planner or assessor ContextManager. The main LLM IS the planner and the assessor, and its conversation lives in the main history store, not in the archive
+- There is no separate planner or assessor ContextManager. The main LLM IS the planner; the user is the assessor (driving review on follow-up turns). Both the main LLM's conversation and any review/iteration turns live in the main history store, not in the archive
