@@ -29,6 +29,7 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - History compaction — enabled flag, trigger threshold, verbatim window, summary budget, minimum verbatim exchanges
 - Document conversion — enabled flag, supported extensions, max source size
 - Document index — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
+- Agents — `enabled` flag gating the parallel-agents capability (default `false`). When `false`, the system prompt omits the agent-spawn block description and the main LLM cannot emit agent-spawn blocks regardless of task shape. See [parallel-agents.md](../7-future/parallel-agents.md#user-control--agent-mode-toggle) for the user-facing toggle and [settings.md](../5-webapp/settings.md#agentic-coding-toggle) for the Settings card
 
 ## Snippets
 

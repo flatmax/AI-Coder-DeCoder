@@ -246,7 +246,32 @@ The main LLM decides per-turn whether to spawn agents. Typical cases:
 - Bulk documentation updates across independent sections
 - Codebase migrations (e.g., API version upgrades across many callers)
 
-For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. Users don't opt in or out — the decision is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
+For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. When agent mode is enabled, the decision to decompose is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
+
+## User Control — Agent Mode Toggle
+
+Agent mode is an opt-in capability gated by a user setting. Users who prefer predictable single-LLM turns, users on constrained token budgets, or users working in repos too small to benefit from decomposition can disable agent mode entirely — the main LLM then handles every turn as a single call, regardless of request shape.
+
+### Configuration
+
+- Stored in `app.json` under `agents.enabled` (boolean). Default: `false`.
+- Exposed through the Settings tab as a toggle card. The card's description names the trade-off clearly — "Allow the assistant to decompose complex requests into parallel agent conversations. Uses more tokens per turn but finishes large refactors faster."
+- Settings-service whitelist covers this field. Hot-reload picks up toggle changes without a server restart; the next user turn sees the new state.
+- When disabled, the AGENT/AGEND blocks the system prompt would normally describe to the main LLM are omitted from the system prompt composition. The LLM is never told about the capability, so it cannot emit agent-spawn blocks.
+- When enabled, the system prompt describes agent-spawn blocks and the main LLM may (but need not) emit them.
+
+### Frontend surface
+
+- Settings tab includes an "Agentic coding" card alongside the other configuration cards.
+- Card renders as a toggle with a short description and a "learn more" link pointing at this spec file.
+- State change broadcasts `modeChanged` — the Settings service's reload path fires it so connected collaborators see the update.
+- Non-localhost participants in collaboration mode see the card in read-only form: the toggle reflects the host's state but cannot be changed. Matches the existing settings-service restriction pattern.
+
+### Runtime behaviour
+
+- `LLMService` reads `config.agents_enabled` on each turn's prompt assembly. When false, the system prompt's agent-spawn description is omitted.
+- The parser's AGENT/AGEND tolerance (per Foundation Requirements) stays active regardless — a disabled-agent-mode setup that somehow receives an agent block in its input (stale session, malformed config) still parses cleanly and ignores the block.
+- Disabling agent mode mid-turn is not possible — the setting is read at prompt-assembly time and the turn proceeds to completion regardless of subsequent toggle flips. A user wanting to abort mid-turn uses the normal cancel mechanism.
 
 ## Invariants (Design Targets)
 

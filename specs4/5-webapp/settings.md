@@ -26,6 +26,19 @@ Each card represents one whitelisted config type:
 
 Card visual style — icon, label, optional subtitle. Clicking a card opens its content in the inline editor.
 
+## Agentic Coding Toggle
+
+A dedicated toggle card in the Settings tab controls whether the main LLM may decompose user requests into parallel agent conversations (see [parallel-agents.md](../7-future/parallel-agents.md)).
+
+- Card label — "Agentic coding"
+- Description — "Allow the assistant to decompose complex requests into parallel agent conversations. Uses more tokens per turn but finishes large refactors faster."
+- Renders as a boolean toggle rather than a text editor — the card opens a different inline surface (a single switch with description and a "learn more" link to the spec) rather than the standard monospace textarea
+- Backed by `app.json`'s `agents.enabled` field (default `false`)
+- Flipping the toggle writes via the standard save-content RPC, and the app-config reload path fires automatically so the next user turn picks up the new state
+- Reload after toggle change also broadcasts `modeChanged` so connected collaborators see the update in real time
+- Non-localhost participants see the toggle in read-only form — the current state is visible but the switch is disabled, matching the mutation-allowed flag pattern used elsewhere in the Settings tab
+- Agent mode being `false` (the default) means the system prompt composition omits the agent-spawn block description entirely; the main LLM is never told about the capability, so it cannot emit agent-spawn blocks. Flipping to `true` adds that description to the prompt on the next turn
+
 ## Editing Flow
 
 1. User clicks a config card
