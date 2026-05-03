@@ -1036,16 +1036,22 @@ class LLMService:
         # signal.
         self._request_accumulators: dict[str, str] = {}
 
-        # Agent streaming impl — points at the stub during
-        # Step 2 of the agent-spawning plan; Step 3 swaps it
-        # for :meth:`_stream_chat` so each spawned agent runs
-        # through the full pipeline. Tests can override this
-        # attribute directly to observe invocations without
-        # patching `asyncio.ensure_future` or the worker
-        # executor. Must be an async callable matching
-        # ``_stream_chat``'s signature.
+        # Agent streaming impl — points at :meth:`_stream_chat`
+        # so each spawned agent runs through the full pipeline
+        # (LLM call, edit parse, edit apply, persistence,
+        # post-response stability update). Tests can override
+        # this attribute to install a recorder or a stub for
+        # observability without patching `asyncio.ensure_future`
+        # or the worker executor. Must be an async callable
+        # matching ``_stream_chat``'s signature.
+        #
+        # Step 3 of the agent-spawning plan flipped this from
+        # the stub (:meth:`_stream_chat_stub`) to the real
+        # streaming method. The stub remains in the codebase
+        # for tests that want a trivial no-op impl; production
+        # paths never reach it.
         self._agent_stream_impl: Callable[..., Awaitable[Any]] = (
-            self._stream_chat_stub
+            self._stream_chat
         )
 
         # Commit background task guard. Prevents concurrent commits.
@@ -5289,16 +5295,20 @@ class LLMService:
         # for retry on the next request (auto-added) or for
         # iteration (newly created).
         #
-        # Agents have their own scope.selected_files (per D21)
-        # but today only the main conversation's scope drives
-        # the file-picker broadcast. Future agent-spawning code
-        # may keep this broadcast main-conversation-only or
-        # extend the event to carry a scope identifier; for
-        # now the read through scope preserves the single-
-        # agent behaviour.
+        # SUPPRESSED for child streams (agent spawning). An
+        # agent's scope.selected_files is a copy of the
+        # parent's that diverges as the agent runs — its
+        # auto-add mutations are agent-private. Broadcasting
+        # that list would stomp the user's picker with the
+        # agent's view, which is wrong until D21's tab strip
+        # routes per-tab selection state. For now the main
+        # picker follows only the parent conversation's
+        # selection; agent auto-adds are visible via the
+        # per-agent archive and the future agent-tab UI.
         if (
-            result.get("files_auto_added")
-            or result.get("files_created")
+            (result.get("files_auto_added")
+             or result.get("files_created"))
+            and not self._is_child_request(request_id)
         ):
             self._broadcast_event(
                 "filesChanged", list(scope.selected_files)

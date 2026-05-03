@@ -74,6 +74,18 @@ class _FakeLiteLLM:
     Test setup patches ``ac_dc.llm_service`` lookups for
     ``import litellm`` via monkeypatching ``sys.modules`` so both
     the streaming and aux completion paths see this fake.
+
+    For single-call tests, ``set_streaming_chunks([...])`` seeds
+    the next streaming completion. For multi-call tests (parallel
+    agents), ``queue_streaming_chunks([...])`` appends to a FIFO
+    that each ``completion(stream=True)`` call pops from —
+    so N parallel agents each get their pre-planned chunks
+    regardless of which call hits the fake first.
+
+    Exceptions can be queued too via ``queue_streaming_error`` —
+    each exception pops from the same FIFO as chunks and raises
+    on the corresponding ``completion()`` call. Useful for
+    testing sibling-exception isolation.
     """
 
     def __init__(self) -> None:
@@ -81,6 +93,12 @@ class _FakeLiteLLM:
         self.non_streaming_reply: str = ""
         self.call_count = 0
         self.last_call_args: dict[str, Any] = {}
+        # FIFO of per-call directives. Each entry is either a
+        # list[str] of chunks or an Exception. Consumed in
+        # order on each streaming completion() call. When the
+        # FIFO is empty, falls back to the single-call
+        # ``streaming_chunks`` field for backward compatibility.
+        self._streaming_queue: list[Any] = []
 
     def set_streaming_chunks(self, chunks: list[str]) -> None:
         """Pre-seed content for the next streaming completion.
@@ -91,6 +109,26 @@ class _FakeLiteLLM:
         """
         self.streaming_chunks = list(chunks)
 
+    def queue_streaming_chunks(self, chunks: list[str]) -> None:
+        """Append a chunk-list to the per-call FIFO.
+
+        Each queued entry is consumed by one streaming
+        ``completion()`` call. Use this for parallel-agent
+        tests where two or more concurrent calls each need
+        their own pre-planned output.
+        """
+        self._streaming_queue.append(list(chunks))
+
+    def queue_streaming_error(self, exc: BaseException) -> None:
+        """Append an exception to the per-call FIFO.
+
+        The next streaming ``completion()`` call raises this
+        exception instead of returning chunks. Useful for
+        testing sibling-exception isolation across parallel
+        agents.
+        """
+        self._streaming_queue.append(exc)
+
     def set_non_streaming_reply(self, reply: str) -> None:
         """Pre-seed content for the next non-streaming call."""
         self.non_streaming_reply = reply
@@ -100,14 +138,31 @@ class _FakeLiteLLM:
         self.call_count += 1
         self.last_call_args = kwargs
         if kwargs.get("stream"):
+            # If we have queued directives, consume one;
+            # otherwise fall through to the single-call field.
+            if self._streaming_queue:
+                directive = self._streaming_queue.pop(0)
+                if isinstance(directive, BaseException):
+                    raise directive
+                return self._build_stream_from(directive)
             return self._build_stream()
         return self._build_response(self.non_streaming_reply)
+
+    def _build_stream_from(self, chunks: list[str]):
+        """Yield chunks supplied directly (bypasses single-call field)."""
+        # Re-use the same chunk-wrapping machinery as
+        # _build_stream; we just start with a specific list.
+        return self._wrap_chunks(list(chunks))
 
     def _build_stream(self):
         """Yield fake streaming chunks."""
         chunks = list(self.streaming_chunks)
         # Reset so a second call doesn't replay stale content.
         self.streaming_chunks = []
+        return self._wrap_chunks(chunks)
+
+    def _wrap_chunks(self, chunks: list[str]):
+        """Shared chunk-wrapping machinery for both entry points."""
 
         class _Delta:
             def __init__(self, content: str) -> None:
@@ -4737,6 +4792,325 @@ class TestAgentSpawn:
         assert agent_scope.archival_append is (
             agent_scope.context.archival_sink
         )
+
+    def test_default_agent_stream_impl_is_real_stream_chat(
+        self,
+        service: LLMService,
+    ) -> None:
+        """After Step 3, the default impl is ``_stream_chat``.
+
+        Regression guard for the Step 3 flip. A future
+        refactor that accidentally re-aliased the attribute
+        to the stub (easy mistake — the stub is still in the
+        codebase for test convenience) would make agent spawns
+        silently no-op in production while still passing every
+        test that installs its own recorder.
+        """
+        # Bound-method identity check — the attribute holds
+        # the service's own _stream_chat method, not the stub.
+        assert service._agent_stream_impl == service._stream_chat
+        # And critically, NOT the stub.
+        assert service._agent_stream_impl != service._stream_chat_stub
+
+
+class TestAgentExecutionEndToEnd:
+    """Step 3 — agents run through the real _stream_chat pipeline.
+
+    These tests pin the invariants that matter when agents
+    spawn real LLM calls rather than hitting the stub:
+
+    - Each agent's assistant response lands in its own archive
+      file (agent-NN.jsonl) under the correct turn directory.
+    - Each agent's task string appears in its archive as a
+      user message (the task text is the agent's initial
+      prompt).
+    - Edit blocks emitted by an agent apply against the shared
+      repo with the per-path write mutex serialising disk
+      writes.
+    - Sibling-exception isolation: one agent raising mid-stream
+      (via a queued LiteLLM exception) doesn't prevent siblings
+      from completing and writing their archives.
+    - The parent's ``filesChanged`` broadcast is suppressed
+      for child streams so an agent's selection doesn't stomp
+      the user's picker.
+
+    Unlike ``TestAgentSpawn`` (which installs a recorder for
+    ``_agent_stream_impl``), these tests use the real
+    ``_stream_chat`` — reached via ``_spawn_agents_for_turn``.
+    The ``_FakeLiteLLM`` queue mechanism supplies per-call
+    responses so two parallel agents each get their planned
+    chunks.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something useful",
+    ) -> Any:
+        """Build a valid AgentBlock."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    async def test_two_agents_each_produce_archive(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+        repo_dir: Path,
+    ) -> None:
+        """Two parallel agents each write their own archive file.
+
+        Verifies the core invariant: per-agent ContextManager
+        routes its assistant response to its own per-turn
+        archive path. The main store is untouched by agents.
+        """
+        # Queue per-call responses. Two agents run in parallel;
+        # each consumes one queued entry. Order-insensitive
+        # because each response contains a unique marker we
+        # can grep for.
+        fake_litellm.queue_streaming_chunks(["alpha reply"])
+        fake_litellm.queue_streaming_chunks(["beta reply"])
+
+        # Set up parent scope as if _stream_chat had populated
+        # it. We exercise _spawn_agents_for_turn directly
+        # rather than going through chat_streaming — avoids
+        # coordinating the main LLM's fake call with the
+        # agents' calls.
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        blocks = [
+            self._make_agent_block("agent-0", "first task"),
+            self._make_agent_block("agent-1", "second task"),
+        ]
+        turn_id = HistoryStore.new_turn_id()
+
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id=turn_id,
+        )
+
+        # Each agent's archive exists and contains its
+        # response.
+        archive_dir = repo_dir / ".ac-dc4" / "agents" / turn_id
+        agent_0 = archive_dir / "agent-00.jsonl"
+        agent_1 = archive_dir / "agent-01.jsonl"
+        assert agent_0.exists()
+        assert agent_1.exists()
+
+        archive = history_store.get_turn_archive(turn_id)
+        assert len(archive) == 2
+        # Both agents recorded their task AND a response.
+        # Each archive contains at least user message + assistant
+        # response. Response content depends on which queued
+        # chunk each agent consumed, so we assert on SET of
+        # responses across agents rather than per-agent order.
+        all_contents: list[str] = []
+        for entry in archive:
+            for msg in entry["messages"]:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    all_contents.append(content)
+        combined = " ".join(all_contents)
+        assert "first task" in combined
+        assert "second task" in combined
+        assert "alpha reply" in combined
+        assert "beta reply" in combined
+
+    async def test_agent_edit_applies_to_repo(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """An agent's edit block modifies the shared repo.
+
+        The per-path write mutex in ``Repo`` serialises
+        concurrent writes; a single agent writing one file
+        just exercises the apply path end-to-end.
+
+        An agent has no selected files by default, so a modify
+        edit against an existing file goes through the
+        ``not_in_context`` path — the edit doesn't apply, but
+        the file gets auto-added to the agent's selection. This
+        is the documented behaviour; we verify it rather than
+        the apply-on-first-try case (which would require
+        pre-seeding the agent's selection, which agents don't
+        have yet without the D21 tab UI).
+        """
+        # Seed a file the agent will try to edit.
+        target = repo_dir / "target.py"
+        target.write_text("original content\n")
+
+        # Agent response contains an edit block targeting the
+        # pre-existing file. The response gets parsed by
+        # _build_completion_result which routes the block
+        # through _edit_pipeline.apply_edits; not-in-context
+        # for the agent means the file is auto-added to its
+        # selection.
+        edit_response = (
+            "Making a change:\n\n"
+            "target.py\n"
+            "🟧🟧🟧 EDIT\n"
+            "original content\n"
+            "🟨🟨🟨 REPL\n"
+            "modified content\n"
+            "🟩🟩🟩 END\n"
+        )
+        fake_litellm.queue_streaming_chunks([edit_response])
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        blocks = [
+            self._make_agent_block(
+                "agent-0", "edit target.py"
+            ),
+        ]
+        turn_id = HistoryStore.new_turn_id()
+
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id=turn_id,
+        )
+
+        # File on disk is unchanged because the edit was
+        # not-in-context (agent's selection was empty). The
+        # edit block parsed and surfaced in the agent's
+        # archive via edit_results.
+        assert target.read_text() == "original content\n"
+
+        # Agent's archive recorded the attempt and the
+        # not-in-context status via edit_results on the
+        # assistant message.
+        archive = history_store.get_turn_archive(turn_id)
+        assert len(archive) == 1
+        messages = archive[0]["messages"]
+        # Assistant message with edit_results.
+        assistant_msgs = [
+            m for m in messages if m.get("role") == "assistant"
+        ]
+        assert assistant_msgs
+        # At least one message has edit results flagging
+        # not-in-context OR files_auto_added.
+        has_edit_info = any(
+            m.get("edit_results") or m.get("files_modified")
+            for m in assistant_msgs
+        )
+        assert has_edit_info
+
+    async def test_sibling_exception_does_not_block_other_agents(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+        repo_dir: Path,
+    ) -> None:
+        """Agent 0 raises mid-stream; agent 1 still completes.
+
+        ``asyncio.gather(return_exceptions=True)`` in
+        ``_spawn_agents_for_turn`` absorbs the raise.
+        Agent 1's archive must still contain its response.
+        """
+        # Agent 0 raises; agent 1 streams normally.
+        fake_litellm.queue_streaming_error(
+            RuntimeError("simulated agent-0 failure"),
+        )
+        fake_litellm.queue_streaming_chunks(["beta survived"])
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        blocks = [
+            self._make_agent_block("agent-0", "will fail"),
+            self._make_agent_block(
+                "agent-1", "will succeed"
+            ),
+        ]
+        turn_id = HistoryStore.new_turn_id()
+
+        # Must not raise — gather absorbs exceptions.
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id=turn_id,
+        )
+
+        archive = history_store.get_turn_archive(turn_id)
+        # Agent 1's archive survived.
+        survived = [
+            a for a in archive if a["agent_idx"] == 1
+        ]
+        assert survived
+        messages = survived[0]["messages"]
+        combined = " ".join(
+            m.get("content", "") for m in messages
+            if isinstance(m.get("content"), str)
+        )
+        assert "beta survived" in combined
+
+    async def test_child_stream_does_not_broadcast_selection(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        repo_dir: Path,
+    ) -> None:
+        """Agent auto-adds don't stomp the user's picker.
+
+        The agent's scope.selected_files is a per-agent copy;
+        broadcasting a filesChanged event with that list
+        would make the main picker reflect the agent's view
+        rather than the user's. Step 3 suppresses this
+        broadcast for child streams via the
+        ``_is_child_request`` check at the broadcast site.
+        """
+        # Seed a file the agent will edit, so the edit path
+        # triggers auto-add (file exists, agent selection is
+        # empty → not_in_context → auto-added).
+        target = repo_dir / "victim.py"
+        target.write_text("unchanged\n")
+
+        edit_response = (
+            "victim.py\n"
+            "🟧🟧🟧 EDIT\n"
+            "unchanged\n"
+            "🟨🟨🟨 REPL\n"
+            "changed\n"
+            "🟩🟩🟩 END\n"
+        )
+        fake_litellm.queue_streaming_chunks([edit_response])
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        # Clear any events from earlier broadcasts so we're
+        # measuring just this spawn's output.
+        event_cb.events.clear()
+
+        blocks = [
+            self._make_agent_block("agent-0", "modify"),
+        ]
+        turn_id = HistoryStore.new_turn_id()
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id=turn_id,
+        )
+
+        # No filesChanged event should have fired from the
+        # agent's auto-add path. The main picker would have
+        # been stomped if we broadcast the agent's private
+        # selection list.
+        files_changed = [
+            args for name, args in event_cb.events
+            if name == "filesChanged"
+        ]
+        assert files_changed == []
 
 
 class TestURLIntegration:
