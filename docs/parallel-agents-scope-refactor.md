@@ -82,7 +82,8 @@ Each step is a small, reviewable diff. Each step leaves the codebase working and
 (Update after each step lands.)
 
 - **Step 1** — delivered. `ConversationScope` dataclass added at module scope in `src/ac_dc/llm_service.py` alongside the `ArchivalAppend` type alias. `_default_scope()` helper method on `LLMService` builds a scope from `self` with a closure wrapping `HistoryStore.append_message`. No call sites use the new machinery yet.
-- **Step 2** — not yet started
+- **Step 2** — delivered. `_stream_chat` gained a keyword-only `scope: ConversationScope | None` parameter, defaulting to `None` with an inline fallback that calls `self._default_scope()` for safety during mid-refactor development. Every per-conversation read inside the method body (user and assistant message persistence, `filesChanged` broadcast, review-context clear, lazy-init mode check, fall-back-to-flat diagnostic) now goes through `scope.*`. `chat_streaming` builds the default scope explicitly and threads it to `_stream_chat`. Callees (`_post_response`, `_sync_file_context`, `_build_and_set_review_context`, `_detect_and_fetch_urls`, `_build_tiered_content`, `_assemble_tiered`, `_assemble_messages_flat`, `_build_completion_result`) still read per-conversation state from `self.*` directly — they get threaded the scope in subsequent steps. For the default-scope case `scope.X` resolves to the same object as `self._X`, so every test passes unchanged.
+- **Step 3** — not yet started
 - **Step 3** — not yet started
 - **Step 4** — not yet started
 - **Step 5** — not yet started

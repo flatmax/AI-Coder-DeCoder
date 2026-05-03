@@ -4488,6 +4488,14 @@ class LLMService:
 
         # Launch the background task. ensure_future rather than
         # await so we return {"status": "started"} immediately.
+        #
+        # The default scope points at the main-conversation
+        # state on ``self``. Future parallel-agent spawning will
+        # construct per-agent scopes via
+        # :func:`ac_dc.agent_factory.build_agent_context_manager`
+        # plus per-agent tracker and selection list; for the
+        # user-facing session the default scope is byte-
+        # identical to the pre-refactor implicit-``self`` reads.
         asyncio.ensure_future(
             self._stream_chat(
                 request_id,
@@ -4495,6 +4503,7 @@ class LLMService:
                 files or [],
                 images or [],
                 excluded_urls or [],
+                scope=self._default_scope(),
             )
         )
         return {"status": "started"}
@@ -4526,6 +4535,8 @@ class LLMService:
         files: list[str],
         images: list[str],
         excluded_urls: list[str] | None = None,
+        *,
+        scope: ConversationScope | None = None,
     ) -> None:
         """Background task — the actual streaming logic.
 
@@ -4535,7 +4546,42 @@ class LLMService:
         :meth:`URLService.format_url_context` can omit them from
         the prompt's URL section while leaving the chip state
         untouched.
+
+        ``scope`` bundles the per-conversation state the method
+        reads — the ContextManager, stability tracker, session
+        ID, selected-files list, and archival-append closure.
+        The default-None fallback builds a scope from ``self``
+        to preserve compatibility with any caller that hasn't
+        been updated yet (none today, but the safety net is
+        cheap). Future parallel-agent spawning constructs
+        per-agent scopes and passes them explicitly.
+
+        Per-conversation reads — history, file_context, tracker,
+        session_id, selected_files — go through ``scope.*``.
+        Shared-infrastructure reads (repo, config, indexes, URL
+        service, executors, guard state, review mode) continue
+        via ``self``. Review-mode state is
+        main-conversation-only per spec; agents never enter
+        review.
+
+        Callees (``_post_response``, ``_update_stability``,
+        ``_sync_file_context``, ``_build_completion_result``,
+        ``_build_and_set_review_context``,
+        ``_detect_and_fetch_urls``, ``_build_tiered_content``,
+        ``_assemble_tiered``, ``_assemble_messages_flat``) still
+        read per-conversation state from ``self.*`` directly.
+        They get threaded the scope in subsequent refactor
+        steps. For the default-scope case the objects match
+        exactly, so the behaviour is byte-identical to the
+        pre-refactor implementation.
         """
+        # Defensive default for callers that predate the scope
+        # parameter. Every shipping call site supplies a scope
+        # explicitly; this branch is dead in practice but keeps
+        # the method callable without a scope during mid-
+        # refactor development.
+        if scope is None:
+            scope = self._default_scope()
         error: str | None = None
         full_content = ""
         cancelled = False
@@ -4570,6 +4616,11 @@ class LLMService:
             # File context sync — remove deselected files, load
             # selected ones. Defensive: skip files that don't exist
             # or that the repo can't read.
+            #
+            # _sync_file_context still reads per-conversation
+            # state from self.* directly (refactored in Step 5).
+            # For the default scope that points at the same
+            # objects, so behaviour is unchanged.
             self._sync_file_context()
 
             # Re-index on every chat request so deletions
@@ -4611,18 +4662,26 @@ class LLMService:
 
             # Persist user message BEFORE the LLM call. Matches
             # specs4 — mid-stream crash preserves user intent.
-            if self._history_store is not None:
-                self._history_store.append_message(
-                    session_id=self._session_id,
-                    role="user",
-                    content=message,
-                    files=list(self._selected_files) or None,
+            #
+            # archival_append is the scope's bound closure over
+            # the history store's append method. For the main
+            # conversation it wraps HistoryStore.append_message;
+            # for future agent scopes it wraps
+            # HistoryStore.append_agent_message (via the closure
+            # in agent_factory.build_agent_context_manager). The
+            # call site doesn't care which.
+            if scope.archival_append is not None:
+                scope.archival_append(
+                    "user",
+                    message,
+                    session_id=scope.session_id,
+                    files=list(scope.selected_files) or None,
                     images=images if images else None,
                     turn_id=turn_id,
                 )
-            self._context.add_message(
+            scope.context.add_message(
                 "user", message,
-                files=list(self._selected_files) or None,
+                files=list(scope.selected_files) or None,
                 turn_id=turn_id,
             )
 
@@ -4666,6 +4725,14 @@ class LLMService:
             # selection (user may have added or removed files
             # since the last turn). See
             # specs4/4-features/code-review.md.
+            #
+            # Review mode is main-conversation-only per spec;
+            # self._review_active is the authoritative flag and
+            # stays on self. The review-context attachment
+            # still happens via the main ContextManager, which
+            # for the default scope is scope.context — the
+            # current helper reads self._context directly; Step
+            # 9 threads the scope through.
             if self._review_active:
                 self._build_and_set_review_context()
             else:
@@ -4674,15 +4741,20 @@ class LLMService:
                 # end_review clears it, but this guard protects
                 # against a crashed exit that left stale
                 # context on the manager.
-                self._context.clear_review_context()
+                scope.context.clear_review_context()
 
             # Lazy stability initialization — if eager init
             # during startup (or mode-switch init) failed, try
             # again on the first chat request. The per-mode
             # flag prevents re-runs once the current mode's
             # tracker is populated.
+            #
+            # _stability_initialized is shared infrastructure
+            # (mode-keyed dict on self), not per-conversation
+            # state. Read mode from scope.context since that's
+            # the conversation's authoritative mode.
             if not self._stability_initialized.get(
-                self._context.mode, False
+                scope.context.mode, False
             ):
                 self._try_initialize_stability()
 
@@ -4691,19 +4763,27 @@ class LLMService:
             # stability tracker hasn't been initialised yet
             # (narrow startup window). Fall back to flat in that
             # case so early requests still work.
+            #
+            # _build_tiered_content / _assemble_tiered /
+            # _assemble_messages_flat still read per-conversation
+            # state from self.* directly (refactored in Step 6).
+            # For the default scope those are the same objects.
             tiered_content = self._build_tiered_content()
             if tiered_content is None:
                 # Diagnose why we're falling back. A persistent
                 # fall-back-to-flat condition usually means the
                 # symbol index never attached or stability init
                 # silently failed — neither is visible to the
-                # user otherwise.
-                mode = self._context.mode
+                # user otherwise. Mode and tracker-item count
+                # come from scope so the diagnostic reports the
+                # conversation's actual state (identical to
+                # self.* for the default scope).
+                mode = scope.context.mode
                 initialised = self._stability_initialized.get(
                     mode, False
                 )
                 tracker_items = len(
-                    self._stability_tracker.get_all_items()
+                    scope.tracker.get_all_items()
                 )
                 logger.warning(
                     "Using flat assembly (tracker empty). "
@@ -4740,19 +4820,23 @@ class LLMService:
             )
 
             # Add assistant response to context and persist.
+            # Both writes go through scope so an agent scope
+            # lands them on the per-agent ContextManager and
+            # the per-turn archive rather than the main
+            # session's state.
             if full_content or cancelled:
                 content_to_store = full_content
                 if cancelled and not content_to_store:
                     content_to_store = "[stopped]"
-                self._context.add_message(
+                scope.context.add_message(
                     "assistant", content_to_store,
                     turn_id=turn_id,
                 )
-                if self._history_store is not None:
-                    self._history_store.append_message(
-                        session_id=self._session_id,
-                        role="assistant",
-                        content=content_to_store,
+                if scope.archival_append is not None:
+                    scope.archival_append(
+                        "assistant",
+                        content_to_store,
+                        session_id=scope.session_id,
                         turn_id=turn_id,
                     )
         except Exception as exc:
@@ -4793,12 +4877,20 @@ class LLMService:
         # selection so the user sees which files were added —
         # for retry on the next request (auto-added) or for
         # iteration (newly created).
+        #
+        # Agents have their own scope.selected_files (per D21)
+        # but today only the main conversation's scope drives
+        # the file-picker broadcast. Future agent-spawning code
+        # may keep this broadcast main-conversation-only or
+        # extend the event to carry a scope identifier; for
+        # now the read through scope preserves the single-
+        # agent behaviour.
         if (
             result.get("files_auto_added")
             or result.get("files_created")
         ):
             self._broadcast_event(
-                "filesChanged", list(self._selected_files)
+                "filesChanged", list(scope.selected_files)
             )
 
         # Broadcast filesModified whenever apply wrote to disk,
