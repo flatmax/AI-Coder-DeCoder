@@ -4936,10 +4936,14 @@ class LLMService:
         # compaction. Only runs when the stream completed normally
         # (not error, not cancelled). turn_id propagates so the
         # compaction system event (if one fires) inherits the
-        # turn's ID per specs4/3-llm/history.md § Turns.
+        # turn's ID per specs4/3-llm/history.md § Turns. Scope
+        # threads through so compaction writes land on the
+        # right ContextManager and archive (matters for future
+        # agent scopes; identical to the main state for the
+        # default scope).
         if error is None and not cancelled:
             try:
-                await self._post_response(request_id, turn_id)
+                await self._post_response(request_id, turn_id, scope)
             except Exception as exc:
                 logger.exception(
                     "Post-response processing for %s failed: %s",
@@ -7405,7 +7409,10 @@ class LLMService:
     # ------------------------------------------------------------------
 
     async def _post_response(
-        self, request_id: str, turn_id: str
+        self,
+        request_id: str,
+        turn_id: str,
+        scope: ConversationScope | None = None,
     ) -> None:
         """Stability tracker update, compaction, terminal HUD.
 
@@ -7414,18 +7421,60 @@ class LLMService:
         in particular) inherits the turn's ID. Per
         specs4/3-llm/history.md § Turns, every record produced by
         a user request shares the turn ID.
+
+        ``scope`` bundles the per-conversation state this method
+        operates on — the ContextManager (for history reads and
+        the compaction system-event append), the stability
+        tracker (for history-purge after compaction), the
+        session_id + archival_append (for persisting the
+        compaction event). The default-None fallback builds a
+        scope from ``self`` so direct callers (tests, future
+        entry points) can skip the scope argument.
+
+        Callees still read from ``self.*``:
+
+        - ``_update_stability`` reads the main-conversation
+          tracker directly (refactored in Step 4).
+        - ``_print_post_response_hud`` is a diagnostic method
+          that reads shared infrastructure — session totals,
+          config, URL service — plus per-conversation state
+          (``self._context``, ``self._stability_tracker``).
+          For the default-scope case these are the same
+          objects; the HUD is unchanged. A future refactor
+          may thread scope through for per-agent terminal
+          HUD output, but today only the main conversation
+          triggers post-response work.
+
+        For the default-scope case every ``scope.X`` read
+        resolves to the same object as ``self._X``, so
+        single-agent behaviour is byte-identical.
         """
+        # Defensive default for callers that predate the scope
+        # parameter. Every shipping call site (just one today:
+        # _stream_chat) supplies a scope explicitly; this
+        # branch is dead in practice.
+        if scope is None:
+            scope = self._default_scope()
+
         # Stability update — builds the full active items list
-        # and runs the tracker update cycle.
+        # and runs the tracker update cycle. Reads the main
+        # conversation's state from self.* directly; Step 4
+        # threads the scope through. For the default scope,
+        # self._stability_tracker is scope.tracker and the
+        # behaviour is identical.
         self._update_stability()
 
         # Print terminal HUD — three sections per specs3.
+        # Shared infrastructure plus main-conversation state;
+        # no scope plumbing for the diagnostic path today.
         self._print_post_response_hud()
 
         # Compaction — runs after the response, gated on the
         # current history token count. Events communicate progress
-        # to the frontend.
-        tokens = self._context.history_token_count()
+        # to the frontend. History reads and the purge go
+        # through scope so an agent scope would drive its own
+        # ContextManager and tracker.
+        tokens = scope.context.history_token_count()
         if self._compactor.should_compact(tokens):
             await self._broadcast_event_async(
                 "compactionEvent",
@@ -7434,7 +7483,7 @@ class LLMService:
             )
             try:
                 result = self._compactor.compact_history_if_needed(
-                    self._context.get_history(),
+                    scope.context.get_history(),
                     already_checked=True,
                 )
             except Exception as exc:
@@ -7453,25 +7502,31 @@ class LLMService:
                 # pre-compaction token count is `tokens` from
                 # the top of this method.
                 messages_before_count = len(
-                    self._context.get_history()
+                    scope.context.get_history()
                 )
                 # Replace history + purge tracker history entries
                 # (compacted messages re-enter as fresh active
                 # items on the next request).
-                self._context.set_history(result.messages)
-                self._stability_tracker.purge_history()
+                scope.context.set_history(result.messages)
+                scope.tracker.purge_history()
                 # Append a system-event message so users see the
                 # compaction in their chat scrollback, and the
                 # history browser can search + display past
                 # compactions. Mirrors the commit_all / reset flow
                 # — context first (so the LLM's next request sees
-                # it as part of history), then history store
-                # (JSONL persistence), then broadcast (frontend
-                # gets the compacted list with the event already
-                # attached).
+                # it as part of history), then archive (JSONL
+                # persistence), then broadcast (frontend gets the
+                # compacted list with the event already attached).
+                #
+                # archival_append is the scope's bound closure
+                # over the history store's append method. For
+                # the main conversation it wraps
+                # HistoryStore.append_message; for future agent
+                # scopes it wraps append_agent_message via the
+                # closure in agent_factory.build_agent_context_manager.
                 try:
                     tokens_after = (
-                        self._context.history_token_count()
+                        scope.context.history_token_count()
                     )
                     event_text = _build_compaction_event_text(
                         result,
@@ -7480,16 +7535,16 @@ class LLMService:
                         messages_before_count=messages_before_count,
                         messages_after_count=len(result.messages),
                     )
-                    self._context.add_message(
+                    scope.context.add_message(
                         "user", event_text,
                         system_event=True,
                         turn_id=turn_id,
                     )
-                    if self._history_store is not None:
-                        self._history_store.append_message(
-                            session_id=self._session_id,
-                            role="user",
-                            content=event_text,
+                    if scope.archival_append is not None:
+                        scope.archival_append(
+                            "user",
+                            event_text,
+                            session_id=scope.session_id,
                             system_event=True,
                             turn_id=turn_id,
                         )
@@ -7508,7 +7563,7 @@ class LLMService:
                     {
                         "stage": "compacted",
                         "case": result.case,
-                        "messages": self._context.get_history(),
+                        "messages": scope.context.get_history(),
                     },
                 )
 
