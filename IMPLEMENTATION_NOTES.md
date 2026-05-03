@@ -135,6 +135,28 @@ The four commits form a complete wire-through with no intermediate half-on state
 
 So toggling agents on today produces a more informative LLM response — it may reference agent blocks in its reasoning, or emit well-formed blocks that nothing acts on — without changing what actually executes. The toggle is decorative from an *execution* standpoint. This is deliberate: `specs4/7-future/parallel-agents.md` files the dispatch layer under future work, and the gating infrastructure had to land first so when dispatch is implemented, the LLM can be taught the capability and then un-taught without redeploying.
 
+**What "agentic mode" means today, concretely.** Four things landed:
+
+| Layer | Piece | Delivered |
+|---|---|---|
+| Config | `agents.enabled` flag, `agents_config` / `agents_enabled` properties, malformed-value degradation | ✓ |
+| Prompt assembly | `system_agentic_appendix.md` bundled file, concatenation logic, user-dir-only read semantics | ✓ |
+| Live refresh | `LLMService.refresh_system_prompt()` invoked from `Settings.reload_app_config()` | ✓ |
+| Frontend | Settings-tab toggle card with click-to-save, defensive parsing, localhost gate, in-flight guard | ✓ |
+
+Four things did NOT land and belong to the future spec:
+
+| Layer | Piece | Status |
+|---|---|---|
+| Parser dispatch | Branch in `EditParser` that routes `🟧🟧🟧 AGENT` blocks to a spawn handler instead of treating them as prose | Foundation (D20) tolerates the markers; no dispatch path exists |
+| Execution | `_stream_chat` refactor to take ContextManager as parameter, then invoke N times in parallel per agent block (per D22) | Not started |
+| Archive UI | Tab strip in chat panel, per-tab state keyed by `{turn_id, agent_idx}`, per-tab RPC routing (per D21) | Not started |
+| Synthesis | Main LLM observing agent completion and deciding synthesize / iterate / recover | Not started |
+
+The gap between "information plane complete" and "execution plane implemented" is substantial — roughly the content of `specs4/7-future/parallel-agents.md` § Execution Model, Agents, Review Step. That spec remains in `specs4/7-future/` precisely because it's future work. A user toggling `agents.enabled` on today gets a more informative LLM that knows about a capability it cannot exercise.
+
+The value of landing D23 in isolation is cleanup cost. When the dispatch layer IS implemented later, the prompt-side gating infrastructure is already in place — the feature can be tested with `agents.enabled=true` from day one, and the existing test suite pins the off-state invariant (appendix-never-read, prompt-never-mentions-capability) so a regression that leaked agent instructions into non-agent deployments would trip on the first test run.
+
 ### D22 — Parallel-agents foundation uses the existing streaming pipeline
 
 Earlier iteration of the parallel-agents foundation built three new modules: `agent_runner.py` (Slice 6a — runs one agent end-to-end), `agent_orchestrator.py` (Slice 6b — dispatches N agents concurrently), and a planned `agent_edit_applier.py` (Slice 6c — applies agent edits to disk). 6a and 6b shipped with full test coverage; 6c was partially written.

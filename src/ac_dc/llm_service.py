@@ -96,6 +96,7 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from ac_dc.context_manager import ContextManager, Mode
@@ -142,6 +143,113 @@ logger = logging.getLogger(__name__)
 # filesChanged(files_list)), so we use *args rather than a fixed
 # schema. Returns a coroutine the caller awaits.
 EventCallback = Callable[..., Awaitable[Any]]
+
+
+# Archival append callable — wraps :meth:`HistoryStore.append_message`
+# for the main conversation, or
+# :meth:`HistoryStore.append_agent_message` for an agent
+# conversation (via the closure in
+# :func:`ac_dc.agent_factory.build_agent_context_manager`).
+#
+# The signature is intentionally loose (``*args, **kwargs``) so the
+# same type covers both append methods. The scope carries None when
+# no history store is attached — a tests-that-skip-persistence case
+# — and callers check for None before invoking.
+ArchivalAppend = Callable[..., Any]
+
+
+# ---------------------------------------------------------------------------
+# Conversation scope
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConversationScope:
+    """Per-conversation state bundle threaded through ``_stream_chat``.
+
+    A ``_stream_chat`` call operates on exactly one conversation.
+    In single-agent operation that's the main user-facing
+    session; in future parallel-agent mode
+    (``specs4/7-future/parallel-agents.md``) each spawned agent
+    runs its own ``_stream_chat`` call with its own scope.
+
+    Bundling the per-conversation fields into one parameter:
+
+    - Makes the dependency graph explicit. A reader of
+      ``_stream_chat``'s signature sees exactly which state is
+      per-conversation without chasing ``self.`` reads.
+    - Keeps the refactor to agent-spawning a field swap, not a
+      parameter plumbing job. The main-conversation path builds a
+      default scope from ``self``; agent spawning builds scopes
+      from :func:`ac_dc.agent_factory.build_agent_context_manager`
+      plus per-agent tracker and selection state.
+    - Separates per-conversation state from shared infrastructure
+      (``_url_service``, ``_symbol_index``, ``_doc_index``,
+      ``_repo``, ``_config``, executors, event callback,
+      cancellation/guard state). The shared fields continue to
+      live on ``LLMService`` and are read via ``self`` from within
+      ``_stream_chat``.
+
+    **What the scope does NOT carry:**
+
+    - ``turn_id`` — generated per-request inside ``_stream_chat``
+      or passed as an argument by future agent-spawning code. A
+      single ContextManager handles many turns; turn_id is
+      mid-flight state, not scope-lifetime state.
+    - ``_review_active`` / ``_review_state`` — review mode is
+      main-conversation-only per
+      ``specs4/4-features/code-review.md``. Agents never review.
+      ``_stream_chat`` continues to read these from ``self``.
+    - Guard state (``_committing``, ``_active_user_request``,
+      ``_cancelled_requests``, ``_request_accumulators``) —
+      multiplexing primitives shared across all conversations.
+    - Mode-tracker management (``_trackers``,
+      ``_stability_initialized``) — shared bookkeeping;
+      ``scope.tracker`` points at whichever entry is live for
+      this scope.
+
+    **Field semantics:**
+
+    ``context`` owns the ContextManager and its embedded
+    FileContext. Callers should use ``scope.context.file_context``
+    rather than storing a separate reference; the two must not
+    drift (historical bug: see the aliasing note in
+    :meth:`LLMService.__init__`).
+
+    ``tracker`` is the StabilityTracker for this conversation.
+    In single-agent operation it's whichever entry of
+    ``LLMService._trackers`` is currently active; in future
+    parallel-agent mode each agent has its own instance.
+
+    ``session_id`` partitions the history store. The main
+    conversation persists to a user session ID; agents persist
+    to a per-turn archive path, which the ``archival_append``
+    closure knows how to target. The ``session_id`` field is
+    still carried on scope because some audit paths (compaction
+    system event persistence for the main conversation) call
+    into ``HistoryStore.append_message`` directly with a
+    session_id. Agents' ``archival_append`` ignores the field —
+    their closure already bakes in the turn_id and agent_idx.
+
+    ``selected_files`` is the file picker state. In single-agent
+    operation this is ``LLMService._selected_files``; per D21 the
+    frontend will eventually scope this per-tab, and agents will
+    own their own list.
+
+    ``archival_append`` is the callable that writes a message to
+    persistent storage. For the main conversation it wraps
+    :meth:`HistoryStore.append_message`; for an agent it wraps
+    :meth:`HistoryStore.append_agent_message` via the closure in
+    :func:`ac_dc.agent_factory.build_agent_context_manager`. None
+    when no history store is attached (tests that skip
+    persistence); callers check for None before invoking.
+    """
+
+    context: Any  # ContextManager — quoted to avoid forward-ref dance
+    tracker: Any  # StabilityTracker
+    session_id: str
+    selected_files: list[str] = field(default_factory=list)
+    archival_append: ArchivalAppend | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -4208,6 +4316,69 @@ class LLMService:
             {"session_id": self._session_id, "messages": []},
         )
         return {"session_id": self._session_id}
+
+    # ------------------------------------------------------------------
+    # Conversation scope construction
+    # ------------------------------------------------------------------
+
+    def _default_scope(self) -> ConversationScope:
+        """Build a scope pointing at the main-conversation state.
+
+        The main user-facing session's state lives on ``self``.
+        Every entry point that runs ``_stream_chat`` for the main
+        conversation (today: ``chat_streaming``) builds a default
+        scope via this helper and threads it through.
+
+        Future parallel-agent mode will NOT call this — each
+        spawned agent constructs its own scope from
+        :func:`ac_dc.agent_factory.build_agent_context_manager`
+        plus a per-agent tracker and a per-agent selection list.
+
+        The ``archival_append`` closure wraps
+        :meth:`HistoryStore.append_message` so the scope can
+        invoke it without caring whether the backing target is
+        the main JSONL or a per-turn archive. When no history
+        store is attached (tests that skip persistence), the
+        field is None and callers check before invoking.
+        """
+        archival: ArchivalAppend | None
+        if self._history_store is not None:
+            store = self._history_store  # closure capture
+
+            def _append_to_main_store(
+                role: str,
+                content: str,
+                *,
+                session_id: str,
+                **kwargs: Any,
+            ) -> Any:
+                """Wrap HistoryStore.append_message.
+
+                The main-store method takes ``session_id`` as a
+                keyword argument and accepts a small fixed set of
+                optional kwargs (files, images, files_modified,
+                edit_results, system_event, turn_id). Callers at
+                the streaming-handler level already know the
+                right keyword shape — we pass through verbatim.
+                """
+                return store.append_message(
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    **kwargs,
+                )
+
+            archival = _append_to_main_store
+        else:
+            archival = None
+
+        return ConversationScope(
+            context=self._context,
+            tracker=self._stability_tracker,
+            session_id=self._session_id,
+            selected_files=self._selected_files,
+            archival_append=archival,
+        )
 
     # ------------------------------------------------------------------
     # Public RPC — streaming
