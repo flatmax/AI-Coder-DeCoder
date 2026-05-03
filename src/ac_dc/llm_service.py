@@ -898,6 +898,33 @@ class LLMService:
         # cancel_streaming; the worker thread polls and breaks out
         # when it finds its ID.
         self._cancelled_requests: set[str] = set()
+        # Per-request accumulated response content, keyed by
+        # request ID. The worker thread populates this on every
+        # chunk so the event loop thread (or a future agent-
+        # spawning path) can read an in-flight stream's current
+        # output without racing against the worker's local
+        # ``full_content`` variable. Cleared in the background
+        # task's finally block.
+        #
+        # Per specs4/7-future/parallel-agents.md § Foundation
+        # Requirements ("Chunk routing keyed by request ID, not
+        # by singleton flag"), the accumulator must be keyed by
+        # request ID so N concurrent streams — one main LLM
+        # stream plus any child agent streams — can coexist.
+        # Today only the main LLM stream populates an entry; when
+        # agent spawning lands, each agent's child request gets
+        # its own slot and the main LLM's synthesis step reads
+        # them all via this dict.
+        #
+        # Entries outlive ``_run_completion_sync`` by a short
+        # window — the worker returns via run_in_executor and
+        # then ``_stream_chat`` builds the completion result,
+        # persists the assistant message, and runs post-response
+        # work. The finally block clears the slot at the same
+        # point that clears ``_active_user_request``, so the
+        # accumulator's lifetime matches the "stream is active"
+        # signal.
+        self._request_accumulators: dict[str, str] = {}
 
         # Commit background task guard. Prevents concurrent commits.
         self._committing = False
@@ -4500,8 +4527,21 @@ class LLMService:
 
         # Clear active-request flag BEFORE post-response work, so a
         # concurrent cancel check doesn't hold on to a stale ID.
-        self._active_user_request = None
+        # Only clear the user-initiated slot when this request
+        # was the parent — child streams (when agent spawning
+        # lands) share the parent's slot and must not clear it.
+        if not self._is_child_request(request_id):
+            self._active_user_request = None
         self._cancelled_requests.discard(request_id)
+        # Drop the accumulator slot. Done after all reads of the
+        # accumulator (the apply pipeline, history persistence,
+        # completion event broadcast) have completed — the slot
+        # must remain populated for the entire post-completion
+        # phase so any reader can see the final content.
+        # ``pop`` with a default avoids KeyError if the worker
+        # thread never populated a slot (empty stream, error
+        # before the first chunk).
+        self._request_accumulators.pop(request_id, None)
 
         # Post-response housekeeping — update stability, run
         # compaction. Only runs when the stream completed normally
@@ -5136,6 +5176,18 @@ class LLMService:
                     delta = choices[0].delta
                     if delta and getattr(delta, "content", None):
                         full_content += delta.content
+                        # Mirror into the per-request accumulator
+                        # so other code paths (future agent
+                        # synthesis, diagnostics) can read the
+                        # in-flight content without racing
+                        # against this worker thread's local
+                        # ``full_content`` variable. The dict
+                        # write is atomic under the GIL; readers
+                        # on the event loop see a consistent
+                        # string.
+                        self._request_accumulators[request_id] = (
+                            full_content
+                        )
                         # Fire chunk callback with FULL accumulated
                         # content, not delta (specs4 contract).
                         asyncio.run_coroutine_threadsafe(
