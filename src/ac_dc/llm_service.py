@@ -107,6 +107,7 @@ from ac_dc.doc_index.keyword_enricher import (
 )
 from ac_dc.edit_pipeline import EditPipeline
 from ac_dc.edit_protocol import (
+    AgentBlock,
     EditResult,
     EditStatus,
     detect_shell_commands,
@@ -4449,6 +4450,123 @@ class LLMService:
             return False
         return request_id.startswith(parent + "-")
 
+    def _maybe_dispatch_agents(
+        self,
+        agent_blocks: list[AgentBlock],
+        parent_request_id: str,
+        turn_id: str,
+    ) -> list[AgentBlock]:
+        """Dispatch scaffold for parallel agents (Step 1 of the plan).
+
+        Per ``docs/agent-spawning-plan.md`` Step 1 ("Parser
+        dispatch scaffold (no execution)"), this is a reachable
+        branch that logs the agent blocks it WOULD spawn if the
+        execution plane were implemented. It does NOT actually
+        invoke :class:`ContextManager` construction, does NOT
+        fan out streaming tasks, does NOT touch the history
+        store's agent archive. Step 2 replaces the log with a
+        call to ``_spawn_agents_for_turn``; Step 1's only job is
+        to prove the branch is reachable, the
+        :class:`AgentBlock` shape is what the method expects,
+        and the ``agents.enabled`` gate holds.
+
+        Gating rules (all must hold for the method to do
+        anything beyond returning an empty list):
+
+        1. ``config.agents_enabled`` is True. When the toggle
+           is off, the system prompt omits the agentic appendix
+           so the LLM is never told about agent blocks — but a
+           malformed response or a stale session could still
+           contain them. Silent drop is the correct behaviour:
+           the invariant from
+           ``docs/agent-spawning-plan.md`` § Invariants is
+           "when the toggle is off, `_stream_chat` behaves
+           byte-identically."
+        2. ``agent_blocks`` is non-empty. Most turns don't
+           spawn agents; the empty-input case is a cheap no-op.
+        3. At least one block has ``valid=True``. Agent blocks
+           missing ``id`` or ``task`` are surfaced by the
+           parser with ``valid=False`` — those are malformed
+           LLM output, not actionable directives. We filter
+           them before logging (and, in Step 2, before
+           spawning).
+
+        Returns the filtered list of valid blocks for caller
+        inspection. Step 1's caller in ``_stream_chat``
+        discards the return value — it exists for Step 1's
+        tests to assert on the exact blocks that reached the
+        dispatch point.
+
+        Parameters
+        ----------
+        agent_blocks:
+            The raw parsed agent blocks from
+            :attr:`ParseResult.agent_blocks`. May contain
+            invalid blocks (filtered here) or an empty list
+            (handled).
+        parent_request_id:
+            The request ID of the main LLM stream. Step 2 will
+            derive child request IDs of the form
+            ``{parent_request_id}-agent-NN`` from this value.
+            Step 1 only logs it so the diagnostic output is
+            traceable back to its parent turn.
+        turn_id:
+            The turn identifier. Step 2 will thread this into
+            :func:`ac_dc.agent_factory.build_agent_context_manager`
+            so per-agent archives land under
+            ``.ac-dc4/agents/{turn_id}/``. Step 1 logs it for
+            symmetry.
+
+        Returns
+        -------
+        list[AgentBlock]
+            The subset of ``agent_blocks`` with ``valid=True``.
+            Empty list when the toggle is off, the input is
+            empty, or every block was invalid.
+        """
+        if not self._config.agents_enabled:
+            return []
+        if not agent_blocks:
+            return []
+        valid_blocks = [b for b in agent_blocks if b.valid]
+        if not valid_blocks:
+            # LLM emitted agent blocks but every one was
+            # malformed (missing id or task). Log at WARNING
+            # so the operator sees the LLM is getting the
+            # format wrong — not a silent drop.
+            logger.warning(
+                "Agent mode enabled and LLM emitted %d agent "
+                "block(s), but all were invalid (missing id "
+                "or task). Parent request %s, turn %s.",
+                len(agent_blocks),
+                parent_request_id,
+                turn_id,
+            )
+            return []
+        # Step 1 scaffold — log the dispatch intent. Step 2
+        # replaces this with a real invocation of
+        # _spawn_agents_for_turn. The log line shape is
+        # deliberately verbose so operators running with
+        # agents.enabled=true in the pre-Step 2 window can
+        # observe the parser is working even though nothing
+        # spawns yet.
+        logger.info(
+            "Agent dispatch scaffold: would spawn %d agent(s) "
+            "under parent request %s (turn %s). Execution plane "
+            "not yet implemented — blocks will be dropped.",
+            len(valid_blocks),
+            parent_request_id,
+            turn_id,
+        )
+        for block in valid_blocks:
+            logger.info(
+                "  agent id=%r task=%r extras=%r",
+                block.id,
+                block.task,
+                block.extras,
+            )
+        return valid_blocks
+
     async def chat_streaming(
         self,
         request_id: str,
@@ -4886,6 +5004,33 @@ class LLMService:
                         "assistant",
                         content_to_store,
                         session_id=scope.session_id,
+                        turn_id=turn_id,
+                    )
+
+            # Agent-spawn dispatch (Step 1 scaffold — see
+            # docs/agent-spawning-plan.md). Parses the response
+            # for agent-spawn blocks and — when agents.enabled
+            # is True — logs what Step 2 will actually spawn.
+            # Only runs on the normal-completion path: errors
+            # and cancellations skip the dispatch because
+            # partial LLM output may carry malformed blocks,
+            # and agents should only fan out from a committed
+            # main-LLM turn. Skipped on agent (child) scopes —
+            # agents don't spawn sub-agents; tree depth is 1.
+            # Parses a second time here rather than sharing
+            # parse_result with _build_completion_result below;
+            # Step 2 will dedupe by threading a single parse
+            # through the method.
+            if (
+                not cancelled
+                and full_content
+                and not self._is_child_request(request_id)
+            ):
+                agent_parse = parse_text(full_content)
+                if agent_parse.agent_blocks:
+                    self._maybe_dispatch_agents(
+                        agent_parse.agent_blocks,
+                        parent_request_id=request_id,
                         turn_id=turn_id,
                     )
         except Exception as exc:

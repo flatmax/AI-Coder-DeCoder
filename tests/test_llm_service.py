@@ -3771,6 +3771,446 @@ class TestStreamingWithEdits:
         )
 
 
+class TestAgentDispatchScaffold:
+    """Step 1 of the agent-spawning plan — dispatch scaffold.
+
+    Covers the reachable-branch contract from
+    ``docs/agent-spawning-plan.md`` Step 1:
+
+    - When ``agents.enabled`` is False, :meth:`_maybe_dispatch_agents`
+      returns ``[]`` and emits no log regardless of input.
+    - When ``agents.enabled`` is True and blocks are valid, the
+      method logs an INFO line per block and returns the filtered
+      list.
+    - When ``agents.enabled`` is True but all blocks are invalid
+      (missing ``id`` or ``task``), the method logs a WARNING and
+      returns ``[]``.
+    - End-to-end through :meth:`_stream_chat`: the dispatch branch
+      fires on the normal-completion path with a well-formed
+      agent block in the response, skipped on cancel/error/child
+      paths.
+
+    Step 2 will replace the log with real orchestration; these
+    tests become regression guards that the branch is reachable
+    and the gating logic is correct.
+    """
+
+    # Agent block markers for assembling test responses. Declared
+    # here rather than imported so any byte-level drift in the
+    # parser's constants surfaces as a visible test failure
+    # rather than a silent mismatch. Matches the discipline used
+    # in TestStreamingWithEdits.
+    AGENT_START = "🟧🟧🟧 AGENT"
+    AGEND_MARK = "🟩🟩🟩 AGEND"
+
+    def _build_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something useful",
+    ) -> str:
+        """Assemble one well-formed agent-spawn block."""
+        return (
+            f"{self.AGENT_START}\n"
+            f"id: {agent_id}\n"
+            f"task: {task}\n"
+            f"{self.AGEND_MARK}\n"
+        )
+
+    def _build_invalid_agent_block(self) -> str:
+        """Agent block missing the required ``task`` field."""
+        return (
+            f"{self.AGENT_START}\n"
+            f"id: agent-0\n"
+            f"{self.AGEND_MARK}\n"
+        )
+
+    def _enable_agents(self, config: ConfigManager) -> None:
+        """Flip ``agents.enabled`` to True via app.json override.
+
+        Mirrors the helper pattern in TestCompactionSystemEvent —
+        writes to app.json on disk and invalidates the config
+        manager's cached copy so the next access re-reads.
+        """
+        app_path = config.config_dir / "app.json"
+        app_data = json.loads(app_path.read_text())
+        app_data.setdefault("agents", {})
+        app_data["agents"]["enabled"] = True
+        app_path.write_text(json.dumps(app_data))
+        config._app_config = None
+
+    # ---------- Unit tests on _maybe_dispatch_agents directly ----------
+
+    def test_toggle_off_returns_empty_with_no_log(
+        self,
+        service: LLMService,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Toggle off → no log, empty return, even with valid input."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        blocks = [AgentBlock(id="agent-0", task="task zero")]
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            result = service._maybe_dispatch_agents(
+                blocks,
+                parent_request_id="r1",
+                turn_id="turn_abc",
+            )
+        assert result == []
+        # No dispatch log — either INFO or WARNING — fires.
+        assert not any(
+            "Agent dispatch scaffold" in rec.getMessage()
+            or "Agent mode enabled" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_toggle_on_empty_input_no_log(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Toggle on but empty agent_blocks → no log, empty return."""
+        self._enable_agents(config)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            result = service._maybe_dispatch_agents(
+                [],
+                parent_request_id="r1",
+                turn_id="turn_abc",
+            )
+        assert result == []
+        assert not any(
+            "Agent dispatch scaffold" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_toggle_on_valid_blocks_logs_and_returns(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Toggle on + valid blocks → INFO log fires, blocks returned."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        self._enable_agents(config)
+        blocks = [
+            AgentBlock(id="agent-0", task="first task"),
+            AgentBlock(id="agent-1", task="second task"),
+        ]
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            result = service._maybe_dispatch_agents(
+                blocks,
+                parent_request_id="r-parent",
+                turn_id="turn_xyz",
+            )
+        assert result == blocks
+        # Header log carries parent request and turn ID.
+        header_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert len(header_logs) == 1
+        assert "r-parent" in header_logs[0]
+        assert "turn_xyz" in header_logs[0]
+        assert "2 agent" in header_logs[0]
+        # Per-block log lines carry id and task text.
+        per_block_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "id=" in rec.getMessage() and "task=" in rec.getMessage()
+        ]
+        assert len(per_block_logs) == 2
+        assert any("agent-0" in m for m in per_block_logs)
+        assert any("first task" in m for m in per_block_logs)
+        assert any("agent-1" in m for m in per_block_logs)
+
+    def test_toggle_on_invalid_blocks_warns_and_returns_empty(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Toggle on + all blocks invalid → WARNING log, empty return."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        self._enable_agents(config)
+        blocks = [
+            AgentBlock(id="", task="orphaned", valid=False),
+            AgentBlock(id="agent-1", task="", valid=False),
+        ]
+        caplog.clear()
+        with caplog.at_level(
+            logging.WARNING, logger="ac_dc.llm_service"
+        ):
+            result = service._maybe_dispatch_agents(
+                blocks,
+                parent_request_id="r1",
+                turn_id="turn_abc",
+            )
+        assert result == []
+        warning_logs = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "all were invalid" in rec.getMessage()
+        ]
+        assert len(warning_logs) == 1
+        # No dispatch-scaffold INFO log fires — the warning
+        # path short-circuits.
+        dispatch_logs = [
+            rec for rec in caplog.records
+            if "dispatch scaffold" in rec.getMessage()
+        ]
+        assert dispatch_logs == []
+
+    def test_toggle_on_mixed_valid_invalid_filters(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Only valid blocks reach the dispatch log.
+
+        Mixed input (one valid, one invalid) should log the
+        valid one and silently drop the invalid one — the
+        all-invalid WARNING path doesn't fire because at least
+        one block was good.
+        """
+        from ac_dc.edit_protocol import AgentBlock
+
+        self._enable_agents(config)
+        blocks = [
+            AgentBlock(id="agent-0", task="the good one"),
+            AgentBlock(id="", task="bad", valid=False),
+        ]
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            result = service._maybe_dispatch_agents(
+                blocks,
+                parent_request_id="r1",
+                turn_id="turn_abc",
+            )
+        assert len(result) == 1
+        assert result[0].id == "agent-0"
+        # One header log + one per-block log for the valid agent.
+        header_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert len(header_logs) == 1
+        assert "1 agent" in header_logs[0]
+        # No WARNING (at least one block was valid).
+        warnings = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "all were invalid" in rec.getMessage()
+        ]
+        assert warnings == []
+
+    # ---------- End-to-end tests through _stream_chat ----------
+
+    async def test_stream_chat_dispatches_when_toggle_on(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Normal-completion path with agent block → dispatch fires."""
+        self._enable_agents(config)
+        response = (
+            "I'll spawn an agent.\n\n"
+            + self._build_agent_block("agent-0", "refactor auth")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r-main", message="please spawn"
+            )
+            await asyncio.sleep(0.3)
+
+        dispatch_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert len(dispatch_logs) == 1
+        assert "r-main" in dispatch_logs[0]
+
+    async def test_stream_chat_skips_dispatch_when_toggle_off(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Toggle off → even with agent blocks in response, no dispatch."""
+        # agents.enabled defaults to False — no setup needed.
+        response = (
+            "Here's an agent block:\n\n"
+            + self._build_agent_block()
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r1", message="hi"
+            )
+            await asyncio.sleep(0.3)
+
+        dispatch_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert dispatch_logs == []
+
+    async def test_stream_chat_skips_dispatch_on_cancellation(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Cancelled stream → dispatch skipped even with agent blocks.
+
+        Partial LLM output may carry malformed or unintended
+        agent blocks; spawning from a cancelled turn would
+        violate the "only commit from a completed turn"
+        invariant.
+        """
+        self._enable_agents(config)
+        response = (
+            "Starting...\n\n"
+            + self._build_agent_block()
+        )
+        fake_litellm.set_streaming_chunks([response])
+        # Pre-cancel so the worker breaks out on the first check.
+        service._cancelled_requests.add("r1")
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r1", message="hi"
+            )
+            await asyncio.sleep(0.3)
+
+        dispatch_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert dispatch_logs == []
+
+    async def test_stream_chat_skips_dispatch_for_child_request(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Child request IDs don't spawn sub-agents.
+
+        Per ``specs4/7-future/parallel-agents.md`` § Execution
+        Model, tree depth is 1: planner → leaf agents. An agent
+        whose response somehow contained agent blocks must not
+        recursively spawn — that would fan out unboundedly.
+        The child-request guard via ``_is_child_request``
+        enforces this at the dispatch point.
+        """
+        self._enable_agents(config)
+        # Simulate an active parent stream so
+        # "r-parent-agent-0" classifies as a child.
+        service._active_user_request = "r-parent"
+
+        response = self._build_agent_block()
+        fake_litellm.set_streaming_chunks([response])
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r-parent-agent-0",
+                message="subtask",
+            )
+            await asyncio.sleep(0.3)
+
+        dispatch_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert dispatch_logs == []
+
+    async def test_stream_chat_dispatches_with_multiple_blocks(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Multiple agent blocks in one response all reach the log."""
+        self._enable_agents(config)
+        response = (
+            self._build_agent_block("agent-0", "task zero")
+            + "\n"
+            + self._build_agent_block("agent-1", "task one")
+            + "\n"
+            + self._build_agent_block("agent-2", "task two")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r1", message="big decomp"
+            )
+            await asyncio.sleep(0.3)
+
+        header_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert len(header_logs) == 1
+        assert "3 agent" in header_logs[0]
+        # One per-block INFO log per agent.
+        per_block = [
+            rec.getMessage() for rec in caplog.records
+            if "id=" in rec.getMessage()
+            and "task=" in rec.getMessage()
+        ]
+        assert len(per_block) == 3
+
+    async def test_stream_chat_no_dispatch_without_agent_blocks(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Regular response with no agent blocks → no dispatch log.
+
+        Confirms the guard on ``agent_parse.agent_blocks`` is
+        cheap — a response with no AGENT markers doesn't
+        trigger the scaffold even when the toggle is on.
+        """
+        self._enable_agents(config)
+        fake_litellm.set_streaming_chunks([
+            "Just a normal response with no agents.",
+        ])
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
+            await service.chat_streaming(
+                request_id="r1", message="hi"
+            )
+            await asyncio.sleep(0.3)
+
+        dispatch_logs = [
+            rec.getMessage() for rec in caplog.records
+            if "Agent dispatch scaffold" in rec.getMessage()
+        ]
+        assert dispatch_logs == []
+
+
 class TestURLIntegration:
     """URL service integration in LLMService — Layer 4.1.6."""
 

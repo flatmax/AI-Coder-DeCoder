@@ -94,7 +94,7 @@ Each step is a small, reviewable diff that leaves the codebase working and tests
 
 (Update after each step lands.)
 
-- **Step 1** — not yet started.
+- **Step 1** — delivered. Adds `_maybe_dispatch_agents` on `LLMService` as a reachable no-op scaffold. Parses the final response a second time at the dispatch point (deferring dedup with `_build_completion_result`'s parse to Step 2), filters agent blocks to valid ones, and logs at INFO when the toggle is on. Gated on: toggle on, non-empty block list, not a child request, not cancelled, non-empty response. 11 new tests in `TestAgentDispatchScaffold` cover unit-level gating (toggle-off early return, empty input, valid/invalid mixes, all-invalid warning) plus end-to-end through `_stream_chat` (toggle-on dispatch fires, toggle-off skip, cancellation skip, child-request skip, no-blocks skip, multi-block fan-out). No runtime behaviour change when toggle is off — the branch never runs. When toggle is on and the LLM emits agent blocks, operators see INFO log lines showing what Step 2 will actually spawn.
 - **Step 2** — not yet started.
 - **Step 3** — not yet started.
 - **Step 4** — not yet started.
