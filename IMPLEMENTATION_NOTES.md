@@ -121,9 +121,15 @@ Diagnosing the test failure that surfaced this semantic took one turn of back-an
 
 The `Settings(config, llm_service=...)` constructor takes an optional LLMService reference. Existing tests and call sites that omit the kwarg keep working — the refresh just doesn't fire when no service is attached, matching pre-commit-3 behaviour. `main.py` wires the reference post-construction via `settings._llm_service = llm_service` because Settings is constructed before LLMService (the usual dependency-inversion pattern for collab and other cross-service wiring).
 
+**Layer 4 — Settings-tab toggle card (frontend).** The backend wire-through (commits 1–3) left the toggle reachable only by editing `app.json` directly. Commit 4 (`d56586d`) adds a dedicated toggle-card renderer to `webapp/src/settings-tab.js` that surfaces `agents.enabled` as an inline switch in the Settings tab — read-in reads the underlying `app.json` content, click-to-flip writes it back via `Settings.save_config_content`, which triggers the reload-and-refresh chain the three backend commits set up.
+
+The card uses a new `renderer: 'toggle'` mode in the `CONFIG_CARDS` catalog, distinct from the default textarea-editor cards. The `toggleConfigKey` names the underlying config type (`'app'`), and `togglePath` is a dot-separated path into that JSON (`'agents.enabled'`). Defensive parsing falls back to `toggleDefault` when JSON is malformed, the `agents` section is missing, or the field is non-bool. A per-card `_togglingKey` field prevents rapid-click double-writes while the save+reload is in flight. Remote collab participants see the switch rendered disabled with a "Host controls this setting" note; mutation is still enforced backend-side by `save_config_content`'s localhost gate, the disabled switch is defensive UI only.
+
+`_loadLocalhostFlag` currently hardcodes `_localhost = true` with a TODO — wiring it to real role data lives with the broader collab-UI work that's explicitly parked. Until that lands, remote participants get a restricted-error toast on click rather than a pre-disabled switch; the outcome is the same (write rejected) but the UX is less polished.
+
 **Invariant preserved**: when `agents.enabled` is `false`, the LLM is never told about agent-spawn blocks. The appendix file is never read, the system prompt never mentions the capability. This is stronger than "the parser tolerates unknown blocks" — the LLM can't emit blocks it doesn't know exist. Users wanting to experiment with agent mode opt in deliberately; users on budget-sensitive workflows never pay the appendix's token cost.
 
-The three commits form a complete wire-through with no intermediate half-on states. A single commit implementing all three would have been harder to review and harder to revert. Future work on the Settings-tab UI (a toggle card that writes to `app.json` and calls `reload_app_config`) can land standalone — the backend is ready to receive the signal.
+The four commits form a complete wire-through with no intermediate half-on states. A single commit implementing all four would have been harder to review and harder to revert. The feature is now end-to-end deliverable from Settings-tab click through to the next user turn including the appendix in its system prompt.
 
 ### D22 — Parallel-agents foundation uses the existing streaming pipeline
 
