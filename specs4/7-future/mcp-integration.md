@@ -143,8 +143,8 @@ User: "Find the GitLab issue about webhook retries, check Slack for related
 │                                                                     │
 │  Decomposes into scoped subtasks, emits agent spawn blocks:         │
 │                                                                     │
-│    🟪 AGENT purpose=search-gitlab  tools=gitlab                     │
-│    🟪 AGENT purpose=search-slack   tools=slack                      │
+│    🟧 AGENT id=agent-0 task="search gitlab" tools=gitlab            │
+│    🟧 AGENT id=agent-1 task="search slack"  tools=slack             │
 └────────────────────────┬───────────────────────┬────────────────────┘
                          │                       │
                          │ spawn (parallel)      │ spawn (parallel)
@@ -202,22 +202,22 @@ The planner decides per-query which mode to use, cued by the user's prompt style
 
 ## Agent block extension for MCP
 
-Extending the agent spawn block from `parallel-agents.md` with a `tools:` field:
+The agent-spawn block shape is defined in [parallel-agents.md — Agent-spawn block format](parallel-agents.md#agent-spawn-block-format) with two required fields (`id`, `task`) plus an `extras` dict for forward compatibility. MCP integration uses the `extras` slot to add one optional field:
 
-```
-🟪🟪🟪 AGENT
-purpose: Research rate-limiting patterns in the org's backend services
-files:
-tools: gitlab, slack
-prompt: Search GitLab project org/backend-services for issues mentioning
-  rate limiting. Cross-reference against Slack history in #backend. Return
-  a summary of the current approach and any open discussion.
-🟪🟪🟪 END
-```
+- **`tools`** — comma-separated list of MCP server keys from config. The orchestrator looks these up and builds the per-agent tool set before spawning. Omitting the field runs the agent with only AC⚡DC-native capabilities (edit blocks, file navigation via the symbol map), same as the base parallel-agents design.
 
-- `files:` empty — agent doesn't need repo context
-- `tools:` names MCP server keys from config; the orchestrator looks these up and builds the per-agent tool set
-- Omitting `tools:` runs the agent with only AC⚡DC-native capabilities (edit blocks), same as the base parallel-agents design
+Rendered as an indented diagram to avoid nesting the literal markers inside a fenced code block:
+
+    ORANGE-START    🟧🟧🟧 AGENT
+    line 1          id: agent-0
+    line 2          task: Search GitLab project org/backend-services for issues
+    line 3          mentioning rate limiting. Cross-reference against Slack
+    line 4          history in #backend. Return a summary of the current
+    line 5          approach and any open discussion.
+    line 6          tools: gitlab, slack
+    GREEN-END       🟩🟩🟩 AGEND
+
+The `task` field continues to describe the goal in natural language — what to search, what to correlate, what to return. It does NOT enumerate which specific GitLab projects or Slack channels the agent should touch; the agent uses its MCP tool set to discover those itself. Same philosophy as repo navigation: the planner decomposes, the agent discovers.
 
 ## Config shape
 

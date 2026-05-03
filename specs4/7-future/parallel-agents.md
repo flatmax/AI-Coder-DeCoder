@@ -17,6 +17,7 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
 | Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
+| Edit parser tolerates unknown markers as prose | [edit-protocol.md](../3-llm/edit-protocol.md#agent-spawn-blocks-reserved-marker) | `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` lines are ignored by the current parser; future agent-spawn handling adds branches without breaking existing edit parsing |
 
 None of these invariants cost anything in single-agent operation. Preserving them in the initial build means agent mode can be added later without refactoring the foundation layers.
 
@@ -65,13 +66,49 @@ If an agent's edit fails validation (anchor not found, or anchor became ambiguou
 
 ## Main LLM — Decomposition and Synthesis
 
-The main LLM's system prompt (the normal user-facing prompt, extended for agent-mode turns) describes agent-spawning as a tool-like capability. When the main LLM judges a task worth parallelizing, it emits a structured decomposition:
+The main LLM's system prompt (the normal user-facing prompt, extended for agent-mode turns) describes agent-spawning as a tool-like capability. When the main LLM judges a task worth parallelizing, it emits one or more agent-spawn blocks, each declaring a sub-task.
 
-- Natural-language description of each sub-task
-- Work units (classes, functions, doc sections) each agent should create or modify
-- Read context — files and symbols each agent needs to see but not edit
+### Agent-spawn block format
 
-The decomposition becomes the agents' initial prompts. The LLM does not need to assign disjoint file sets — it assigns independent work units. Using the symbol map's imports, call sites, and cross-references, the LLM identifies clusters of symbols with no cross-references between them, making them safe to edit in parallel.
+An agent block uses a distinct marker pair with no middle separator:
+
+- Start: `🟧🟧🟧 AGENT` — three orange squares (U+1F7E7), space, literal `AGENT`
+- End: `🟩🟩🟩 AGEND` — three green squares (U+1F7E9), space, literal `AGEND`
+
+Rendered as an indented diagram to avoid nesting the literal markers inside a fenced code block:
+
+    ORANGE-START    🟧🟧🟧 AGENT
+    line 1          id: agent-0
+    line 2          task: Refactor the auth module to extract session logic into
+    line 3          a new SessionManager class. Update callers of auth.Session to
+    line 4          use the new class.
+    GREEN-END       🟩🟩🟩 AGEND
+
+**Why the end marker differs from the edit-block end marker.** An edit block closes with `🟩🟩🟩 END`. If an agent block used the same end marker, a parser scanning line-by-line would have to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input and forces frontend and backend parsers to stay in lockstep on state tracking. A distinct agent end marker lets each parser match on the literal line: `🟩🟩🟩 END` closes edits, `🟩🟩🟩 AGEND` closes agents, no state disambiguation needed. An LLM response that interleaves both block types, or a document quoting both in the same code fence, cannot cause one marker to accidentally terminate the other's block.
+
+**Fields.** Body is a minimal YAML-ish payload of `key: value` pairs. Only two fields are defined:
+
+- **`id`** — identifier the main LLM uses to reference this agent in subsequent review and synthesis. Scoped to the turn; unique within the turn's decomposition. Convention is `agent-N` (zero-indexed), but the parser accepts any string.
+- **`task`** — the initial prompt handed to the agent. One logical instruction in natural language; may span multiple lines until the end marker. The task should describe the goal, not enumerate file paths — the agent discovers files the same way the user's chat session does (symbol map, reference index, file mentions via edit blocks).
+
+Unknown keys are preserved in an `extras` dict for forward compatibility. When the spec gains a new field (e.g., sequencing dependencies, MCP server keys), old parser versions still surface the value rather than dropping it.
+
+### Why not pre-declare files
+
+The decomposition deliberately does NOT enumerate which files each agent should read or edit. Pre-declaring file sets is error-prone (the planner has to predict the agent's navigation before the agent has started), brittle to refactors (an agent discovering it needs one more file would violate the declaration), and wasteful of the planner's reasoning budget (the whole point of agents is to parallelize reasoning).
+
+Agents inherit the same repo view the main LLM has:
+
+- Symbol map with imports, call sites, and `←N` reference counts
+- Document index (in doc mode or cross-reference mode)
+- Reference graph for identifying independent work units
+- File tree and edit protocol for navigation and modification
+
+An agent that edits `src/auth.py` auto-adds it to its selection via the existing `files_auto_added` mechanism — same behaviour as a user's chat session today. The main LLM's job is decomposition, not file-level specification.
+
+### Assigning independent work units
+
+Using the symbol map's reference graph, the main LLM identifies clusters of symbols with no cross-references between them, making them safe to edit in parallel. The decomposition describes these clusters in the `task` string at whatever granularity is useful — "refactor the auth module", "update the logging format", "extract the paging helper". The agent reads the task, consults the symbol map, and navigates to the relevant files on its own.
 
 When all spawned agents have completed, the main LLM reviews the combined forward diff and decides:
 
@@ -87,10 +124,12 @@ Each agent runs with:
 
 - Own ContextManager (own conversation history, own file context, own stability tracker)
 - Shared read-only access to symbol index, reference index, repo
-- A focused sub-task from the main LLM's decomposition
+- The `task` string from the main LLM's spawn block as its initial user message
 - A turn-scoped archival sink appending to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`
 
-Agents produce edit blocks applied via the existing apply pipeline.
+Agents start with an empty file context — same as a fresh user session. They navigate the repo via the symbol map, add files to their selection by emitting edit blocks (which trigger the existing `files_auto_added` path on not-in-context edits or `files_created` on creates), and produce modifications via the normal edit protocol. The apply pipeline treats an agent's edit blocks identically to a user's — per-path mutex, anchor matching, dry-run option, and result reporting all work unchanged.
+
+No file-set restriction is enforced on agents. If agent-0's task is to refactor the auth module and it decides it needs to read `src/logging.py` too, it does — nothing in the protocol prevents this. The main LLM's review step (next section) is the semantic-conflict safety net, not a file-level pre-declaration.
 
 ### Per-File I/O Serialization
 
