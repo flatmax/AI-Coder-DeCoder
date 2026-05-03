@@ -99,6 +99,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
+from ac_dc.agent_factory import build_agent_context_manager
 from ac_dc.context_manager import ContextManager, Mode
 from ac_dc.doc_index.index import DocIndex
 from ac_dc.doc_index.keyword_enricher import (
@@ -1034,6 +1035,18 @@ class LLMService:
         # accumulator's lifetime matches the "stream is active"
         # signal.
         self._request_accumulators: dict[str, str] = {}
+
+        # Agent streaming impl — points at the stub during
+        # Step 2 of the agent-spawning plan; Step 3 swaps it
+        # for :meth:`_stream_chat` so each spawned agent runs
+        # through the full pipeline. Tests can override this
+        # attribute directly to observe invocations without
+        # patching `asyncio.ensure_future` or the worker
+        # executor. Must be an async callable matching
+        # ``_stream_chat``'s signature.
+        self._agent_stream_impl: Callable[..., Awaitable[Any]] = (
+            self._stream_chat_stub
+        )
 
         # Commit background task guard. Prevents concurrent commits.
         self._committing = False
@@ -4450,72 +4463,47 @@ class LLMService:
             return False
         return request_id.startswith(parent + "-")
 
-    def _maybe_dispatch_agents(
+    def _filter_dispatchable_agents(
         self,
         agent_blocks: list[AgentBlock],
         parent_request_id: str,
         turn_id: str,
     ) -> list[AgentBlock]:
-        """Dispatch scaffold for parallel agents (Step 1 of the plan).
+        """Gate + filter for agent-spawn dispatch.
 
-        Per ``docs/agent-spawning-plan.md`` Step 1 ("Parser
-        dispatch scaffold (no execution)"), this is a reachable
-        branch that logs the agent blocks it WOULD spawn if the
-        execution plane were implemented. It does NOT actually
-        invoke :class:`ContextManager` construction, does NOT
-        fan out streaming tasks, does NOT touch the history
-        store's agent archive. Step 2 replaces the log with a
-        call to ``_spawn_agents_for_turn``; Step 1's only job is
-        to prove the branch is reachable, the
-        :class:`AgentBlock` shape is what the method expects,
-        and the ``agents.enabled`` gate holds.
+        Applies the three gating rules that determine whether
+        a response's agent blocks should actually spawn, and
+        returns the filtered list of valid blocks. Separated
+        from the spawn path itself so the gate is easy to
+        test independently and the spawn path doesn't have
+        to re-do the checks.
 
-        Gating rules (all must hold for the method to do
-        anything beyond returning an empty list):
+        Gating rules (all must hold for the return value to
+        be non-empty):
 
         1. ``config.agents_enabled`` is True. When the toggle
-           is off, the system prompt omits the agentic appendix
-           so the LLM is never told about agent blocks — but a
-           malformed response or a stale session could still
-           contain them. Silent drop is the correct behaviour:
-           the invariant from
-           ``docs/agent-spawning-plan.md`` § Invariants is
-           "when the toggle is off, `_stream_chat` behaves
+           is off, the system prompt omits the agentic
+           appendix so the LLM is never told about agent
+           blocks — but a malformed response or stale
+           session could still contain them. Silent drop is
+           the correct behaviour per
+           ``docs/agent-spawning-plan.md`` § Invariants: "when
+           the toggle is off, ``_stream_chat`` behaves
            byte-identically."
         2. ``agent_blocks`` is non-empty. Most turns don't
-           spawn agents; the empty-input case is a cheap no-op.
-        3. At least one block has ``valid=True``. Agent blocks
+           spawn agents; the empty-input case is a cheap
+           no-op.
+        3. At least one block has ``valid=True``. Blocks
            missing ``id`` or ``task`` are surfaced by the
            parser with ``valid=False`` — those are malformed
            LLM output, not actionable directives. We filter
-           them before logging (and, in Step 2, before
-           spawning).
+           them before spawning.
 
-        Returns the filtered list of valid blocks for caller
-        inspection. Step 1's caller in ``_stream_chat``
-        discards the return value — it exists for Step 1's
-        tests to assert on the exact blocks that reached the
-        dispatch point.
-
-        Parameters
-        ----------
-        agent_blocks:
-            The raw parsed agent blocks from
-            :attr:`ParseResult.agent_blocks`. May contain
-            invalid blocks (filtered here) or an empty list
-            (handled).
-        parent_request_id:
-            The request ID of the main LLM stream. Step 2 will
-            derive child request IDs of the form
-            ``{parent_request_id}-agent-NN`` from this value.
-            Step 1 only logs it so the diagnostic output is
-            traceable back to its parent turn.
-        turn_id:
-            The turn identifier. Step 2 will thread this into
-            :func:`ac_dc.agent_factory.build_agent_context_manager`
-            so per-agent archives land under
-            ``.ac-dc4/agents/{turn_id}/``. Step 1 logs it for
-            symmetry.
+        Logs at INFO when spawning will happen (so operators
+        can trace which turns fan out) and at WARNING when
+        every block was invalid (so malformed LLM output
+        surfaces in the operator log without being silently
+        dropped).
 
         Returns
         -------
@@ -4543,17 +4531,9 @@ class LLMService:
                 turn_id,
             )
             return []
-        # Step 1 scaffold — log the dispatch intent. Step 2
-        # replaces this with a real invocation of
-        # _spawn_agents_for_turn. The log line shape is
-        # deliberately verbose so operators running with
-        # agents.enabled=true in the pre-Step 2 window can
-        # observe the parser is working even though nothing
-        # spawns yet.
         logger.info(
-            "Agent dispatch scaffold: would spawn %d agent(s) "
-            "under parent request %s (turn %s). Execution plane "
-            "not yet implemented — blocks will be dropped.",
+            "Agent spawn: dispatching %d agent(s) under "
+            "parent request %s (turn %s).",
             len(valid_blocks),
             parent_request_id,
             turn_id,
@@ -4566,6 +4546,227 @@ class LLMService:
                 block.extras,
             )
         return valid_blocks
+
+    async def _stream_chat_stub(
+        self,
+        request_id: str,
+        message: str,
+        files: list[str],
+        images: list[str],
+        excluded_urls: list[str] | None = None,
+        *,
+        scope: ConversationScope | None = None,
+    ) -> None:
+        """No-op stand-in for ``_stream_chat`` during Step 2.
+
+        Step 2 of ``docs/agent-spawning-plan.md`` verifies the
+        per-agent infrastructure (ContextManager construction,
+        archive directory creation, scope copying) without
+        actually running any LLM calls. Each agent's scope is
+        constructed by :meth:`_spawn_agents_for_turn` and
+        handed to whichever callable is currently assigned to
+        :attr:`_agent_stream_impl`; in Step 2 that's this
+        stub, in Step 3 it flips to :meth:`_stream_chat`.
+
+        Tests can override ``_agent_stream_impl`` directly to
+        observe invocations without patching the streaming
+        machinery. The stub's signature matches
+        :meth:`_stream_chat` so the swap is a one-line change
+        when Step 3 lands.
+
+        Logs at INFO so operators running with agent mode
+        enabled during the pre-Step-3 window see evidence the
+        plumbing worked without thinking something broke when
+        no LLM call fired.
+        """
+        del files, images, excluded_urls  # unused in stub
+        task_preview = message[:60].replace("\n", " ")
+        logger.info(
+            "Agent stream stub: request=%s task=%r (scope=%s). "
+            "Execution plane not yet implemented — Step 3 "
+            "replaces this stub with _stream_chat.",
+            request_id,
+            task_preview,
+            "present" if scope is not None else "missing",
+        )
+
+    async def _spawn_agents_for_turn(
+        self,
+        agent_blocks: list[AgentBlock],
+        parent_scope: ConversationScope,
+        parent_request_id: str,
+        turn_id: str,
+    ) -> None:
+        """Fan out N agents under a single user turn.
+
+        Per Step 2 of ``docs/agent-spawning-plan.md``: for
+        each valid agent block, construct a per-agent
+        :class:`ContextManager` via
+        :func:`ac_dc.agent_factory.build_agent_context_manager`,
+        a fresh :class:`StabilityTracker`, and a per-agent
+        :class:`ConversationScope`. Derive a child request ID
+        of the form ``{parent_request_id}-agent-{NN}`` and
+        invoke :attr:`_agent_stream_impl` (the stub in Step 2,
+        the real streaming path in Step 3) with the per-agent
+        scope.
+
+        All N tasks run concurrently via
+        :func:`asyncio.gather` with ``return_exceptions=True``
+        so one agent raising doesn't kill its siblings. Step 2
+        tests pin that exceptions from the stub propagate as
+        ``gather`` results rather than crashing the method.
+
+        **Per-agent scope construction details:**
+
+        - ``context`` — fresh agent ContextManager whose
+          archival sink writes to
+          ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl``. The
+          ``build_agent_context_manager`` factory bakes
+          ``turn_id`` + ``agent_idx`` into the sink closure;
+          this method just supplies them.
+        - ``tracker`` — fresh StabilityTracker seeded with the
+          parent's cache-target-tokens. Agents don't inherit
+          the parent's tier state; they accumulate their own
+          as they run (across iterations within the turn,
+          per D21).
+        - ``session_id`` — copied from the parent scope so the
+          per-agent archive's ``session_id`` field points back
+          at the user-facing session. Matches the spec's
+          "every record carries session_id" invariant.
+        - ``selected_files`` — deep copy of the parent's list.
+          Per the plan's invariants, the parent's scope must
+          never be mutated by agent runs; a shared reference
+          would violate that if an agent's auto-add loop
+          appended to it.
+        - ``archival_append`` — wrapped by the factory to
+          target the per-agent archive, not the main store.
+
+        **Why no synthesis step yet:** Step 4 adds synthesis —
+        reading the archive, formatting transcripts, running a
+        second LLM call from the parent scope. Step 2 just
+        returns after all agents complete; the parent's
+        ``_stream_chat`` continues as normal.
+
+        Parameters
+        ----------
+        agent_blocks:
+            Pre-filtered list of valid :class:`AgentBlock`
+            instances (output of
+            :meth:`_filter_dispatchable_agents`). Invalid
+            blocks must not reach this method.
+        parent_scope:
+            The parent turn's :class:`ConversationScope`. Read
+            for ``session_id`` and ``selected_files``; never
+            mutated.
+        parent_request_id:
+            The user-facing request ID. Child request IDs are
+            derived from this via the ``{parent}-agent-{NN}``
+            shape.
+        turn_id:
+            The turn identifier from the parent turn.
+            Propagates into each agent's ContextManager so
+            archive writes land under the correct directory.
+        """
+        if not agent_blocks:
+            return
+        tasks: list[asyncio.Task[Any]] = []
+        for agent_idx, block in enumerate(agent_blocks):
+            agent_scope = self._build_agent_scope(
+                block=block,
+                agent_idx=agent_idx,
+                parent_scope=parent_scope,
+                turn_id=turn_id,
+            )
+            child_request_id = (
+                f"{parent_request_id}-agent-{agent_idx:02d}"
+            )
+            task = asyncio.ensure_future(
+                self._agent_stream_impl(
+                    child_request_id,
+                    block.task,
+                    [],  # files — agents start with empty file list
+                    [],  # images — agents never carry images
+                    [],  # excluded_urls — agents start fresh
+                    scope=agent_scope,
+                )
+            )
+            tasks.append(task)
+        # return_exceptions=True so one agent raising doesn't
+        # take down its siblings. A future synthesis step (D4)
+        # can inspect the results list and surface per-agent
+        # failures to the main LLM.
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _build_agent_scope(
+        self,
+        block: AgentBlock,
+        agent_idx: int,
+        parent_scope: ConversationScope,
+        turn_id: str,
+    ) -> ConversationScope:
+        """Construct a per-agent :class:`ConversationScope`.
+
+        Split from :meth:`_spawn_agents_for_turn` so the
+        construction logic is easy to test in isolation and
+        the spawn method's flow is readable. Callers that
+        want to inspect the constructed scope without
+        actually running the agent can call this directly.
+
+        See :meth:`_spawn_agents_for_turn`'s docstring for
+        field-by-field rationale.
+        """
+        # Agent ContextManager — factory wires the archival
+        # sink to the per-turn archive directory. Requires a
+        # history store; if one isn't attached (test configs
+        # that skip persistence), the factory raises. Agent
+        # mode without persistence isn't a supported config —
+        # the archive IS the transcript the main LLM reads in
+        # the synthesis step.
+        if self._history_store is None:
+            raise RuntimeError(
+                "Agent spawning requires a history store; "
+                "construct LLMService with history_store=... "
+                "to enable agent mode."
+            )
+        agent_context = build_agent_context_manager(
+            turn_id=turn_id,
+            agent_idx=agent_idx,
+            model_name=self._config.model,
+            history_store=self._history_store,
+            repo=self._repo,
+            cache_target_tokens=(
+                self._config.cache_target_tokens_for_model()
+            ),
+            compaction_config=self._config.compaction_config,
+            # Agent system prompt is the task text itself —
+            # plus any per-agent instructions the future
+            # synthesis step may inject. Step 2 uses the
+            # empty string so the task string from the
+            # spawn block lands as the agent's first user
+            # message and carries all semantic weight. A
+            # future pass may add a short "you are an agent
+            # spawned by the main LLM" prefix here.
+            system_prompt="",
+        )
+        # Fresh tracker — agents accumulate their own tier
+        # state across iterations within the turn.
+        agent_tracker = StabilityTracker(
+            cache_target_tokens=(
+                self._config.cache_target_tokens_for_model()
+            ),
+        )
+        agent_context.set_stability_tracker(agent_tracker)
+        # Deep copy of selected_files so agent auto-add
+        # mutations don't leak back to the parent. list(...)
+        # is sufficient — the elements are strings
+        # (immutable).
+        return ConversationScope(
+            context=agent_context,
+            tracker=agent_tracker,
+            session_id=parent_scope.session_id,
+            selected_files=list(parent_scope.selected_files),
+            archival_append=agent_context.archival_sink,
+        )
 
     async def chat_streaming(
         self,
@@ -5007,20 +5208,22 @@ class LLMService:
                         turn_id=turn_id,
                     )
 
-            # Agent-spawn dispatch (Step 1 scaffold — see
+            # Agent-spawn dispatch (Step 2 — see
             # docs/agent-spawning-plan.md). Parses the response
-            # for agent-spawn blocks and — when agents.enabled
-            # is True — logs what Step 2 will actually spawn.
-            # Only runs on the normal-completion path: errors
-            # and cancellations skip the dispatch because
-            # partial LLM output may carry malformed blocks,
-            # and agents should only fan out from a committed
-            # main-LLM turn. Skipped on agent (child) scopes —
-            # agents don't spawn sub-agents; tree depth is 1.
-            # Parses a second time here rather than sharing
-            # parse_result with _build_completion_result below;
-            # Step 2 will dedupe by threading a single parse
-            # through the method.
+            # for agent-spawn blocks, filters to valid ones,
+            # and fans out N agent scopes when the toggle is
+            # on. Only runs on the normal-completion path:
+            # errors and cancellations skip the dispatch
+            # because partial LLM output may carry malformed
+            # blocks, and agents should only fan out from a
+            # committed main-LLM turn. Skipped on agent
+            # (child) scopes — agents don't spawn sub-agents;
+            # tree depth is 1 per
+            # specs4/7-future/parallel-agents.md § Execution
+            # Model. Parses a second time here rather than
+            # sharing parse_result with _build_completion_result
+            # below; a future refactor will dedupe by threading
+            # a single parse through the method.
             if (
                 not cancelled
                 and full_content
@@ -5028,11 +5231,18 @@ class LLMService:
             ):
                 agent_parse = parse_text(full_content)
                 if agent_parse.agent_blocks:
-                    self._maybe_dispatch_agents(
+                    valid_blocks = self._filter_dispatchable_agents(
                         agent_parse.agent_blocks,
                         parent_request_id=request_id,
                         turn_id=turn_id,
                     )
+                    if valid_blocks:
+                        await self._spawn_agents_for_turn(
+                            valid_blocks,
+                            parent_scope=scope,
+                            parent_request_id=request_id,
+                            turn_id=turn_id,
+                        )
         except Exception as exc:
             logger.exception(
                 "Streaming request %s failed", request_id

@@ -3773,12 +3773,13 @@ class TestStreamingWithEdits:
 
 
 class TestAgentDispatchScaffold:
-    """Step 1 of the agent-spawning plan — dispatch scaffold.
+    """Agent dispatch gating — the filter method and end-to-end routing.
 
-    Covers the reachable-branch contract from
-    ``docs/agent-spawning-plan.md`` Step 1:
+    Originally Step 1 of the agent-spawning plan; promoted to
+    regression guard in Step 2 when the log-only scaffold
+    became real spawning. The tests pin:
 
-    - When ``agents.enabled`` is False, :meth:`_maybe_dispatch_agents`
+    - When ``agents.enabled`` is False, :meth:`_filter_dispatchable_agents`
       returns ``[]`` and emits no log regardless of input.
     - When ``agents.enabled`` is True and blocks are valid, the
       method logs an INFO line per block and returns the filtered
@@ -3791,9 +3792,11 @@ class TestAgentDispatchScaffold:
       agent block in the response, skipped on cancel/error/child
       paths.
 
-    Step 2 will replace the log with real orchestration; these
-    tests become regression guards that the branch is reachable
-    and the gating logic is correct.
+    Step 2 separates this contract from the spawn behaviour:
+    :class:`TestAgentSpawn` covers scope construction and the
+    stub invocation. The stub does not interact with the log
+    messages this class asserts on, so the two tests layers
+    remain independent.
     """
 
     # Agent block markers for assembling test responses. Declared
@@ -3852,7 +3855,7 @@ class TestAgentDispatchScaffold:
         blocks = [AgentBlock(id="agent-0", task="task zero")]
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
-            result = service._maybe_dispatch_agents(
+            result = service._filter_dispatchable_agents(
                 blocks,
                 parent_request_id="r1",
                 turn_id="turn_abc",
@@ -3860,7 +3863,7 @@ class TestAgentDispatchScaffold:
         assert result == []
         # No dispatch log — either INFO or WARNING — fires.
         assert not any(
-            "Agent dispatch scaffold" in rec.getMessage()
+            "Agent spawn" in rec.getMessage()
             or "Agent mode enabled" in rec.getMessage()
             for rec in caplog.records
         )
@@ -3875,14 +3878,14 @@ class TestAgentDispatchScaffold:
         self._enable_agents(config)
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
-            result = service._maybe_dispatch_agents(
+            result = service._filter_dispatchable_agents(
                 [],
                 parent_request_id="r1",
                 turn_id="turn_abc",
             )
         assert result == []
         assert not any(
-            "Agent dispatch scaffold" in rec.getMessage()
+            "Agent spawn" in rec.getMessage()
             for rec in caplog.records
         )
 
@@ -3902,7 +3905,7 @@ class TestAgentDispatchScaffold:
         ]
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
-            result = service._maybe_dispatch_agents(
+            result = service._filter_dispatchable_agents(
                 blocks,
                 parent_request_id="r-parent",
                 turn_id="turn_xyz",
@@ -3911,7 +3914,7 @@ class TestAgentDispatchScaffold:
         # Header log carries parent request and turn ID.
         header_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert len(header_logs) == 1
         assert "r-parent" in header_logs[0]
@@ -3945,7 +3948,7 @@ class TestAgentDispatchScaffold:
         with caplog.at_level(
             logging.WARNING, logger="ac_dc.llm_service"
         ):
-            result = service._maybe_dispatch_agents(
+            result = service._filter_dispatchable_agents(
                 blocks,
                 parent_request_id="r1",
                 turn_id="turn_abc",
@@ -3957,11 +3960,11 @@ class TestAgentDispatchScaffold:
             and "all were invalid" in rec.getMessage()
         ]
         assert len(warning_logs) == 1
-        # No dispatch-scaffold INFO log fires — the warning
+        # No spawn INFO log fires — the warning
         # path short-circuits.
         dispatch_logs = [
             rec for rec in caplog.records
-            if "dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert dispatch_logs == []
 
@@ -3987,7 +3990,7 @@ class TestAgentDispatchScaffold:
         ]
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="ac_dc.llm_service"):
-            result = service._maybe_dispatch_agents(
+            result = service._filter_dispatchable_agents(
                 blocks,
                 parent_request_id="r1",
                 turn_id="turn_abc",
@@ -3997,7 +4000,7 @@ class TestAgentDispatchScaffold:
         # One header log + one per-block log for the valid agent.
         header_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert len(header_logs) == 1
         assert "1 agent" in header_logs[0]
@@ -4011,6 +4014,41 @@ class TestAgentDispatchScaffold:
 
     # ---------- End-to-end tests through _stream_chat ----------
 
+    def _install_recording_stub(
+        self, service: LLMService
+    ) -> list[dict[str, Any]]:
+        """Replace ``_agent_stream_impl`` with a recorder.
+
+        Returns a list that the recorder appends one dict to
+        per invocation. Tests inspect the list to verify which
+        child request IDs / tasks / scopes reached the stub.
+
+        The stub signature matches ``_stream_chat`` so the
+        swap is transparent — Step 3 will flip the real
+        ``_agent_stream_impl`` to ``_stream_chat`` and these
+        tests become regression guards that the spawn loop
+        does invoke the configured impl.
+        """
+        recordings: list[dict[str, Any]] = []
+
+        async def _recorder(
+            request_id: str,
+            message: str,
+            files: list[str],
+            images: list[str],
+            excluded_urls: list[str] | None = None,
+            *,
+            scope: Any = None,
+        ) -> None:
+            recordings.append({
+                "request_id": request_id,
+                "message": message,
+                "scope": scope,
+            })
+
+        service._agent_stream_impl = _recorder
+        return recordings
+
     async def test_stream_chat_dispatches_when_toggle_on(
         self,
         service: LLMService,
@@ -4018,8 +4056,9 @@ class TestAgentDispatchScaffold:
         fake_litellm: _FakeLiteLLM,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Normal-completion path with agent block → dispatch fires."""
+        """Normal-completion path with agent block → spawn fires."""
         self._enable_agents(config)
+        recordings = self._install_recording_stub(service)
         response = (
             "I'll spawn an agent.\n\n"
             + self._build_agent_block("agent-0", "refactor auth")
@@ -4033,12 +4072,17 @@ class TestAgentDispatchScaffold:
             )
             await asyncio.sleep(0.3)
 
+        # Filter log fired with parent request ID.
         dispatch_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert len(dispatch_logs) == 1
         assert "r-main" in dispatch_logs[0]
+        # One agent spawned — the recording stub was invoked once.
+        assert len(recordings) == 1
+        assert recordings[0]["request_id"] == "r-main-agent-00"
+        assert recordings[0]["message"] == "refactor auth"
 
     async def test_stream_chat_skips_dispatch_when_toggle_off(
         self,
@@ -4048,6 +4092,7 @@ class TestAgentDispatchScaffold:
     ) -> None:
         """Toggle off → even with agent blocks in response, no dispatch."""
         # agents.enabled defaults to False — no setup needed.
+        recordings = self._install_recording_stub(service)
         response = (
             "Here's an agent block:\n\n"
             + self._build_agent_block()
@@ -4063,9 +4108,11 @@ class TestAgentDispatchScaffold:
 
         dispatch_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert dispatch_logs == []
+        # No spawn fired.
+        assert recordings == []
 
     async def test_stream_chat_skips_dispatch_on_cancellation(
         self,
@@ -4082,6 +4129,7 @@ class TestAgentDispatchScaffold:
         invariant.
         """
         self._enable_agents(config)
+        recordings = self._install_recording_stub(service)
         response = (
             "Starting...\n\n"
             + self._build_agent_block()
@@ -4099,9 +4147,10 @@ class TestAgentDispatchScaffold:
 
         dispatch_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert dispatch_logs == []
+        assert recordings == []
 
     async def test_stream_chat_skips_dispatch_for_child_request(
         self,
@@ -4120,6 +4169,7 @@ class TestAgentDispatchScaffold:
         enforces this at the dispatch point.
         """
         self._enable_agents(config)
+        recordings = self._install_recording_stub(service)
         # Simulate an active parent stream so
         # "r-parent-agent-0" classifies as a child.
         service._active_user_request = "r-parent"
@@ -4137,9 +4187,10 @@ class TestAgentDispatchScaffold:
 
         dispatch_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert dispatch_logs == []
+        assert recordings == []
 
     async def test_stream_chat_dispatches_with_multiple_blocks(
         self,
@@ -4148,8 +4199,9 @@ class TestAgentDispatchScaffold:
         fake_litellm: _FakeLiteLLM,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Multiple agent blocks in one response all reach the log."""
+        """Multiple agent blocks spawn N agents with child IDs."""
         self._enable_agents(config)
+        recordings = self._install_recording_stub(service)
         response = (
             self._build_agent_block("agent-0", "task zero")
             + "\n"
@@ -4168,7 +4220,7 @@ class TestAgentDispatchScaffold:
 
         header_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert len(header_logs) == 1
         assert "3 agent" in header_logs[0]
@@ -4179,6 +4231,12 @@ class TestAgentDispatchScaffold:
             and "task=" in rec.getMessage()
         ]
         assert len(per_block) == 3
+        # Three agents spawned with child IDs zero-padded.
+        assert len(recordings) == 3
+        child_ids = sorted(r["request_id"] for r in recordings)
+        assert child_ids == [
+            "r1-agent-00", "r1-agent-01", "r1-agent-02",
+        ]
 
     async def test_stream_chat_no_dispatch_without_agent_blocks(
         self,
@@ -4194,6 +4252,7 @@ class TestAgentDispatchScaffold:
         trigger the scaffold even when the toggle is on.
         """
         self._enable_agents(config)
+        recordings = self._install_recording_stub(service)
         fake_litellm.set_streaming_chunks([
             "Just a normal response with no agents.",
         ])
@@ -4207,9 +4266,477 @@ class TestAgentDispatchScaffold:
 
         dispatch_logs = [
             rec.getMessage() for rec in caplog.records
-            if "Agent dispatch scaffold" in rec.getMessage()
+            if "Agent spawn: dispatching" in rec.getMessage()
         ]
         assert dispatch_logs == []
+        assert recordings == []
+
+
+class TestAgentSpawn:
+    """Step 2 — per-agent scope construction and fan-out.
+
+    Covers ``_spawn_agents_for_turn`` and its helper
+    ``_build_agent_scope``:
+
+    - Each agent gets a fresh ContextManager whose archival
+      sink targets ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl``.
+    - Each agent gets a fresh StabilityTracker, not a copy of
+      the parent's.
+    - ``selected_files`` is deep-copied so agent auto-add
+      mutations don't leak back to the parent.
+    - ``session_id`` is inherited so archive records tie back
+      to the user session.
+    - Child request IDs follow the ``{parent}-agent-{NN}``
+      shape.
+    - The parent's scope state (``_active_user_request``,
+      ``_selected_files``) is preserved through fan-out.
+    - Empty block list is a cheap no-op.
+    - No history store → construction raises with a clear
+      message (agent mode requires persistence).
+
+    These tests exercise the spawn machinery directly rather
+    than going through ``_stream_chat`` — the end-to-end path
+    is covered by ``TestAgentDispatchScaffold``.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        """Build a valid AgentBlock for spawn tests."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    async def _drain_stub_invocations(
+        self, service: LLMService
+    ) -> list[dict[str, Any]]:
+        """Install a recorder as ``_agent_stream_impl``.
+
+        Returns a list that the recorder appends to per
+        invocation; each entry carries request_id, message,
+        and the per-agent scope.
+        """
+        recordings: list[dict[str, Any]] = []
+
+        async def _recorder(
+            request_id: str,
+            message: str,
+            files: list[str],
+            images: list[str],
+            excluded_urls: list[str] | None = None,
+            *,
+            scope: Any = None,
+        ) -> None:
+            recordings.append({
+                "request_id": request_id,
+                "message": message,
+                "scope": scope,
+                "files": list(files),
+                "images": list(images),
+                "excluded_urls": (
+                    list(excluded_urls) if excluded_urls else []
+                ),
+            })
+
+        service._agent_stream_impl = _recorder
+        return recordings
+
+    async def test_empty_blocks_is_noop(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Empty block list → returns immediately, no stub invocation."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[],
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_abc",
+        )
+        assert recordings == []
+
+    async def test_single_agent_invokes_stream_impl(
+        self,
+        service: LLMService,
+    ) -> None:
+        """One agent block → one stub invocation with child ID."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        block = self._make_agent_block("agent-0", "task text")
+        await service._spawn_agents_for_turn(
+            agent_blocks=[block],
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id="turn_xyz",
+        )
+        assert len(recordings) == 1
+        assert recordings[0]["request_id"] == "r-main-agent-00"
+        # The agent's initial message IS the task text — the
+        # agent's first turn is as if the user typed the task.
+        assert recordings[0]["message"] == "task text"
+
+    async def test_multiple_agents_get_zero_padded_ids(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Child IDs are zero-padded to 2 digits regardless of count."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        blocks = [
+            self._make_agent_block(f"agent-{i}", f"t{i}")
+            for i in range(3)
+        ]
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r-parent",
+            turn_id="turn_x",
+        )
+        ids = sorted(r["request_id"] for r in recordings)
+        assert ids == [
+            "r-parent-agent-00",
+            "r-parent-agent-01",
+            "r-parent-agent-02",
+        ]
+
+    async def test_agent_scope_has_fresh_context_manager(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Each agent gets its own ContextManager, not the parent's."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        blocks = [
+            self._make_agent_block("a0", "t0"),
+            self._make_agent_block("a1", "t1"),
+        ]
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+        assert len(recordings) == 2
+        # Neither agent's context is the parent's.
+        assert recordings[0]["scope"].context is not (
+            parent_scope.context
+        )
+        assert recordings[1]["scope"].context is not (
+            parent_scope.context
+        )
+        # The two agents have DISTINCT ContextManagers — not
+        # aliased to a single shared instance.
+        assert (
+            recordings[0]["scope"].context
+            is not recordings[1]["scope"].context
+        )
+
+    async def test_agent_scope_has_fresh_tracker(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Each agent gets its own StabilityTracker."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        blocks = [
+            self._make_agent_block("a0", "t0"),
+            self._make_agent_block("a1", "t1"),
+        ]
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+        assert recordings[0]["scope"].tracker is not (
+            parent_scope.tracker
+        )
+        assert (
+            recordings[0]["scope"].tracker
+            is not recordings[1]["scope"].tracker
+        )
+
+    async def test_agent_scope_inherits_session_id(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Agent scopes use the parent's session_id so archive
+        records tie back to the user session correctly."""
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        block = self._make_agent_block()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[block],
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+        assert recordings[0]["scope"].session_id == (
+            parent_scope.session_id
+        )
+
+    async def test_agent_scope_copies_selected_files(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """selected_files is copied, not shared, so mutations isolate."""
+        (repo_dir / "a.py").write_text("content")
+        service.set_selected_files(["a.py"])
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        block = self._make_agent_block()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[block],
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+        agent_scope = recordings[0]["scope"]
+        # Same contents.
+        assert agent_scope.selected_files == ["a.py"]
+        # Different list object — mutation on agent's list
+        # doesn't touch parent's.
+        assert agent_scope.selected_files is not (
+            parent_scope.selected_files
+        )
+        agent_scope.selected_files.append("b.py")
+        assert parent_scope.selected_files == ["a.py"]
+        assert service.get_selected_files() == ["a.py"]
+
+    async def test_agent_archive_directory_created_on_first_message(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        repo_dir: Path,
+    ) -> None:
+        """Appending via the agent's archival_sink creates the dir.
+
+        Per specs4/3-llm/history.md § Agent Turn Archive, the
+        directory is created lazily on the first agent-message
+        write — turns without agent spawning leave no trace on
+        disk. The factory wires this behaviour via
+        HistoryStore.append_agent_message, which mkdir's
+        parents=True on the per-turn path.
+        """
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        block = self._make_agent_block("agent-0", "task body")
+        turn_id = HistoryStore.new_turn_id()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[block],
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id=turn_id,
+        )
+        agent_scope = recordings[0]["scope"]
+        # Before any write, the directory doesn't exist.
+        archive_dir = repo_dir / ".ac-dc4" / "agents" / turn_id
+        assert not archive_dir.exists()
+        # Simulate the agent producing output — the sink
+        # creates the archive directory.
+        agent_scope.context.add_message(
+            "assistant", "agent reply",
+        )
+        assert archive_dir.exists()
+        agent_file = archive_dir / "agent-00.jsonl"
+        assert agent_file.exists()
+        # And the message is persisted.
+        contents = agent_file.read_text()
+        assert "agent reply" in contents
+
+    async def test_parent_scope_not_mutated_by_spawn(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Spawn leaves parent scope's fields untouched."""
+        (repo_dir / "a.py").write_text("content")
+        service.set_selected_files(["a.py"])
+        await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        # Snapshot every scope field.
+        before = {
+            "context": parent_scope.context,
+            "tracker": parent_scope.tracker,
+            "session_id": parent_scope.session_id,
+            "selected_files": list(parent_scope.selected_files),
+            "archival_append": parent_scope.archival_append,
+        }
+
+        blocks = [
+            self._make_agent_block("a0", "t0"),
+            self._make_agent_block("a1", "t1"),
+        ]
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+
+        # Every field unchanged.
+        assert parent_scope.context is before["context"]
+        assert parent_scope.tracker is before["tracker"]
+        assert parent_scope.session_id == before["session_id"]
+        assert parent_scope.selected_files == (
+            before["selected_files"]
+        )
+        assert parent_scope.archival_append is (
+            before["archival_append"]
+        )
+
+    async def test_parent_guard_state_preserved(
+        self,
+        service: LLMService,
+    ) -> None:
+        """_active_user_request unchanged after spawn completes.
+
+        The guard slot tracks the user-initiated parent; agent
+        streams must not overwrite or clear it. Today the stub
+        never touches guard state, but Step 3 runs the real
+        _stream_chat for each agent — and _stream_chat's
+        cleanup path must recognise child requests and skip
+        the parent-slot clear (the _is_child_request branch in
+        _stream_chat's finally). Pinning the invariant now
+        catches a regression if that branch ever drops.
+        """
+        service._active_user_request = "r-parent"
+        recordings = await self._drain_stub_invocations(service)
+        parent_scope = service._default_scope()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[self._make_agent_block()],
+            parent_scope=parent_scope,
+            parent_request_id="r-parent",
+            turn_id="turn_x",
+        )
+        assert service._active_user_request == "r-parent"
+        assert len(recordings) == 1
+
+    async def test_sibling_exception_does_not_kill_others(
+        self,
+        service: LLMService,
+    ) -> None:
+        """One agent raising doesn't prevent siblings from running.
+
+        asyncio.gather(return_exceptions=True) captures each
+        task's result (or exception) independently. Pinning
+        this invariant now means the synthesis step in Step 4
+        can rely on partial results when one agent fails.
+        """
+        invocations: list[str] = []
+
+        async def _sometimes_raising(
+            request_id: str,
+            message: str,
+            files: list[str],
+            images: list[str],
+            excluded_urls: list[str] | None = None,
+            *,
+            scope: Any = None,
+        ) -> None:
+            invocations.append(request_id)
+            if "agent-01" in request_id:
+                raise RuntimeError("simulated agent-01 failure")
+
+        service._agent_stream_impl = _sometimes_raising
+        parent_scope = service._default_scope()
+        blocks = [
+            self._make_agent_block("a0", "t0"),
+            self._make_agent_block("a1", "t1"),
+            self._make_agent_block("a2", "t2"),
+        ]
+        # Must not raise.
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent_scope,
+            parent_request_id="r1",
+            turn_id="turn_x",
+        )
+        # All three agents were invoked; the middle one raised
+        # but the other two still ran.
+        assert sorted(invocations) == [
+            "r1-agent-00", "r1-agent-01", "r1-agent-02",
+        ]
+
+    async def test_build_scope_requires_history_store(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Agent mode without a history store → construction raises.
+
+        Per specs4/3-llm/history.md § Agent Turn Archive, the
+        archive IS the transcript the main LLM reads in
+        synthesis. Running agents without persistence would
+        silently drop that transcript — better to fail loudly.
+        """
+        svc = LLMService(
+            config=config, repo=repo, history_store=None
+        )
+        block = self._make_agent_block()
+        with pytest.raises(
+            RuntimeError, match="history store"
+        ):
+            svc._build_agent_scope(
+                block=block,
+                agent_idx=0,
+                parent_scope=svc._default_scope(),
+                turn_id="turn_x",
+            )
+
+    async def test_build_scope_field_identity(
+        self,
+        service: LLMService,
+    ) -> None:
+        """_build_agent_scope wires every field correctly.
+
+        Unit-level check on the helper itself. Verifies the
+        constructed scope has the shape Step 3 depends on:
+
+        - context is an agent ContextManager (has a turn_id
+          attribute matching the supplied turn_id)
+        - tracker is a fresh StabilityTracker
+        - session_id comes from the parent
+        - selected_files is a list-copy of the parent's
+        - archival_append is the ContextManager's own sink
+        """
+        from ac_dc.stability_tracker import StabilityTracker
+
+        parent_scope = service._default_scope()
+        service.set_selected_files([])  # clean baseline
+        block = self._make_agent_block()
+        turn_id = "turn_xyz"
+        agent_scope = service._build_agent_scope(
+            block=block,
+            agent_idx=2,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        # ContextManager wired with the right turn_id.
+        assert agent_scope.context.turn_id == turn_id
+        # Not the parent's ContextManager.
+        assert agent_scope.context is not parent_scope.context
+        # Fresh tracker.
+        assert isinstance(agent_scope.tracker, StabilityTracker)
+        assert agent_scope.tracker is not parent_scope.tracker
+        # Session ID inherited.
+        assert agent_scope.session_id == parent_scope.session_id
+        # Selected files is a copy.
+        assert agent_scope.selected_files == (
+            parent_scope.selected_files
+        )
+        assert agent_scope.selected_files is not (
+            parent_scope.selected_files
+        )
+        # Archival sink wired through the agent context.
+        assert agent_scope.archival_append is (
+            agent_scope.context.archival_sink
+        )
 
 
 class TestURLIntegration:
