@@ -4564,8 +4564,10 @@ class LLMService:
         main-conversation-only per spec; agents never enter
         review.
 
-        Callees (``_post_response``, ``_update_stability``,
-        ``_sync_file_context``, ``_build_completion_result``,
+        Callees refactored to take scope explicitly:
+        ``_post_response`` (Step 3), ``_update_stability``
+        (Step 4), ``_sync_file_context`` (Step 5). Remaining
+        callees (``_build_completion_result``,
         ``_build_and_set_review_context``,
         ``_detect_and_fetch_urls``, ``_build_tiered_content``,
         ``_assemble_tiered``, ``_assemble_messages_flat``) still
@@ -4617,11 +4619,13 @@ class LLMService:
             # selected ones. Defensive: skip files that don't exist
             # or that the repo can't read.
             #
-            # _sync_file_context still reads per-conversation
-            # state from self.* directly (refactored in Step 5).
-            # For the default scope that points at the same
-            # objects, so behaviour is unchanged.
-            self._sync_file_context()
+            # Scope threads through so an agent's sync loads its
+            # own selected files into its own ContextManager's
+            # file_context. For the default scope, scope.context
+            # .file_context is self._file_context and
+            # scope.selected_files is self._selected_files, so
+            # single-agent behaviour is unchanged.
+            self._sync_file_context(scope)
 
             # Re-index on every chat request so deletions
             # propagate. Per specs4/2-indexing/document-index.md
@@ -7344,13 +7348,35 @@ class LLMService:
     # File context sync
     # ------------------------------------------------------------------
 
-    def _sync_file_context(self) -> None:
+    def _sync_file_context(
+        self,
+        scope: ConversationScope | None = None,
+    ) -> None:
         """Reconcile file context with the current selection.
 
         Adds newly-selected files, removes deselected ones. Binary
         and missing files are skipped — but NOT silently. Each
         failure logs at WARNING so the user can see which files
         their selection isn't actually getting.
+
+        ``scope`` bundles the per-conversation state this method
+        operates on — the ContextManager (whose ``file_context``
+        field holds the loaded file contents) and the selected-
+        files list. The default-None fallback builds a scope
+        from ``self`` so direct callers (``get_context_breakdown``
+        in particular, which runs a sync before the snapshot)
+        can skip the scope argument and keep operating on the
+        main conversation.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_repo`` is the single repo handle used for all
+        file reads regardless of which conversation needs the
+        content. Per-conversation reads migrate to
+        ``scope.context.file_context`` and
+        ``scope.selected_files``. For the default-scope case
+        every ``scope.X`` resolves to the same object as the
+        corresponding ``self._X``, so single-agent behaviour
+        is byte-identical.
 
         Historical note: failures here used to log at DEBUG,
         which hid a common class of bug where a file appeared
@@ -7379,12 +7405,20 @@ class LLMService:
           workaround is to deselect + reselect the file, which
           forces a re-read via ``selected - current``.
         """
-        current = set(self._file_context.get_files())
-        selected = set(self._selected_files)
+        # Defensive default for callers that predate the scope
+        # parameter (get_context_breakdown runs a sync before
+        # the snapshot; future direct entry points may too).
+        # Every shipping call site from within _stream_chat's
+        # pipeline supplies a scope explicitly.
+        if scope is None:
+            scope = self._default_scope()
+        file_context = scope.context.file_context
+        current = set(file_context.get_files())
+        selected = set(scope.selected_files)
 
         # Remove files no longer selected.
         for path in current - selected:
-            self._file_context.remove_file(path)
+            file_context.remove_file(path)
 
         # Add newly-selected files. Use the Repo to read. Errors
         # are logged at WARNING rather than silently swallowed —
@@ -7394,7 +7428,7 @@ class LLMService:
             if self._repo is None:
                 continue
             try:
-                self._file_context.add_file(path)
+                file_context.add_file(path)
             except Exception as exc:
                 logger.warning(
                     "Selected file %s could not be loaded "
