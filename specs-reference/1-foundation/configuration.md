@@ -54,6 +54,7 @@ Linux respects `XDG_CONFIG_HOME` when set; otherwise falls back to `~/.config/`.
 |---|---|
 | `system.md` | Main coding-agent system prompt |
 | `system_doc.md` | Document-mode system prompt |
+| `system_agentic_appendix.md` | Agent-spawn capability description; appended to `system.md` when `agents.enabled` is true |
 | `review.md` | Review-mode system prompt |
 | `commit.md` | Commit message generation prompt |
 | `compaction.md` | Topic boundary detection prompt |

@@ -256,9 +256,10 @@ Agent mode is an opt-in capability gated by a user setting. Users who prefer pre
 
 - Stored in `app.json` under `agents.enabled` (boolean). Default: `false`.
 - Exposed through the Settings tab as a toggle card. The card's description names the trade-off clearly — "Allow the assistant to decompose complex requests into parallel agent conversations. Uses more tokens per turn but finishes large refactors faster."
-- Settings-service whitelist covers this field. Hot-reload picks up toggle changes without a server restart; the next user turn sees the new state.
-- When disabled, the AGENT/AGEND blocks the system prompt would normally describe to the main LLM are omitted from the system prompt composition. The LLM is never told about the capability, so it cannot emit agent-spawn blocks.
-- When enabled, the system prompt describes agent-spawn blocks and the main LLM may (but need not) emit them.
+- Settings-service whitelist covers the app-config field. Hot-reload picks up toggle changes without a server restart; the next user turn sees the new state.
+- The agent-spawn capability is described in a separate bundled file, `system_agentic_appendix.md`. When `agents.enabled` is `true`, the config layer concatenates the appendix onto `system.md` during prompt assembly. When `false`, the appendix is never read and the LLM is never told about the capability — it cannot emit agent-spawn blocks regardless of task shape.
+- The appendix is a managed file (treated like `system.md`, `review.md`, etc.) — bundled defaults ship with the app, users can edit their copy to customise the agent instructions, and the upgrade pass backs up customisations on version change.
+- Assembly order: `system.md` → `system_agentic_appendix.md` (if enabled) → `system_extra.md`. User project-specific customisation in `system_extra.md` lands last so it can extend or override anything above.
 
 ### Frontend surface
 

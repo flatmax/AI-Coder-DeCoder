@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _MANAGED_FILES = frozenset({
     "system.md",
     "system_doc.md",
+    "system_agentic_appendix.md",
     "review.md",
     "commit.md",
     "compaction.md",
@@ -703,6 +704,39 @@ class ConfigManager:
             ),
         }
 
+    @property
+    def agents_config(self) -> dict[str, Any]:
+        """Agent-mode section with defaults filled in.
+
+        Gates the parallel-agents capability described in
+        specs4/7-future/parallel-agents.md. Until agent mode is
+        implemented, this flag only affects whether the system
+        prompt's agent-spawn block description is visible to the
+        LLM — it does not change any runtime code path beyond
+        :meth:`get_system_prompt`'s fenced-section stripping.
+
+        Kept separate from :attr:`agents_enabled` so future
+        agent-mode settings (max concurrent agents, per-agent
+        token budget, synthesis delay) can be added to the dict
+        without changing the bool accessor's shape.
+        """
+        section = self.app_config.get("agents", {})
+        if not isinstance(section, dict):
+            section = {}
+        return {
+            "enabled": bool(section.get("enabled", False)),
+        }
+
+    @property
+    def agents_enabled(self) -> bool:
+        """Convenience accessor — True when agent mode is on.
+
+        Callers in the hot prompt-assembly path read this rather
+        than unpacking the config dict on every turn. Defaults to
+        False — agent mode is strictly opt-in.
+        """
+        return self.agents_config["enabled"]
+
     # ------------------------------------------------------------------
     # Directory accessors
     # ------------------------------------------------------------------
@@ -773,8 +807,52 @@ class ConfigManager:
         return f"{main}\n\n{extra}"
 
     def get_system_prompt(self) -> str:
-        """Main coding-agent system prompt (``system.md`` + extra)."""
+        """Main coding-agent system prompt.
+
+        Assembly order (top to bottom):
+
+        1. ``system.md`` — base prompt
+        2. ``system_agentic_appendix.md`` — appended only when
+           ``agents_enabled`` is True AND the file exists in
+           the user config dir. Describes the agent-spawn
+           capability to the LLM. When ``False`` or file
+           absent, the LLM is never told about agent mode —
+           it cannot emit agent-spawn blocks even if
+           ``app.json`` somehow carries a stale reference.
+        3. ``system_extra.md`` — user customisation, always
+           appended last so project-specific rules apply to
+           everything above.
+
+        Each section is separated from the next by a blank
+        line. Absent or empty sections are skipped cleanly —
+        a user install without the agentic appendix file
+        (e.g., stripped-down release, or user-deleted file)
+        falls through to the extra prompt without error.
+
+        The appendix deliberately does NOT fall back to the
+        bundled copy when the user file is absent. A user who
+        deletes their copy has made a clear choice to suppress
+        agent-mode instructions; the fallback-to-bundle
+        semantics used for the base prompt would defeat that.
+        """
         main = self._read_user_file("system.md")
+        if self.agents_enabled:
+            # User-dir-only read — no bundle fallback, see
+            # docstring rationale. Returns "" when the file
+            # doesn't exist in the user dir.
+            user_appendix_path = (
+                self._user_dir / "system_agentic_appendix.md"
+            )
+            appendix = ""
+            try:
+                if user_appendix_path.is_file():
+                    appendix = user_appendix_path.read_text(
+                        encoding="utf-8"
+                    ).strip()
+            except OSError:
+                appendix = ""
+            if appendix:
+                main = f"{main}\n\n{appendix}"
         return self._concat_prompt(main)
 
     def get_doc_system_prompt(self) -> str:

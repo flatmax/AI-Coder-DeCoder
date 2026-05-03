@@ -25,5 +25,8 @@
     "keywords_diversity": 0.5,
     "keywords_tfidf_fallback_chars": 150,
     "keywords_max_doc_freq": 0.6
+  },
+  "agents": {
+    "enabled": false
   }
 }

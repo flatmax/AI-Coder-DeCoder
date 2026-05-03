@@ -379,6 +379,204 @@ def test_url_cache_config_defaults(isolated_config_dir):
     ucc = cfg.url_cache_config
     assert "path" in ucc
     assert ucc["ttl_hours"] > 0
+
+
+def test_agents_config_defaults(isolated_config_dir):
+    """agents_config returns {'enabled': False} on a fresh install.
+
+    Default-false is the contract — agent mode must be explicitly
+    opted into, never enabled silently.
+    """
+    cfg = ConfigManager()
+    assert cfg.agents_config == {"enabled": False}
+    assert cfg.agents_enabled is False
+
+
+def test_agents_config_reads_enabled_flag(isolated_config_dir):
+    """Flipping the flag in app.json is visible via agents_enabled."""
+    cfg = ConfigManager()
+    # Seed a custom app.json.
+    app_path = cfg.config_dir / "app.json"
+    existing = json.loads(app_path.read_text(encoding="utf-8"))
+    existing.setdefault("agents", {})["enabled"] = True
+    app_path.write_text(json.dumps(existing), encoding="utf-8")
+    # Hot-reload picks it up.
+    cfg.reload_app_config()
+    assert cfg.agents_enabled is True
+    assert cfg.agents_config == {"enabled": True}
+
+
+def test_agents_config_missing_section_defaults_false(isolated_config_dir):
+    """app.json without an `agents` section → flag defaults False.
+
+    Pin for backwards compatibility with pre-toggle app.json
+    files. Users upgrading from an older install must not trip
+    the agent-mode toggle just because their app.json was
+    written before the section existed.
+    """
+    cfg = ConfigManager()
+    # Overwrite app.json without the agents section.
+    app_path = cfg.config_dir / "app.json"
+    app_path.write_text(
+        json.dumps({"url_cache": {"ttl_hours": 12}}),
+        encoding="utf-8",
+    )
+    cfg.reload_app_config()
+    assert cfg.agents_enabled is False
+
+
+def test_agents_config_non_dict_section_defaults_false(isolated_config_dir):
+    """Malformed `agents` section (not a dict) → defaults False.
+
+    Defensive — a user editing app.json by hand could produce a
+    list or string under the `agents` key. We treat that as
+    "nothing valid here" and keep the default.
+    """
+    cfg = ConfigManager()
+    app_path = cfg.config_dir / "app.json"
+    app_path.write_text(
+        json.dumps({"agents": "broken"}),
+        encoding="utf-8",
+    )
+    cfg.reload_app_config()
+    assert cfg.agents_enabled is False
+
+
+def test_agents_config_non_bool_enabled_coerced(isolated_config_dir):
+    """A truthy string under `enabled` coerces to True.
+
+    `bool()` of any non-empty string is True. We accept this —
+    a user writing `"yes"` instead of `true` shouldn't have
+    their intent silently ignored. The toggle card in the UI
+    writes a real bool, so this path only matters for
+    hand-edited app.json.
+    """
+    cfg = ConfigManager()
+    app_path = cfg.config_dir / "app.json"
+    app_path.write_text(
+        json.dumps({"agents": {"enabled": "yes"}}),
+        encoding="utf-8",
+    )
+    cfg.reload_app_config()
+    assert cfg.agents_enabled is True
+
+
+def test_system_prompt_omits_appendix_when_disabled(isolated_config_dir):
+    """agents.enabled=false → appendix NOT in system prompt.
+
+    The LLM must never see the agent-spawn block description
+    when the capability is disabled. If it did, it could emit
+    spawn blocks that the current non-agent pipeline doesn't
+    act on — the user would see mysterious text in the
+    response.
+
+    Pin for the frontend toggle's actual effect: flipping the
+    switch off must remove the capability description from
+    the prompt composition, not just hide it in the UI.
+    """
+    cfg = ConfigManager()
+    # Default state: agents disabled.
+    assert cfg.agents_enabled is False
+    prompt = cfg.get_system_prompt()
+    # The appendix file's content must not appear.
+    assert "Agent-Spawn Capability" not in prompt
+    assert "🟧🟧🟧 AGENT" not in prompt
+
+
+def test_system_prompt_includes_appendix_when_enabled(isolated_config_dir):
+    """agents.enabled=true → appendix IS in system prompt.
+
+    Happy path — flipping the toggle on surfaces the
+    capability description in the next LLM request's prompt.
+    """
+    cfg = ConfigManager()
+    # Enable agents.
+    app_path = cfg.config_dir / "app.json"
+    data = json.loads(app_path.read_text(encoding="utf-8"))
+    data["agents"] = {"enabled": True}
+    app_path.write_text(json.dumps(data), encoding="utf-8")
+    cfg.reload_app_config()
+    assert cfg.agents_enabled is True
+
+    prompt = cfg.get_system_prompt()
+    # Appendix content present.
+    assert "Agent-Spawn Capability" in prompt
+    assert "🟧🟧🟧 AGENT" in prompt
+    assert "🟩🟩🟩 AGEND" in prompt
+
+
+def test_system_prompt_handles_missing_appendix_gracefully(
+    isolated_config_dir,
+):
+    """Missing appendix file when agents enabled → no crash.
+
+    Defensive against stripped-down releases or users who
+    deleted the file. The prompt is assembled without the
+    appendix; the LLM won't know about agent mode, which is
+    consistent with the disabled state. Better than raising
+    and breaking every chat request.
+
+    Users hitting this state should see a warning somewhere,
+    but the exact warning mechanism isn't part of this test
+    — the behavioural contract here is "don't crash".
+    """
+    cfg = ConfigManager()
+    # Enable agents.
+    app_path = cfg.config_dir / "app.json"
+    data = json.loads(app_path.read_text(encoding="utf-8"))
+    data["agents"] = {"enabled": True}
+    app_path.write_text(json.dumps(data), encoding="utf-8")
+    cfg.reload_app_config()
+
+    # Delete the appendix file.
+    (cfg.config_dir / "system_agentic_appendix.md").unlink()
+
+    # Must not raise.
+    prompt = cfg.get_system_prompt()
+    # Base prompt still present.
+    assert "coding agent" in prompt.lower()
+    # But no appendix content.
+    assert "Agent-Spawn Capability" not in prompt
+
+
+def test_system_prompt_assembly_order(isolated_config_dir):
+    """Assembly order: base → appendix → extra.
+
+    Pin for the specs4 contract: user customisation in
+    `system_extra.md` must land LAST so project-specific
+    rules apply to everything above (including the agent
+    appendix when enabled).
+
+    A user saying "always use type annotations" in
+    system_extra.md should have that rule apply to code
+    the agents write too.
+    """
+    cfg = ConfigManager()
+    # Enable agents.
+    app_path = cfg.config_dir / "app.json"
+    data = json.loads(app_path.read_text(encoding="utf-8"))
+    data["agents"] = {"enabled": True}
+    app_path.write_text(json.dumps(data), encoding="utf-8")
+    cfg.reload_app_config()
+
+    # Put a distinctive marker in system_extra.md.
+    extra_path = cfg.config_dir / "system_extra.md"
+    extra_path.write_text(
+        "PROJECT-EXTRA-MARKER-XYZ",
+        encoding="utf-8",
+    )
+
+    prompt = cfg.get_system_prompt()
+    # All three sections present.
+    assert "coding agent" in prompt.lower()  # base
+    assert "Agent-Spawn Capability" in prompt  # appendix
+    assert "PROJECT-EXTRA-MARKER-XYZ" in prompt  # extra
+
+    # Order check: base before appendix before extra.
+    base_idx = prompt.lower().find("coding agent")
+    appendix_idx = prompt.find("Agent-Spawn Capability")
+    extra_idx = prompt.find("PROJECT-EXTRA-MARKER-XYZ")
+    assert base_idx < appendix_idx < extra_idx
 def test_app_config_hot_reload(isolated_config_dir):
     """Editing app.json and calling reload_app_config reflects changes."""
     cfg = ConfigManager()

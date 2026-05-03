@@ -7,6 +7,7 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - LLM config (provider settings, model, env vars, cache tuning)
 - App config (URL cache, history compaction, document conversion, document index)
 - System prompt (main LLM instructions)
+- Agentic coding appendix (optional — describes the agent-spawn capability; appended to the system prompt only when `agents.enabled` is true in app config)
 - Extra prompt (appended to system prompt)
 - Document system prompt (replaces main prompt in document mode)
 - Review system prompt (replaces main prompt in review mode)
