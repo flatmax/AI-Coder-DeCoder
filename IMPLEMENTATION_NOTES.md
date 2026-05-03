@@ -129,7 +129,11 @@ The card uses a new `renderer: 'toggle'` mode in the `CONFIG_CARDS` catalog, dis
 
 **Invariant preserved**: when `agents.enabled` is `false`, the LLM is never told about agent-spawn blocks. The appendix file is never read, the system prompt never mentions the capability. This is stronger than "the parser tolerates unknown blocks" — the LLM can't emit blocks it doesn't know exist. Users wanting to experiment with agent mode opt in deliberately; users on budget-sensitive workflows never pay the appendix's token cost.
 
-The four commits form a complete wire-through with no intermediate half-on states. A single commit implementing all four would have been harder to review and harder to revert. The feature is now end-to-end deliverable from Settings-tab click through to the next user turn including the appendix in its system prompt.
+The four commits form a complete wire-through with no intermediate half-on states. A single commit implementing all four would have been harder to review and harder to revert. The *information plane* is end-to-end deliverable from Settings-tab click through to the next user turn including the appendix in its system prompt.
+
+**What D23 does NOT deliver — the execution plane.** Enabling the toggle tells the LLM about agent-spawn blocks via the appendix. It does not cause anything to spawn. The edit parser recognises `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` as reserved marker syntax (D20) and the `AgentBlock` dataclass captures parsed fields, but no dispatch path consumes those blocks — they surface in the response as prose. The `build_agent_context_manager` factory exists (Slice 5), turn-ID propagation exists (Slice 1), agent archive persistence exists (Slice 2), but the `_stream_chat` refactor that would invoke N agents in parallel has not landed (see D22). The tabbed chat-panel UI described in D21 has not landed either.
+
+So toggling agents on today produces a more informative LLM response — it may reference agent blocks in its reasoning, or emit well-formed blocks that nothing acts on — without changing what actually executes. The toggle is decorative from an *execution* standpoint. This is deliberate: `specs4/7-future/parallel-agents.md` files the dispatch layer under future work, and the gating infrastructure had to land first so when dispatch is implemented, the LLM can be taught the capability and then un-taught without redeploying.
 
 ### D22 — Parallel-agents foundation uses the existing streaming pipeline
 
