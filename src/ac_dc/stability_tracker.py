@@ -785,6 +785,30 @@ class StabilityTracker:
         processed: set[Tier] = set()
         for _ in range(8):
             made_progress = False
+            # L0 backfill probe — if L0's token total is below
+            # cache target, mark it broken so _try_promote_from
+            # treats it as "needs content" and promotes eligible
+            # L1 items upward. Without this, an underfilled L0
+            # is neither broken nor empty per _try_promote_from's
+            # check, so nothing ever promotes into it and L0
+            # sits permanently under the provider's cache-min
+            # threshold — meaning the provider silently refuses
+            # to cache it and we pay the full ingestion cost on
+            # every request. Per specs4/3-llm/cache-tiering.md
+            # § "L0 Backfill". Runs every iteration so a
+            # promotion that lands in L0 mid-cascade still
+            # triggers further backfill if the newly-promoted
+            # content didn't meet the target.
+            if self._cache_target_tokens > 0:
+                l0_tokens = sum(
+                    item.tokens
+                    for item in self._items.values()
+                    if item.tier == Tier.L0
+                )
+                if l0_tokens < self._cache_target_tokens:
+                    if Tier.L0 not in self._broken_tiers:
+                        self._broken_tiers.add(Tier.L0)
+                        made_progress = True
             for tier in _CASCADE_ORDER:
                 if tier in processed:
                     # Re-visit only to check promotion eligibility
