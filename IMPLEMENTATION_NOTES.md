@@ -135,6 +135,39 @@ The four commits form a complete wire-through with no intermediate half-on state
 
 So toggling agents on today produces a more informative LLM response — it may reference agent blocks in its reasoning, or emit well-formed blocks that nothing acts on — without changing what actually executes. The toggle is decorative from an *execution* standpoint. This is deliberate: `specs4/7-future/parallel-agents.md` files the dispatch layer under future work, and the gating infrastructure had to land first so when dispatch is implemented, the LLM can be taught the capability and then un-taught without redeploying.
 
+### D24 — `_stream_chat` `ConversationScope` refactor complete; module decomposition deferred
+
+The execution-layer prerequisite called out at the end of D22 has landed. `LLMService._stream_chat` and every per-conversation helper it calls now thread a `ConversationScope` dataclass containing the conversation's `ContextManager`, stability tracker, session ID, selected-files list, and archival-append closure. Shared infrastructure (`_repo`, `_config`, `_symbol_index`, `_doc_index`, `_url_service`, `_edit_pipeline`, executors, event callback, guard state) stays on `LLMService`. For the main user-facing session, `_default_scope()` builds a scope from `self` and the behaviour is byte-identical to the pre-refactor implicit-reads; a future agent-spawning path constructs per-agent scopes via `build_agent_context_manager` (Slice 5) and invokes `_stream_chat` N times in parallel.
+
+**The 11-commit sequence.** Landed over eleven reviewable commits rather than one monolithic diff. Each step left the codebase passing tests; no intermediate half-refactored state shipped. Commit hashes and content in the progress log at `docs/parallel-agents-scope-refactor.md`:
+
+1. Add `ConversationScope` dataclass + `_default_scope()` helper; no call sites use it yet
+2. `_stream_chat` accepts `scope`; `chat_streaming` threads it through
+3. `_post_response(scope)` — compaction system-event writes go through `scope.context.add_message` and `scope.archival_append`
+4. `_update_stability(scope)` — tier assignment reads `scope.tracker`, `scope.context.mode`, `scope.selected_files`
+5. `_sync_file_context(scope)` — file loads target `scope.context.file_context`
+6. `_build_tiered_content(scope)`, `_assemble_tiered(scope)`, `_assemble_messages_flat(scope)` — all tier assembly reads per-conversation state from scope
+7. `_detect_and_fetch_urls(scope)` — URL context attaches to `scope.context`; `_url_service` stays shared
+8. `_build_completion_result(scope)` — auto-add mutations write to `scope.selected_files` and `scope.context.file_context`
+9. `_build_and_set_review_context(scope)` — last per-conversation callee; review-mode state stays main-only on `self`
+10. `TestConversationScopeDefault` — five-test regression guard pinning explicit-scope equivalence
+11. This entry
+
+**Main-conversation-only state pinned to self.** `_review_active` and `_review_state` intentionally do NOT move into scope. Review mode is a main-conversation feature per specs4/4-features/code-review.md § Limitations; agents never enter review. Keeping the state on `self` surfaces that invariant at the method boundary — a reader of `_stream_chat` sees the review-mode branch read from `self._review_active` and understands immediately that this code path is specific to the user-facing session. Threading scope through `_build_and_set_review_context` was for consistency; the method's content still reads `self._review_state` because scope never carries it.
+
+**The `archival_append` closure is the agent-vs-main abstraction.** For the main conversation, `_default_scope()` wraps `HistoryStore.append_message` in a closure that captures the store. For a future agent conversation, `build_agent_context_manager` returns a ContextManager whose `archival_sink` wraps `HistoryStore.append_agent_message` and bakes in the turn_id + agent_idx. At the call site in `_stream_chat`, `scope.archival_append("user", content, session_id=..., turn_id=...)` works identically — it's just a callable that persists one message. Neither the main path nor the agent path has to know the other exists.
+
+**Decomposition of `llm_service.py` deferred.** The module is ~3000 lines — a handful of RPC methods (mode / cross-reference / review / URL / rebuild / session / history / LSP / TeX / settings-refresh), the streaming pipeline, and the orchestration glue that wires context + tracker + compactor + URL service + event callback + guard state. Splitting it now during the refactor would produce a chain of dependencies between new modules that the scope refactor itself doesn't motivate. Candidate carve-outs for a future pass: the RPC surface methods (mode / review / URL / rebuild) into `llm_rpc_methods.py`, the streaming pipeline (`_stream_chat` + `_run_completion_sync` + `_build_completion_result` + helpers) into `llm_streaming.py`, the stability-tier glue (`_try_initialize_stability` / `_update_stability` / `_rebuild_cache_impl`) into `llm_stability.py`, keeping `LLMService` in `llm_service.py` as the public entry point. Not this commit.
+
+**Next concrete work.** With scope plumbing in place, agent-spawning becomes a focused change rather than a surgical one:
+
+1. Add a parser branch in `EditParser` that dispatches `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` blocks to a spawn handler instead of treating them as prose (D20 foundation is already in place; today the markers parse as unknown text).
+2. A new method (tentatively `_spawn_agents_for_turn(agent_blocks)`) constructs N `ConversationScope` instances via `build_agent_context_manager`, fans out N `_stream_chat(..., scope=agent_scope)` calls with child request IDs, awaits their completion.
+3. The per-request accumulator dict (`_request_accumulators`) already routes by request ID, so child agent streams interleave naturally on the WebSocket.
+4. A synthesis step reads each agent's completed `ContextManager.get_history()` (or archive) and injects the transcripts into the main conversation's context for the main LLM's final response.
+
+Steps 2-4 can land in separate commits with tests for each, paralleling this refactor's discipline. The expensive part — proving byte-identical single-agent behaviour through a scope indirection — is done.
+
 **What "agentic mode" means today, concretely.** Four things landed:
 
 | Layer | Piece | Delivered |
