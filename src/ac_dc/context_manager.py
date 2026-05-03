@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ac_dc.file_context import FileContext
 from ac_dc.token_counter import TokenCounter
@@ -207,6 +207,8 @@ class ContextManager:
         cache_target_tokens: int | None = None,
         compaction_config: dict[str, Any] | None = None,
         system_prompt: str = "",
+        turn_id: str | None = None,
+        archival_sink: Callable[..., Any] | None = None,
     ) -> None:
         """Initialise a fresh context manager.
 
@@ -234,12 +236,44 @@ class ContextManager:
             Initial system prompt text. Defaults to empty; callers
             usually set it explicitly via :meth:`set_system_prompt`
             after reading the prompt from config.
+        turn_id:
+            Optional turn identifier for agent ContextManagers
+            spawned under a parent turn (see
+            specs4/7-future/parallel-agents.md § Turn ID
+            Propagation). When set, :meth:`add_message` and
+            :meth:`add_exchange` include the turn_id in the
+            archival sink's payload so every agent record in
+            ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl`` carries
+            the parent turn's ID. The main user-facing
+            ContextManager leaves this None — its records land
+            in the main history store via a different code path.
+        archival_sink:
+            Optional callable for persisting agent messages to
+            disk. Called after every :meth:`add_message` /
+            :meth:`add_exchange` append with keyword arguments
+            matching :meth:`HistoryStore.append_agent_message`'s
+            shape minus ``turn_id`` and ``agent_idx`` (the sink
+            closes over those). When None, the ContextManager
+            is in-memory only — its messages live in
+            :attr:`_history` but don't persist anywhere. This is
+            the correct state for the main user-facing
+            ContextManager; agent ContextManagers get a sink
+            that writes to their per-agent archive file.
         """
         self._model_name = model_name
         self._cache_target_tokens = cache_target_tokens
         self._compaction_config = (
             dict(compaction_config) if compaction_config is not None else None
         )
+        # Turn ID and archival sink — optional per-agent plumbing
+        # for the parallel-agents foundation. Neither affects the
+        # in-memory history semantics; the sink fires as a
+        # fire-and-forget side effect after each append so a
+        # broken sink can't corrupt conversation state. See
+        # _invoke_archival_sink for the exception-handling
+        # contract.
+        self._turn_id = turn_id
+        self._archival_sink = archival_sink
 
         # Core collaborators.
         self._counter = TokenCounter(model_name)
@@ -324,6 +358,71 @@ class ContextManager:
         """
         return self._compaction_config
 
+    @property
+    def turn_id(self) -> str | None:
+        """The turn ID this ContextManager is scoped to, or None.
+
+        Set at construction for agent ContextManagers; None for
+        the main user-facing ContextManager. Exposed read-only so
+        downstream code (archival sinks, prompt assembly, the
+        agent browser UI) can correlate records without needing
+        to look up the parent turn separately.
+        """
+        return self._turn_id
+
+    @property
+    def archival_sink(self) -> Callable[..., Any] | None:
+        """The archival sink callable, or None.
+
+        Exposed for tests and for diagnostic callers that want to
+        verify a sink is attached. In normal operation, code
+        should not invoke the sink directly — :meth:`add_message`
+        and :meth:`add_exchange` drive it.
+        """
+        return self._archival_sink
+
+    def _invoke_archival_sink(
+        self,
+        role: str,
+        content: str,
+        *,
+        system_event: bool = False,
+        **extra: Any,
+    ) -> None:
+        """Fire the archival sink with a single message's fields.
+
+        No-op when no sink is attached. When a sink is attached
+        but raises, the exception is logged at WARNING and
+        swallowed — the in-memory history append has already
+        happened, and a broken sink must not roll that back or
+        propagate into the streaming pipeline. Same defensive
+        discipline as :meth:`_purge_tracker_history` and
+        :meth:`Repo._fire_post_write`.
+
+        The sink's keyword-argument shape matches
+        :meth:`HistoryStore.append_agent_message` minus
+        ``turn_id`` and ``agent_idx`` — the caller that
+        constructed the ContextManager closes over those values
+        when building the sink.
+        """
+        sink = self._archival_sink
+        if sink is None:
+            return
+        try:
+            sink(
+                role=role,
+                content=content,
+                system_event=system_event,
+                **extra,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Archival sink raised for turn_id=%s role=%s: %s",
+                self._turn_id,
+                role,
+                exc,
+            )
+
     # ------------------------------------------------------------------
     # Mode
     # ------------------------------------------------------------------
@@ -404,6 +503,18 @@ class ContextManager:
         if extra:
             msg.update(extra)
         self._history.append(msg)
+        # Fire the archival sink as a side effect. Happens AFTER
+        # the in-memory append so a sink exception (swallowed
+        # inside the helper) can't leave us with a dropped
+        # message. The sink receives the canonical fields —
+        # role, content, system_event, and any extras — minus
+        # turn_id/agent_idx which the sink closes over.
+        self._invoke_archival_sink(
+            role,
+            content,
+            system_event=system_event,
+            **extra,
+        )
         return msg
 
     def add_exchange(
@@ -422,6 +533,13 @@ class ContextManager:
         self._history.append(
             {"role": "assistant", "content": assistant_content}
         )
+        # Fire the sink for both messages in order. Matches the
+        # semantics of two back-to-back add_message calls from
+        # the sink's perspective — the caller-supplied sink sees
+        # a user record followed by an assistant record, same as
+        # it would for the normal streaming-handler path.
+        self._invoke_archival_sink("user", user_content)
+        self._invoke_archival_sink("assistant", assistant_content)
 
     def get_history(self) -> list[dict[str, Any]]:
         """Return a shallow copy of the current history.

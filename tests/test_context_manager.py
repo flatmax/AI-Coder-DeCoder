@@ -994,3 +994,309 @@ class TestEstimateAndShed:
         assert "large.py" in dropped
         # Small file should survive.
         assert cm.file_context.has_file("small.py")
+
+
+# ---------------------------------------------------------------------------
+# Turn ID and archival sink — Slice 4 of parallel-agents foundation
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSink:
+    """Captures every archival-sink invocation for assertions.
+
+    Mimics the shape of the closure the LLMService will build
+    around ``HistoryStore.append_agent_message`` — accepts
+    arbitrary keyword arguments and records them. Tests inspect
+    the ``calls`` list to verify ordering, per-message payload
+    contents, and that the sink fired at all.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(dict(kwargs))
+
+
+class _BrokenSink:
+    """Sink that always raises — for exception-isolation tests.
+
+    A production sink could raise from disk full, permission
+    denied, serialisation failure, or a bug in the closure that
+    wraps ``HistoryStore``. The ContextManager must isolate those
+    failures so a broken sink doesn't corrupt the in-memory
+    conversation or leak exceptions into the streaming pipeline.
+    """
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.call_count += 1
+        raise RuntimeError("simulated sink failure")
+
+
+class TestTurnIdAndArchivalSink:
+    """Agent-scoped plumbing — turn_id propagation + archival sink.
+
+    Pins the Slice 4 contract from
+    ``specs4/7-future/parallel-agents.md`` § Turn ID
+    Propagation. The main user-facing ContextManager leaves
+    these fields None (its records flow through the main history
+    store via a different path); agent ContextManagers receive
+    both so every per-agent record carries its parent turn's ID
+    and lands in ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl``.
+    """
+
+    def test_turn_id_defaults_none(
+        self, cm: ContextManager
+    ) -> None:
+        """Main-LLM ContextManager has no turn_id."""
+        assert cm.turn_id is None
+
+    def test_archival_sink_defaults_none(
+        self, cm: ContextManager
+    ) -> None:
+        """Main-LLM ContextManager has no archival sink."""
+        assert cm.archival_sink is None
+
+    def test_turn_id_stored_from_constructor(self) -> None:
+        """Agent ContextManager exposes the turn_id it was built with."""
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_1234567890_abc123",
+        )
+        assert cm.turn_id == "turn_1234567890_abc123"
+
+    def test_archival_sink_stored_from_constructor(self) -> None:
+        """Agent ContextManager exposes the sink it was built with."""
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=sink,
+        )
+        assert cm.archival_sink is sink
+
+    def test_add_message_invokes_sink(self) -> None:
+        """Each add_message call fires the sink once.
+
+        Pins the per-message invocation contract — callers should
+        see one sink call per message, not batched.
+        """
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_1_abc",
+            archival_sink=sink,
+        )
+        cm.add_message("user", "hello")
+        cm.add_message("assistant", "hi there")
+        assert len(sink.calls) == 2
+
+    def test_add_message_payload_shape(self) -> None:
+        """Sink receives role, content, system_event keyword args.
+
+        The shape matches ``HistoryStore.append_agent_message``
+        minus ``turn_id`` and ``agent_idx`` which the sink's
+        closure supplies. Pinning the kwarg names protects the
+        LLMService's closure code from a silent contract break.
+        """
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_1_abc",
+            archival_sink=sink,
+        )
+        cm.add_message("user", "hello")
+        call = sink.calls[0]
+        assert call["role"] == "user"
+        assert call["content"] == "hello"
+        assert call["system_event"] is False
+
+    def test_add_message_system_event_forwarded(self) -> None:
+        """system_event=True propagates to the sink."""
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=sink,
+        )
+        cm.add_message(
+            "user", "Committed abc123", system_event=True
+        )
+        assert sink.calls[0]["system_event"] is True
+
+    def test_add_message_extras_forwarded(self) -> None:
+        """Arbitrary extra kwargs forward to the sink.
+
+        Matches the stash-on-the-dict behaviour of add_message
+        itself — files, edit_results, image_refs all reach the
+        sink verbatim so the per-agent JSONL records carry the
+        same metadata as the main store's records would.
+        """
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=sink,
+        )
+        cm.add_message(
+            "assistant",
+            "done",
+            files_modified=["src/foo.py"],
+            edit_results=[{"file": "src/foo.py", "status": "applied"}],
+        )
+        call = sink.calls[0]
+        assert call["files_modified"] == ["src/foo.py"]
+        assert call["edit_results"][0]["status"] == "applied"
+
+    def test_add_message_without_sink_is_noop(
+        self, cm: ContextManager
+    ) -> None:
+        """No sink attached → add_message still works, no crash.
+
+        The main ContextManager runs without a sink every day;
+        this test pins that the sink call site handles the
+        None case without raising or special-casing.
+        """
+        cm.add_message("user", "hi")
+        assert len(cm.get_history()) == 1
+
+    def test_add_exchange_fires_sink_twice(self) -> None:
+        """add_exchange invokes the sink for user then assistant.
+
+        Session restore and other atomic-pair callers use
+        add_exchange; the sink must see both records so the
+        per-agent archive stays consistent with in-memory state.
+        """
+        sink = _RecordingSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_1_abc",
+            archival_sink=sink,
+        )
+        cm.add_exchange("question", "answer")
+        assert len(sink.calls) == 2
+        assert sink.calls[0]["role"] == "user"
+        assert sink.calls[0]["content"] == "question"
+        assert sink.calls[1]["role"] == "assistant"
+        assert sink.calls[1]["content"] == "answer"
+
+    def test_sink_fires_after_history_append(self) -> None:
+        """In-memory history is updated before the sink runs.
+
+        Critical: a sink that reads back from the context
+        manager during its invocation must see the just-appended
+        message. If the order were reversed, the sink would see
+        stale history (or worse, could race with a concurrent
+        reader). We pin the order by having the sink check
+        history length during its call.
+        """
+        history_sizes_seen: list[int] = []
+
+        def _observing_sink(**kwargs: Any) -> None:
+            history_sizes_seen.append(len(cm.get_history()))
+
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=_observing_sink,
+        )
+        cm.add_message("user", "first")
+        cm.add_message("assistant", "second")
+        # Sink saw 1 entry after first append, 2 after second.
+        assert history_sizes_seen == [1, 2]
+
+    def test_sink_exception_does_not_propagate(self) -> None:
+        """Sink raises → add_message returns normally.
+
+        A failing sink must not break the in-memory conversation.
+        Matches the defensive discipline on
+        :meth:`_purge_tracker_history` and repo post-write
+        callbacks.
+        """
+        sink = _BrokenSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=sink,
+        )
+        # Must not raise.
+        cm.add_message("user", "hi")
+        # History was still updated.
+        assert len(cm.get_history()) == 1
+        # Sink was still called.
+        assert sink.call_count == 1
+
+    def test_sink_exception_does_not_prevent_history_append(
+        self,
+    ) -> None:
+        """Broken sink leaves in-memory history intact.
+
+        Belt-and-braces over the previous test: pin that the
+        history append happens BEFORE the sink fires, so a
+        sink exception can never leave us with a message the
+        caller thinks was stored but isn't.
+        """
+        sink = _BrokenSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=sink,
+        )
+        returned = cm.add_message("user", "survives")
+        # Message is in history.
+        assert cm.get_history() == [returned]
+        # And was returned to the caller.
+        assert returned["content"] == "survives"
+
+    def test_sink_exception_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Broken sink produces a WARNING log entry.
+
+        Operators need a signal when sinks fail — silent
+        swallowing would hide a broken agent archive
+        indefinitely.
+        """
+        sink = _BrokenSink()
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_diag_xyz",
+            archival_sink=sink,
+        )
+        with caplog.at_level("WARNING", logger="ac_dc.context_manager"):
+            cm.add_message("user", "hi")
+        # At least one WARNING mentioning the turn_id.
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING"
+        ]
+        assert warnings
+        assert any(
+            "turn_diag_xyz" in r.getMessage() for r in warnings
+        )
+
+    def test_turn_id_is_read_only(self) -> None:
+        """No public setter for turn_id.
+
+        Turn ID is set once at construction and never changes —
+        it's the agent's identity. A setter would invite bugs
+        where a running agent's turn ID drifts mid-execution.
+        """
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            turn_id="turn_1_abc",
+        )
+        with pytest.raises(AttributeError):
+            cm.turn_id = "turn_2_def"  # type: ignore[misc]
+
+    def test_archival_sink_is_read_only(self) -> None:
+        """No public setter for archival_sink.
+
+        Sink is set once at construction. Swapping mid-session
+        would mean messages written with the old sink would be
+        orphaned in a different archive from the new sink's
+        target.
+        """
+        cm = ContextManager(
+            model_name="anthropic/claude-sonnet-4-5",
+            archival_sink=_RecordingSink(),
+        )
+        with pytest.raises(AttributeError):
+            cm.archival_sink = _RecordingSink()  # type: ignore[misc]
