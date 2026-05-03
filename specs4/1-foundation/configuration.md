@@ -75,6 +75,19 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - System prompts read fresh from files; concatenated at assembly time — edits take effect on next LLM request
 - Snippets loaded on request with two-location fallback: repo-local first, then app config directory
 
+### User-Dir-Only Read for the Agentic Appendix
+
+The agent-spawn capability file (`system_agentic_appendix.md`) is read from the user config directory WITHOUT the usual fallback to the bundled copy. When the file is absent from the user directory — user deleted it, or a stripped-down release that didn't ship it — the appendix is omitted from the assembled system prompt even when `agents.enabled` is true.
+
+The rationale: a user who deletes the appendix file has made a clear choice to suppress agent-mode instructions. Falling back to the bundled copy would defeat that choice and re-inject the instructions the user just removed. This is distinct from the base `system.md`, where the fallback-to-bundle path is load-bearing (a missing base prompt would break every chat request).
+
+Callers that want the appendix present must either:
+
+- Keep the bundled copy in the user directory (the default on any fresh install), OR
+- Customise their user-directory copy (edits survive upgrades via the standard managed-file backup mechanism)
+
+Deleting the appendix is a supported user action. Toggling `agents.enabled` off without deleting the file is the usual way to suppress agent mode; deletion is an extra belt-and-braces step for users who want no trace of the capability even if the toggle later flips back on.
+
 ## Token Counter Data Sources
 
 - Hardcoded model-family defaults (no runtime provider registry lookup)
