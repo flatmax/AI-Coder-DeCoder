@@ -4569,14 +4569,16 @@ class LLMService:
         (Step 4), ``_sync_file_context`` (Step 5),
         ``_build_tiered_content`` / ``_assemble_tiered`` /
         ``_assemble_messages_flat`` (Step 6),
-        ``_detect_and_fetch_urls`` (Step 7). Remaining callees
-        (``_build_completion_result``,
-        ``_build_and_set_review_context``) still read
-        per-conversation state from ``self.*`` directly. They
-        get threaded the scope in subsequent refactor steps.
-        For the default-scope case the objects match exactly,
-        so the behaviour is byte-identical to the pre-refactor
-        implementation.
+        ``_detect_and_fetch_urls`` (Step 7),
+        ``_build_completion_result`` (Step 8). Remaining callee
+        ``_build_and_set_review_context`` still reads
+        per-conversation state from ``self.*`` directly;
+        review is main-conversation-only per spec, so Step 9
+        threads scope through primarily for the
+        ``_selected_files`` read that drives reverse-diff
+        inclusion. For the default-scope case the objects
+        match exactly, so the behaviour is byte-identical to
+        the pre-refactor implementation.
         """
         # Defensive default for callers that predate the scope
         # parameter. Every shipping call site supplies a scope
@@ -4868,6 +4870,12 @@ class LLMService:
         # reason on the last chunk before our cancel took
         # effect). Left None when the try-block raised before
         # _run_completion_sync returned.
+        #
+        # Scope threads through so the auto-add-to-selection
+        # path mutates the right conversation's selection list
+        # and loads content into the right file_context. For
+        # the default scope these are self._selected_files and
+        # self._file_context — unchanged behaviour.
         result = await self._build_completion_result(
             full_content=full_content,
             user_message=message,
@@ -4875,6 +4883,7 @@ class LLMService:
             error=error,
             finish_reason=finish_reason if error is None else None,
             request_usage=request_usage,
+            scope=scope,
         )
 
         # Fire completion event.
@@ -5144,6 +5153,7 @@ class LLMService:
         error: str | None,
         finish_reason: str | None = None,
         request_usage: dict[str, Any] | None = None,
+        scope: ConversationScope | None = None,
     ) -> dict[str, Any]:
         """Parse the response, apply edits, build the result dict.
 
@@ -5159,6 +5169,36 @@ class LLMService:
         from natural stops. None when the stream raised before
         completion or when the provider didn't report one.
 
+        ``scope`` bundles the per-conversation state this method
+        mutates — the selected-files list (appended-to on auto-
+        add of not-in-context edits and newly-created files) and
+        the ContextManager's file_context (populated with the
+        content of auto-added files so the next request's prompt
+        assembly sees them). The default-None fallback builds a
+        scope from ``self`` so direct callers (tests that exercise
+        the method in isolation) can skip the scope argument.
+
+        Shared infrastructure continues to live on ``self``:
+        ``_review_active`` is main-conversation-only per
+        specs4/4-features/code-review.md — agents never enter
+        review, so the read-only gate stays on self.
+        ``_edit_pipeline`` is shared infrastructure — a single
+        pipeline handle serialised by the repo layer's per-path
+        mutex, so concurrent agent apply calls remain safe.
+        ``_last_error_info`` is a single-stream-guard side
+        channel that the guard itself keeps safe for main-
+        conversation use; future parallel-agent work can widen
+        it to a per-request dict.
+
+        For the default-scope case every ``scope.X`` resolves
+        to the same object as the corresponding ``self._X``, so
+        single-agent behaviour is byte-identical. In particular,
+        the mutation of ``scope.selected_files`` writes to the
+        same list as the pre-refactor ``self._selected_files``
+        mutation — the downstream ``filesChanged`` broadcast
+        (which reads ``scope.selected_files`` in ``_stream_chat``)
+        sees the updated list.
+
         Order of operations:
 
         1. Parse the full response via :func:`parse_text` —
@@ -5168,11 +5208,13 @@ class LLMService:
            blocks and zero counts.
         3. Otherwise, run the pipeline against the current
            selected-files set. Auto-added files are appended to
-           ``_selected_files`` so the next request's file sync
-           includes them.
+           the scope's selection list so the next request's file
+           sync includes them.
         4. Populate aggregate counts and files_* lists from the
            pipeline's :class:`ApplyReport`.
         """
+        if scope is None:
+            scope = self._default_scope()
         # Parse the response. We do this even for cancelled /
         # error streams — the frontend renders incomplete blocks
         # as pending cards, and shell-command detection on a
@@ -5262,9 +5304,11 @@ class LLMService:
         # currently-selected files so it can mark not-in-context
         # edits. We pass a copy — the pipeline doesn't mutate
         # its input, but the defensive copy means a concurrent
-        # mutation of _selected_files can't affect apply
-        # results mid-loop.
-        in_context = set(self._selected_files)
+        # mutation of the selection list can't affect apply
+        # results mid-loop. Selection comes from scope so an
+        # agent's apply sees its own selection, not the main
+        # conversation's.
+        in_context = set(scope.selected_files)
         try:
             report = await self._edit_pipeline.apply_edits(
                 parse_result.blocks,
@@ -5303,17 +5347,26 @@ class LLMService:
         if paths_to_add:
             added: list[str] = []
             for path in paths_to_add:
-                if path not in self._selected_files:
-                    self._selected_files.append(path)
+                if path not in scope.selected_files:
+                    # Mutate the scope's selection list in
+                    # place. For the default scope this IS
+                    # self._selected_files, so the downstream
+                    # filesChanged broadcast (which reads from
+                    # scope) sees the append. For an agent
+                    # scope the agent's own list gets the
+                    # entry, per D21's per-tab selection rule.
+                    scope.selected_files.append(path)
                     added.append(path)
             # Load the newly-selected files into the file
             # context so the next request's assembly has their
             # content. Silently skip files that fail to load
             # (binary, missing) — matches the file_sync
-            # policy.
+            # policy. File context lives on the scope's
+            # ContextManager so an agent scope's added files
+            # land in the agent's file_context.
             for path in added:
                 try:
-                    self._file_context.add_file(path)
+                    scope.context.file_context.add_file(path)
                 except Exception as exc:
                     logger.debug(
                         "Auto-added file %s could not be "
@@ -5325,7 +5378,7 @@ class LLMService:
         # not just auto-added ones. Without this, files that
         # were already in context keep their pre-edit snapshot
         # indefinitely — the pipeline writes the new content to
-        # disk, but _file_context is a write-once cache for
+        # disk, but file_context is a write-once cache for
         # already-present entries (see _sync_file_context: it
         # only calls add_file for files in `selected - current`,
         # so files already present are never re-read).
@@ -5343,9 +5396,12 @@ class LLMService:
         # Runs AFTER the auto-add loop above so auto-added
         # files (also in files_modified) get loaded exactly
         # once with the post-edit content rather than being
-        # loaded then immediately re-loaded.
+        # loaded then immediately re-loaded. File context
+        # comes from scope so agents refresh their own
+        # ContextManager's cache.
+        file_context = scope.context.file_context
         for path in report.files_modified:
-            if not self._file_context.has_file(path):
+            if not file_context.has_file(path):
                 # Auto-added files already loaded above, or
                 # the file was removed from selection between
                 # edit and here. Either way, nothing to
@@ -5357,7 +5413,7 @@ class LLMService:
                 # already-present path updates its content
                 # in place and preserves insertion order
                 # (FileContext contract).
-                self._file_context.add_file(path)
+                file_context.add_file(path)
             except Exception as exc:
                 # File became unreadable post-edit (binary
                 # conversion? permission flip?). Log at
