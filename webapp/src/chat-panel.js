@@ -537,6 +537,53 @@ export class ChatPanel extends RpcMixin(LitElement) {
       line-height: 1.5;
     }
 
+    /* Tab strip — D21 Phase B1. Renders above the
+     * messages area when multiple tabs exist. Hidden
+     * entirely in single-tab operation (the common
+     * case) so it doesn't consume vertical space
+     * users will never benefit from. Appears the
+     * moment a second tab spawns.
+     *
+     * Horizontal flex row; individual tabs shrink if
+     * needed but won't grow past their content. B2
+     * will add overflow scrolling for tab counts that
+     * exceed the panel width. */
+    .tab-strip {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.125rem;
+      padding: 0.25rem 0.5rem;
+      background: rgba(22, 27, 34, 0.6);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      overflow: hidden;
+    }
+    .tab-strip-tab {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.3rem 0.75rem;
+      border-radius: 4px 4px 0 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      white-space: nowrap;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tab-strip-tab:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-tab.active {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      border-color: rgba(88, 166, 255, 0.3);
+      border-bottom-color: rgba(22, 27, 34, 0.6);
+    }
+
     .messages-wrapper {
       flex: 1;
       min-height: 0;
@@ -1763,6 +1810,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._tabs = new Map();
     this._tabs.set('main', this._makeTabState());
 
+    // Human-readable labels for the tab strip (D21
+    // Phase B1). Keyed by tab ID, stored separately
+    // from `_tabs` so agent tabs can have descriptive
+    // labels derived from their task text without
+    // renaming their state-storage key. Main's label is
+    // fixed; agent labels will be set by Phase C's
+    // spawn path.
+    this._tabLabels = new Map();
+    this._tabLabels.set('main', 'Main');
+
     // ---------------------------------------------------------
     // Cross-tab / component-scoped state (unchanged)
     // ---------------------------------------------------------
@@ -2309,6 +2366,67 @@ export class ChatPanel extends RpcMixin(LitElement) {
       }
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------
+  // Tab strip rendering (D21 Phase B1)
+  // ---------------------------------------------------------------
+
+  /**
+   * Handle a tab button click. Flips `_activeTabId`,
+   * which fires the `active-tab-changed` event (see A3)
+   * so the files-tab picker swaps its selection state
+   * to match the newly-active tab.
+   *
+   * Same-tab clicks are no-ops because the setter
+   * short-circuits on equal values.
+   */
+  _onTabClick(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    this._activeTabId = tabId;
+  }
+
+  /**
+   * Render the tab strip. Returns an empty template
+   * when only the main tab exists — the strip consumes
+   * vertical space, and users running single-agent
+   * operation (the common case) shouldn't pay that
+   * cost. The strip appears the moment a second tab
+   * materialises (Phase C's spawn path).
+   *
+   * Label source — `this._tabLabels` Map, keyed by tab
+   * ID. Missing labels fall back to the tab ID itself
+   * so a stale Map (future bug) produces visible but
+   * ugly output rather than empty buttons.
+   */
+  _renderTabStrip() {
+    // Hide in single-tab operation. The `_tabs` Map
+    // always has 'main'; any additional entry means
+    // we've got agent tabs.
+    if (this._tabs.size <= 1) return '';
+    // Iteration order of a Map is insertion order, so
+    // 'main' comes first (constructor) and agent tabs
+    // follow in spawn order. That matches the natural
+    // left-to-right reading order for the strip.
+    const tabs = Array.from(this._tabs.keys());
+    return html`
+      <div class="tab-strip" role="tablist">
+        ${tabs.map((tabId) => {
+          const label = this._tabLabels.get(tabId) || tabId;
+          const active = tabId === this._activeTabId;
+          return html`
+            <button
+              class="tab-strip-tab ${active ? 'active' : ''}"
+              role="tab"
+              aria-selected=${active}
+              data-tab-id=${tabId}
+              @click=${() => this._onTabClick(tabId)}
+              title=${label}
+            >${label}</button>
+          `;
+        })}
+      </div>
+    `;
   }
 
   // ---------------------------------------------------------------
@@ -5593,6 +5711,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
   render() {
     const fileMode = this._searchMode === 'file';
     return html`
+      ${this._renderTabStrip()}
       <div class="messages-wrapper">
         <div
           class="messages ${fileMode ? 'messages-hidden' : ''}"
