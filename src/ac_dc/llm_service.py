@@ -1004,6 +1004,29 @@ class LLMService:
         # no USER-initiated stream is active, not that the set is
         # empty.
         self._active_user_request: str | None = None
+        # Per-agent active stream tracking (C1c). Keyed by the
+        # ``(turn_id, agent_idx)`` tuple that tags an agent-
+        # conversation stream. An entry being present means that
+        # agent currently has a stream in flight; a second
+        # ``chat_streaming`` call with the same agent_tag while
+        # this entry is set returns the "another stream is
+        # active" error (per-agent, not per-session).
+        #
+        # Lives alongside ``_active_user_request`` rather than
+        # replacing it because the two slots enforce different
+        # mutual-exclusion rules:
+        #
+        # - ``_active_user_request`` — single-stream guard for the
+        #   main user-facing session. Untagged ``chat_streaming``
+        #   calls gate on this.
+        # - ``_active_agent_streams`` — per-agent single-stream
+        #   guard. Agent-tagged calls gate on this instead, so a
+        #   user typing into the main tab AND an agent tab sees
+        #   both streams proceed in parallel.
+        #
+        # Cleared in the background task's finally block, same
+        # pattern as ``_active_user_request``.
+        self._active_agent_streams: set[tuple[str, int]] = set()
         # Cancellation flags keyed by request ID. Populated by
         # cancel_streaming; the worker thread polls and breaks out
         # when it finds its ID.
@@ -5160,6 +5183,7 @@ class LLMService:
         files: list[str] | None = None,
         images: list[str] | None = None,
         excluded_urls: list[str] | None = None,
+        agent_tag: tuple[str, int] | list[Any] | None = None,
     ) -> dict[str, Any]:
         """Start a streaming chat request.
 
@@ -5168,7 +5192,8 @@ class LLMService:
         completion arrive via the event callback.
 
         Rejects if the service isn't fully initialised, or if
-        another user-initiated stream is active.
+        another stream is active for the same scope (main
+        conversation OR the tagged agent).
 
         ``excluded_urls`` carries the set of fetched URLs the user
         has unchecked in the chip UI. These URLs stay in the URL
@@ -5176,6 +5201,34 @@ class LLMService:
         remains visible and can be re-included on a later turn)
         but are omitted from this turn's injected URL context.
         See specs4/4-features/url-content.md § URL Chips UI.
+
+        ``agent_tag`` routes the call to an agent conversation
+        when present (C1c). Shape is ``(turn_id, agent_idx)`` —
+        the frontend's agent tab derives this from its
+        ``{turn_id}/agent-NN`` tab ID. The scope is looked up in
+        :attr:`_agent_contexts`; a stale tab ID (agent already
+        closed, or the session rolled over via
+        :meth:`new_session`) produces an ``agent not found``
+        error rather than silently falling back to the main
+        conversation, which would append to the main history in
+        confusing ways.
+
+        Single-stream guard scoping:
+
+        - Untagged calls gate on :attr:`_active_user_request`
+          (the main user-facing session's slot).
+        - Tagged calls gate on :attr:`_active_agent_streams`
+          keyed by ``(turn_id, agent_idx)`` — per-agent
+          mutual exclusion. A user typing in the main tab
+          AND an agent tab sees both streams proceed in
+          parallel; typing again in the same agent tab while
+          a stream is active returns the active-stream error.
+
+        JRPC-OO delivers array args as lists, so ``agent_tag``
+        may arrive as ``[turn_id, agent_idx]``. The tuple form
+        is accepted for test convenience and direct Python
+        callers; both shapes coerce to the ``(turn_id, agent_idx)``
+        tuple used as the registry key.
         """
         # Capture event loop on the RPC thread — this is the
         # event-loop thread. D10 contract: the capture happens
@@ -5193,48 +5246,101 @@ class LLMService:
                     "a moment"
                 )
             }
-        # User-initiated single-stream guard. Per
-        # specs4/7-future/parallel-agents.md § Foundation
-        # Requirements ("Single-stream guard gates user-
-        # initiated requests only"), the guard blocks a second
-        # USER-initiated stream but must allow internal streams
-        # that share an active parent's request ID prefix.
-        # Today no code path produces child request IDs, so the
-        # ``_is_child_request`` branch never fires; when agent
-        # spawning lands, each agent's request ID will be
-        # ``{parent_id}-agent-N`` and pass this gate naturally.
-        if (
-            self._active_user_request is not None
-            and not self._is_child_request(request_id)
-        ):
-            return {
-                "error": (
-                    f"Another stream is active (request "
-                    f"{self._active_user_request})"
-                )
-            }
 
-        # Register the active request. Cleared in the background
-        # task's finally block. Only user-initiated requests
-        # register here — child requests share their parent's
-        # slot and don't overwrite it. A future agent-spawning
-        # path will track child streams in a separate
-        # per-request accumulator; this slot stays the
-        # authoritative "is a user-initiated stream active?"
-        # signal for the guard itself.
-        if not self._is_child_request(request_id):
-            self._active_user_request = request_id
+        # Resolve the scope. Three cases:
+        #
+        # 1. agent_tag is None → default scope (main conversation).
+        # 2. agent_tag is well-formed and points at a registered
+        #    agent → use the registered scope.
+        # 3. agent_tag is well-formed but the agent isn't
+        #    registered (stale tab) → error.
+        #
+        # Malformed agent_tag (wrong shape, non-string turn_id,
+        # non-integer agent_idx) falls through to the error
+        # path with a different message so the frontend can
+        # distinguish "my tab is stale, close it" from "my RPC
+        # payload was malformed, file a bug".
+        agent_key: tuple[str, int] | None = None
+        scope: ConversationScope
+        if agent_tag is None:
+            scope = self._default_scope()
+        else:
+            # Accept both tuple and list shapes. JRPC-OO
+            # serialises Python tuples to JS arrays, so the
+            # frontend always sends a two-element array; tests
+            # and direct callers use the tuple form. Either way
+            # we normalise to a tuple for the registry key.
+            parsed = self._parse_agent_tag(agent_tag)
+            if parsed is None:
+                return {
+                    "error": (
+                        "Malformed agent_tag — expected "
+                        "[turn_id, agent_idx] or "
+                        "(turn_id, agent_idx)"
+                    )
+                }
+            agent_key = parsed
+            turn_id_part, agent_idx_part = agent_key
+            turn_bucket = self._agent_contexts.get(turn_id_part)
+            agent_scope = (
+                turn_bucket.get(agent_idx_part)
+                if turn_bucket is not None
+                else None
+            )
+            if agent_scope is None:
+                return {"error": "agent not found"}
+            scope = agent_scope
+
+        # Single-stream guard. Tagged calls gate on the
+        # per-agent set; untagged calls gate on the main-
+        # session slot. A tagged call does NOT consult
+        # ``_active_user_request`` — the main session's guard
+        # is for the main tab; an agent tab is its own
+        # conversation and can stream in parallel with it.
+        if agent_key is not None:
+            if agent_key in self._active_agent_streams:
+                return {
+                    "error": (
+                        f"Another stream is active for agent "
+                        f"{agent_key[0]}/agent-{agent_key[1]:02d}"
+                    )
+                }
+            # Register the agent slot. Cleared in the background
+            # task's finally block.
+            self._active_agent_streams.add(agent_key)
+        else:
+            # Main-tab untagged path — unchanged from pre-C1c.
+            # User-initiated single-stream guard per
+            # specs4/7-future/parallel-agents.md § Foundation
+            # Requirements. Blocks a second user-initiated
+            # stream but allows child streams that share an
+            # active parent's request ID prefix.
+            if (
+                self._active_user_request is not None
+                and not self._is_child_request(request_id)
+            ):
+                return {
+                    "error": (
+                        f"Another stream is active (request "
+                        f"{self._active_user_request})"
+                    )
+                }
+            # Register the active request. Only user-initiated
+            # requests register here — child requests share
+            # their parent's slot and don't overwrite it.
+            if not self._is_child_request(request_id):
+                self._active_user_request = request_id
 
         # Launch the background task. ensure_future rather than
         # await so we return {"status": "started"} immediately.
         #
-        # The default scope points at the main-conversation
-        # state on ``self``. Future parallel-agent spawning will
-        # construct per-agent scopes via
-        # :func:`ac_dc.agent_factory.build_agent_context_manager`
-        # plus per-agent tracker and selection list; for the
-        # user-facing session the default scope is byte-
-        # identical to the pre-refactor implicit-``self`` reads.
+        # For the untagged path, the default scope points at the
+        # main-conversation state on ``self``. For the tagged
+        # path, the scope is the registered agent's scope from
+        # ``_agent_contexts`` — its own ContextManager,
+        # StabilityTracker, and archival sink. ``_stream_chat``
+        # doesn't distinguish between the two; it just threads
+        # scope through.
         asyncio.ensure_future(
             self._stream_chat(
                 request_id,
@@ -5242,10 +5348,44 @@ class LLMService:
                 files or [],
                 images or [],
                 excluded_urls or [],
-                scope=self._default_scope(),
+                scope=scope,
+                agent_key=agent_key,
             )
         )
         return {"status": "started"}
+
+    @staticmethod
+    def _parse_agent_tag(
+        agent_tag: Any,
+    ) -> tuple[str, int] | None:
+        """Coerce an incoming agent_tag into a ``(turn_id, agent_idx)`` tuple.
+
+        JRPC-OO serialises tuples to JS arrays on the wire;
+        tests and direct callers use the tuple form. Both
+        shapes are accepted. Returns None when the payload
+        is structurally malformed (wrong length, wrong types).
+
+        Kept as a ``@staticmethod`` so it's trivially testable
+        without constructing a service.
+        """
+        if not isinstance(agent_tag, (list, tuple)):
+            return None
+        if len(agent_tag) != 2:
+            return None
+        turn_id_raw, agent_idx_raw = agent_tag
+        if not isinstance(turn_id_raw, str) or not turn_id_raw:
+            return None
+        # Accept int or int-compatible. Reject bool because
+        # ``bool`` is a subclass of ``int`` and True/False
+        # silently matching agent_idx 1/0 would mask bugs in
+        # upstream code that forgot to parse a string.
+        if isinstance(agent_idx_raw, bool):
+            return None
+        if not isinstance(agent_idx_raw, int):
+            return None
+        if agent_idx_raw < 0:
+            return None
+        return (turn_id_raw, agent_idx_raw)
 
     def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """Signal a streaming request to abort.
@@ -5276,6 +5416,7 @@ class LLMService:
         excluded_urls: list[str] | None = None,
         *,
         scope: ConversationScope | None = None,
+        agent_key: tuple[str, int] | None = None,
     ) -> None:
         """Background task — the actual streaming logic.
 
@@ -5294,6 +5435,14 @@ class LLMService:
         been updated yet (none today, but the safety net is
         cheap). Future parallel-agent spawning constructs
         per-agent scopes and passes them explicitly.
+
+        ``agent_key`` is non-None when this call is a C1c agent-
+        tagged stream (frontend typing in an agent tab). The
+        cleanup path at the end of the method uses it to drop
+        the per-agent single-stream guard entry. None for
+        untagged calls (the main user-facing session) and for
+        agent-spawn child streams (those register as child
+        requests and use the parent's guard slot).
 
         Per-conversation reads — history, file_context, tracker,
         session_id, selected_files — go through ``scope.*``.
@@ -5717,10 +5866,18 @@ class LLMService:
 
         # Clear active-request flag BEFORE post-response work, so a
         # concurrent cancel check doesn't hold on to a stale ID.
-        # Only clear the user-initiated slot when this request
-        # was the parent — child streams (when agent spawning
-        # lands) share the parent's slot and must not clear it.
-        if not self._is_child_request(request_id):
+        # Slot-clearing depends on which guard we grabbed in
+        # ``chat_streaming``:
+        #
+        # - Agent-tagged call (``agent_key`` populated) — drop
+        #   the per-agent entry. Main-tab slot was never touched.
+        # - Untagged main-tab call — clear
+        #   ``_active_user_request`` (the pre-C1c behaviour).
+        # - Child stream spawned by ``_spawn_agents_for_turn`` —
+        #   share the parent's slot; don't clear it.
+        if agent_key is not None:
+            self._active_agent_streams.discard(agent_key)
+        elif not self._is_child_request(request_id):
             self._active_user_request = None
         self._cancelled_requests.discard(request_id)
         # Drop the accumulator slot. Done after all reads of the

@@ -5707,6 +5707,469 @@ class TestSetAgentSelectedFilesLocalhostOnly:
         assert scope.selected_files == []
 
 
+class TestParseAgentTag:
+    """C1c — :meth:`LLMService._parse_agent_tag` input coercion.
+
+    Pure static method so no fixture setup needed. Tests pin
+    the shape normalisation (tuple vs list), the type
+    rejection rules (non-string turn_id, non-int agent_idx,
+    bool masquerading as int, negative index), and the
+    empty-turn-id guard.
+    """
+
+    def test_tuple_input_accepted(self) -> None:
+        """Native tuple form passes through."""
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", 0)
+        ) == ("turn_abc", 0)
+
+    def test_list_input_normalises_to_tuple(self) -> None:
+        """JRPC-OO array form coerces to tuple.
+
+        Over the wire jrpc-oo serialises Python tuples to JS
+        arrays. The frontend sends ``[turn_id, idx]``; parsing
+        must accept that shape and produce the tuple form used
+        as the registry key.
+        """
+        assert LLMService._parse_agent_tag(
+            ["turn_abc", 5]
+        ) == ("turn_abc", 5)
+
+    def test_three_element_list_rejected(self) -> None:
+        """Wrong length → None."""
+        assert LLMService._parse_agent_tag(
+            ["turn_abc", 0, "extra"]
+        ) is None
+
+    def test_single_element_rejected(self) -> None:
+        """Single element → None."""
+        assert LLMService._parse_agent_tag(
+            ["turn_abc"]
+        ) is None
+
+    def test_empty_list_rejected(self) -> None:
+        assert LLMService._parse_agent_tag([]) is None
+
+    def test_non_string_turn_id_rejected(self) -> None:
+        """turn_id must be a string."""
+        assert LLMService._parse_agent_tag(
+            (42, 0)
+        ) is None
+
+    def test_empty_string_turn_id_rejected(self) -> None:
+        """Empty turn_id → None.
+
+        An empty string is a valid Python string but a useless
+        registry key. Rejecting here keeps the lookup path
+        straightforward.
+        """
+        assert LLMService._parse_agent_tag(
+            ("", 0)
+        ) is None
+
+    def test_non_int_agent_idx_rejected(self) -> None:
+        """agent_idx must be an int."""
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", "0")
+        ) is None
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", 0.5)
+        ) is None
+
+    def test_bool_agent_idx_rejected(self) -> None:
+        """Bool is a subclass of int; rejecting avoids True/False matching.
+
+        ``isinstance(True, int)`` is ``True`` in Python —
+        a caller that forgot to parse a string could send
+        ``True`` and silently match agent_idx 1. Explicit
+        bool rejection surfaces the bug instead.
+        """
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", True)
+        ) is None
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", False)
+        ) is None
+
+    def test_negative_agent_idx_rejected(self) -> None:
+        """Negative indexes don't exist in the registry."""
+        assert LLMService._parse_agent_tag(
+            ("turn_abc", -1)
+        ) is None
+
+    def test_non_sequence_rejected(self) -> None:
+        """Dict, string, scalar — all None."""
+        assert LLMService._parse_agent_tag(
+            {"turn_id": "turn_abc", "idx": 0}
+        ) is None
+        assert LLMService._parse_agent_tag(
+            "turn_abc/agent-00"
+        ) is None
+        assert LLMService._parse_agent_tag(42) is None
+        assert LLMService._parse_agent_tag(None) is None
+
+
+class TestAgentTaggedStreaming:
+    """C1c — ``agent_tag`` routes ``chat_streaming`` to agent scopes.
+
+    Covers the routing, single-stream guard scoping, and
+    cleanup. End-to-end streaming into an agent's own
+    ContextManager is covered separately by
+    :class:`TestAgentExecutionEndToEnd` via direct
+    ``_spawn_agents_for_turn`` calls — those cover the
+    archive-write path. Here we focus on the
+    ``chat_streaming`` surface: malformed / unknown agent
+    tags, guard slot selection, parallel streams.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def _seed_agent(
+        self,
+        service: LLMService,
+        turn_id: str = "turn_abc",
+        agent_idx: int = 0,
+    ) -> Any:
+        """Register an agent scope directly.
+
+        Bypasses ``_spawn_agents_for_turn`` so the test
+        exercises only the ``chat_streaming`` surface without
+        spinning up a full streaming pipeline for the setup.
+        """
+        parent_scope = service._default_scope()
+        return service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=agent_idx,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+
+    async def test_untagged_call_uses_default_scope(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """No agent_tag → default main-tab behaviour.
+
+        Regression guard for the common path. The default
+        scope resolves to the main ContextManager so the
+        streamed response lands in main-session history.
+        """
+        fake_litellm.set_streaming_chunks(["hi there"])
+        result = await service.chat_streaming(
+            request_id="r1", message="hello"
+        )
+        assert result == {"status": "started"}
+        await asyncio.sleep(0.2)
+
+        # Main session's history got the exchange.
+        main_history = service._context.get_history()
+        roles = [m["role"] for m in main_history]
+        assert "user" in roles
+        assert "assistant" in roles
+        # Main guard slot cleared after completion.
+        assert service._active_user_request is None
+
+    async def test_tagged_call_streams_into_agent_context(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Tagged call writes history into the agent's ContextManager.
+
+        Key routing invariant: the agent's own history grows
+        while the main session's stays untouched.
+        """
+        agent_scope = self._seed_agent(service)
+        fake_litellm.set_streaming_chunks(["agent reply"])
+
+        result = await service.chat_streaming(
+            request_id="r-agent-1",
+            message="do the thing",
+            agent_tag=("turn_abc", 0),
+        )
+        assert result == {"status": "started"}
+        await asyncio.sleep(0.3)
+
+        # Agent's history grew.
+        agent_history = agent_scope.context.get_history()
+        agent_roles = [m["role"] for m in agent_history]
+        assert "user" in agent_roles
+        assert "assistant" in agent_roles
+        # Main session's history DID NOT grow. (The fixture
+        # constructs LLMService with no auto-restore content,
+        # so the main history starts empty. If the tagged
+        # call leaked into it, we'd see messages.)
+        main_history = service._context.get_history()
+        assert main_history == []
+
+    async def test_tagged_call_accepts_list_shape(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """jrpc-oo array form routes identically to the tuple form.
+
+        Frontend sends ``[turn_id, idx]`` as a JSON array.
+        Pinning both shapes works so wire-format coercion
+        is invisible to the routing logic.
+        """
+        agent_scope = self._seed_agent(service)
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        result = await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag=["turn_abc", 0],
+        )
+        assert result == {"status": "started"}
+        await asyncio.sleep(0.3)
+
+        # Agent got the message.
+        assert len(agent_scope.context.get_history()) >= 1
+
+    async def test_unknown_agent_tag_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Stale tab ID (agent not in registry) → error response."""
+        # No agent registered.
+        result = await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag=("turn_nonexistent", 0),
+        )
+        assert result == {"error": "agent not found"}
+        # Neither guard slot touched.
+        assert service._active_user_request is None
+        assert service._active_agent_streams == set()
+
+    async def test_known_turn_unknown_agent_idx_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Turn exists but agent_idx doesn't — error.
+
+        Plausible in practice: the registry has agents 0 and 1
+        for a turn; the frontend sends a stale tag for
+        agent-07 from a closed tab.
+        """
+        self._seed_agent(service, turn_id="turn_known")
+        result = await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag=("turn_known", 99),
+        )
+        assert result == {"error": "agent not found"}
+
+    async def test_malformed_agent_tag_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Bad shape → malformed-tag error, distinct from stale.
+
+        Frontend bug vs stale tab are surfaced differently so
+        the user-facing error can be actionable. Stale-tab
+        triggers a "your tab is closed, dismiss it" toast;
+        malformed-payload triggers a "file a bug" toast.
+        """
+        result = await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag="not-a-tuple",
+        )
+        assert "malformed" in result.get("error", "").lower()
+        # Empty list form also malformed.
+        result = await service.chat_streaming(
+            request_id="r2",
+            message="hi",
+            agent_tag=[],
+        )
+        assert "malformed" in result.get("error", "").lower()
+
+    async def test_tagged_call_does_not_touch_user_guard(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Agent-tagged call leaves main-tab guard available.
+
+        User types in the main tab while an agent stream runs;
+        the main call must not be rejected as "another stream
+        active". The two guards are disjoint.
+        """
+        self._seed_agent(service)
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        # Start agent stream.
+        r1 = await service.chat_streaming(
+            request_id="r-agent",
+            message="agent task",
+            agent_tag=("turn_abc", 0),
+        )
+        assert r1 == {"status": "started"}
+        # Main-tab guard untouched at this point.
+        assert service._active_user_request is None
+        # Agent slot registered.
+        assert ("turn_abc", 0) in service._active_agent_streams
+
+        await asyncio.sleep(0.3)
+        # Both slots cleared after completion.
+        assert service._active_user_request is None
+        assert service._active_agent_streams == set()
+
+    async def test_untagged_call_does_not_touch_agent_guard(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Main-tab call leaves per-agent guards available.
+
+        Symmetric with the reverse test. User typing in the
+        main tab while an agent is idle doesn't register any
+        agent slot.
+        """
+        self._seed_agent(service)
+        fake_litellm.set_streaming_chunks(["ok"])
+
+        await service.chat_streaming(
+            request_id="r-main",
+            message="hello"
+        )
+        # Main slot registered; agent slots empty.
+        assert service._active_user_request == "r-main"
+        assert service._active_agent_streams == set()
+
+        await asyncio.sleep(0.3)
+        # Both cleared.
+        assert service._active_user_request is None
+        assert service._active_agent_streams == set()
+
+    async def test_duplicate_agent_tag_rejected(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Second tagged call for the same agent while active → rejected.
+
+        Per-agent single-stream guard. User double-clicks
+        Send in an agent tab; the second call errors out.
+        """
+        self._seed_agent(service)
+        fake_litellm.set_streaming_chunks(["ok"])
+        # Pre-register the agent slot to simulate an in-flight
+        # stream. Using the service's own guard state rather
+        # than racing two real streams keeps the test
+        # deterministic.
+        service._active_agent_streams.add(("turn_abc", 0))
+
+        result = await service.chat_streaming(
+            request_id="r2",
+            message="again",
+            agent_tag=("turn_abc", 0),
+        )
+        assert "active" in result.get("error", "").lower()
+
+        # Cleanup.
+        service._active_agent_streams.discard(("turn_abc", 0))
+
+    async def test_different_agents_stream_in_parallel(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Agent 0 and agent 1 can stream concurrently.
+
+        Per-agent single-stream guard is per-key, not global.
+        Two agents in the same turn (or different turns) can
+        have simultaneous streams.
+        """
+        self._seed_agent(service, turn_id="turn_abc", agent_idx=0)
+        self._seed_agent(service, turn_id="turn_abc", agent_idx=1)
+
+        # Queue two per-call responses so both streams have
+        # content to consume.
+        fake_litellm.queue_streaming_chunks(["a0 reply"])
+        fake_litellm.queue_streaming_chunks(["a1 reply"])
+
+        r1 = await service.chat_streaming(
+            request_id="r-a0",
+            message="t0",
+            agent_tag=("turn_abc", 0),
+        )
+        r2 = await service.chat_streaming(
+            request_id="r-a1",
+            message="t1",
+            agent_tag=("turn_abc", 1),
+        )
+        assert r1 == {"status": "started"}
+        assert r2 == {"status": "started"}
+
+        # Both slots registered.
+        assert ("turn_abc", 0) in service._active_agent_streams
+        assert ("turn_abc", 1) in service._active_agent_streams
+
+        await asyncio.sleep(0.5)
+        # Both cleared.
+        assert service._active_agent_streams == set()
+
+    async def test_agent_slot_cleared_on_error(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Agent stream raising leaves no stale slot entry.
+
+        Regression guard: a series of failing agent calls
+        would otherwise accumulate slot entries permanently,
+        eventually blocking every future call for that agent.
+        """
+        self._seed_agent(service)
+
+        # Force the executor call to raise.
+        def _raise(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("simulated failure")
+        monkeypatch.setattr(
+            service, "_run_completion_sync", _raise
+        )
+
+        await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag=("turn_abc", 0),
+        )
+        await asyncio.sleep(0.3)
+
+        # Slot cleared even though the stream errored.
+        assert service._active_agent_streams == set()
+
+    async def test_closed_agent_returns_error_on_next_call(
+        self,
+        service: LLMService,
+    ) -> None:
+        """After close_agent_context, the tag becomes stale."""
+        self._seed_agent(service)
+        # Close via the C1b RPC.
+        closed = service.close_agent_context("turn_abc", 0)
+        assert closed["closed"] is True
+
+        # Subsequent tagged call returns agent-not-found.
+        result = await service.chat_streaming(
+            request_id="r1",
+            message="hi",
+            agent_tag=("turn_abc", 0),
+        )
+        assert result == {"error": "agent not found"}
+
+
 class TestAgentExecutionEndToEnd:
     """Step 3 — agents run through the real _stream_chat pipeline.
 
