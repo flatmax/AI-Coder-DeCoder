@@ -303,13 +303,23 @@ const AUTO_SCROLL_DISENGAGE_PX = 100;
 
 export class ChatPanel extends RpcMixin(LitElement) {
   static properties = {
+    // Per-tab reactive properties — every field marked
+    // `noAccessor: true` has a custom getter/setter on the
+    // class body that forwards to the active tab's state
+    // (D21 per-tab refactor). Lit honours `noAccessor` by
+    // skipping its descriptor installation and relying on
+    // our setter to call requestUpdate.
+    //
+    // Non-per-tab reactive properties (`repoFiles`,
+    // `reviewActive`) use the normal Lit accessor path.
+
     /**
      * Messages as `{role, content, system_event?}` dicts.
      * Replaced wholesale on session load; appended during
      * normal conversation. Always a new array on change so
      * Lit's default identity check triggers re-render.
      */
-    messages: { type: Array },
+    messages: { type: Array, noAccessor: true },
     /**
      * Flat list of repo-relative file paths. The files-tab
      * orchestrator pushes this down via direct assignment
@@ -323,40 +333,54 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * entirely — `findFileMentions` short-circuits on empty
      * lists so the cost is nil until the files-tab wires
      * up.
+     *
+     * Not per-tab — repo-level state, global across tabs.
      */
     repoFiles: { type: Array },
     /** Current textarea content. Cleared on send. */
-    _input: { type: String, state: true },
+    _input: { type: String, state: true, noAccessor: true },
     /**
      * True while a user-initiated stream is in flight. Drives
      * the Send/Stop toggle and disables the input.
      */
-    _streaming: { type: Boolean, state: true },
+    _streaming: { type: Boolean, state: true, noAccessor: true },
     /**
      * Rendered content of the active streaming assistant
      * message. Updated per animation frame, not per chunk, so
      * Lit re-render rate is capped at ~60Hz.
      */
-    _streamingContent: { type: String, state: true },
+    _streamingContent: {
+      type: String,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Whether the history browser modal is open. Toggled by
      * the "History" button and by the modal's close/load
      * events.
      */
-    _historyOpen: { type: Boolean, state: true },
+    _historyOpen: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Whether the snippet drawer is expanded. Persisted to
      * localStorage under `ac-dc-snippet-drawer` — the drawer
      * state survives browser refreshes.
      */
-    _snippetDrawerOpen: { type: Boolean, state: true },
+    _snippetDrawerOpen: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Snippets loaded from LLMService.get_snippets. Each is
      * `{icon, tooltip, message}`. Empty until RPC ready or on
      * fetch error. Reloaded on mode / review state changes
      * since the server returns mode-aware snippets.
      */
-    _snippets: { type: Array, state: true },
+    _snippets: { type: Array, state: true, noAccessor: true },
     /**
      * Images currently attached to the composition, as
      * data URIs. Accumulated from pastes and re-attaches;
@@ -364,27 +388,51 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * MAX_IMAGES_PER_MESSAGE; over-limit adds produce a
      * warning toast and are ignored.
      */
-    _pendingImages: { type: Array, state: true },
+    _pendingImages: {
+      type: Array,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * When non-null, the lightbox is open showing this data
      * URI. Set by clicking a message thumbnail or a pending
      * preview; cleared by Escape or backdrop click.
      */
-    _lightboxImage: { type: String, state: true },
+    _lightboxImage: {
+      type: String,
+      state: true,
+      noAccessor: true,
+    },
     /** Current search query text. Empty = no active search. */
-    _searchQuery: { type: String, state: true },
+    _searchQuery: { type: String, state: true, noAccessor: true },
     /** Ignore-case search toggle. Persisted to localStorage. */
-    _searchIgnoreCase: { type: Boolean, state: true },
+    _searchIgnoreCase: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /** Regex search toggle. Persisted to localStorage. */
-    _searchRegex: { type: Boolean, state: true },
+    _searchRegex: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /** Whole-word search toggle. Persisted to localStorage. */
-    _searchWholeWord: { type: Boolean, state: true },
+    _searchWholeWord: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Index into the matches array of the currently-highlighted
      * match. -1 when no matches or no active search. Wraps
      * on Enter/Shift+Enter navigation.
      */
-    _searchCurrentIndex: { type: Number, state: true },
+    _searchCurrentIndex: {
+      type: Number,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Search mode — 'message' (default) searches chat
      * messages; 'file' searches repository content via the
@@ -392,28 +440,42 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * the action bar and by the activateFileSearch() public
      * method (called from Ctrl+Shift+F at the shell level).
      */
-    _searchMode: { type: String, state: true },
+    _searchMode: { type: String, state: true, noAccessor: true },
     /**
      * Flat list of file search results, shape from the RPC:
      * [{file, matches: [{line_num, line, context_before,
      * context_after}]}]. Empty until the first debounced RPC
      * call completes.
      */
-    _fileSearchResults: { type: Array, state: true },
+    _fileSearchResults: {
+      type: Array,
+      state: true,
+      noAccessor: true,
+    },
     /** True while a file-search RPC call is in flight. */
-    _fileSearchLoading: { type: Boolean, state: true },
+    _fileSearchLoading: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Flat index into the results' matches — each file's
      * matches contribute N slots, enumerated top-to-bottom.
      * A value of 0 means the first match of the first file.
      * -1 means no focus (empty results).
      */
-    _fileSearchFocusedIndex: { type: Number, state: true },
+    _fileSearchFocusedIndex: {
+      type: Number,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * True while a commit_all background task is in flight.
      * Drives the commit button's spinner state and disables
      * both commit and reset until the completion event fires.
      * Cleared by the `commit-result` window event handler.
+     *
+     * Not per-tab — commits are main-conversation-only.
      */
     _committing: { type: Boolean, state: true },
     /**
@@ -426,6 +488,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
      *
      * Defaults to false so component works standalone before
      * the files-tab wires up the push.
+     *
+     * Not per-tab — review is main-conversation-only.
      */
     reviewActive: { type: Boolean },
     /**
@@ -434,7 +498,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * content. Set by the `url-view-requested` handler,
      * cleared by Escape or backdrop click.
      */
-    _urlViewDialog: { type: Object, state: true },
+    _urlViewDialog: {
+      type: Object,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Active tab within the URL view dialog. `'content'`
      * shows title + body (summary/readme/content); `'symbols'`
@@ -442,7 +510,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * URL is a GitHub repo with a symbol map — generic URLs
      * hide the tab bar since there's only one panel to show.
      */
-    _urlViewTab: { type: String, state: true },
+    _urlViewTab: { type: String, state: true, noAccessor: true },
   };
 
   static styles = css`
@@ -1647,144 +1715,59 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    // One-shot flag — when true, the next paste event
-    // into the chat textarea is swallowed via
-    // preventDefault(). Set by the files-tab's
-    // `_onInsertPath` handler immediately before
-    // focusing the textarea, which would otherwise
-    // trigger the browser's selection-buffer paste on
-    // Linux (middle-click → focus → autoplace selected
-    // text). Instance field, not a reactive property:
-    // reactive would cause a Lit re-render on every
-    // flag flip and the flag exists entirely in
-    // paste-handler event scope.
-    this._suppressNextPaste = false;
-    // Active @mention range in the textarea. When the
-    // cursor sits inside an @word sequence (e.g. typing
-    // `@foo|` where | is the cursor), this holds
-    // `{start, end}` — `start` is the index of the `@`,
-    // `end` is the cursor position. Null when no active
-    // mention. Used to detect edge transitions between
-    // input events so we emit `filter-from-chat` only
-    // when the mention state actually changes, and emit
-    // a clearing event when the user exits a mention
-    // (deletes the `@`, types whitespace after, etc.).
-    // Instance field, not reactive — changes per
-    // keystroke and doesn't affect rendering.
-    this._activeMention = null;
-    this.messages = [];
-    this.repoFiles = [];
-    this._input = '';
-    this._streaming = false;
-    this._streamingContent = '';
-    this._historyOpen = false;
-    // Read drawer state eagerly — avoids a closed→open flicker
-    // on mount when the user had it open previously.
-    this._snippetDrawerOpen = _loadDrawerOpen();
-    this._snippets = [];
-    this._pendingImages = [];
-    this._lightboxImage = null;
-    // Search state — query empty by default, toggles loaded
-    // from localStorage. Ignore-case defaults true (most
-    // users expect case-insensitive), regex and whole-word
-    // default false.
-    this._searchQuery = '';
-    this._searchIgnoreCase = _loadSearchToggle(
-      _SEARCH_IGNORE_CASE_KEY,
-      true,
-    );
-    this._searchRegex = _loadSearchToggle(
-      _SEARCH_REGEX_KEY,
-      false,
-    );
-    this._searchWholeWord = _loadSearchToggle(
-      _SEARCH_WHOLE_WORD_KEY,
-      false,
-    );
-    this._searchCurrentIndex = -1;
-    // File search state — starts in message mode; file mode
-    // activates on button click or via activateFileSearch().
-    this._searchMode = 'message';
-    this._fileSearchResults = [];
-    this._fileSearchLoading = false;
-    this._fileSearchFocusedIndex = -1;
-    // Generation counter for stale-response guard. RPC calls
-    // increment this; when a response arrives with a stale
-    // gen, we discard it rather than overwrite fresher
-    // results. Handles the race where the user types fast
-    // enough that an earlier call's response arrives after
-    // a later call's.
-    this._fileSearchGeneration = 0;
-    // Debounce handle for the file search RPC. Cleared on
-    // query change / mode change / unmount.
-    this._fileSearchDebounceTimer = null;
-    // Flag that temporarily suppresses scroll-sync dispatches
-    // when a scroll is externally driven (e.g., by the picker
-    // clicking a file to scroll the overlay). Prevents
-    // feedback loops. Cleared after a short timeout.
-    this._fileSearchScrollPaused = false;
+    // ---------------------------------------------------------
+    // Per-tab state (D21 — agent tab strip foundation)
+    // ---------------------------------------------------------
+    //
+    // Every field that used to live on `this` directly and
+    // changes per-conversation now lives inside a tab state
+    // object, keyed by tab ID. Single-agent operation has
+    // exactly one entry, `"main"`. Future parallel-agent
+    // spawning will add one entry per agent under the same
+    // Map.
+    //
+    // Lit reactive properties (`messages`, `_input`, etc.)
+    // are exposed via getters/setters defined on the class
+    // prototype; reads forward to the active tab's state,
+    // writes mutate the tab's state and call
+    // `this.requestUpdate(name, oldValue)` so Lit's dirty-
+    // check machinery observes the change.
+    //
+    // Non-reactive per-tab fields (`_streams`,
+    // `_pendingChunks`, `_autoScroll`, etc.) don't go through
+    // the Lit re-render path — they're still on the tab
+    // state object but the getters don't call requestUpdate.
+    //
+    // See `_makeTabState` below for the field list.
+    this._activeTabId = 'main';
+    this._tabs = new Map();
+    this._tabs.set('main', this._makeTabState());
 
-    // URL chip detection state. Debounce handle for the
-    // detect_urls RPC — fires ~300ms after the user stops
-    // typing. Per specs4/4-features/url-content.md the UI
-    // "chips" feature runs a detection scan independent of
-    // the backend's streaming-time detection; this is the
-    // frontend's half.
-    this._urlDetectDebounceTimer = null;
-    // Generation counter guards against stale responses. If
-    // the user types faster than the RPC returns, later
-    // responses arrive after earlier ones; comparing against
-    // the current gen discards the stale ones.
-    this._urlDetectGeneration = 0;
-    // Dialog state for the "view URL content" overlay. Null
-    // when closed; populated with `{url, content}` when open.
-    // Matches the lightbox pattern used for pending-image
-    // inspection.
-    this._urlViewDialog = null;
-    // Active tab when the dialog is open. Reset to 'content'
-    // each time the dialog opens so users always see the
-    // human-readable body first.
-    this._urlViewTab = 'content';
+    // ---------------------------------------------------------
+    // Cross-tab / component-scoped state (unchanged)
+    // ---------------------------------------------------------
+    // These fields aren't per-conversation — they're global
+    // to the chat panel (main-only concerns, handler bindings,
+    // files-tab pushes).
+
     // Commit state. `_committing` flips true on click, false
     // when the `commit-result` window event fires. Review
     // state defaults false and is driven by the parent
-    // component via property push.
+    // component via property push. Both are main-conversation
+    // concerns — agents never commit, agents never enter
+    // review mode.
     this._committing = false;
     this.reviewActive = false;
 
-    // Per-request streaming state. Map<requestId, {content,
-    // sticky}> where sticky is true when scroll is engaged. We
-    // keep this as a Map even though single-agent operation
-    // has at most one entry at a time — parallel-agent mode
-    // (D10) produces N concurrent streams under a parent ID,
-    // and the transport layer routes chunks to the right state
-    // slot via the request ID.
-    this._streams = new Map();
-    // Which request ID is "ours" — the most recent user-initiated
-    // send. Chunks for other request IDs (e.g. from a
-    // collaborator's prompt) are ignored in Phase 2b; Phase 2d
-    // will adopt them as passive streams.
-    this._currentRequestId = null;
-    // The most recently completed request ID. Compaction events
-    // arrive asynchronously AFTER stream-complete, by which time
-    // `_currentRequestId` is already null. The compaction-event
-    // handler accepts events for either `_currentRequestId` (in
-    // the rare case compaction starts before stream-complete is
-    // fully processed) or `_lastRequestId` (the common case).
-    // Set inside `_onStreamComplete` for our own requests only;
-    // collaborator streams don't update this.
-    this._lastRequestId = null;
+    // Repo files list — pushed by files-tab for file mention
+    // detection. Global to the chat panel because the repo is
+    // the same across all conversations.
+    this.repoFiles = [];
 
-    // rAF coalescing state — `_pendingChunks` is
-    // Map<requestId, content>. The rAF callback reads and
-    // clears entries, and updates `_streamingContent` from the
-    // pending content for `_currentRequestId`.
-    this._pendingChunks = new Map();
+    // rAF handle for chunk coalescing. One rAF active at a
+    // time across all tabs — we pick the right tab's pending
+    // chunk from `_activeTabId` when the rAF fires.
     this._rafHandle = null;
-
-    // Auto-scroll state. Engaged by default; disengaged when
-    // the user scrolls up during streaming.
-    this._autoScroll = true;
 
     // Bound handlers so add/remove match and we can clean up.
     this._onStreamChunk = this._onStreamChunk.bind(this);
@@ -1798,6 +1781,425 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
     this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
     this._onCommitResult = this._onCommitResult.bind(this);
+  }
+
+  // ---------------------------------------------------------------
+  // Per-tab state factory
+  // ---------------------------------------------------------------
+
+  /**
+   * Build a fresh tab state object.
+   *
+   * Every field that a conversation owns lives in here. The
+   * main tab gets one of these at construction time; future
+   * agent spawning will add tab states keyed by `{turn_id}/
+   * agent-NN` identifiers.
+   *
+   * Field groupings (informational — the flat object is
+   * what the code uses):
+   *
+   *   Conversation — messages, input, pendingImages
+   *   Streaming    — streaming, streamingContent,
+   *                  currentRequestId, lastRequestId,
+   *                  streams, pendingChunks
+   *   Selection    — selectedFiles
+   *   Search       — searchQuery, searchIgnoreCase,
+   *                  searchRegex, searchWholeWord,
+   *                  searchCurrentIndex, searchMode,
+   *                  fileSearchResults, fileSearchLoading,
+   *                  fileSearchFocusedIndex,
+   *                  fileSearchGeneration,
+   *                  fileSearchDebounceTimer,
+   *                  fileSearchScrollPaused
+   *   UI           — historyOpen, snippetDrawerOpen,
+   *                  lightboxImage, urlViewDialog,
+   *                  urlViewTab, snippets
+   *   URL chips    — urlDetectDebounceTimer,
+   *                  urlDetectGeneration
+   *   Misc         — autoScroll, suppressNextPaste,
+   *                  activeMention
+   */
+  _makeTabState() {
+    return {
+      // Conversation
+      messages: [],
+      input: '',
+      pendingImages: [],
+      // Streaming
+      streaming: false,
+      streamingContent: '',
+      currentRequestId: null,
+      lastRequestId: null,
+      streams: new Map(),
+      pendingChunks: new Map(),
+      // Selection (pushed by files-tab for the main tab;
+      // agents will get their own per-tab selection in a
+      // later phase)
+      selectedFiles: [],
+      // Search — toggle defaults loaded from localStorage
+      // so the user's last chosen search mode survives
+      // reload.
+      searchQuery: '',
+      searchIgnoreCase: _loadSearchToggle(
+        _SEARCH_IGNORE_CASE_KEY,
+        true,
+      ),
+      searchRegex: _loadSearchToggle(_SEARCH_REGEX_KEY, false),
+      searchWholeWord: _loadSearchToggle(
+        _SEARCH_WHOLE_WORD_KEY,
+        false,
+      ),
+      searchCurrentIndex: -1,
+      searchMode: 'message',
+      fileSearchResults: [],
+      fileSearchLoading: false,
+      fileSearchFocusedIndex: -1,
+      fileSearchGeneration: 0,
+      fileSearchDebounceTimer: null,
+      fileSearchScrollPaused: false,
+      // UI
+      historyOpen: false,
+      snippetDrawerOpen: _loadDrawerOpen(),
+      lightboxImage: null,
+      urlViewDialog: null,
+      urlViewTab: 'content',
+      snippets: [],
+      // URL chip detection
+      urlDetectDebounceTimer: null,
+      urlDetectGeneration: 0,
+      // Misc non-reactive flags / state
+      autoScroll: true,
+      suppressNextPaste: false,
+      activeMention: null,
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // Reactive property accessors (D21 per-tab forwarding)
+  // ---------------------------------------------------------------
+
+  // Every reactive property declared in `static properties`
+  // is re-exposed here as a getter/setter pair that forwards
+  // to the active tab's state. The setters call
+  // `requestUpdate(name, oldValue)` so Lit's internal dirty-
+  // check machinery fires re-renders on mutation — same
+  // behaviour as native reactive properties, just with the
+  // storage indirected through the Map.
+  //
+  // Non-reactive per-tab fields (streams, pendingChunks,
+  // autoScroll, etc.) get simple getters/setters without
+  // requestUpdate calls; see the block below the reactive
+  // accessors.
+
+  get messages() {
+    return this._tabs.get(this._activeTabId).messages;
+  }
+  set messages(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.messages;
+    tab.messages = value;
+    this.requestUpdate('messages', oldValue);
+  }
+
+  get _input() {
+    return this._tabs.get(this._activeTabId).input;
+  }
+  set _input(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.input;
+    tab.input = value;
+    this.requestUpdate('_input', oldValue);
+  }
+
+  get _streaming() {
+    return this._tabs.get(this._activeTabId).streaming;
+  }
+  set _streaming(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.streaming;
+    tab.streaming = value;
+    this.requestUpdate('_streaming', oldValue);
+  }
+
+  get _streamingContent() {
+    return this._tabs.get(this._activeTabId).streamingContent;
+  }
+  set _streamingContent(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.streamingContent;
+    tab.streamingContent = value;
+    this.requestUpdate('_streamingContent', oldValue);
+  }
+
+  get _historyOpen() {
+    return this._tabs.get(this._activeTabId).historyOpen;
+  }
+  set _historyOpen(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.historyOpen;
+    tab.historyOpen = value;
+    this.requestUpdate('_historyOpen', oldValue);
+  }
+
+  get _snippetDrawerOpen() {
+    return this._tabs.get(this._activeTabId).snippetDrawerOpen;
+  }
+  set _snippetDrawerOpen(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.snippetDrawerOpen;
+    tab.snippetDrawerOpen = value;
+    this.requestUpdate('_snippetDrawerOpen', oldValue);
+  }
+
+  get _snippets() {
+    return this._tabs.get(this._activeTabId).snippets;
+  }
+  set _snippets(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.snippets;
+    tab.snippets = value;
+    this.requestUpdate('_snippets', oldValue);
+  }
+
+  get _pendingImages() {
+    return this._tabs.get(this._activeTabId).pendingImages;
+  }
+  set _pendingImages(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.pendingImages;
+    tab.pendingImages = value;
+    this.requestUpdate('_pendingImages', oldValue);
+  }
+
+  get _lightboxImage() {
+    return this._tabs.get(this._activeTabId).lightboxImage;
+  }
+  set _lightboxImage(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.lightboxImage;
+    tab.lightboxImage = value;
+    this.requestUpdate('_lightboxImage', oldValue);
+  }
+
+  get _searchQuery() {
+    return this._tabs.get(this._activeTabId).searchQuery;
+  }
+  set _searchQuery(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchQuery;
+    tab.searchQuery = value;
+    this.requestUpdate('_searchQuery', oldValue);
+  }
+
+  get _searchIgnoreCase() {
+    return this._tabs.get(this._activeTabId).searchIgnoreCase;
+  }
+  set _searchIgnoreCase(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchIgnoreCase;
+    tab.searchIgnoreCase = value;
+    this.requestUpdate('_searchIgnoreCase', oldValue);
+  }
+
+  get _searchRegex() {
+    return this._tabs.get(this._activeTabId).searchRegex;
+  }
+  set _searchRegex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchRegex;
+    tab.searchRegex = value;
+    this.requestUpdate('_searchRegex', oldValue);
+  }
+
+  get _searchWholeWord() {
+    return this._tabs.get(this._activeTabId).searchWholeWord;
+  }
+  set _searchWholeWord(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchWholeWord;
+    tab.searchWholeWord = value;
+    this.requestUpdate('_searchWholeWord', oldValue);
+  }
+
+  get _searchCurrentIndex() {
+    return this._tabs.get(this._activeTabId).searchCurrentIndex;
+  }
+  set _searchCurrentIndex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchCurrentIndex;
+    tab.searchCurrentIndex = value;
+    this.requestUpdate('_searchCurrentIndex', oldValue);
+  }
+
+  get _searchMode() {
+    return this._tabs.get(this._activeTabId).searchMode;
+  }
+  set _searchMode(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchMode;
+    tab.searchMode = value;
+    this.requestUpdate('_searchMode', oldValue);
+  }
+
+  get _fileSearchResults() {
+    return this._tabs.get(this._activeTabId).fileSearchResults;
+  }
+  set _fileSearchResults(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchResults;
+    tab.fileSearchResults = value;
+    this.requestUpdate('_fileSearchResults', oldValue);
+  }
+
+  get _fileSearchLoading() {
+    return this._tabs.get(this._activeTabId).fileSearchLoading;
+  }
+  set _fileSearchLoading(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchLoading;
+    tab.fileSearchLoading = value;
+    this.requestUpdate('_fileSearchLoading', oldValue);
+  }
+
+  get _fileSearchFocusedIndex() {
+    return this._tabs.get(this._activeTabId).fileSearchFocusedIndex;
+  }
+  set _fileSearchFocusedIndex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchFocusedIndex;
+    tab.fileSearchFocusedIndex = value;
+    this.requestUpdate('_fileSearchFocusedIndex', oldValue);
+  }
+
+  get _urlViewDialog() {
+    return this._tabs.get(this._activeTabId).urlViewDialog;
+  }
+  set _urlViewDialog(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.urlViewDialog;
+    tab.urlViewDialog = value;
+    this.requestUpdate('_urlViewDialog', oldValue);
+  }
+
+  get _urlViewTab() {
+    return this._tabs.get(this._activeTabId).urlViewTab;
+  }
+  set _urlViewTab(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.urlViewTab;
+    tab.urlViewTab = value;
+    this.requestUpdate('_urlViewTab', oldValue);
+  }
+
+  // ---------------------------------------------------------------
+  // Non-reactive per-tab accessors
+  // ---------------------------------------------------------------
+  //
+  // These fields back code paths that should NOT trigger a
+  // Lit re-render on mutation — streaming internals
+  // (`_streams`, `_pendingChunks`), event-handler scoped
+  // flags (`_suppressNextPaste`, `_activeMention`), and
+  // transient timer handles. They need tab-scoped storage
+  // but no `requestUpdate` call.
+
+  get _streams() {
+    return this._tabs.get(this._activeTabId).streams;
+  }
+  set _streams(value) {
+    this._tabs.get(this._activeTabId).streams = value;
+  }
+
+  get _currentRequestId() {
+    return this._tabs.get(this._activeTabId).currentRequestId;
+  }
+  set _currentRequestId(value) {
+    this._tabs.get(this._activeTabId).currentRequestId = value;
+  }
+
+  get _lastRequestId() {
+    return this._tabs.get(this._activeTabId).lastRequestId;
+  }
+  set _lastRequestId(value) {
+    this._tabs.get(this._activeTabId).lastRequestId = value;
+  }
+
+  get _pendingChunks() {
+    return this._tabs.get(this._activeTabId).pendingChunks;
+  }
+  set _pendingChunks(value) {
+    this._tabs.get(this._activeTabId).pendingChunks = value;
+  }
+
+  get _autoScroll() {
+    return this._tabs.get(this._activeTabId).autoScroll;
+  }
+  set _autoScroll(value) {
+    this._tabs.get(this._activeTabId).autoScroll = value;
+  }
+
+  get _suppressNextPaste() {
+    return this._tabs.get(this._activeTabId).suppressNextPaste;
+  }
+  set _suppressNextPaste(value) {
+    this._tabs.get(this._activeTabId).suppressNextPaste = value;
+  }
+
+  get _activeMention() {
+    return this._tabs.get(this._activeTabId).activeMention;
+  }
+  set _activeMention(value) {
+    this._tabs.get(this._activeTabId).activeMention = value;
+  }
+
+  get _fileSearchGeneration() {
+    return this._tabs.get(this._activeTabId).fileSearchGeneration;
+  }
+  set _fileSearchGeneration(value) {
+    this._tabs.get(this._activeTabId).fileSearchGeneration = value;
+  }
+
+  get _fileSearchDebounceTimer() {
+    return this._tabs.get(this._activeTabId).fileSearchDebounceTimer;
+  }
+  set _fileSearchDebounceTimer(value) {
+    this._tabs.get(this._activeTabId).fileSearchDebounceTimer = value;
+  }
+
+  get _fileSearchScrollPaused() {
+    return this._tabs.get(this._activeTabId).fileSearchScrollPaused;
+  }
+  set _fileSearchScrollPaused(value) {
+    this._tabs.get(this._activeTabId).fileSearchScrollPaused = value;
+  }
+
+  get _urlDetectDebounceTimer() {
+    return this._tabs.get(this._activeTabId).urlDetectDebounceTimer;
+  }
+  set _urlDetectDebounceTimer(value) {
+    this._tabs.get(this._activeTabId).urlDetectDebounceTimer = value;
+  }
+
+  get _urlDetectGeneration() {
+    return this._tabs.get(this._activeTabId).urlDetectGeneration;
+  }
+  set _urlDetectGeneration(value) {
+    this._tabs.get(this._activeTabId).urlDetectGeneration = value;
+  }
+
+  // `selectedFiles` is declared in `static properties` via
+  // the files-tab orchestrator's direct-update path. It's
+  // per-tab because agents will get their own selection
+  // later. The getter/setter pair handles the reactive-
+  // property contract so files-tab's requestUpdate pattern
+  // keeps working.
+  get selectedFiles() {
+    return this._tabs.get(this._activeTabId).selectedFiles;
+  }
+  set selectedFiles(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.selectedFiles;
+    tab.selectedFiles = value;
+    this.requestUpdate('selectedFiles', oldValue);
   }
 
   // ---------------------------------------------------------------

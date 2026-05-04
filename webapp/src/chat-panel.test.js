@@ -6256,3 +6256,164 @@ describe('ChatPanel URL chip lifecycle', () => {
     expect(detect).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-tab state structure (D21 Phase A1)
+// ---------------------------------------------------------------------------
+
+// These tests pin the Map-based storage contract directly —
+// the Map exists, holds exactly one `"main"` entry after
+// construction, `_activeTabId` defaults to `"main"`, and
+// every migrated field round-trips through its getter to
+// the active tab's state object. Without this block, the
+// existing feature-level tests would catch most regressions
+// but wouldn't distinguish between "direct field still
+// works" and "Map-backed field still works" — both read
+// the same in single-tab operation. These tests look
+// directly at the Map so a refactor that drops the Map
+// machinery fails loudly.
+
+describe('ChatPanel per-tab state — structure', () => {
+  it('constructs with exactly one "main" tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._tabs).toBeInstanceOf(Map);
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('_activeTabId defaults to "main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('main tab state has every migrated field', async () => {
+    // Pin the field list so a future refactor that drops
+    // a field from _makeTabState fails here rather than
+    // silently breaking reads in production.
+    const p = mountPanel();
+    await settle(p);
+    const tab = p._tabs.get('main');
+    // Conversation
+    expect(tab.messages).toEqual([]);
+    expect(tab.input).toBe('');
+    expect(tab.pendingImages).toEqual([]);
+    // Streaming
+    expect(tab.streaming).toBe(false);
+    expect(tab.streamingContent).toBe('');
+    expect(tab.currentRequestId).toBeNull();
+    expect(tab.lastRequestId).toBeNull();
+    expect(tab.streams).toBeInstanceOf(Map);
+    expect(tab.pendingChunks).toBeInstanceOf(Map);
+    // Selection
+    expect(tab.selectedFiles).toEqual([]);
+    // Search
+    expect(tab.searchQuery).toBe('');
+    expect(typeof tab.searchIgnoreCase).toBe('boolean');
+    expect(typeof tab.searchRegex).toBe('boolean');
+    expect(typeof tab.searchWholeWord).toBe('boolean');
+    expect(tab.searchCurrentIndex).toBe(-1);
+    expect(tab.searchMode).toBe('message');
+    expect(tab.fileSearchResults).toEqual([]);
+    expect(tab.fileSearchLoading).toBe(false);
+    expect(tab.fileSearchFocusedIndex).toBe(-1);
+    expect(tab.fileSearchGeneration).toBe(0);
+    expect(tab.fileSearchDebounceTimer).toBeNull();
+    expect(tab.fileSearchScrollPaused).toBe(false);
+    // UI
+    expect(tab.historyOpen).toBe(false);
+    expect(typeof tab.snippetDrawerOpen).toBe('boolean');
+    expect(tab.lightboxImage).toBeNull();
+    expect(tab.urlViewDialog).toBeNull();
+    expect(tab.urlViewTab).toBe('content');
+    expect(tab.snippets).toEqual([]);
+    // URL chip detection
+    expect(tab.urlDetectDebounceTimer).toBeNull();
+    expect(tab.urlDetectGeneration).toBe(0);
+    // Misc
+    expect(tab.autoScroll).toBe(true);
+    expect(tab.suppressNextPaste).toBe(false);
+    expect(tab.activeMention).toBeNull();
+  });
+
+  it('getter round-trips through active tab state', async () => {
+    // Pin that reads go through the tab state, not a
+    // shadow field on `this`. Mutate the Map directly;
+    // the getter should reflect the change.
+    const p = mountPanel();
+    await settle(p);
+    const tab = p._tabs.get('main');
+    tab.messages = [{ role: 'user', content: 'direct' }];
+    expect(p.messages).toEqual([
+      { role: 'user', content: 'direct' },
+    ]);
+  });
+
+  it('setter writes to active tab state', async () => {
+    // Pin that writes land in the Map, not a shadow
+    // field. Set via the public property; the Map
+    // should reflect the change.
+    const p = mountPanel();
+    await settle(p);
+    p.messages = [{ role: 'user', content: 'via setter' }];
+    const tab = p._tabs.get('main');
+    expect(tab.messages).toEqual([
+      { role: 'user', content: 'via setter' },
+    ]);
+  });
+
+  it('setter triggers Lit re-render', async () => {
+    // requestUpdate is the contract — without it, Lit's
+    // dirty-check doesn't fire and the template stays
+    // stale. Spy on the panel's requestUpdate to
+    // verify the setter invokes it.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._input = 'new value';
+    expect(spy).toHaveBeenCalled();
+    // First arg is the property name; second is the old
+    // value. Matches Lit's reactive-property signature.
+    expect(spy.mock.calls[0][0]).toBe('_input');
+  });
+
+  it('non-reactive fields do not trigger re-render', async () => {
+    // Streams, pendingChunks, autoScroll, etc. are
+    // per-tab but non-reactive — Lit shouldn't re-render
+    // on their mutation. Pinned so a future setter
+    // refactor that accidentally adds requestUpdate
+    // calls to these paths fails here.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._streams = new Map();
+    p._pendingChunks = new Map();
+    p._autoScroll = false;
+    p._currentRequestId = 'fake-id';
+    p._lastRequestId = 'another-id';
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('per-tab state is distinct from component fields', async () => {
+    // Make sure we didn't accidentally leave a shadow
+    // instance field next to the getter. If a shadow
+    // field existed, the getter would still work but
+    // hasOwnProperty would find the name on the
+    // instance. With the Map-backed approach, only the
+    // Map itself is on the instance; the reactive
+    // names live on the prototype as accessor
+    // descriptors.
+    const p = mountPanel();
+    await settle(p);
+    // `messages` is a reactive accessor — should live
+    // on the prototype, not the instance.
+    expect(
+      Object.prototype.hasOwnProperty.call(p, 'messages'),
+    ).toBe(false);
+    // But `_tabs` is a plain field on the instance.
+    expect(
+      Object.prototype.hasOwnProperty.call(p, '_tabs'),
+    ).toBe(true);
+  });
+});
