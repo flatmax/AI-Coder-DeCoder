@@ -1,6 +1,6 @@
 # Agent Tab Strip — UX Implementation Plan
 
-**Status:** not started. Prerequisite (D25 agent execution plane) is complete; see IMPLEMENTATION_NOTES.md D25.
+**Status:** complete. All four phases (A–D) delivered. See the Progress log below for per-commit details. Prerequisite (D25 agent execution plane) was in place before this work started; see IMPLEMENTATION_NOTES.md D25.
 
 Governing spec: `specs4/5-webapp/agent-browser.md`.
 Decision log: D21 (chat-panel tabs), D25 (execution plane).
@@ -320,12 +320,119 @@ Tests: spawn produces N tabs, streaming chunks route to the right tab, switching
     coercion rules for the static method) and
     `TestAgentTaggedStreaming` (13, routing, guard scoping, parallel
     streams, error paths, cleanup on error, stale-tag after close).
-  - **C2 — not started.** Frontend spawn path on `stream-complete`:
-    inspect `result.agent_blocks`, create tabs via the existing
-    `_tabs`/`_tabLabels` infrastructure, route agent-tab textareas
-    to `chat_streaming` with `agent_tag`, wire close button to
-    `close_agent_context`.
-- **Phase D — not started.**
+  - **C2a — frontend spawn path** — delivered `5d0d201`.
+    `_onStreamComplete` inspects main-tab results for
+    `result.agent_blocks` and calls new `_spawnAgentTabs(turn_id,
+    agent_blocks)` which creates `_tabs` + `_tabLabels` entries
+    per valid block. Tab IDs follow `{turn_id}/agent-{NN:02d}` to
+    match the backend archive path convention (C1b) and parse
+    back to `[turn_id, agent_idx]` for `close_agent_context` /
+    `chat_streaming`'s `agent_tag`. Labels derive from
+    `deriveAgentTabLabel` (C.0). Each spawned tab's messages are
+    seeded with the task text as the initial user message so the
+    user sees the agent's brief on switch. Gated on main-tab
+    completions (tree depth 1), non-error, non-cancelled,
+    non-empty `turn_id`, non-empty `agent_blocks`. Idempotent on
+    duplicate stream-complete. Tab strip's render gate
+    (`_tabs.size > 1`) flips from hidden to visible on first
+    spawn. 19 tests across three describe blocks covering gating
+    (6 — missing blocks, empty array, missing turn_id, error /
+    cancelled completions, agent-tab depth-1 rejection), tab
+    creation (6 — count, ID format, task seeding, selectedFiles
+    copy, label derivation, no auto-switch, strip visibility),
+    and defensive (7 — idempotent, non-numeric agent_idx,
+    negative agent_idx, non-array blocks, null entries,
+    non-string task, empty turn_id).
+  - **C2b — per-tab text routing** — delivered `5d0d201`.
+    `_send` now parses the active tab ID via `parseAgentTabId`
+    and passes the result as the 6th positional arg to
+    `chat_streaming`. Main tab passes `null`, agent tabs pass
+    `[turn_id, agent_idx]` matching the backend's C1c
+    `agent_tag` signature. `parseAgentTabId` exported from the
+    chat panel handles main-tab (null), multi-digit indexes,
+    complex turn IDs, and rejects malformed inputs (empty
+    string, non-string, missing slash, invalid agent part,
+    whitespace). 18 tests: 11 on the parser itself
+    (`parseAgentTabId`), 6 on the routing (main/agent/multi-
+    agent/cross-turn/per-tab-selection/main-after-agent).
+  - **C2c — close-tab backend wiring** — delivered `7dda7c6`.
+    `_onTabClose` fires `LLMService.close_agent_context(turn_id,
+    agent_idx)` alongside the existing optimistic local remove
+    + `close-tab` event dispatch. Restricted-caller responses
+    surface as warning toasts (actionable — participant asks
+    host to close); generic failures log at debug without toast
+    (tab already gone locally, no user action possible). RPC
+    skipped for main tab (blocked by entry guard) and when
+    disconnected (tests, pre-connect). Fire-and-forget: the
+    backend's C1b idempotent-or-noop contract means duplicate
+    calls or calls for already-closed agents are safe. 12 tests
+    across `TestCloseTabBackendWiring` — RPC args (turn_id +
+    agent_idx parsing with multi-digit indexes), optimistic
+    remove invariants, error paths (restricted warning, silent
+    generic), disconnection no-op, event co-dispatch with RPC,
+    active-tab close path, overflow menu exclusion (menu items
+    don't render close buttons), programmatic `_onTabClose`
+    calls, guard cases (main tab, non-existent tab ID).
+  - **C2d — stale-tag error handling** — delivered `d2b7c10`.
+    `_send` inspects the resolved RPC value for `result.error`.
+    New `_handleStreamStartError(requestId, errorMsg, agentTag)`
+    routes: `"agent not found"` from a tagged send closes the
+    stale tab, switches to main, toasts the user, removes the
+    optimistic user message (scope is gone, message never
+    landed). Other errors (duplicate stream, malformed tag,
+    restricted caller) append an assistant error message in
+    the current tab so the user sees why the stream didn't
+    start, clear streaming state, leave the tab open for
+    retry. RPC rejections (network failures) continue through
+    the existing catch block unchanged. 9 tests across
+    `TestStreamStartErrorHandling` covering stale-tag (close,
+    main-switch, toast, optimistic-message removal, `_onTabClose`
+    dispatch), generic errors (message appending, state
+    clearing, tab preservation), main-tab fallback, and
+    regression guards for rejection vs resolution paths.
+- **Phase D — delivered.** Both polish items shipped:
+  - **D1 — streaming indicator** — delivered `1d11423`. 6px
+    animated pulsing dot renders on tab labels when
+    `tab.streaming === true`, read per-tab directly from the
+    Map (not via active-tab getters) so the indicator stays
+    visible on inactive tabs. Shown on strip buttons and
+    overflow menu items. `aria-busy="true"` on the tab button
+    for screen readers; the dot itself marked `aria-hidden` to
+    avoid double-reporting. Also fixed a latent bug in
+    `_onStreamComplete`: inactive-tab completions now call a
+    plain `requestUpdate()` so the strip re-renders and the
+    indicator disappears even when the user has switched to a
+    different tab. 11 tests covering idle / streaming / active
+    variants, aria attributes, parallel streams, end-to-end
+    send→complete cycles, persistence across tab switches,
+    inactive-tab completion re-render, overflow menu parity.
+  - **D2 — tab cycling shortcuts** — delivered `da7b640`.
+    Alt+\` cycles to next tab, Alt+Shift+\` to previous,
+    wrapping at both ends via positive-modulo arithmetic.
+    Document-level listener installed in `connectedCallback`,
+    removed in `disconnectedCallback`. Gated on
+    `_tabs.size > 1` (single-tab mode passes the keystroke
+    through). Rejects Ctrl+Alt+\` (Linux WM conflict) and
+    Meta+Alt+\` (macOS app switcher). Does NOT intercept
+    Alt+1..9 — those remain with app-shell's dialog-tab
+    shortcuts. **Design deviation from spec**: the original
+    `specs4/5-webapp/agent-browser.md` asked for Alt+1..0
+    direct access, but app-shell already owns Alt+1..4 for
+    dialog tabs and renumbering them would be scope creep.
+    Backtick cycling scales to any tab count and matches the
+    Ctrl+Tab convention used by browsers and IDEs. 13 tests
+    covering single-tab no-op, both cycle directions, wrap at
+    both ends, preventDefault on handled keys, modifier-key
+    rejection (Ctrl+Alt, Meta+Alt), plain-backtick pass-
+    through, Alt+1 pass-through (dialog shortcut preservation),
+    `active-tab-changed` dispatch, disconnect cleanup,
+    end-to-end three-tab cycle.
+
+**Plan status:** complete. All backend (C1a–C1c) and
+frontend (C2a–C2d, D1–D2) delivery items shipped.
+Prerequisite (D25 execution plane) is in place. The
+follow-on work listed below remains as-planned future
+items, not in-scope for the agent tab strip plan.
 
 ### Progress log correction — Phases A and B
 
