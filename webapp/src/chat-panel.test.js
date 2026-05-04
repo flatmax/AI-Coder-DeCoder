@@ -5499,6 +5499,360 @@ describe('ChatPanel message search — scroll behaviour', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tab strip rendering (D21 Phase B1)
+// ---------------------------------------------------------------------------
+
+// The tab strip is hidden in single-tab operation (the
+// common case) to preserve vertical space for users
+// running single-agent workflows. It appears the moment
+// a second tab is added. Clicking a tab button flips
+// `_activeTabId`, which fires the `active-tab-changed`
+// event wired in A3 — the files-tab picker then swaps
+// its selection state via A4's handler.
+//
+// Phase A never produces a second tab in practice, but
+// the tests seed the Map directly (same pattern as A3)
+// to pin the rendering and click contracts. When
+// Phase C's spawn path lands, it just adds entries to
+// `_tabs` and `_tabLabels`; the strip appears and works
+// without re-touching any of this.
+
+/**
+ * Seed a fresh tab in the chat panel's `_tabs` Map with
+ * a label. Mirrors the A3 helper but adds the label so
+ * the strip renders human-readable text. Caller must
+ * call `requestUpdate()` afterward; `settle()` picks up
+ * the re-render.
+ *
+ * Named `seedLabeledTab` to avoid colliding with the A3
+ * suite's own `seedTab` helper (same file, different
+ * describe blocks, same-name function declarations
+ * collide at parse time).
+ */
+function seedLabeledTab(panel, tabId, label) {
+  panel._tabs.set(tabId, panel._makeTabState());
+  if (typeof label === 'string' && label) {
+    panel._tabLabels.set(tabId, label);
+  }
+}
+
+describe('ChatPanel tab strip rendering', () => {
+  it('is hidden when only the main tab exists', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeNull();
+  });
+
+  it('appears when a second tab is added', async () => {
+    // Pinned behaviour: users running single-agent
+    // workflows never see the strip; the moment a
+    // second tab spawns, it materialises.
+    const p = mountPanel();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeTruthy();
+  });
+
+  it('renders one button per tab in insertion order', async () => {
+    // Map iteration order is insertion order — main
+    // first (constructor), then agents in spawn order.
+    // That matches the natural left-to-right reading.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    seedLabeledTab(p, 'agent-2', 'Agent 2');
+    p.requestUpdate();
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(buttons.length).toBe(4);
+    expect(buttons[0].getAttribute('data-tab-id')).toBe('main');
+    expect(buttons[1].getAttribute('data-tab-id')).toBe('agent-0');
+    expect(buttons[2].getAttribute('data-tab-id')).toBe('agent-1');
+    expect(buttons[3].getAttribute('data-tab-id')).toBe('agent-2');
+  });
+
+  it('renders the main tab label as "Main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.textContent.trim()).toBe('Main');
+  });
+
+  it('renders custom labels for agent tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(agentBtn.textContent.trim()).toBe('Agent 0: refactor auth');
+  });
+
+  it('falls back to tab ID when label is missing', async () => {
+    // Defensive — a tab added to `_tabs` without a
+    // corresponding label entry renders its raw ID so
+    // the button is visible but ugly (rather than an
+    // empty button that's impossible to click).
+    const p = mountPanel();
+    await settle(p);
+    // Add tab to _tabs but NOT to _tabLabels.
+    p._tabs.set('orphan-tab', p._makeTabState());
+    p.requestUpdate();
+    await settle(p);
+    const orphanBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="orphan-tab"]',
+    );
+    expect(orphanBtn.textContent.trim()).toBe('orphan-tab');
+  });
+
+  it('active tab gets the .active class', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Main is active initially.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(true);
+    expect(agentBtn.classList.contains('active')).toBe(false);
+  });
+
+  it('active class follows _activeTabId changes', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Switch to agent-0 via direct setter.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(false);
+    expect(agentBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('active button carries aria-selected="true"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.getAttribute('aria-selected')).toBe('true');
+    expect(agentBtn.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('button title attribute mirrors the label', async () => {
+    // Title gives a hover-tooltip with the full label
+    // when the text is ellipsis-truncated at 16rem
+    // max-width. Pinned so a refactor that drops the
+    // title attribute fails here.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth module');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(agentBtn.getAttribute('title')).toBe(
+      'Agent 0: refactor auth module',
+    );
+  });
+
+  it('tablist role on the strip container', async () => {
+    // ARIA tablist role required for screen-reader
+    // users to recognise the strip as a tab widget.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip.getAttribute('role')).toBe('tablist');
+  });
+
+  it('buttons carry role="tab"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    for (const btn of buttons) {
+      expect(btn.getAttribute('role')).toBe('tab');
+    }
+  });
+});
+
+describe('ChatPanel tab strip interaction', () => {
+  it('clicking a tab flips _activeTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-0');
+  });
+
+  it('click dispatches active-tab-changed event', async () => {
+    // The A3 setter fires the event on transition.
+    // B1's click handler uses the setter, so the event
+    // flows through the same path and sibling
+    // components (files-tab) see the change.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const agentBtn = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"]',
+      );
+      agentBtn.click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking the already-active tab is a no-op', async () => {
+    // The A3 setter short-circuits on same-value
+    // writes — no event, no re-render. Pinned
+    // alongside the strip click because a double-
+    // click on the main tab shouldn't spam the
+    // channel.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const mainBtn = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="main"]',
+      );
+      // Main is already active. Click should be silent.
+      mainBtn.click();
+      mainBtn.click();
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking updates the active class on the strip', async () => {
+    // End-to-end: user clicks a tab, the strip
+    // re-renders with the new active class on the
+    // clicked button. Proves the click → setter →
+    // requestUpdate → render chain works.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn2 = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(false);
+    expect(agentBtn2.classList.contains('active')).toBe(true);
+  });
+
+  it('switching tabs swaps the visible message list', async () => {
+    // Real per-tab UX check. Seed different messages
+    // in each tab's slot, then click to switch — the
+    // messages in view should change because the
+    // `messages` getter reads from the active tab.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    // Write different messages into each tab's slot.
+    p._tabs.get('main').messages = [
+      { role: 'user', content: 'main tab message' },
+    ];
+    p._tabs.get('agent-0').messages = [
+      { role: 'user', content: 'agent tab message' },
+    ];
+    p.requestUpdate();
+    await settle(p);
+    // Starts on main.
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).toContain('main tab message');
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).not.toContain('agent tab message');
+    // Switch to agent-0.
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).toContain('agent tab message');
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).not.toContain('main tab message');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // URL chips integration (Layer 5.30)
 // ---------------------------------------------------------------------------
 
