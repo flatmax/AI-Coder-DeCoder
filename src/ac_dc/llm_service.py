@@ -4418,6 +4418,122 @@ class LLMService:
         return {"session_id": self._session_id}
 
     # ------------------------------------------------------------------
+    # Public RPC — agent context lifecycle (C1b)
+    # ------------------------------------------------------------------
+
+    def close_agent_context(
+        self,
+        turn_id: str,
+        agent_idx: int,
+    ) -> dict[str, Any]:
+        """Free an agent's ContextManager + tracker + file_context.
+
+        Called by the frontend when the user clicks the ✕ on an
+        agent tab (D21 Phase B3). Pops the per-agent entry from
+        :attr:`_agent_contexts`; the ContextManager, stability
+        tracker, and file_context become garbage-collectable
+        immediately. The per-turn archive file on disk stays —
+        the agent's transcript is still readable via
+        :meth:`get_turn_archive` for audit / synthesis-on-
+        follow-up-turn purposes.
+
+        If closing the agent empties the outer per-turn dict,
+        pop the turn_id key too so the registry doesn't
+        accumulate empty buckets. A later new_session() clears
+        whatever's left anyway, but per-turn cleanup keeps the
+        registry tidy during long single-session usage.
+
+        Idempotent:
+
+        - Unknown turn_id → ``{status: "ok", closed: False}``
+        - Known turn_id but unknown agent_idx →
+          ``{status: "ok", closed: False}``
+        - Successful close → ``{status: "ok", closed: True}``
+
+        The ``closed`` boolean lets the frontend tell "actually
+        freed state" from "no-op on a stale tab ID" — helpful
+        for diagnostics but not behaviorally load-bearing (the
+        frontend just removes its own tab either way).
+
+        Localhost-only. Remote collaborators can't free session
+        state.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        turn_bucket = self._agent_contexts.get(turn_id)
+        if turn_bucket is None:
+            return {"status": "ok", "closed": False}
+        scope = turn_bucket.pop(agent_idx, None)
+        if scope is None:
+            return {"status": "ok", "closed": False}
+        # Inner dict empty → drop the outer key too. Keeps the
+        # registry compact; a long-running session with many
+        # turns would otherwise accumulate empty {turn_id: {}}
+        # buckets indefinitely.
+        if not turn_bucket:
+            self._agent_contexts.pop(turn_id, None)
+        return {"status": "ok", "closed": True}
+
+    def set_agent_selected_files(
+        self,
+        turn_id: str,
+        agent_idx: int,
+        files: list[str],
+    ) -> list[str] | dict[str, Any]:
+        """Replace an agent's selected-files list.
+
+        Per-agent analogue of :meth:`set_selected_files`. The
+        frontend routes file picker checkbox toggles to this
+        method when an agent tab is active (D21 per-tab
+        selection); the main tab's checkbox toggles still go
+        through :meth:`set_selected_files`.
+
+        Returns the canonical list (after filesystem existence
+        filtering, matching the main-tab path) on success, or
+        a restricted-error dict for non-localhost callers, or
+        ``{error: "agent not found"}`` when no scope exists
+        at ``{turn_id, agent_idx}``.
+
+        The agent's scope's ``selected_files`` list is replaced
+        in-place so existing references (e.g., the scope's
+        copy in the registry) see the new list on their next
+        read. No filesChanged broadcast fires — agent selection
+        state is per-tab on the frontend, and broadcasting to
+        other clients would overwrite their main-tab or
+        different-agent-tab state.
+
+        Localhost-only.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        turn_bucket = self._agent_contexts.get(turn_id)
+        if turn_bucket is None:
+            return {"error": "agent not found"}
+        scope = turn_bucket.get(agent_idx)
+        if scope is None:
+            return {"error": "agent not found"}
+        # Filter non-existent files when a repo is attached.
+        # Mirrors the main-tab path so agents can't carry
+        # phantom paths in their selection.
+        if self._repo is not None:
+            valid = [
+                p for p in files
+                if isinstance(p, str) and self._repo.file_exists(p)
+            ]
+        else:
+            valid = [p for p in files if isinstance(p, str)]
+        # Replace in-place so the scope's stored list identity
+        # is preserved. Downstream code (_sync_file_context)
+        # reads scope.selected_files and would break if the
+        # list object was swapped for a new one between
+        # references.
+        scope.selected_files.clear()
+        scope.selected_files.extend(valid)
+        return list(scope.selected_files)
+
+    # ------------------------------------------------------------------
     # Conversation scope construction
     # ------------------------------------------------------------------
 

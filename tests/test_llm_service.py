@@ -5178,6 +5178,535 @@ class TestAgentContextRegistry:
         assert len(archive) == 1
 
 
+class TestCloseAgentContext:
+    """C1b — close_agent_context RPC.
+
+    The frontend calls this when the user clicks ✕ on an
+    agent tab (D21 Phase B3). The backend frees the scope's
+    ContextManager + StabilityTracker + file_context; the
+    per-turn archive file on disk stays.
+
+    Tests exercise both populated-registry and empty-registry
+    paths so the idempotence contract is pinned — closing an
+    already-closed agent, an agent that never existed, or
+    any combination of stale turn_id / stale agent_idx all
+    return ``{status: "ok", closed: False}`` rather than
+    raising.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        """Build a valid AgentBlock."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_close_unknown_turn_is_noop(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown turn_id → ok with closed=False."""
+        result = service.close_agent_context(
+            "turn_nonexistent", 0
+        )
+        assert result == {"status": "ok", "closed": False}
+
+    def test_close_known_turn_unknown_agent_is_noop(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Known turn_id but unknown agent_idx → closed=False."""
+        # Seed an agent at idx 0.
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_known",
+        )
+        # Close a different idx.
+        result = service.close_agent_context("turn_known", 7)
+        assert result == {"status": "ok", "closed": False}
+        # Original agent still there.
+        assert 0 in service._agent_contexts["turn_known"]
+
+    def test_close_existing_agent_returns_closed_true(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Successful close → closed=True; scope removed."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_one",
+        )
+        assert 0 in service._agent_contexts["turn_one"]
+        result = service.close_agent_context("turn_one", 0)
+        assert result == {"status": "ok", "closed": True}
+        # Agent gone.
+        assert "turn_one" not in service._agent_contexts
+
+    def test_close_empties_inner_dict_drops_outer_key(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Closing last agent of a turn removes the turn_id bucket.
+
+        Keeps the registry compact — a long session with many
+        turns would accumulate empty {turn_id: {}} buckets
+        indefinitely otherwise.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_solo",
+        )
+        assert "turn_solo" in service._agent_contexts
+        service.close_agent_context("turn_solo", 0)
+        # Outer key gone, not just emptied.
+        assert "turn_solo" not in service._agent_contexts
+
+    def test_close_one_of_many_keeps_outer_key(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Closing one agent leaves siblings and their bucket intact."""
+        parent_scope = service._default_scope()
+        for i in range(3):
+            service._build_agent_scope(
+                block=self._make_agent_block(f"a{i}", f"t{i}"),
+                agent_idx=i,
+                parent_scope=parent_scope,
+                turn_id="turn_multi",
+            )
+        # Close middle agent.
+        result = service.close_agent_context("turn_multi", 1)
+        assert result == {"status": "ok", "closed": True}
+        # Siblings survive.
+        assert 0 in service._agent_contexts["turn_multi"]
+        assert 1 not in service._agent_contexts["turn_multi"]
+        assert 2 in service._agent_contexts["turn_multi"]
+
+    def test_close_is_idempotent(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Closing the same agent twice is safe.
+
+        A stale frontend tab ID (user clicks ✕ on a tab that
+        was already closed server-side by new_session) must
+        not raise or mutate anything. Pinning idempotence
+        keeps the frontend's error surface narrow.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_twice",
+        )
+        first = service.close_agent_context("turn_twice", 0)
+        assert first == {"status": "ok", "closed": True}
+        second = service.close_agent_context("turn_twice", 0)
+        assert second == {"status": "ok", "closed": False}
+
+    def test_close_freed_scope_no_longer_looked_up(
+        self,
+        service: LLMService,
+    ) -> None:
+        """After close, set_agent_selected_files can't find the agent."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_gone",
+        )
+        service.close_agent_context("turn_gone", 0)
+        # C1b's other RPC should return agent-not-found.
+        result = service.set_agent_selected_files(
+            "turn_gone", 0, []
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_close_does_not_remove_archive_file(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        repo_dir: Path,
+    ) -> None:
+        """Closing an agent leaves its archive on disk.
+
+        Per specs4/3-llm/history.md § Agent Turn Archive, the
+        archive IS the transcript. Close frees memory; audit
+        paths (synthesis on a follow-up main-tab turn, manual
+        archive inspection) still work.
+        """
+        parent_scope = service._default_scope()
+        turn_id = "turn_with_archive"
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("a0", "test task"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        # Write something to the archive via the scope's sink.
+        scope.context.add_message(
+            "assistant", "agent output goes here",
+        )
+        archive_file = (
+            repo_dir / ".ac-dc4" / "agents" / turn_id
+            / "agent-00.jsonl"
+        )
+        assert archive_file.exists()
+        # Close the agent.
+        service.close_agent_context(turn_id, 0)
+        # Archive file survives.
+        assert archive_file.exists()
+        # And is still readable via the public RPC.
+        archive = service.get_turn_archive(turn_id)
+        assert len(archive) == 1
+
+
+class TestCloseAgentContextLocalhostOnly:
+    """C1b — close_agent_context restricts non-localhost callers.
+
+    Remote collaborators must not be able to free the host's
+    session state. The restriction shape matches the rest of
+    the mutating RPC surface — ``{"error": "restricted",
+    "reason": ...}`` — so frontend toast rendering works
+    uniformly.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        # Install a collab stub that reports non-localhost.
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        # Seed an agent so the restriction isn't masked by
+        # the unknown-turn noop path.
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_secured",
+        )
+        result = service.close_agent_context("turn_secured", 0)
+        assert result.get("error") == "restricted"
+        # Agent NOT freed — the guard runs before the pop.
+        assert "turn_secured" in service._agent_contexts
+
+    def test_localhost_bypasses_restriction(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Localhost caller proceeds normally."""
+        class _LocalCollab:
+            def is_caller_localhost(self) -> bool:
+                return True
+
+        service._collab = _LocalCollab()
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_local",
+        )
+        result = service.close_agent_context("turn_local", 0)
+        assert result == {"status": "ok", "closed": True}
+
+
+class TestSetAgentSelectedFiles:
+    """C1b — set_agent_selected_files RPC.
+
+    Per-agent analogue of set_selected_files. The frontend
+    routes picker checkbox toggles here when an agent tab is
+    active; the main-tab path still hits set_selected_files.
+
+    Tests cover happy path, missing-agent error, in-place
+    list mutation (so the scope's stored list identity is
+    preserved), filesystem existence filtering (mirroring the
+    main-tab path), and the restricted-error path.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_turn_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown turn_id → agent-not-found error."""
+        result = service.set_agent_selected_files(
+            "turn_nonexistent", 0, ["file.py"],
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_unknown_agent_idx_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Known turn but unknown agent_idx → error."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_known",
+        )
+        result = service.set_agent_selected_files(
+            "turn_known", 99, [],
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_replaces_selected_files(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Selection replacement — new list becomes canonical."""
+        (repo_dir / "a.py").write_text("alpha\n")
+        (repo_dir / "b.py").write_text("beta\n")
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.set_agent_selected_files(
+            "turn_t", 0, ["a.py", "b.py"],
+        )
+        assert result == ["a.py", "b.py"]
+        # Agent's scope reflects the change.
+        assert scope.selected_files == ["a.py", "b.py"]
+
+    def test_preserves_list_identity(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Mutation is in-place; the scope's list object is preserved.
+
+        Downstream code (_sync_file_context, _stream_chat's
+        scope reads) holds references to scope.selected_files.
+        Swapping the list object for a new one would leave
+        those references pointing at stale state. Pinning
+        in-place mutation ensures the scope stays coherent
+        across multiple set_agent_selected_files calls.
+        """
+        (repo_dir / "a.py").write_text("x\n")
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_identity",
+        )
+        original_list = scope.selected_files
+        service.set_agent_selected_files(
+            "turn_identity", 0, ["a.py"],
+        )
+        # Same list object, updated contents.
+        assert scope.selected_files is original_list
+        assert original_list == ["a.py"]
+
+    def test_filters_nonexistent_files(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Paths not on disk are dropped (mirrors main-tab path)."""
+        (repo_dir / "real.py").write_text("content\n")
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_filter",
+        )
+        result = service.set_agent_selected_files(
+            "turn_filter", 0, ["real.py", "phantom.py"],
+        )
+        # Phantom filtered out.
+        assert result == ["real.py"]
+
+    def test_empty_list_clears_selection(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Passing [] clears the agent's selection."""
+        (repo_dir / "a.py").write_text("x\n")
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_clear",
+        )
+        # Seed a non-empty selection.
+        service.set_agent_selected_files(
+            "turn_clear", 0, ["a.py"],
+        )
+        assert scope.selected_files == ["a.py"]
+        # Clear.
+        result = service.set_agent_selected_files(
+            "turn_clear", 0, [],
+        )
+        assert result == []
+        assert scope.selected_files == []
+
+    def test_returns_copy_not_internal_list(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Caller mutations of the return value don't affect scope."""
+        (repo_dir / "a.py").write_text("x\n")
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_copy",
+        )
+        result = service.set_agent_selected_files(
+            "turn_copy", 0, ["a.py"],
+        )
+        assert isinstance(result, list)
+        result.append("injected.py")
+        # Scope's list unaffected.
+        assert scope.selected_files == ["a.py"]
+
+    def test_non_string_entries_filtered(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Non-string entries dropped — defensive against bad RPC payloads."""
+        (repo_dir / "a.py").write_text("x\n")
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_typed",
+        )
+        result = service.set_agent_selected_files(
+            "turn_typed", 0, ["a.py", 42, None, ["nested"]],
+        )
+        # Only the string survives.
+        assert result == ["a.py"]
+
+    def test_works_without_repo(
+        self,
+        config: ConfigManager,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """No repo attached → string-type filter applies but no fs check.
+
+        Tests that construct a service without a repo (e.g.,
+        standalone RPC surface tests) should still be able to
+        exercise the selection path. The filesystem existence
+        filter is bypassed because there's no repo to consult.
+        """
+        # Build a service with no repo but a fake history store
+        # so _build_agent_scope doesn't reject for missing
+        # persistence.
+        svc = LLMService(
+            config=config,
+            repo=None,
+            history_store=history_store,
+        )
+        from ac_dc.edit_protocol import AgentBlock
+        block = AgentBlock(id="a0", task="t0")
+        parent_scope = svc._default_scope()
+        svc._build_agent_scope(
+            block=block,
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_no_repo",
+        )
+        # Non-existent file still passes because there's no
+        # repo to filter against.
+        result = svc.set_agent_selected_files(
+            "turn_no_repo", 0, ["anything.py"],
+        )
+        assert result == ["anything.py"]
+
+
+class TestSetAgentSelectedFilesLocalhostOnly:
+    """C1b — set_agent_selected_files restricts non-localhost callers."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        (repo_dir / "a.py").write_text("x\n")
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_restricted",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.set_agent_selected_files(
+            "turn_restricted", 0, ["a.py"],
+        )
+        assert result.get("error") == "restricted"
+        # Scope NOT mutated.
+        assert scope.selected_files == []
+
+
 class TestAgentExecutionEndToEnd:
     """Step 3 — agents run through the real _stream_chat pipeline.
 
