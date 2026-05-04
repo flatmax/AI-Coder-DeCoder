@@ -604,10 +604,19 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    // Authoritative selection state. Held as a Set for O(1)
-    // membership checks; the picker consumes a Set prop
-    // directly.
-    this._selectedFiles = new Set();
+    // Authoritative selection state — keyed by tab ID so
+    // agent tabs (Phase C) can each own their own
+    // selection. In Phase A only the main tab exists,
+    // so every read/write flows through the same entry
+    // and behaviour matches pre-refactor byte-for-byte.
+    //
+    // The `_selectedFiles` getter/setter defined below
+    // routes through `this._activeTabId` so existing
+    // call sites (_applySelection, _onSelectionChanged,
+    // etc.) don't need to know about the Map.
+    this._activeTabId = 'main';
+    this._selectedFilesByTab = new Map();
+    this._selectedFilesByTab.set('main', new Set());
     // Authoritative exclusion state — the third position in
     // the picker's three-state checkbox model. Parallel to
     // `_selectedFiles`: orchestrator owns the Set, picker
@@ -772,6 +781,15 @@ export class FilesTab extends RpcMixin(LitElement) {
     // from what the editor is showing.
     this._onRevealFileInPicker =
       this._onRevealFileInPicker.bind(this);
+    // Chat panel's active-tab-changed bubbles +
+    // composes out to the window (D21 A3). We listen
+    // there so the picker's checkbox state tracks
+    // whichever tab is currently visible. Phase A
+    // only has the main tab, so the listener never
+    // actually swaps — but wiring it now means
+    // Phase C's spawn path doesn't re-touch this
+    // component.
+    this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
     // New-file and new-directory commit handlers —
     // fired when the picker's inline input is
     // confirmed with Enter. Same bind pattern as
@@ -790,6 +808,42 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onSplitterPointerUp.bind(this);
     this._onSplitterDoubleClick =
       this._onSplitterDoubleClick.bind(this);
+  }
+
+  // ---------------------------------------------------------------
+  // Per-tab selection accessors (D21 Phase A4)
+  // ---------------------------------------------------------------
+
+  // `_selectedFiles` was a plain Set pre-A4; now it's a
+  // getter that routes through the tab-keyed Map. Every
+  // existing call site — _applySelection,
+  // _onSelectionChanged, the initial-auto-select pass,
+  // _sendSelectionToServer — writes or reads
+  // `this._selectedFiles` and gets the active tab's
+  // slot transparently.
+  //
+  // A missing Map entry for the active tab is created on
+  // demand with an empty Set. This defends against a
+  // race where `active-tab-changed` hasn't been observed
+  // yet but the active tab's slot is queried — the
+  // fresh empty Set is the correct starting state for
+  // any tab Phase C spawns.
+
+  get _selectedFiles() {
+    let set = this._selectedFilesByTab.get(this._activeTabId);
+    if (set === undefined) {
+      set = new Set();
+      this._selectedFilesByTab.set(this._activeTabId, set);
+    }
+    return set;
+  }
+
+  set _selectedFiles(value) {
+    // Wrap non-Set inputs defensively — the pre-A4 code
+    // always assigned Set instances, but _applySelection
+    // passes whatever it was given.
+    const set = value instanceof Set ? value : new Set(value);
+    this._selectedFilesByTab.set(this._activeTabId, set);
   }
 
   // ---------------------------------------------------------------
@@ -827,6 +881,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // detail carries the full review-state dict.
     window.addEventListener('review-started', this._onReviewStarted);
     window.addEventListener('review-ended', this._onReviewEnded);
+    // Chat panel tab switches (D21 A4). The event is
+    // bubbled + composed so we catch it at the
+    // window level without coupling to the chat
+    // panel's shadow root.
+    window.addEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
   }
 
   disconnectedCallback() {
@@ -849,6 +910,9 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onReviewStarted,
     );
     window.removeEventListener('review-ended', this._onReviewEnded);
+    window.removeEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
     // If a splitter drag was in progress at unmount (hot
     // reload, tab switch under load), release the
     // document-scope listeners. Without this, pointermove
@@ -1349,6 +1413,59 @@ export class FilesTab extends RpcMixin(LitElement) {
     // post-review state (HEAD reattached, staging
     // cleared).
     this._loadFileTree();
+  }
+
+  /**
+   * Chat panel's active-tab-changed event — swap the
+   * picker's selection state to whichever tab is now
+   * visible. Phase A always has the main tab active,
+   * so the handler is reachable but the branch below
+   * that swaps picker state only fires in Phase C when
+   * agent tabs materialise.
+   *
+   * Detail shape: `{tabId, previousTabId}`.
+   *
+   * The handler has two jobs:
+   *
+   *   1. Update `_activeTabId` so the `_selectedFiles`
+   *      getter routes to the right Map slot. Every
+   *      subsequent selection read/write inside this
+   *      component lands on the correct tab.
+   *   2. Push the new tab's selection to the picker
+   *      via direct-update so its checkboxes reflect
+   *      the tab's state without re-rendering the
+   *      orchestrator.
+   *
+   * The chat panel is the source of truth for tab
+   * activation — its `_activeTabId` setter fires the
+   * event, and files-tab follows. Files-tab does NOT
+   * originate tab switches.
+   */
+  _onActiveTabChanged(event) {
+    const tabId = event?.detail?.tabId;
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === this._activeTabId) return;
+    this._activeTabId = tabId;
+    // Ensure the Map has an entry — the getter does
+    // this lazily too, but doing it up front keeps the
+    // subsequent .get() deterministic.
+    if (!this._selectedFilesByTab.has(tabId)) {
+      this._selectedFilesByTab.set(tabId, new Set());
+    }
+    const tabSelection = this._selectedFilesByTab.get(tabId);
+    // Push to the picker. Direct-update pattern, same as
+    // _applySelection — assign a fresh Set then
+    // requestUpdate so the picker's internal
+    // `selectedFiles` prop reflects the active tab.
+    const picker = this._picker();
+    if (picker) {
+      picker.selectedFiles = new Set(tabSelection);
+      picker.requestUpdate();
+    }
+    // Chat panel is already tracking the active tab
+    // (the event came from its setter), so we don't
+    // push to it — its own getter now reads from the
+    // right tab slot automatically.
   }
 
   async _onExitReview() {
