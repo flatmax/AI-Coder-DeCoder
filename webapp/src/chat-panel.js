@@ -314,6 +314,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // `reviewActive`) use the normal Lit accessor path.
 
     /**
+     * Which tab is currently visible (D21 A3). Setter
+     * dispatches `active-tab-changed` on change so
+     * sibling components (files-tab picker, tab strip
+     * UI) can re-sync their per-tab state. Single-tab
+     * operation keeps this fixed at `"main"`; the
+     * reactive plumbing is wired now so Phase C's
+     * spawn path doesn't re-touch the switching
+     * logic.
+     */
+    _activeTabId: { type: String, state: true, noAccessor: true },
+
+    /**
      * Messages as `{role, content, system_event?}` dicts.
      * Replaced wholesale on session load; appended during
      * normal conversation. Always a new array on change so
@@ -1739,7 +1751,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // state object but the getters don't call requestUpdate.
     //
     // See `_makeTabState` below for the field list.
-    this._activeTabId = 'main';
+    //
+    // `_activeTabIdValue` is the backing storage for the
+    // `_activeTabId` getter/setter defined on the
+    // prototype. The setter dispatches
+    // `active-tab-changed` on change (D21 A3); using a
+    // backing field avoids infinite recursion in the
+    // setter while preserving the Lit reactive-property
+    // contract via `noAccessor: true`.
+    this._activeTabIdValue = 'main';
     this._tabs = new Map();
     this._tabs.set('main', this._makeTabState());
 
@@ -1890,6 +1910,36 @@ export class ChatPanel extends RpcMixin(LitElement) {
   // autoScroll, etc.) get simple getters/setters without
   // requestUpdate calls; see the block below the reactive
   // accessors.
+
+  // `_activeTabId` is special — it's the KEY into `_tabs`,
+  // not a per-tab field itself. The getter reads a scalar
+  // backing field on `this`; the setter dispatches
+  // `active-tab-changed` on real transitions so sibling
+  // components can re-sync per-tab state. Same-value
+  // writes are no-ops to keep the event channel quiet.
+  get _activeTabId() {
+    return this._activeTabIdValue;
+  }
+  set _activeTabId(value) {
+    const oldValue = this._activeTabIdValue;
+    if (oldValue === value) return;
+    this._activeTabIdValue = value;
+    this.requestUpdate('_activeTabId', oldValue);
+    // Notify listeners of the transition. bubbles+composed
+    // so the event crosses the shadow DOM boundary —
+    // files-tab and the future tab strip component listen
+    // at their own levels.
+    this.dispatchEvent(
+      new CustomEvent('active-tab-changed', {
+        detail: {
+          tabId: value,
+          previousTabId: oldValue,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
 
   get messages() {
     return this._tabs.get(this._activeTabId).messages;
@@ -2203,6 +2253,65 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Request-ID → tab routing (D21 A2)
+  // ---------------------------------------------------------------
+
+  /**
+   * Find which tab owns `requestId`, or null.
+   *
+   * Matching rules:
+   *
+   *   1. Exact match against any tab's
+   *      `currentRequestId` — the tab that initiated the
+   *      request is the primary owner.
+   *   2. Prefix match against `{parentId}-` — future
+   *      parallel-agent mode spawns N child streams under
+   *      a parent turn; each child's request ID is
+   *      `{parent}-agent-NN`. The chat panel's tab
+   *      strip (when it lands in Phase B/C) will carry
+   *      one tab per agent, each with its own request ID,
+   *      so this prefix match is dead in practice — but
+   *      keeping it wired in now means Phase C's spawn
+   *      path doesn't have to re-touch streaming
+   *      routing.
+   *
+   * Returns the tab ID (`"main"` or `{turn_id}/agent-NN`)
+   * or null when no tab claims the request.
+   *
+   * Collaboration broadcasts (a remote user's stream
+   * reaching our panel) also return null — passive
+   * stream adoption is a separate feature (see the
+   * "passive stream" notes in the class docstring) and
+   * will hook in here when it lands.
+   */
+  _findTabForRequest(requestId) {
+    if (!requestId) return null;
+    // Fast path — exact match against the active tab.
+    // Skips the Map iteration in the common case.
+    const active = this._tabs.get(this._activeTabId);
+    if (active && active.currentRequestId === requestId) {
+      return this._activeTabId;
+    }
+    // General scan. Two passes so exact matches on any
+    // tab win over prefix matches — a request ID that
+    // exactly equals one tab's ID shouldn't be treated
+    // as a child of another tab whose ID happens to be
+    // a prefix.
+    for (const [tabId, tab] of this._tabs) {
+      if (tab.currentRequestId === requestId) {
+        return tabId;
+      }
+    }
+    for (const [tabId, tab] of this._tabs) {
+      const parentId = tab.currentRequestId;
+      if (parentId && requestId.startsWith(`${parentId}-`)) {
+        return tabId;
+      }
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------
 
@@ -2317,28 +2426,46 @@ export class ChatPanel extends RpcMixin(LitElement) {
   _onStreamChunk(event) {
     const { requestId, content } = event.detail || {};
     if (!requestId) return;
-    // Store the latest content for this request. Full-content
-    // semantics means we overwrite, not append — each chunk
-    // carries a superset of prior content. Dropped chunks are
-    // harmless.
+    // Route to the tab that owns this request (D21 A2).
+    // Drops unknown request IDs — collaboration broadcasts
+    // from other clients don't belong to any of our tabs
+    // yet (passive stream adoption is future work).
+    const ownerTabId = this._findTabForRequest(requestId);
+    if (!ownerTabId) return;
+    const ownerTab = this._tabs.get(ownerTabId);
+    if (!ownerTab) return;
+    // Full-content semantics — overwrite the pending slot,
+    // don't append. Each chunk carries a superset of prior
+    // content; dropped chunks are harmless.
     const normalizedContent = content ?? '';
-    this._pendingChunks.set(requestId, normalizedContent);
-    // Apply synchronously for our own active stream, in
-    // addition to scheduling the rAF coalesce. The rAF path
-    // is the fast path for rapid-fire chunks (it caps
-    // re-render rate at ~60Hz); the sync path is insurance
-    // against rAF starvation — if the browser throttles rAF
-    // because the tab was briefly backgrounded, because the
-    // chat panel's containing element is display:none at
-    // the moment the chunk arrives (tab-panel lazy
-    // visibility), or because of any other scheduling
-    // oddity, the user still sees text appear. The sync
-    // assignment is idempotent with the subsequent rAF
-    // update: both read from the same `_pendingChunks`
-    // entry, so the rAF either finds it drained (no-op) or
-    // re-applies the same value (harmless).
-    if (requestId === this._currentRequestId && this._streaming) {
-      this._streamingContent = normalizedContent;
+    ownerTab.pendingChunks.set(requestId, normalizedContent);
+    // Apply synchronously in addition to scheduling the
+    // rAF coalesce. The rAF path caps re-render rate at
+    // ~60Hz for rapid chunks; the sync path is insurance
+    // against rAF starvation (tab backgrounded, chat panel
+    // briefly display:none, etc.). Both paths read from
+    // the same pendingChunks entry so the rAF either finds
+    // it drained (no-op) or re-applies the same value
+    // (harmless).
+    //
+    // Only fire the sync render for chunks matching the
+    // tab's CURRENT request — the tab may be between
+    // streams and the pending slot should still queue
+    // for the rAF, but the `streaming` + `streamingContent`
+    // fields are for the currently-active stream only.
+    if (
+      requestId === ownerTab.currentRequestId
+      && ownerTab.streaming
+    ) {
+      // Writing through the tab object directly. We use
+      // requestUpdate only when the OWNER tab is the
+      // ACTIVE tab — writing to an inactive tab's state
+      // shouldn't force a re-render of the currently
+      // visible tab's template.
+      ownerTab.streamingContent = normalizedContent;
+      if (ownerTabId === this._activeTabId) {
+        this.requestUpdate('_streamingContent');
+      }
     }
     this._scheduleFlush();
   }
@@ -2346,28 +2473,42 @@ export class ChatPanel extends RpcMixin(LitElement) {
   _onStreamComplete(event) {
     const { requestId, result } = event.detail || {};
     if (!requestId) return;
+    // Route to the owning tab (D21 A2). Unknown request
+    // IDs — collab broadcasts from other clients whose
+    // streams don't match any tab — are silently dropped.
+    const ownerTabId = this._findTabForRequest(requestId);
+    if (!ownerTabId) return;
+    const ownerTab = this._tabs.get(ownerTabId);
+    if (!ownerTab) return;
+    const ownerIsActive = ownerTabId === this._activeTabId;
 
     // Flush any pending chunk synchronously so the final
-    // content is reflected before we move it into messages.
-    const pending = this._pendingChunks.get(requestId);
+    // content is reflected before we move it into
+    // messages. Operates on the owning tab's
+    // pendingChunks.
+    const pending = ownerTab.pendingChunks.get(requestId);
     if (pending !== undefined) {
-      this._pendingChunks.delete(requestId);
-      if (requestId === this._currentRequestId) {
-        this._streamingContent = pending;
+      ownerTab.pendingChunks.delete(requestId);
+      if (requestId === ownerTab.currentRequestId) {
+        ownerTab.streamingContent = pending;
+        if (ownerIsActive) {
+          this.requestUpdate('_streamingContent');
+        }
       }
     }
 
-    // Move the streaming content into the message list as a
-    // finalised assistant message. Error responses surface as
-    // a dedicated error message rather than assistant content.
-    // Attach edit_results so the renderer can pair each edit
-    // segment with its backend result (applied / failed /
-    // skipped / not_in_context) via matchSegmentsToResults.
+    // Move the streaming content into the owning tab's
+    // message list as a finalised assistant message. Error
+    // responses surface as a dedicated error message rather
+    // than assistant content. Attach edit_results so the
+    // renderer can pair each edit segment with its backend
+    // result (applied / failed / skipped / not_in_context)
+    // via matchSegmentsToResults.
     let wasOwnRequest = false;
-    if (requestId === this._currentRequestId) {
+    if (requestId === ownerTab.currentRequestId) {
       wasOwnRequest = true;
       const finalContent =
-        result?.response ?? this._streamingContent ?? '';
+        result?.response ?? ownerTab.streamingContent ?? '';
       const error = result?.error;
       const errorInfo = result?.error_info;
       const editResults = Array.isArray(result?.edit_results)
@@ -2388,8 +2529,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
       const errorBody = error
         ? this._formatErrorBody(error, errorInfo)
         : null;
-      this.messages = [
-        ...this.messages,
+      // Append to the owning tab's messages. requestUpdate
+      // fires only when the owner is active — inactive tabs
+      // accumulate silently and render when the user
+      // switches.
+      ownerTab.messages = [
+        ...ownerTab.messages,
         error
           ? {
               role: 'assistant',
@@ -2413,11 +2558,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
               ...(finishReason ? { finishReason } : {}),
             },
       ];
+      if (ownerIsActive) {
+        this.requestUpdate('messages');
+      }
       // Surface the classified error as a toast with a
       // type-specific message. Unclassified errors fall
       // through to the generic path inside the toast
-      // helper. Runs only when `error` is set — success
-      // responses skip this branch entirely.
+      // helper. Toasts are global UI — fire regardless of
+      // whether the owning tab is active, so the user sees
+      // failures for background agent streams too.
       if (error) {
         this._emitTypedErrorToast(errorInfo, error);
       }
@@ -2432,19 +2581,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
       if (!error && finishReason) {
         this._maybeShowFinishReasonToast(finishReason);
       }
-      this._streaming = false;
-      this._streamingContent = '';
-      this._currentRequestId = null;
+      // Reset streaming state on the owning tab.
+      ownerTab.streaming = false;
+      ownerTab.streamingContent = '';
+      ownerTab.currentRequestId = null;
+      if (ownerIsActive) {
+        this.requestUpdate('_streaming');
+      }
       // Remember the completed request ID so post-completion
       // events (compaction, URL fetches whose callbacks arrived
       // late) can still be routed to this conversation. Kept
       // as a separate field so it outlives the current-request
       // reset above. Overwritten by each new stream-complete
-      // we own.
-      this._lastRequestId = requestId;
+      // the tab owns.
+      ownerTab.lastRequestId = requestId;
     }
 
-    this._streams.delete(requestId);
+    ownerTab.streams.delete(requestId);
 
     // After finalising, check whether the response warrants
     // a retry prompt. Only fires for our own requests —
@@ -2452,7 +2605,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // prompts in our textarea. If a prompt IS populated,
     // the textarea is focused so the user can review and
     // send immediately.
-    if (wasOwnRequest && result && !result.error) {
+    //
+    // _maybePopulateRetryPrompt writes through the active-
+    // tab accessors (`this._input`, etc.). In single-tab
+    // operation (A2 scope) the owning tab IS the active
+    // tab, so the behaviour is identical. A future commit
+    // when multiple tabs exist will thread the tab ID
+    // through so retry prompts land in the owning tab's
+    // input regardless of which tab is currently active.
+    if (wasOwnRequest && ownerIsActive && result && !result.error) {
       this._maybePopulateRetryPrompt(result);
     }
   }
@@ -3119,14 +3280,27 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (this._rafHandle != null) return;
     this._rafHandle = requestAnimationFrame(() => {
       this._rafHandle = null;
-      // Drain the latest pending content for our current
-      // request. Other request IDs (parallel agents, collab
-      // broadcasts) are held until they're needed — Phase 2b
-      // doesn't render them.
-      const pending = this._pendingChunks.get(this._currentRequestId);
-      if (pending !== undefined) {
-        this._pendingChunks.delete(this._currentRequestId);
-        this._streamingContent = pending;
+      // Drain pending chunks across every tab. Each
+      // entry in pendingChunks is keyed by request ID;
+      // we look up the owning tab and write the chunk
+      // to its streamingContent. Only the active tab's
+      // update triggers a Lit re-render — inactive tabs
+      // accumulate state silently and render when the
+      // user switches to them.
+      let activeChanged = false;
+      for (const tab of this._tabs.values()) {
+        if (tab.pendingChunks.size === 0) continue;
+        for (const [requestId, content] of tab.pendingChunks) {
+          if (requestId !== tab.currentRequestId) continue;
+          tab.pendingChunks.delete(requestId);
+          tab.streamingContent = content;
+          if (tab === this._tabs.get(this._activeTabId)) {
+            activeChanged = true;
+          }
+        }
+      }
+      if (activeChanged) {
+        this.requestUpdate('_streamingContent');
       }
     });
   }

@@ -6417,3 +6417,210 @@ describe('ChatPanel per-tab state — structure', () => {
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Active-tab-changed event plumbing (D21 Phase A3)
+// ---------------------------------------------------------------------------
+
+// A3 wires the reactive-property machinery for tab
+// switches without creating any new tabs. The event
+// fires on real `_activeTabId` transitions, carries
+// `{tabId, previousTabId}`, and bubbles + composes so
+// sibling components hear it across shadow boundaries.
+// Single-tab operation never fires the event in
+// practice — the plumbing is for Phase C when agent
+// tabs materialise.
+
+// Helper — seed an additional tab entry in the Map so the
+// per-tab accessors find valid state when the test flips
+// `_activeTabId` to the new key. Without this, any getter
+// call (via a subsequent render() or disconnectedCallback
+// during teardown) hits `this._tabs.get(unknownKey)` which
+// returns undefined and crashes.
+//
+// Phase C will spawn tabs via build_agent_context_manager's
+// frontend counterpart. For A3 we just need a valid tab
+// state at the target key — the existing `_makeTabState`
+// factory produces exactly that.
+function seedTab(panel, tabId) {
+  panel._tabs.set(tabId, panel._makeTabState());
+}
+
+describe('ChatPanel active-tab-changed event', () => {
+  it('_activeTabId defaults to "main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('setting to same value is a no-op (no event)', async () => {
+    // Spam the setter with the current value — no
+    // events, no re-renders. Keeps the channel quiet
+    // for sibling components that might otherwise
+    // do expensive sync work on every dispatch.
+    const p = mountPanel();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'main';
+      p._activeTabId = 'main';
+      p._activeTabId = 'main';
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('setting to a different value fires the event', async () => {
+    // Single-tab operation doesn't normally hit this
+    // path, but the reactive plumbing works — we can
+    // seed a second tab, flip to it, and observe the
+    // dispatch. Phase C's spawning path will assign
+    // real agent tab IDs like `{turn_id}/agent-NN`;
+    // the plumbing is identical.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'some-other-tab');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'some-other-tab';
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('event detail carries tabId and previousTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'new-tab');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'new-tab';
+      await settle(p);
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail).toEqual({
+        tabId: 'new-tab',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('successive changes fire once each with correct previous', async () => {
+    // Chain of transitions — each event's previousTabId
+    // is the previous current, each event's tabId is
+    // the new current.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'a');
+    seedTab(p, 'b');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'a';
+      p._activeTabId = 'b';
+      p._activeTabId = 'main';
+      await settle(p);
+      expect(listener).toHaveBeenCalledTimes(3);
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'a',
+        previousTabId: 'main',
+      });
+      expect(listener.mock.calls[1][0].detail).toEqual({
+        tabId: 'b',
+        previousTabId: 'a',
+      });
+      expect(listener.mock.calls[2][0].detail).toEqual({
+        tabId: 'main',
+        previousTabId: 'b',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('event bubbles out of the shadow DOM (composed)', async () => {
+    // The files-tab orchestrator listens at its own
+    // level; the event must cross the shadow boundary.
+    // Bubbles + composed is the standard pattern for
+    // cross-boundary events in this codebase (see
+    // file-mention-click, file-chip-click, etc.).
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const outerListener = vi.fn();
+    document.body.addEventListener(
+      'active-tab-changed',
+      outerListener,
+    );
+    try {
+      p._activeTabId = 'agent-0';
+      await settle(p);
+      expect(outerListener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'active-tab-changed',
+        outerListener,
+      );
+    }
+  });
+
+  it('triggers a Lit re-render on change', async () => {
+    // _activeTabId flipping means the template's
+    // getter reads (messages, _input, etc.) will
+    // return different tab state. requestUpdate must
+    // fire so the template re-renders; without it
+    // Lit would keep showing stale state.
+    //
+    // No settle() after the flip — the assertions run
+    // synchronously against the requestUpdate spy.
+    // Teardown calls disconnectedCallback which reads
+    // per-tab accessors, so we seed the target tab to
+    // keep the Map lookup valid.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'x');
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._activeTabId = 'x';
+    expect(spy).toHaveBeenCalled();
+    // First arg is the property name; second is the
+    // old value. Matches Lit's reactive-property
+    // signature.
+    expect(spy.mock.calls[0][0]).toBe('_activeTabId');
+    expect(spy.mock.calls[0][1]).toBe('main');
+  });
+
+  it('same-value write does not call requestUpdate', async () => {
+    // Pinned alongside the no-event check so a future
+    // refactor that accidentally drops the early return
+    // from the setter fails loudly. Re-rendering on
+    // no-op writes would produce spurious template
+    // work on every settle loop.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._activeTabId = 'main';
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('getter reflects the new value after setter', async () => {
+    // Sanity — the scalar backing round-trips through
+    // the property. Not just event-dispatch plumbing;
+    // the getter must see the updated value so the
+    // Map lookup in every per-tab accessor finds the
+    // right tab.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    expect(p._activeTabId).toBe('main');
+    p._activeTabId = 'agent-0';
+    expect(p._activeTabId).toBe('agent-0');
+  });
+});
