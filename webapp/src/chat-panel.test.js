@@ -5600,7 +5600,14 @@ describe('ChatPanel tab strip rendering', () => {
     const agentBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="agent-0"]',
     );
-    expect(agentBtn.textContent.trim()).toBe('Agent 0: refactor auth');
+    // Agent tabs include a trailing ✕ close button (B3),
+    // so assert on the label text portion rather than the
+    // full textContent. The query-root-text after stripping
+    // the close glyph should equal the label.
+    const labelText = agentBtn.textContent
+      .replace(/✕\s*$/, '')
+      .trim();
+    expect(labelText).toBe('Agent 0: refactor auth');
   });
 
   it('falls back to tab ID when label is missing', async () => {
@@ -5617,7 +5624,12 @@ describe('ChatPanel tab strip rendering', () => {
     const orphanBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="orphan-tab"]',
     );
-    expect(orphanBtn.textContent.trim()).toBe('orphan-tab');
+    // Strip the trailing close button glyph — B3 renders
+    // ✕ for all non-main tabs, orphan tabs included.
+    const labelText = orphanBtn.textContent
+      .replace(/✕\s*$/, '')
+      .trim();
+    expect(labelText).toBe('orphan-tab');
   });
 
   it('active tab gets the .active class', async () => {

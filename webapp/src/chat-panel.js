@@ -2697,6 +2697,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // deletion — _tabs mutations don't trigger Lit's
     // dirty-check on their own.
     this.requestUpdate();
+
     this.dispatchEvent(
       new CustomEvent('close-tab', {
         detail: { tabId },
@@ -2705,10 +2706,6 @@ export class ChatPanel extends RpcMixin(LitElement) {
       }),
     );
   }
-🟨🟨🟨 REPL
-
-Wait — I wrote `🟨🟨🟨 REPL` twice. Let me fix that.
-
 
   /**
    * Render the tab strip. Returns an empty template
