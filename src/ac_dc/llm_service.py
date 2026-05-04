@@ -6185,6 +6185,32 @@ class LLMService:
             for b in parse_result.blocks
         ]
 
+        # Agent-spawn blocks surface in the completion result
+        # so the frontend's C2a spawn handler can create agent
+        # tabs for each valid block. Invalid blocks (missing
+        # id or task) are dropped — the backend's spawn path
+        # filters them via `_filter_dispatchable_agents` and
+        # the frontend matches that semantic here so stale
+        # or malformed blocks never produce ghost tabs.
+        #
+        # Each entry carries id (string), task (string), and
+        # agent_idx (int). The frontend uses agent_idx to
+        # derive the tab ID `{turn_id}/agent-{NN:02d}` which
+        # the backend's spawn path uses for the archive
+        # directory and the agent-stream child request ID.
+        # The ordering is stable — index matches spawn order —
+        # which matters because close_agent_context and
+        # agent_tag both key by agent_idx.
+        agent_blocks_summary = [
+            {
+                "id": b.id,
+                "task": b.task,
+                "agent_idx": idx,
+            }
+            for idx, b in enumerate(parse_result.agent_blocks)
+            if b.valid
+        ]
+
         # Default result — apply step skipped.
         # token_usage carries per-request counts from the
         # provider. The frontend's TokenHUD reads this for its
@@ -6207,6 +6233,7 @@ class LLMService:
             "response": full_content,
             "token_usage": usage_dict,
             "edit_blocks": edit_blocks_summary,
+            "agent_blocks": agent_blocks_summary,
             "shell_commands": parse_result.shell_commands,
             "passed": 0,
             "already_applied": 0,

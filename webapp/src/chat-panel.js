@@ -3189,6 +3189,41 @@ export class ChatPanel extends RpcMixin(LitElement) {
       // reset above. Overwritten by each new stream-complete
       // the tab owns.
       ownerTab.lastRequestId = requestId;
+
+      // C2a — spawn agent tabs for each valid agent block the
+      // backend surfaced in this turn. The backend's
+      // _build_completion_result populates result.agent_blocks
+      // with {id, task, agent_idx} entries (empty array for
+      // turns without agent blocks). Each spawned tab's state
+      // is seeded with the task as the initial user message
+      // so when the user switches to it they see why it
+      // exists.
+      //
+      // Only fires for MAIN-tab completions — agent tabs
+      // themselves can't spawn child agents (tree depth is
+      // 1 per specs4/7-future/parallel-agents.md § Execution
+      // Model), and the backend's _is_child_request gate
+      // already prevents their responses from producing
+      // actual spawns. Filter here too so a stale agent
+      // response carrying agent blocks doesn't produce
+      // ghost tabs on the frontend.
+      //
+      // Error and cancelled completions still carry
+      // agent_blocks (the backend's result builder populates
+      // the field regardless of the apply gate), but we
+      // skip spawn on those paths — the backend doesn't
+      // actually fan out agents for cancelled/errored
+      // turns, so opening tabs would be misleading.
+      if (
+        ownerTabId === 'main'
+        && !result.error
+        && !result.cancelled
+        && typeof result.turn_id === 'string'
+        && Array.isArray(result.agent_blocks)
+        && result.agent_blocks.length > 0
+      ) {
+        this._spawnAgentTabs(result.turn_id, result.agent_blocks);
+      }
     }
 
     ownerTab.streams.delete(requestId);
@@ -3209,6 +3244,117 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // input regardless of which tab is currently active.
     if (wasOwnRequest && ownerIsActive && result && !result.error) {
       this._maybePopulateRetryPrompt(result);
+    }
+  }
+
+  /**
+   * C2a — create agent tab state for each valid block.
+   *
+   * Called from ``_onStreamComplete`` when the main-tab
+   * result carries ``turn_id`` + one or more agent blocks.
+   * Creates a ``_tabs`` entry and a ``_tabLabels`` entry
+   * per block. Does NOT switch to any of the new tabs —
+   * the user's focus stays on the main tab where the
+   * assistant message (including the spawn blocks rendered
+   * as prose) has just landed. They can click into any
+   * agent tab via the strip or the overflow menu.
+   *
+   * Tab ID shape: ``{turn_id}/agent-{NN:02d}`` — matches the
+   * backend's archive directory convention and the child
+   * request ID format. Parsing the tab ID back into
+   * ``[turn_id, agent_idx]`` produces the exact tuple the
+   * backend's ``agent_tag`` kwarg expects (C1c) and the
+   * exact ``(turn_id, agent_idx)`` pair
+   * ``close_agent_context`` takes (C1b).
+   *
+   * Label derivation: :func:`deriveAgentTabLabel` produces
+   * ``Agent {NN}`` for tasks without text and ``Agent {NN}:
+   * {first line}`` otherwise, truncated to fit the strip.
+   * Pre-C.0 code treated this as an ad-hoc string
+   * concatenation; pinning it to the helper means future
+   * label shape changes land in one place.
+   *
+   * Tab state seeding: the agent's initial user message is
+   * the task text. Users switching to an agent tab should
+   * see what the main LLM asked it to do without having to
+   * scroll through the archive — the task IS the prompt.
+   * The selection list starts as a copy of the main tab's
+   * selection so the agent inherits context per the
+   * parallel-agents spec's "selected_files is a deep copy
+   * of the parent's" invariant. Backend already deep-copies
+   * server-side; the frontend copy here is the per-tab
+   * picker state. Subsequent user actions in the agent tab
+   * drive both (server via
+   * :meth:`LLMService.set_agent_selected_files`, client via
+   * picker state swap on tab activation).
+   *
+   * Idempotent: if a tab for the same ``{turn_id, agent_idx}``
+   * already exists (duplicate stream-complete for the same
+   * turn — defensive, shouldn't happen in practice), the
+   * existing tab is preserved. Creating fresh state would
+   * wipe any messages the user had already seen in that
+   * tab.
+   *
+   * Request update so the strip renders. The tab strip's
+   * render gate (``_tabs.size > 1``) flips from hidden to
+   * visible on the first spawn, so this call is load-
+   * bearing.
+   *
+   * @param {string} turnId — the backend's turn_id, shared
+   *   across all agent tabs from this turn
+   * @param {Array<object>} agentBlocks — validated block
+   *   entries with {id, task, agent_idx}
+   */
+  _spawnAgentTabs(turnId, agentBlocks) {
+    if (typeof turnId !== 'string' || !turnId) return;
+    if (!Array.isArray(agentBlocks)) return;
+    let anySpawned = false;
+    // Snapshot of the main tab's selection. Each new agent
+    // tab gets its own copy so mutations on one don't leak
+    // into another. Reading from _tabs directly (not via
+    // the `selectedFiles` getter) because the getter would
+    // return the ACTIVE tab's list — which is main here,
+    // but being explicit about the read keeps the spawn
+    // path robust against future changes to the getter.
+    const mainTab = this._tabs.get('main');
+    const mainSelection = Array.isArray(mainTab?.selectedFiles)
+      ? [...mainTab.selectedFiles]
+      : [];
+    for (const block of agentBlocks) {
+      if (!block || typeof block !== 'object') continue;
+      const agentIdx = block.agent_idx;
+      if (typeof agentIdx !== 'number' || agentIdx < 0) continue;
+      const task = typeof block.task === 'string' ? block.task : '';
+      // Tab ID — zero-padded to 2 digits for stable sort
+      // order in the strip (agent-02 < agent-10) and to
+      // match the backend's archive path convention.
+      const paddedIdx = String(Math.floor(agentIdx)).padStart(2, '0');
+      const tabId = `${turnId}/agent-${paddedIdx}`;
+      // Idempotent — existing tab wins.
+      if (this._tabs.has(tabId)) continue;
+      // Fresh tab state with the task seeded as the initial
+      // user message. The agent's own conversation starts
+      // with this message server-side (the backend's spawn
+      // path calls `_agent_stream_impl` with the task as
+      // the message argument), so the tab's visible history
+      // matches what the backend archives.
+      const state = this._makeTabState();
+      state.messages = [
+        { role: 'user', content: task },
+      ];
+      state.selectedFiles = [...mainSelection];
+      this._tabs.set(tabId, state);
+      this._tabLabels.set(
+        tabId, deriveAgentTabLabel(agentIdx, task),
+      );
+      anySpawned = true;
+    }
+    if (anySpawned) {
+      // Force a re-render so the tab strip appears.
+      // `_tabs` is a Map mutation (not a reactive property
+      // assignment) so Lit doesn't observe the change
+      // automatically.
+      this.requestUpdate();
     }
   }
 

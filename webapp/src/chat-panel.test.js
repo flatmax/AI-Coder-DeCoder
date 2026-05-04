@@ -7813,3 +7813,508 @@ describe('ChatPanel active-tab-changed event', () => {
     expect(p._activeTabId).toBe('agent-0');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Agent tab spawning (D21 Phase C2a)
+// ---------------------------------------------------------------------------
+
+// When a main-tab stream completes with agent blocks in
+// its result, the panel creates tab state + labels for
+// each valid block. The tab strip materialises (since
+// `_tabs.size > 1`), and each new tab's message list is
+// seeded with the task text as the initial user message.
+//
+// Spawn is gated to: main-tab completions only, non-
+// error, non-cancelled, valid turn_id, non-empty
+// agent_blocks. Any other completion leaves `_tabs`
+// unchanged.
+
+describe('ChatPanel agent tab spawning — gating', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('no spawn when agent_blocks is missing', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'plain response',
+        turn_id: 'turn_abc',
+      },
+    });
+    await settle(p);
+    // Still just main.
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('no spawn when agent_blocks is empty array', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'no agents',
+        turn_id: 'turn_abc',
+        agent_blocks: [],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn when turn_id is missing', async () => {
+    // Defensive — backend always includes turn_id, but
+    // a malformed result shouldn't produce tabs without
+    // the key we need for routing.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'missing turn_id',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn on error completion', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        error: 'something broke',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn on cancelled completion', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        cancelled: true,
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn for agent-tab completions (tree depth 1)', async () => {
+    // When an agent tab's own stream completes, its
+    // response might contain agent blocks (the agent
+    // emitted them as prose), but the frontend must not
+    // spawn sub-agents — tree depth is 1 per spec. The
+    // backend's _is_child_request gate prevents actual
+    // agent execution; we match that semantic on the
+    // frontend so ghost tabs don't appear.
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab manually, simulating that the
+    // backend spawned it earlier.
+    const agentTabId = 'turn_xyz/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    // Make the agent tab active so its tab owns the
+    // about-to-fire request.
+    p._activeTabId = agentTabId;
+    await settle(p);
+    // Start a stream from the agent tab. The fake RPC
+    // captures the request ID.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(p);
+    p._input = 'continue';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Fire stream-complete for the agent tab with agent
+    // blocks — would spawn if the gate were absent.
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'nested agents',
+        turn_id: 'turn_nested',
+        agent_blocks: [
+          { id: 'agent-0', task: 'nested', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    // No new tab — main + original agent only.
+    expect(p._tabs.size).toBe(2);
+    expect(p._tabs.has('turn_nested/agent-00')).toBe(false);
+  });
+});
+
+describe('ChatPanel agent tab spawning — tab creation', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('creates one tab per valid block', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'delegated',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'first', agent_idx: 0 },
+          { id: 'agent-1', task: 'second', agent_idx: 1 },
+          { id: 'agent-2', task: 'third', agent_idx: 2 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(4); // main + 3 agents
+    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
+    expect(p._tabs.has('turn_abc/agent-01')).toBe(true);
+    expect(p._tabs.has('turn_abc/agent-02')).toBe(true);
+  });
+
+  it('tab ID format matches backend archive path convention', async () => {
+    // Pinned — the tab ID IS the key the frontend later
+    // parses back into (turn_id, agent_idx) for C2b's
+    // agent_tag and C2c's close_agent_context calls. A
+    // format drift would break both.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+          { id: 'agent-7', task: 't', agent_idx: 7 },
+          { id: 'agent-42', task: 't', agent_idx: 42 },
+        ],
+      },
+    });
+    await settle(p);
+    // Zero-padded to 2 digits (agent-00, agent-07) for
+    // sort stability; three-digit indexes grow naturally.
+    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
+    expect(p._tabs.has('turn_abc/agent-07')).toBe(true);
+    expect(p._tabs.has('turn_abc/agent-42')).toBe(true);
+  });
+
+  it('seeds each tab with task as initial user message', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          {
+            id: 'agent-0',
+            task: 'refactor the auth module',
+            agent_idx: 0,
+          },
+        ],
+      },
+    });
+    await settle(p);
+    const tab = p._tabs.get('turn_abc/agent-00');
+    expect(tab).toBeTruthy();
+    expect(tab.messages).toHaveLength(1);
+    expect(tab.messages[0]).toEqual({
+      role: 'user',
+      content: 'refactor the auth module',
+    });
+  });
+
+  it('copies main tab selected files into each agent tab', async () => {
+    // Per specs4/7-future/parallel-agents.md § Execution,
+    // agents inherit the parent's selected_files as a
+    // deep copy. The backend already copies server-side;
+    // the frontend copy here is the per-tab picker
+    // state so each tab shows the initial selection.
+    const p = mountPanel();
+    // Seed main tab with a selection.
+    p._tabs.get('main').selectedFiles = ['src/auth.py', 'src/db.py'];
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+          { id: 'agent-1', task: 't', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    const tab0 = p._tabs.get('turn_abc/agent-00');
+    const tab1 = p._tabs.get('turn_abc/agent-01');
+    expect(tab0.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
+    expect(tab1.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
+    // Distinct arrays — mutations don't leak.
+    expect(tab0.selectedFiles).not.toBe(tab1.selectedFiles);
+    expect(tab0.selectedFiles).not.toBe(p._tabs.get('main').selectedFiles);
+  });
+
+  it('labels use deriveAgentTabLabel', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'refactor auth', agent_idx: 0 },
+          { id: 'agent-1', task: '', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabLabels.get('turn_abc/agent-00')).toBe(
+      'Agent 00: refactor auth',
+    );
+    expect(p._tabLabels.get('turn_abc/agent-01')).toBe('Agent 01');
+  });
+
+  it('does not switch to a newly spawned tab', async () => {
+    // User's focus stays on the main tab after spawn —
+    // the assistant message (with spawn blocks as prose)
+    // just landed there. They switch tabs deliberately
+    // via the strip, not automatically.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    expect(p._activeTabId).toBe('main');
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('tab strip becomes visible after first spawn', async () => {
+    // The strip's render gate is `_tabs.size > 1`. Spawn
+    // flips it from 1 to 2+, so the strip materialises.
+    const p = mountPanel();
+    await settle(p);
+    // Before spawn — strip hidden.
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    // After spawn — strip rendered with main + agent.
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeTruthy();
+    const buttons = strip.querySelectorAll('.tab-strip-tab');
+    expect(buttons.length).toBe(2);
+  });
+});
+
+describe('ChatPanel agent tab spawning — defensive', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('idempotent on duplicate stream-complete', async () => {
+    // A duplicate event for the same turn (defensive
+    // against weird reconnect edge cases) shouldn't
+    // wipe the tab's existing messages. The idempotence
+    // guard preserves state the user may already have
+    // seen.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const result = {
+      response: 'ok',
+      turn_id: 'turn_abc',
+      agent_blocks: [
+        { id: 'agent-0', task: 'initial', agent_idx: 0 },
+      ],
+    };
+    pushEvent('stream-complete', { requestId: reqId, result });
+    await settle(p);
+    // Mutate the tab's state to simulate user-visible
+    // content arriving between the two events.
+    const tab = p._tabs.get('turn_abc/agent-00');
+    tab.messages.push({ role: 'assistant', content: 'agent reply' });
+    // Duplicate event — same turn_id, same agent_idx.
+    pushEvent('stream-complete', { requestId: reqId, result });
+    await settle(p);
+    // Tab state preserved; assistant message survives.
+    const same = p._tabs.get('turn_abc/agent-00');
+    expect(same).toBe(tab);
+    expect(same.messages).toHaveLength(2);
+    expect(same.messages[1].content).toBe('agent reply');
+  });
+
+  it('skips entries with non-numeric agent_idx', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'good', agent_idx: 0 },
+          { id: 'agent-bad', task: 'bad', agent_idx: 'zero' },
+          { id: 'agent-1', task: 'also good', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    // Only the two with valid indices spawn.
+    expect(p._tabs.size).toBe(3); // main + 2
+    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
+    expect(p._tabs.has('turn_abc/agent-01')).toBe(true);
+  });
+
+  it('skips entries with negative agent_idx', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-neg', task: 't', agent_idx: -1 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('non-array agent_blocks silently drops', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: 'not an array',
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('null blocks within array are skipped', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          null,
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+          undefined,
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(2);
+    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
+  });
+
+  it('non-string task falls back to empty string', async () => {
+    // Defensive — backend should always send a string
+    // task (the parser enforces it), but a malformed
+    // payload shouldn't crash the spawn.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: null, agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    const tab = p._tabs.get('turn_abc/agent-00');
+    expect(tab).toBeTruthy();
+    // Empty-string task → bare "Agent 00" label, no
+    // colon.
+    expect(p._tabLabels.get('turn_abc/agent-00')).toBe('Agent 00');
+    // First message content is the empty string.
+    expect(tab.messages[0].content).toBe('');
+  });
+
+  it('empty turn_id is rejected', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: '',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+});

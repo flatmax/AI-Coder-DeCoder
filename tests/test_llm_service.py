@@ -3827,6 +3827,192 @@ class TestStreamingWithEdits:
         )
 
 
+class TestCompletionResultAgentBlocks:
+    """C2a — ``agent_blocks`` field in the stream-complete result.
+
+    The frontend's C2a spawn handler reads ``result.agent_blocks``
+    to create agent tabs. Each entry carries ``id``, ``task``,
+    and ``agent_idx``. Invalid blocks (missing id or task) are
+    filtered so the frontend can trust the field's contents
+    without re-validating; its ordering matches the backend's
+    spawn path so ``agent_idx`` values line up with archive
+    paths and child request IDs.
+
+    Empty field on responses without agent blocks — frontend
+    checks ``result.agent_blocks.length > 0`` before opening
+    tabs, so an always-present empty array is friendlier than
+    an optional key.
+    """
+
+    AGENT_MARK = "🟧🟧🟧 AGENT"
+    AGEND_MARK = "🟩🟩🟩 AGEND"
+
+    def _build_agent_block(self, id_: str, task: str) -> str:
+        """Assemble one well-formed agent block."""
+        return (
+            f"{self.AGENT_MARK}\n"
+            f"id: {id_}\n"
+            f"task: {task}\n"
+            f"{self.AGEND_MARK}\n"
+        )
+
+    def _last_complete_result(
+        self, event_cb: _RecordingEventCallback
+    ) -> dict:
+        completes = [
+            args for name, args in event_cb.events
+            if name == "streamComplete"
+        ]
+        assert completes, "No streamComplete event observed"
+        return completes[-1][1]
+
+    async def test_no_agent_blocks_field_always_present(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Plain response → empty list, not missing key."""
+        fake_litellm.set_streaming_chunks(["Hello."])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        result = self._last_complete_result(event_cb)
+        assert "agent_blocks" in result
+        assert result["agent_blocks"] == []
+
+    async def test_single_valid_block_surfaces(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Response with one well-formed agent block surfaces it."""
+        response = (
+            "I'll delegate.\n\n"
+            + self._build_agent_block("agent-0", "refactor auth")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="please"
+        )
+        await asyncio.sleep(0.2)
+
+        result = self._last_complete_result(event_cb)
+        assert len(result["agent_blocks"]) == 1
+        block = result["agent_blocks"][0]
+        assert block["id"] == "agent-0"
+        assert block["task"] == "refactor auth"
+        assert block["agent_idx"] == 0
+
+    async def test_multiple_blocks_get_sequential_indices(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """agent_idx enumerates 0..N-1 in source order.
+
+        The frontend uses agent_idx to derive tab IDs matching
+        the backend's archive path convention. If the ordering
+        diverged between backend spawn (which enumerates
+        ``_spawn_agents_for_turn``'s input list) and the result
+        field, tab IDs would point at wrong archive files.
+        """
+        response = (
+            self._build_agent_block("agent-0", "task zero")
+            + self._build_agent_block("agent-1", "task one")
+            + self._build_agent_block("agent-2", "task two")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="decompose"
+        )
+        await asyncio.sleep(0.2)
+
+        blocks = self._last_complete_result(event_cb)["agent_blocks"]
+        assert [b["agent_idx"] for b in blocks] == [0, 1, 2]
+        assert [b["id"] for b in blocks] == [
+            "agent-0", "agent-1", "agent-2",
+        ]
+        assert [b["task"] for b in blocks] == [
+            "task zero", "task one", "task two",
+        ]
+
+    async def test_invalid_blocks_filtered_from_result(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Blocks missing id or task don't reach the frontend.
+
+        Matches the filter applied by the backend's spawn path
+        (``_filter_dispatchable_agents``). A stale or malformed
+        block that wouldn't produce an actual agent stream
+        shouldn't produce a ghost tab either.
+        """
+        # First block valid; second missing task; third valid.
+        invalid_no_task = (
+            f"{self.AGENT_MARK}\n"
+            f"id: agent-1\n"
+            f"{self.AGEND_MARK}\n"
+        )
+        response = (
+            self._build_agent_block("agent-0", "first")
+            + invalid_no_task
+            + self._build_agent_block("agent-2", "third")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="mixed"
+        )
+        await asyncio.sleep(0.2)
+
+        blocks = self._last_complete_result(event_cb)["agent_blocks"]
+        assert len(blocks) == 2
+        assert [b["id"] for b in blocks] == ["agent-0", "agent-2"]
+
+    async def test_agent_blocks_preserved_when_mixed_with_edits(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Response with both agent and edit blocks surfaces both.
+
+        Parse order in the response doesn't affect either
+        field's ordering — agents enumerate by agent block
+        order, edits by edit block order.
+        """
+        (repo_dir / "a.py").write_text("original\n")
+        service.set_selected_files(["a.py"])
+        response = (
+            "Mixed work:\n\n"
+            + self._build_agent_block("agent-0", "handle ui")
+            + "\na.py\n🟧🟧🟧 EDIT\noriginal\n"
+            + "🟨🟨🟨 REPL\nmodified\n🟩🟩🟩 END\n"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="mixed"
+        )
+        await asyncio.sleep(0.3)
+
+        result = self._last_complete_result(event_cb)
+        assert len(result["agent_blocks"]) == 1
+        assert result["agent_blocks"][0]["id"] == "agent-0"
+        assert len(result["edit_blocks"]) == 1
+        assert result["edit_blocks"][0]["file"] == "a.py"
+
 class TestAgentDispatchScaffold:
     """Agent dispatch gating — the filter method and end-to-end routing.
 
