@@ -261,6 +261,56 @@ The main LLM decides per-turn whether to spawn agents. Typical cases:
 
 For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. When agent mode is enabled, the decision to decompose is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
 
+## Cross-Turn Agent Reuse (Design Sketch)
+
+Today each agentic turn produces fresh agent tabs with identities `{turn_id, agent_idx}`. Reusing an earlier agent by name across turns — e.g. the main LLM referencing "the auth agent from turn X" and continuing its conversation in-place — is a future capability, not currently in scope. The agent's `ContextManager` and `StabilityTracker` stay warm across interactions within a turn (provider cache benefits accrue), but a new agentic turn in the main tab produces new agents with fresh identities.
+
+Continuity across turns requires a richer agent identity — probably a user- or LLM-assigned name that's stable across turns — plus two execution-plane additions: an RPC to continue an existing agent (distinct from spawning a fresh one), and a way for the main LLM to know which agents are still live without digging through archives.
+
+### Per-agent state descriptor
+
+For the main LLM to orchestrate agent reuse — decide which to continue, which to spawn fresh, which to retire — it needs a minimal summary of each live agent's state at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
+
+Each descriptor entry carries only fields the main LLM can't infer from its own context:
+
+- Identity — `{turn_id}/agent-NN` plus a human-readable label
+- Last-turn summary — one or two sentences describing the agent's most recent output. The main LLM's primary signal for "what did this agent actually do." Enables "continue from where agent 0 left off" without reading the full transcript
+- Turn count — rough measure of conversation depth
+- Status — idle, streaming, or closed (archive-only)
+
+### What's deliberately omitted
+
+Earlier drafts included more fields that turned out to be redundant or unhelpful:
+
+- **Original task text** — the main LLM cares whether the task *landed*, not what was originally asked. If the task succeeded, the main LLM reads the files modified (already in its own context via assimilation) and judges. If it partially failed, the last-turn summary plus the file diffs convey what's broken. The original brief is already in the agent's history and the assistant-message narration of the turn that spawned it.
+- **Open files (agent's selected_files list)** — the main LLM already has the post-change file content in its own context. Knowing which files the agent happens to have selected is only useful for routing decisions the main LLM isn't well-placed to make; agent reuse decisions are better informed by what the agent *did* than by what it has open.
+- **Fetched URLs** — treated as user-owned state, not routing input for the main LLM. When a URL's ongoing relevance is in question, the main LLM raises it *with the user* — "agent 0 has URLs X, Y, Z loaded; should I keep them for the next round or clear them?" — rather than deciding silently. Keeps the user in control of URL lifecycle across agent turns.
+- **Stability tier summary** — cache warmth isn't actionable without a mental model of the tier system, which the main LLM doesn't have. If a decision needs cache state, the main LLM can request it explicitly via a future RPC.
+- **Full conversation history** — expensive and 90% redundant with the last-turn summary.
+- **Per-agent session totals** — exposed via the token HUD rather than as LLM routing input.
+- **Raw file content** — the main LLM's own context already has the relevant content via assimilation.
+
+### Reference mechanism
+
+The main LLM's agentic appendix learns a new block type alongside `🟧🟧🟧 AGENT`:
+
+- `🟧🟧🟧 CONTINUE` — address an existing agent by ID and supply a continuation task
+- `🟧🟧🟧 AGENT` — spawn a fresh one (existing semantics)
+
+The spawn-block parser dispatches on the keyword, routing `CONTINUE` to the registered agent's `ContextManager` and `AGENT` to a fresh scope. Per the marker-bytes discipline in `specs4/3-llm/edit-protocol.md`, `CONTINUE` gets its own distinct end marker to avoid the parser-state-tracking brittleness described for AGEND — tentatively `🟩🟩🟩 CONEND`.
+
+### User-confirmation for state changes
+
+When the main LLM wants to clear an agent's state (drop URLs, close the agent, wipe file selection), it asks the user *first* rather than mutating directly. The user answers yes or no in the main chat; the backend acts on the confirmed answer. Keeps destructive state changes under the user's control — the main LLM can only read the descriptor, never mutate agent state unilaterally.
+
+### Registry shape
+
+`LLMService._agent_contexts[turn_id][agent_idx]` gains an `AgentDescriptor` field populated by the agent's streaming pipeline as it runs. The last-turn summary is produced by a small LLM call after each agent turn completes, paid for once and re-used across subsequent main-conversation turns until the agent's next reply invalidates it.
+
+### Revisit trigger
+
+This design should be revisited once enough real multi-agent turns have run to reveal natural patterns — whether the main LLM spontaneously reuses agents when told it can, or whether the descriptor block adds noise the main LLM mostly ignores. Premature implementation would lock in guesses; the current fresh-per-turn model costs nothing and preserves every implementation option.
+
 ## User Control — Agent Mode Toggle
 
 Agent mode is an opt-in capability gated by a user setting. Users who prefer predictable single-LLM turns, users on constrained token budgets, or users working in repos too small to benefit from decomposition can disable agent mode entirely — the main LLM then handles every turn as a single call, regardless of request shape.
