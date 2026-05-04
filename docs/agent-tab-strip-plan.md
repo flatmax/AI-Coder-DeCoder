@@ -185,13 +185,19 @@ Only after A5 lands and tests are green.
 
 **B3 — Close button on agent tabs (but no agent tabs yet).** Button renders conditionally based on tab type. Wired to a `close-tab` event dispatched from the tab strip; `ChatPanel` handles it by calling `LLMService.close_agent_context` and removing the tab from the Map. Main tab never shows the close button.
 
-### Phase C — agent tab spawning (~2 commits)
+### Phase C — agent tab spawning (~3 commits)
 
 Requires Phase B's UI and the backend changes.
 
+**C.0 — Tab label derivation helper** — delivered `1cf20f5`. Pure
+`deriveAgentTabLabel(agentIdx, task)` function in `chat-panel.js`, with
+29 tests pinning the label format. Independent of C1 and C2 — no
+backend dependency — so it could land ahead of either. When C2's spawn
+path writes to `_tabLabels`, the label shape is already locked in.
+
 **C1 — Backend: `close_agent_context` RPC, agent registry, `set_agent_selected_files` RPC, `turn_id` in completion result, `agent_tag` kwarg on `chat_streaming`.** Tests: agent registry populated on spawn, cleared on close, per-agent selection stored correctly, `chat_streaming` routes to the agent's ContextManager when `agent_tag` is present.
 
-**C2 — Frontend: agent tab lifecycle.** On `stream-complete` for a main turn with agent blocks, create agent tabs. Labels derive from the task text (first ~30 chars, ellipsized). Each agent tab's initial message is the task; subsequent assistant chunks populate as the backend streams. User typing in an agent tab's input routes to `chat_streaming` with `agent_tag`. Close button calls `close_agent_context` and removes the tab.
+**C2 — Frontend: agent tab lifecycle.** On `stream-complete` for a main turn with agent blocks, create agent tabs. Labels derive from the task text via `deriveAgentTabLabel` (C.0). Each agent tab's initial message is the task; subsequent assistant chunks populate as the backend streams. User typing in an agent tab's input routes to `chat_streaming` with `agent_tag`. Close button calls `close_agent_context` and removes the tab.
 
 Tests: spawn produces N tabs, streaming chunks route to the right tab, switching tabs preserves scroll/draft state, closing a tab removes it and frees backend state.
 
@@ -215,10 +221,83 @@ Tests: spawn produces N tabs, streaming chunks route to the right tab, switching
 
 (Update after each phase lands.)
 
-- **Phase A** — not started.
-- **Phase B** — not started.
-- **Phase C** — not started.
-- **Phase D** — not started.
+- **Phase A — delivered.** Reading the current code confirms A1–A5 all
+  shipped prior to C.0:
+  - **A1** — `_tabs: Map<tabId, TabState>` + `_activeTabId` with per-tab
+    getters/setters on every reactive property. Main-only operation
+    preserves byte-identical behaviour via the single-entry Map.
+    Visible in `chat-panel.js` constructor, `_makeTabState()`, and the
+    long reactive-accessor block.
+  - **A2** — Streaming routed by request ID via `_findTabForRequest()`.
+    Exact match on `currentRequestId` first, then `{parent}-` prefix
+    match for the future agent-spawn case. `_onStreamChunk` and
+    `_onStreamComplete` both dispatch to the owning tab's state;
+    inactive-tab accumulation is silent (no `requestUpdate` when the
+    chunk isn't for the active tab).
+  - **A3** — `active-tab-changed` event plumbing. Setter on
+    `_activeTabId` dispatches `CustomEvent` with `{tabId,
+    previousTabId}`, bubbles + composed so sibling components see it.
+  - **A4** — FilesTab per-tab selection. `selectedFiles` getter on
+    chat-panel forwards per-tab; files-tab's `_onActiveTabChanged`
+    method responds to the event by swapping its own state.
+  - **A5** — Existing streaming/selection/image/URL-chip tests in
+    `chat-panel.test.js` and `files-tab.test.js` continue to pass
+    against the per-tab state structure, which is the regression
+    guard the plan called for.
+- **Phase B — delivered.** Tab strip UI present and functional:
+  - **B1** — `_renderTabStrip()` emits a horizontal button row above the
+    messages list, rendered only when `_tabs.size > 1`. Active tab
+    gets `.active` class + accent styling. CSS in the static
+    `styles` block (`.tab-strip`, `.tab-strip-tab`).
+  - **B2** — Overflow scrolling + three-dots menu. `.tab-strip-scroll`
+    is the horizontally-scrollable flex row; `.tab-strip-overflow`
+    button is pinned at the right, always visible when the strip
+    is visible. Clicking opens `_renderOverflowMenu()` — a dropdown
+    listing every tab by label. Outside-click and Escape dismissal
+    via capture-phase document listeners (`_onOverflowOutsideClick`,
+    `_onOverflowKeyDown`). Listeners attached only while menu is
+    open to keep the document event loop clean.
+  - **B3** — Close button on agent tabs. `.tab-close` element rendered
+    conditionally (main tab never shows one). Own click handler with
+    `stopPropagation()` so clicking ✕ doesn't flip to the tab being
+    closed. `_onTabClose(tabId)` deletes from `_tabs` and
+    `_tabLabels`, switches to Main if the closed tab was active, and
+    dispatches `close-tab` event. Event is the hook Phase C's
+    backend integration will listen on (calling
+    `LLMService.close_agent_context`).
+- **Phase C — in progress.**
+  - **C.0 — `deriveAgentTabLabel` helper** — delivered `1cf20f5`. Pure
+    function exported from `webapp/src/chat-panel.js` that derives
+    `Agent NN` / `Agent NN: {first line of task}` labels with length-
+    capped truncation. 29 tests in
+    `webapp/src/chat-panel-agent-labels.test.js` pin every rule (bare
+    prefix cases, task text inclusion, truncation, index coercion,
+    regression scenarios). Unblocks C2's spawn path — when the spawn
+    handler lands, it populates `_tabLabels` by calling this helper,
+    and the label format is already pinned.
+  - **C1 — not started.** Backend agent registry, `close_agent_context`
+    RPC, `set_agent_selected_files` RPC, `turn_id` in completion
+    result, `agent_tag` kwarg on `chat_streaming`.
+  - **C2 — not started.** Frontend spawn path on `stream-complete`:
+    inspect `result.agent_blocks`, create tabs via the existing
+    `_tabs`/`_tabLabels` infrastructure, route agent-tab textareas
+    to `chat_streaming` with `agent_tag`, wire close button to
+    `close_agent_context`.
+- **Phase D — not started.**
+
+### Progress log correction — Phases A and B
+
+An earlier iteration of this log marked Phases A and B as "not
+started" when in fact they had already shipped. Reading the current
+code in `chat-panel.js`, `files-tab.js`, and the test files confirmed
+the infrastructure was in place — per-tab `_tabs` Map, tab strip
+rendering, overflow menu, close buttons, `active-tab-changed`
+plumbing, request-ID routing — before C.0 landed. C.0 was the first
+step of Phase C, not a standalone item before Phases A/B.
+
+The log above now reflects the real state. Future resumptions should
+trust the code over the log when they disagree; the code is
+authoritative.
 
 ## If we get cut off
 
