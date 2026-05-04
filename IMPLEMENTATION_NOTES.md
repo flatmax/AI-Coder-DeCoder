@@ -159,14 +159,7 @@ The execution-layer prerequisite called out at the end of D22 has landed. `LLMSe
 
 **Decomposition of `llm_service.py` deferred.** The module is ~3000 lines — a handful of RPC methods (mode / cross-reference / review / URL / rebuild / session / history / LSP / TeX / settings-refresh), the streaming pipeline, and the orchestration glue that wires context + tracker + compactor + URL service + event callback + guard state. Splitting it now during the refactor would produce a chain of dependencies between new modules that the scope refactor itself doesn't motivate. Candidate carve-outs for a future pass: the RPC surface methods (mode / review / URL / rebuild) into `llm_rpc_methods.py`, the streaming pipeline (`_stream_chat` + `_run_completion_sync` + `_build_completion_result` + helpers) into `llm_streaming.py`, the stability-tier glue (`_try_initialize_stability` / `_update_stability` / `_rebuild_cache_impl`) into `llm_stability.py`, keeping `LLMService` in `llm_service.py` as the public entry point. Not this commit.
 
-**Next concrete work.** With scope plumbing in place, agent-spawning becomes a focused change rather than a surgical one:
-
-1. Add a parser branch in `EditParser` that dispatches `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` blocks to a spawn handler instead of treating them as prose (D20 foundation is already in place; today the markers parse as unknown text).
-2. A new method (tentatively `_spawn_agents_for_turn(agent_blocks)`) constructs N `ConversationScope` instances via `build_agent_context_manager`, fans out N `_stream_chat(..., scope=agent_scope)` calls with child request IDs, awaits their completion.
-3. The per-request accumulator dict (`_request_accumulators`) already routes by request ID, so child agent streams interleave naturally on the WebSocket.
-4. A synthesis step reads each agent's completed `ContextManager.get_history()` (or archive) and injects the transcripts into the main conversation's context for the main LLM's final response.
-
-Steps 2-4 can land in separate commits with tests for each, paralleling this refactor's discipline. The expensive part — proving byte-identical single-agent behaviour through a scope indirection — is done.
+**Next concrete work — delivered.** See D25 for the execution-plane shipping record. Summary: parser dispatch, `_spawn_agents_for_turn`, per-agent scope construction, and post-spawn assimilation have all landed across six commits (Steps 1-6 in `docs/agent-spawning-plan.md`). Synthesis was deliberately replaced with user-driven review — see D25 for the scope revision and its rationale.
 
 **What "agentic mode" means today, concretely.** Four things landed:
 
@@ -189,6 +182,55 @@ Four things did NOT land and belong to the future spec:
 The gap between "information plane complete" and "execution plane implemented" is substantial — roughly the content of `specs4/7-future/parallel-agents.md` § Execution Model, Agents, Review Step. That spec remains in `specs4/7-future/` precisely because it's future work. A user toggling `agents.enabled` on today gets a more informative LLM that knows about a capability it cannot exercise.
 
 The value of landing D23 in isolation is cleanup cost. When the dispatch layer IS implemented later, the prompt-side gating infrastructure is already in place — the feature can be tested with `agents.enabled=true` from day one, and the existing test suite pins the off-state invariant (appendix-never-read, prompt-never-mentions-capability) so a regression that leaked agent instructions into non-agent deployments would trip on the first test run.
+
+### D25 — Agent execution plane delivered; synthesis replaced by user-driven review
+
+The four "not started" items from D24's closing table split: parser dispatch, execution, and post-spawn assimilation landed across six commits following the plan in `docs/agent-spawning-plan.md`. The synthesis item dropped from scope — deliberately replaced by user-driven review on the follow-up turn — and the archive UI (D21 tab strip) remains deferred.
+
+**What shipped.** Six commits, each leaving tests passing:
+
+| Step | Commit | Content |
+|---|---|---|
+| 1 | Step 1 scaffold | Parser dispatch as a reachable no-op; log-only when toggle on; `_filter_dispatchable_agents` gates on `agents.enabled` + non-empty valid blocks |
+| 2 | Step 2 spawn skeleton | `_spawn_agents_for_turn` constructs per-agent scopes via `build_agent_context_manager`, derives child request IDs `{parent}-agent-{NN:02d}`, fans out via `gather(return_exceptions=True)`; `_agent_stream_impl` attribute starts as a no-op stub |
+| 3 | Step 3 real streaming | `_agent_stream_impl` flips to `_stream_chat`; agents run the full pipeline (LLM call, edit apply via per-path mutex, per-agent archive persistence, post-response stability update); `_FakeLiteLLM.queue_streaming_*` supports per-call directives for parallel agents |
+| 4 | `7c0f999` (Step 4+5) | `_assimilate_agent_changes(agent_results, parent_scope)` unions `files_modified` + `files_created`, refreshes parent's `file_context` for every touched path, fires `filesChanged` + `filesModified`; `_stream_chat` returns the completion result so assimilation reads fresh dicts rather than re-parsing archives; 6-test `TestAgentAssimilation` suite covers single/multi-agent, no-op, creates, sibling exceptions, cross-turn observable |
+| 6 | This entry | Delivery note |
+
+**The deliberate scope revision.** Step 4 was originally planned as a synthesis LLM call — after all agents complete, fire a second `completion()` from the parent scope with the per-agent transcripts as context, let the main LLM write a unified response. That got dropped in favour of mechanical assimilation for three reasons documented fully at `specs4/7-future/parallel-agents.md` § Review Step — User-Driven:
+
+1. **Redundant token spend.** The main LLM already SAW what it delegated (it wrote the spawn blocks). Having it re-read per-agent transcripts to summarise its own plan's execution is reasoning the model already did.
+2. **User context is load-bearing.** The judgement "is this complete, are the pieces consistent, what's left to do" depends on what the user cares about most, which tests they ran, which tradeoffs they'd accept. A synthesis LLM call without that context produces plausible-sounding summaries that miss the point.
+3. **Natural checkpoint.** Stopping after the initial response — with agent-spawn blocks rendered as prose — lets the user see file changes in the picker before any further LLM work. Agents that went off the rails get caught before spending more tokens on a synthesis of bad work.
+
+The user-driven path: main LLM's assistant message (containing the spawn blocks as prose narrating what it delegated) IS the turn's final assistant message. The picker updates via `filesChanged` / `filesModified` broadcasts. On the next turn, the user types a follow-up — typically the one-click `🤖 Review agent work` snippet added in Step 4's commit — and the main LLM sees the post-change file state in its context (assimilation loaded it there) and can judge completeness, flag inconsistencies, suggest fixes.
+
+**Rejection of alternatives.** An earlier draft of Step 4 had the assimilation method re-parse `history_store.get_turn_archive(turn_id)` to recover `files_modified` / `files_created` from archive records. That required teaching the archive to persist those metadata fields (currently it stores role + content only — the edit metadata lives on the completion result dict, which predates the archive append). Simpler to have `_stream_chat` return the result dict and let `_spawn_agents_for_turn`'s `gather` collect them. Byproduct: `_stream_chat` is now return-value-bearing for the main-conversation path too, but `chat_streaming`'s `ensure_future` ignores the return — no behaviour change for single-agent operation.
+
+**What remains deferred.** Two deferrals carried over from D24:
+
+| Layer | Piece | Status |
+|---|---|---|
+| Archive UI | Tab strip in chat panel, per-tab state keyed by `{turn_id, agent_idx}`, per-tab RPC routing (per D21) | Not started |
+| Automatic synthesis | Dropped from scope by the D25 scope revision; user-driven review replaces it | Not applicable |
+
+The tab-strip UI is a real deferral — until it lands, agent conversations exist only in the JSONL archive files. Users see the main LLM's response (including the spawn blocks rendered as prose by marked.js) and the resulting working-tree changes via the picker + diff viewer. The `get_turn_archive(turn_id)` RPC exists and works; nothing in the chat panel calls it yet. When the tab strip ships, existing turns from before its delivery remain browsable via the RPC without migration — the archive format is the contract.
+
+Synthesis is not deferred in the "waiting to be implemented" sense — it's replaced. A user wanting a synthesis-like experience types "review what the agents did" (or clicks the snippet). The main LLM reads the post-change files from its context, produces a unified response that takes the user's actual follow-up question into account (tests run? specific concern? broader pattern?), and continues the conversation naturally. The one-click snippet gives the common case a single-gesture entry point without committing the backend to a specific synthesis prompt or timing.
+
+**What "agentic mode" means today, updated from D24.** Seven things landed across D23 + D25:
+
+| Layer | Piece | Delivered |
+|---|---|---|
+| Config | `agents.enabled` flag, `agents_config` / `agents_enabled` properties, malformed-value degradation | ✓ (D23) |
+| Prompt assembly | `system_agentic_appendix.md` bundled file, concatenation logic, user-dir-only read semantics | ✓ (D23) |
+| Live refresh | `LLMService.refresh_system_prompt()` invoked from `Settings.reload_app_config()` | ✓ (D23) |
+| Frontend | Settings-tab toggle card with click-to-save, defensive parsing, localhost gate, in-flight guard | ✓ (D23) |
+| Parser dispatch | `_filter_dispatchable_agents` + `_spawn_agents_for_turn` gating on `agents.enabled`, valid blocks, non-child request | ✓ (D25) |
+| Execution | Per-agent `ConversationScope`, fresh tracker + ContextManager per agent, child request IDs, `asyncio.gather` fan-out; agents run the full `_stream_chat` pipeline | ✓ (D25) |
+| Assimilation | `_assimilate_agent_changes` unions modified+created, refreshes parent's file context, broadcasts to picker | ✓ (D25) |
+
+When the toggle is on and the LLM emits agent-spawn blocks, the backend now genuinely fans out N parallel streams, each with their own ContextManager / tracker / archive, each producing real LLM calls and real edits on disk. The parent's next user turn sees the unioned file changes in its prompt automatically. The deferrals are all in the UI layer — the execution substrate is complete.
 
 ### D22 — Parallel-agents foundation uses the existing streaming pipeline
 
