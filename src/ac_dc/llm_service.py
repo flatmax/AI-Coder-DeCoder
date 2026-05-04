@@ -3596,8 +3596,14 @@ class LLMService:
             prompt = self._config.get_doc_system_prompt()
         else:
             prompt = self._config.get_system_prompt()
+        has_appendix = "Agent-Spawn Capability" in prompt
         self._context.set_system_prompt(prompt)
-        return {"status": "ok", "mode": self._context.mode.value}
+        return {
+            "status": "ok",
+            "mode": self._context.mode.value,
+            "prompt_len": len(prompt),
+            "appendix_present": has_appendix,
+        }
 
     def switch_mode(self, mode: str) -> dict[str, Any]:
         """Switch between code and document mode.
@@ -5127,15 +5133,20 @@ class LLMService:
                 self._config.cache_target_tokens_for_model()
             ),
             compaction_config=self._config.compaction_config,
-            # Agent system prompt is the task text itself —
-            # plus any per-agent instructions the future
-            # synthesis step may inject. Step 2 uses the
-            # empty string so the task string from the
-            # spawn block lands as the agent's first user
-            # message and carries all semantic weight. A
-            # future pass may add a short "you are an agent
-            # spawned by the main LLM" prefix here.
-            system_prompt="",
+            # Agents need the same behavioural instructions
+            # as a non-agent turn — edit protocol, context-
+            # trust rules, tone — because they run through
+            # the same streaming pipeline with the same
+            # edit parser and apply path. Without this, an
+            # agent has never been told the edit block
+            # format exists and invents plausible-looking
+            # alternatives (XML, JSON, diff headers) that
+            # the parser silently drops. The agentic
+            # appendix is deliberately NOT included — tree
+            # depth is 1 per spec, agents don't spawn
+            # sub-agents. See ConfigManager
+            # .get_agent_system_prompt for assembly.
+            system_prompt=self._config.get_agent_system_prompt(),
         )
         # Fresh tracker — agents accumulate their own tier
         # state across iterations within the turn.
@@ -5771,6 +5782,34 @@ class LLMService:
                         turn_id=turn_id,
                     )
                     if valid_blocks:
+                        # Fire agentsSpawned BEFORE the gather
+                        # so the frontend creates tabs in time
+                        # to receive the child streams. Without
+                        # this, the main streamComplete (which
+                        # carries agent_blocks) only fires after
+                        # every agent finishes — by then every
+                        # child chunk has been dropped because
+                        # no tab owned the child request IDs.
+                        # The frontend's agentsSpawned handler
+                        # creates a tab per agent with its
+                        # child request ID pre-populated, so
+                        # chunks route correctly as they arrive.
+                        agent_block_payload = [
+                            {
+                                "id": b.id,
+                                "task": b.task,
+                                "agent_idx": i,
+                            }
+                            for i, b in enumerate(valid_blocks)
+                        ]
+                        await self._broadcast_event_async(
+                            "agentsSpawned",
+                            {
+                                "turn_id": turn_id,
+                                "parent_request_id": request_id,
+                                "agent_blocks": agent_block_payload,
+                            },
+                        )
                         await self._spawn_agents_for_turn(
                             valid_blocks,
                             parent_scope=scope,

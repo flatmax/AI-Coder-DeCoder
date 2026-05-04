@@ -27,6 +27,6 @@
     "keywords_max_doc_freq": 0.6
   },
   "agents": {
-    "enabled": false
+    "enabled": true
   }
 }

@@ -829,28 +829,32 @@ class ConfigManager:
         (e.g., stripped-down release, or user-deleted file)
         falls through to the extra prompt without error.
 
-        The appendix deliberately does NOT fall back to the
-        bundled copy when the user file is absent. A user who
-        deletes their copy has made a clear choice to suppress
-        agent-mode instructions; the fallback-to-bundle
-        semantics used for the base prompt would defeat that.
+        The appendix falls back to the bundled copy when the
+        user-dir file is absent. This matters because
+        ``system_agentic_appendix.md`` was added to the
+        managed-files set in a specific release — users who
+        installed AC⚡DC before that release have a version
+        marker that prevents the upgrade pass from copying the
+        file, but their toggle-enabled state still expects the
+        appendix text to flow into the prompt. The fallback
+        papers over this cross-version gap so "toggle on" reliably
+        produces agent instructions regardless of install
+        history. Users who explicitly want to suppress the
+        appendix text can do so via the ``agents.enabled`` flag
+        in ``app.json`` (which the Settings-tab toggle writes
+        to); there is no use case for "toggle on but appendix
+        text suppressed" that warrants a second independent
+        control.
         """
         main = self._read_user_file("system.md")
         if self.agents_enabled:
-            # User-dir-only read — no bundle fallback, see
-            # docstring rationale. Returns "" when the file
-            # doesn't exist in the user dir.
-            user_appendix_path = (
-                self._user_dir / "system_agentic_appendix.md"
-            )
-            appendix = ""
-            try:
-                if user_appendix_path.is_file():
-                    appendix = user_appendix_path.read_text(
-                        encoding="utf-8"
-                    ).strip()
-            except OSError:
-                appendix = ""
+            # Read from user dir first; fall back to bundle
+            # when the user file is absent. _read_user_file
+            # already implements that two-stage lookup —
+            # defer to it rather than duplicating the logic.
+            appendix = self._read_user_file(
+                "system_agentic_appendix.md"
+            ).strip()
             if appendix:
                 main = f"{main}\n\n{appendix}"
         return self._concat_prompt(main)
@@ -863,6 +867,34 @@ class ConfigManager:
         customisations apply to both.
         """
         main = self._read_user_file("system_doc.md")
+        return self._concat_prompt(main)
+
+    def get_agent_system_prompt(self) -> str:
+        """System prompt for spawned agent conversations.
+
+        Per specs4/7-future/parallel-agents.md § Execution
+        Model, agents run through the same streaming pipeline
+        as main-conversation turns — same edit parsing, same
+        apply path, same tool surface. They therefore need
+        the same behavioural instructions as a non-agent
+        turn: the core coding-agent system prompt plus any
+        user customisation.
+
+        Differs from :meth:`get_system_prompt` in one way:
+        the agentic appendix is NEVER appended, regardless
+        of the ``agents.enabled`` toggle. Tree depth is 1
+        per spec — agents don't spawn sub-agents — so
+        describing the spawn capability to an agent would
+        be misleading (it could emit agent-spawn blocks
+        that the parent's ``_is_child_request`` gate
+        silently drops). Omitting the appendix keeps the
+        agent focused on its task and saves tokens.
+
+        Assembly: ``system.md`` → ``system_extra.md``.
+        Same user-customisation contract as the main
+        prompt.
+        """
+        main = self._read_user_file("system.md")
         return self._concat_prompt(main)
 
     def get_review_prompt(self) -> str:

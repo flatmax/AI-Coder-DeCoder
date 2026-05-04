@@ -1561,6 +1561,19 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  agentsSpawned(data) {
+    // Fired by the backend immediately after the main LLM
+    // finishes and before spawning agents. Carries
+    // {turn_id, parent_request_id, agent_blocks} so the
+    // chat panel can create agent tabs in time to receive
+    // the child streams. See specs4/7-future/
+    // parallel-agents.md § Execution Model.
+    window.dispatchEvent(
+      new CustomEvent('agents-spawned', { detail: data }),
+    );
+    return true;
+  }
+
   sessionChanged(data) {
     window.dispatchEvent(new CustomEvent('session-changed', { detail: data }));
     return true;

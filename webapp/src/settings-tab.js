@@ -156,32 +156,23 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
 
     /* Toggle card — renders a switch inline rather than
-       opening the editor. Hover styling disabled since
-       the click target is the switch itself, not the
-       whole card. */
+       opening the editor. Matches the regular card's
+       centered layout so the grid stays visually uniform.
+       Description text lives in the title tooltip. */
     .card.toggle-card {
       cursor: default;
-      text-align: left;
-      padding: 0.75rem 0.9rem;
       display: flex;
       flex-direction: column;
+      align-items: center;
       gap: 0.4rem;
     }
     .card.toggle-card:hover {
       background: rgba(22, 27, 34, 0.6);
       border-color: rgba(240, 246, 252, 0.1);
     }
-    .card.toggle-card .card-icon {
-      margin-bottom: 0;
-    }
     .card.toggle-card.toggle-on {
       border-color: rgba(88, 166, 255, 0.4);
       background: rgba(88, 166, 255, 0.04);
-    }
-    .card-description {
-      font-size: 0.75rem;
-      color: var(--text-secondary, #8b949e);
-      line-height: 1.4;
     }
     .toggle-switch {
       display: inline-flex;
@@ -541,10 +532,43 @@ export class SettingsTab extends RpcMixin(LitElement) {
         this._emitToast(saveResult.error, 'error');
         return;
       }
-      // Update local state (optimistic) — the reload that
-      // save triggered on the backend will propagate the
-      // refreshed prompt for the agents.enabled case.
+      // Update local state (optimistic) — the reload below
+      // refreshes the context manager's system prompt so the
+      // agentic appendix takes effect on the NEXT turn rather
+      // than being deferred two turns (one for the tracker to
+      // notice the hash change, one for the prompt itself to
+      // reach the LLM).
       this._toggles = { ...this._toggles, [card.key]: next };
+      // Trigger the backend reload for the underlying config
+      // type. For app.json this calls reload_app_config,
+      // which invokes refresh_system_prompt on the LLM
+      // service so the agents.enabled flag takes effect
+      // immediately. save_config_content alone writes the
+      // file but does not touch the runtime prompt cache.
+      try {
+        const reloadMethod =
+          card.toggleConfigKey === 'litellm'
+            ? 'Settings.reload_llm_config'
+            : 'Settings.reload_app_config';
+        const reloadResult = await this.rpcExtract(reloadMethod);
+        if (
+          reloadResult &&
+          typeof reloadResult === 'object' &&
+          reloadResult.error
+        ) {
+          this._emitToast(
+            `Reload failed: ${reloadResult.error}`,
+            'error',
+          );
+          return;
+        }
+      } catch (err) {
+        this._emitToast(
+          `Reload failed: ${err?.message || err}`,
+          'error',
+        );
+        return;
+      }
       this._emitToast(
         next ? `${card.label}: on` : `${card.label}: off`,
         'success',
@@ -726,24 +750,25 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const isDisabled =
       !this._localhost || this._togglingKey === card.key;
     const ariaLabel = `${card.label}: ${value ? 'on' : 'off'}`;
+    const tooltip = card.description
+      ? `${card.label} — ${card.description}`
+      : card.label;
     return html`
       <div
         class="card toggle-card ${value ? 'toggle-on' : ''} ${
           isDisabled ? 'toggle-disabled' : ''
         }"
-        title="${card.label}"
+        title=${tooltip}
       >
         <span class="card-icon">${card.icon}</span>
         <span class="card-label">${card.label}</span>
-        ${card.description
-          ? html`<span class="card-description">${card.description}</span>`
-          : ''}
         <button
           class="toggle-switch ${value ? 'on' : 'off'}"
           role="switch"
           aria-checked=${value ? 'true' : 'false'}
           aria-label=${ariaLabel}
           ?disabled=${isDisabled}
+          title=${tooltip}
           @click=${(e) => {
             e.stopPropagation();
             this._onToggleClick(card);

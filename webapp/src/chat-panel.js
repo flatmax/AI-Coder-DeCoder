@@ -2142,6 +2142,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onUserMessage = this._onUserMessage.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onAgentsSpawned = this._onAgentsSpawned.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
@@ -2982,7 +2983,9 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Hide in single-tab operation. The `_tabs` Map
     // always has 'main'; any additional entry means
     // we've got agent tabs.
-    if (this._tabs.size <= 1) return '';
+    if (this._tabs.size <= 1) {
+      return '';
+    }
     // Iteration order of a Map is insertion order, so
     // 'main' comes first (constructor) and agent tabs
     // follow in spawn order. That matches the natural
@@ -3099,6 +3102,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    window.addEventListener('agents-spawned', this._onAgentsSpawned);
     // D2 — chat-tab keyboard shortcuts. Alt+` cycles to the
     // next tab, Alt+Shift+` to the previous. Installed at
     // the document level (bubble phase) so the shortcut
@@ -3148,6 +3152,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener('agents-spawned', this._onAgentsSpawned);
     window.removeEventListener('state-loaded', this._onStateLoaded);
     window.removeEventListener(
       'compaction-event',
@@ -3279,6 +3284,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
       }
     }
     this._scheduleFlush();
+  }
+
+  _onAgentsSpawned(event) {
+    // Fired by the backend right after the main LLM's
+    // response is parsed and before child agent streams
+    // begin. Creates agent tabs immediately so chunks
+    // for the child request IDs route to their tabs as
+    // they arrive, rather than being dropped while the
+    // main stream is still finalizing.
+    //
+    // Payload: {turn_id, parent_request_id, agent_blocks}
+    // where agent_blocks is [{id, task, agent_idx}, ...].
+    const detail = event.detail || {};
+    const { turn_id, parent_request_id, agent_blocks } = detail;
+    if (typeof turn_id !== 'string' || !turn_id) return;
+    if (typeof parent_request_id !== 'string') return;
+    if (!Array.isArray(agent_blocks)) return;
+    if (agent_blocks.length === 0) return;
+    this._spawnAgentTabs(turn_id, agent_blocks, parent_request_id);
   }
 
   _onStreamComplete(event) {
@@ -3450,7 +3474,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
         && Array.isArray(result.agent_blocks)
         && result.agent_blocks.length > 0
       ) {
-        this._spawnAgentTabs(result.turn_id, result.agent_blocks);
+        this._spawnAgentTabs(
+          result.turn_id,
+          result.agent_blocks,
+          requestId,
+        );
       }
     }
 
@@ -3532,8 +3560,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
    *   across all agent tabs from this turn
    * @param {Array<object>} agentBlocks — validated block
    *   entries with {id, task, agent_idx}
+   * @param {string} [parentRequestId] — the main LLM's
+   *   request ID. The backend streams each agent on child
+   *   request IDs of the form `{parent}-agent-{NN:02d}`;
+   *   we seed each new tab's `currentRequestId` + flip
+   *   its `streaming` flag so `_findTabForRequest` routes
+   *   the child's chunks to the correct tab. Optional for
+   *   backwards compatibility; when absent, tabs spawn
+   *   without streaming state and chunk routing silently
+   *   drops every child chunk.
    */
-  _spawnAgentTabs(turnId, agentBlocks) {
+  _spawnAgentTabs(turnId, agentBlocks, parentRequestId) {
     if (typeof turnId !== 'string' || !turnId) return;
     if (!Array.isArray(agentBlocks)) return;
     let anySpawned = false;
@@ -3571,6 +3608,19 @@ export class ChatPanel extends RpcMixin(LitElement) {
         { role: 'user', content: task },
       ];
       state.selectedFiles = [...mainSelection];
+      // Route child stream chunks to this tab. The
+      // backend's child request ID format is
+      // `{parent}-agent-{NN:02d}`, matching the backend
+      // _spawn_agents_for_turn path. `_findTabForRequest`
+      // uses exact-match on currentRequestId, so we must
+      // install the FULL child ID (not just the parent).
+      if (typeof parentRequestId === 'string' && parentRequestId) {
+        const childId = (
+          `${parentRequestId}-agent-${paddedIdx}`
+        );
+        state.currentRequestId = childId;
+        state.streaming = true;
+      }
       this._tabs.set(tabId, state);
       this._tabLabels.set(
         tabId, deriveAgentTabLabel(agentIdx, task),

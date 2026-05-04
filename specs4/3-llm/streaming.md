@@ -165,6 +165,16 @@ The worker captures whichever chunk first reports a non-null value and propagate
 - Server adds request ID to cancelled set; streaming thread checks each iteration and breaks out
 - Partial content stored with marker; completion event sent with cancelled flag
 
+## Agents Spawned Event
+
+When a user turn's main-LLM response contains valid agent-spawn blocks AND the `agents.enabled` config toggle is on, the backend fires an `agentsSpawned` server-push event immediately after parsing the main response and BEFORE invoking the agent-gather step. Payload: `{turn_id, parent_request_id, agent_blocks: [{id, task, agent_idx}, ...]}`.
+
+Ordering is load-bearing. Agent child streams begin as soon as the spawn step dispatches them; without `agentsSpawned` firing first, a fast-completing agent can finish its entire stream before the main `streamComplete` arrives carrying `agent_blocks` in its result dict — and the frontend's tab-lookup logic silently drops every chunk whose request ID doesn't match an existing tab's current request. Firing `agentsSpawned` between response parse and agent dispatch lets the frontend create the tabs and seed their child request IDs before any child chunk reaches the chunk handler.
+
+Child request IDs follow the format `{parent_request_id}-agent-{NN:02d}` where NN is the zero-padded agent index. The frontend derives tab IDs from the same shape (`{turn_id}/agent-{NN:02d}`) so tab identity, archive path, and child request ID all share the same index convention.
+
+Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComplete` fallback path: the frontend's tab creation short-circuits when a tab for `{turn_id, agent_idx}` already exists, so an older backend that only surfaces `agent_blocks` via `streamComplete` continues to work (tabs appear after all agents finish, as before — child chunks still dropped, but the final transcripts become visible via the archive).
+
 ## Stream Completion Result
 
 - Full assistant response text
