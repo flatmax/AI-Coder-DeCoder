@@ -96,6 +96,76 @@ function generateRequestId() {
   return `${epoch}-${suffix}`;
 }
 
+/** Maximum visible width of an agent tab label, in chars. */
+const _AGENT_LABEL_MAX_LENGTH = 40;
+
+/**
+ * Derive a tab-strip label for a spawned agent.
+ *
+ * Format: `Agent NN` for empty / whitespace tasks, or
+ * `Agent NN: {first line of task}` for a populated task
+ * — truncated to `_AGENT_LABEL_MAX_LENGTH` chars with a
+ * trailing `…` when the task text doesn't fit.
+ *
+ * The `Agent NN` prefix is zero-padded to two digits so
+ * tabs sort naturally in the strip (agent-02 before
+ * agent-10) and match the backend's `{turn_id}/agent-NN`
+ * archive path convention from D25. Large indexes
+ * (100+) outgrow the padding but still render; the
+ * numeric width just isn't fixed beyond two digits.
+ *
+ * Task handling:
+ *   - Non-string / null / undefined → `Agent NN`
+ *   - Empty or whitespace-only → `Agent NN`
+ *   - Multi-line → first non-blank line only. Tab labels
+ *     are single-line; later lines are context the user
+ *     will read in the agent's own conversation view.
+ *   - Long first line → truncated to fit the cap; the
+ *     `…` counts toward the total length so the label
+ *     never exceeds `_AGENT_LABEL_MAX_LENGTH`.
+ *
+ * Index handling:
+ *   - Non-integer or negative → coerced via
+ *     `Math.max(0, Math.floor(idx))`. NaN coerces to 0.
+ *     Defensive; the backend always sends a non-negative
+ *     integer, but a malformed spawn payload shouldn't
+ *     produce an ugly label like `Agent NaN`.
+ *
+ * @param {number} agentIdx — zero-based agent index
+ * @param {string | undefined | null} task — the agent's
+ *   task text from the spawn block
+ * @returns {string} — tab label, suitable for the
+ *   `_tabLabels` Map
+ */
+function deriveAgentTabLabel(agentIdx, task) {
+  // Coerce the index. Integer, non-negative, padded to
+  // two digits for strip sort order.
+  let idx = Number(agentIdx);
+  if (!Number.isFinite(idx)) idx = 0;
+  idx = Math.max(0, Math.floor(idx));
+  const paddedIdx = String(idx).padStart(2, '0');
+  const prefix = `Agent ${paddedIdx}`;
+
+  // Task handling — non-string / empty → bare prefix.
+  if (typeof task !== 'string') return prefix;
+  const firstLine = task
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return prefix;
+
+  const full = `${prefix}: ${firstLine}`;
+  if (full.length <= _AGENT_LABEL_MAX_LENGTH) return full;
+
+  // Truncate, reserving one char for the ellipsis.
+  // `prefix: ` is never itself long enough to overflow
+  // (prefix is at most ~9 chars for 2-digit indexes; the
+  // cap is 40), so there's always room for at least a
+  // few task chars plus the ellipsis.
+  const keep = _AGENT_LABEL_MAX_LENGTH - 1;
+  return `${full.slice(0, keep)}…`;
+}
+
 /**
  * Build a retry prompt for ambiguous-anchor edit failures.
  *
@@ -7502,6 +7572,8 @@ customElements.define('ac-chat-panel', ChatPanel);
 
 export {
   generateRequestId,
+  deriveAgentTabLabel,
+  _AGENT_LABEL_MAX_LENGTH,
   _loadDrawerOpen,
   _saveDrawerOpen,
   _DRAWER_STORAGE_KEY,
