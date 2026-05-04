@@ -8587,3 +8587,387 @@ describe('ChatPanel agent tab spawning — defensive', () => {
     expect(p._tabs.size).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// C2c — close button → close_agent_context RPC
+// ---------------------------------------------------------------------------
+
+// Clicking ✕ on an agent tab removes it locally
+// (covered by B3) AND fires the backend RPC to free
+// the agent's ConversationScope. The RPC is
+// idempotent per C1b, so duplicate calls or calls
+// for already-closed agents are safe.
+
+describe('ChatPanel close-tab backend wiring', () => {
+  it('fires close_agent_context with parsed (turn_id, agent_idx)', async () => {
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab.
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // Click the close button.
+    const closeBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+    );
+    closeBtn.click();
+    await settle(p);
+    // RPC fired with turn_id and agent_idx.
+    expect(close).toHaveBeenCalledOnce();
+    expect(close.mock.calls[0]).toEqual(['turn_abc', 0]);
+  });
+
+  it('parses multi-digit agent_idx correctly', async () => {
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_xyz/agent-42';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 42');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    expect(close.mock.calls[0]).toEqual(['turn_xyz', 42]);
+  });
+
+  it('tab is removed locally regardless of RPC outcome', async () => {
+    // Optimistic close — the local state mutation
+    // happens before the RPC, and doesn't depend on
+    // the RPC's success.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabs.has(agentTabId)).toBe(true);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    // Tab gone locally.
+    expect(p._tabs.has(agentTabId)).toBe(false);
+    expect(p._tabLabels.has(agentTabId)).toBe(false);
+  });
+
+  it('RPC failure does not restore the tab', async () => {
+    // The tab stays closed locally even when the
+    // backend call fails. Users clicked remove; they
+    // expect the tab gone. A failed RPC just means
+    // the scope leaks server-side until session end.
+    const close = vi
+      .fn()
+      .mockRejectedValue(new Error('network down'));
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const debugSpy = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      const agentTabId = 'turn_abc/agent-00';
+      p._tabs.set(agentTabId, p._makeTabState());
+      p._tabLabels.set(agentTabId, 'Agent 00');
+      p.requestUpdate();
+      await settle(p);
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      expect(p._tabs.has(agentTabId)).toBe(false);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it('restricted-caller response emits warning toast', async () => {
+    const close = vi.fn().mockResolvedValue({
+      error: 'restricted',
+      reason: 'Participants cannot close agent tabs',
+    });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toContain('Participants');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('generic RPC failure does not emit toast', async () => {
+    // Non-restricted failures (network, server error)
+    // stay silent — the user already sees the tab
+    // gone, and a toast would be confusing without
+    // an actionable next step.
+    const close = vi
+      .fn()
+      .mockRejectedValue(new Error('server exploded'));
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const debugSpy = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      const agentTabId = 'turn_abc/agent-00';
+      p._tabs.set(agentTabId, p._makeTabState());
+      p._tabLabels.set(agentTabId, 'Agent 00');
+      p.requestUpdate();
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector(
+            `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+          )
+          .click();
+        await settle(p);
+        expect(toastListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it('does not fire RPC when RPC is disconnected', async () => {
+    // No fake RPC published → rpcConnected is false.
+    // Close should work locally but skip the backend
+    // call entirely.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // Should not throw.
+    expect(() => {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+    }).not.toThrow();
+    await settle(p);
+    expect(p._tabs.has(agentTabId)).toBe(false);
+  });
+
+  it('still dispatches close-tab event alongside RPC', async () => {
+    // The event remains for any external listener
+    // that wants to observe tab closes. Pinned so a
+    // refactor that moves the RPC dispatch doesn't
+    // accidentally drop the event.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const closeTabListener = vi.fn();
+    p.addEventListener('close-tab', closeTabListener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      expect(closeTabListener).toHaveBeenCalledOnce();
+      expect(closeTabListener.mock.calls[0][0].detail).toEqual({
+        tabId: agentTabId,
+      });
+      // And the RPC also fired.
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      p.removeEventListener('close-tab', closeTabListener);
+    }
+  });
+
+  it('active tab close fires RPC and switches to main', async () => {
+    // B3 already covers the active-tab switch; this
+    // test pins that the RPC still fires on the
+    // active-tab close path (not just inactive tabs).
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    expect(close).toHaveBeenCalledOnce();
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('close from overflow menu item does NOT fire RPC', async () => {
+    // Overflow menu items are jump affordances only
+    // per B2 — no close button is rendered there.
+    // Pinned so a future refactor that adds close
+    // buttons to menu items has to update this test,
+    // forcing the author to think about whether RPC
+    // dispatch should fire twice or migrate.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // Open the overflow menu.
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    // Confirm there's no close button in the menu
+    // item.
+    const menuItem = p.shadowRoot.querySelector(
+      `.tab-strip-overflow-item[data-tab-id="${agentTabId}"]`,
+    );
+    expect(menuItem.querySelector('.tab-close')).toBeNull();
+    // Clicking the menu item jumps to the tab, doesn't
+    // close it, and doesn't fire the RPC.
+    menuItem.click();
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+    expect(p._tabs.has(agentTabId)).toBe(true);
+  });
+
+  it('programmatic _onTabClose also fires RPC', async () => {
+    // Safety — a future path that calls _onTabClose
+    // directly (keyboard shortcut, new UI affordance)
+    // should get the same backend behaviour as a
+    // click.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    p._onTabClose(agentTabId);
+    await settle(p);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('calling _onTabClose on main does not fire RPC', async () => {
+    // Main tab can't be closed (guard at top of
+    // _onTabClose), and wouldn't parse as an agent
+    // tab ID anyway. Double-pinning — explicit guard
+    // + parse rejection — so both layers are tested.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._onTabClose('main');
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('non-existent tab ID does not fire RPC', async () => {
+    // _onTabClose short-circuits on unknown IDs. The
+    // RPC dispatch is inside the guarded branch, so
+    // this path doesn't fire it either.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._onTabClose('turn_nonexistent/agent-00');
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+  });
+});

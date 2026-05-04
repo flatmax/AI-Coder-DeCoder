@@ -2813,6 +2813,65 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+
+    // C2c — fire the backend RPC to free the scope's
+    // ContextManager + tracker + file_context. The
+    // archive file on disk is preserved per C1b's
+    // contract. Agent-mode-only: the tab ID parses
+    // into (turn_id, agent_idx); main tab's "close"
+    // path is blocked by the early-return guard above,
+    // so we won't reach this branch for main.
+    //
+    // Fire-and-forget — the local state is already
+    // mutated (optimistic close), and the RPC is
+    // idempotent per C1b. A failure here means the
+    // backend scope lingers until session end or
+    // explicit cleanup; the user-visible tab is gone
+    // regardless. Surfacing an error toast would be
+    // confusing ("I closed the tab — why am I seeing
+    // an error?") and the frontend has no recovery
+    // action anyway.
+    //
+    // Restricted-caller errors for non-localhost
+    // participants DO surface as a toast because
+    // they're actionable: the user can ask the host
+    // to close the tab for them. The rpcConnected
+    // gate short-circuits when no RPC is available
+    // (tests, pre-connect).
+    const agentTag = parseAgentTabId(tabId);
+    if (agentTag && this.rpcConnected) {
+      const [turnId, agentIdx] = agentTag;
+      this.rpcExtract(
+        'LLMService.close_agent_context',
+        turnId,
+        agentIdx,
+      ).then((result) => {
+        // Restricted caller — surface as warning.
+        // C1b's non-localhost path returns the
+        // standard {error: "restricted", reason:
+        // ...} shape.
+        if (
+          result
+          && typeof result === 'object'
+          && result.error === 'restricted'
+        ) {
+          this._emitToast(
+            result.reason || 'Restricted operation',
+            'warning',
+          );
+        }
+      }).catch((err) => {
+        // Network failure, RPC rejection, or similar.
+        // Log at debug — the tab is already gone
+        // locally, so toasting would misrepresent
+        // the state. Operators debugging "why did
+        // the scope leak" can find the log entry.
+        console.debug(
+          '[chat] close_agent_context failed',
+          err,
+        );
+      });
+    }
   }
 
   /**
