@@ -57,9 +57,19 @@ Switching tabs swaps the visible state without discarding any tab's values. The 
 
 ## Streaming Routing
 
-Every streaming chunk from the backend carries its originating request ID. Request IDs are already the routing primitive (see [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics)). Agent child requests use IDs of the form `{parent_request_id}-agent-{NN}`. The chat panel's tab registry maps each known request ID to the tab that owns it; incoming chunks update that tab's streaming content even when the tab is not currently active.
+Every streaming chunk from the backend carries its originating request ID. Request IDs are already the routing primitive (see [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics)). Agent child requests use IDs of the form `{parent_request_id}-agent-{NN}` (zero-padded to two digits). The chat panel's tab registry maps each known request ID to the tab that owns it; incoming chunks update that tab's streaming content even when the tab is not currently active.
 
 A user watching agent 1's tab sees agent 0's streaming happening in the strip (the tab label pulses or carries a progress indicator). Switching to agent 0's tab surfaces its current stream position immediately — no re-fetch, no loading state.
+
+### Tab Creation Ordering
+
+Agent tabs must exist in the chat panel's tab registry before any child stream chunks arrive for them. Otherwise `_findTabForRequest` (the routing layer) sees a child request ID with no matching tab and silently drops the chunk. Because agents often finish quickly, the entire agent's stream can complete in this dropped state, leaving the tab populated with nothing.
+
+The backend solves this by firing an `agentsSpawned` event immediately after the main LLM's response is parsed and BEFORE dispatching agent streams. The event carries `{turn_id, parent_request_id, agent_blocks: [{id, task, agent_idx}, ...]}` — everything the frontend needs to create tabs with pre-populated child request IDs. The spawn step awaits nothing between emitting `agentsSpawned` and starting the first agent stream, so by the time the frontend's event handler creates the tabs, the race window has closed to zero.
+
+The main LLM's `streamComplete` event also carries `agent_blocks` as a fallback. The frontend's tab-creation path is idempotent — creating a tab for a `{turn_id, agent_idx}` pair that already exists is a no-op. This keeps older backends (that only surface agent blocks via `streamComplete`) working: tabs appear after all agents finish, which means child chunks and completion events are still dropped, but the final transcripts become visible via the archive (see [history.md](../3-llm/history.md#agent-turn-archive)).
+
+Tab identity — the key in the chat panel's `_tabs` Map — is `{turn_id}/agent-{NN:02d}`, matching the backend's archive directory layout. Parsing the tab ID back into `[turn_id, agent_idx]` produces the exact tuple the backend's `agent_tag` RPC kwarg expects (see [close tab behaviour](#tab-lifetime)).
 
 ## File Picker Scope
 

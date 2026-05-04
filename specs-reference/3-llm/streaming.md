@@ -58,6 +58,22 @@ Fire-and-forget notification of stream end. Fires exactly once per user-initiate
 | `binary_files` | list[string] | On validation failure | Rejected binary files |
 | `invalid_files` | list[string] | On validation failure | Files not found on disk |
 
+### `agentsSpawned(data)` — server → browser (broadcast)
+
+Fires immediately after the main LLM's response is parsed and BEFORE child agent streams begin. Lets the frontend create agent tabs with pre-populated child request IDs so subsequent chunks route to the correct tab. See `specs4/7-future/parallel-agents.md` § Execution Model for the ordering contract.
+
+`data` dict shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `turn_id` | string | The turn's ID, generated at the top of the streaming pipeline; shared across the main LLM's own records and every spawned agent's archive |
+| `parent_request_id` | string | The main user-initiated request ID. Child request IDs are derived as `{parent_request_id}-agent-{NN:02d}` — NN zero-padded to two digits matches the backend's archive directory layout |
+| `agent_blocks` | list[object] | One entry per valid agent block. Each entry: `{id: str, task: str, agent_idx: int}`. `agent_idx` is zero-based; `id` and `task` come from the agent-spawn block body |
+
+Idempotent with `streamComplete`'s `agent_blocks` field — the frontend's tab-creation path short-circuits when a tab for `{turn_id, agent_idx}` already exists. An older backend that only surfaces `agent_blocks` via `streamComplete` continues to work (tabs appear after all agents finish; child chunks in the interim are dropped, but final transcripts remain accessible via the archive).
+
+Fires only when `agents.enabled` is true in config AND the main LLM emitted at least one valid agent-spawn block.
+
 ### `compactionEvent(request_id, event)` — server → browser
 
 General-purpose progress channel. Despite the name, it carries history compaction, URL fetch, and doc enrichment progress. Stage name discriminates.

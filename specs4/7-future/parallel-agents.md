@@ -14,6 +14,7 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | Stability tracker is per-context-manager | [context-model.md](../3-llm/context-model.md#stability-tracker-attachment) | Trackers scope to their owning context manager, not to modes |
 | Single-stream guard gates user-initiated requests only | [streaming.md](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request) | Internal agent streams coexist under a parent request ID |
 | Request IDs are the multiplexing primitive | [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics) | All server-push events route by exact request ID |
+| `agentsSpawned` event fires BEFORE agent dispatch | [streaming.md](../3-llm/streaming.md) | Frontend creates tabs in time to claim child request IDs; without it, fast-completing agents' chunks are dropped |
 | Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
 | Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive |
