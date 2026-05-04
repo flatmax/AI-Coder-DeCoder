@@ -1036,6 +1036,40 @@ class LLMService:
         # signal.
         self._request_accumulators: dict[str, str] = {}
 
+        # Agent context registry — per-turn, per-agent
+        # ConversationScope storage so the scopes outlive the
+        # spawn's ``asyncio.gather`` and remain reachable for
+        # follow-up user replies to the agent tab.
+        #
+        # Keyed ``{turn_id: {agent_idx: ConversationScope}}``.
+        # Nested shape (rather than flat tuple keys) makes
+        # per-turn invalidation cleanly expressible —
+        # ``new_session()`` wipes the whole dict, and
+        # ``close_agent_context(turn_id, agent_idx)`` pops the
+        # inner entry plus the outer dict when it empties.
+        #
+        # Populated in :meth:`_build_agent_scope` — the single
+        # chokepoint for agent scope construction. Today the
+        # spawn path (:meth:`_spawn_agents_for_turn`) builds a
+        # scope and immediately feeds it to
+        # :attr:`_agent_stream_impl`; the scope becomes
+        # garbage-collectable when the gathered task returns.
+        # Registering here keeps a reference alive so the main
+        # LLM's follow-up turns can route user replies back to
+        # the same ContextManager + StabilityTracker + file
+        # context — the agent's conversation state stays warm,
+        # the provider cache stays warm, and iteration within
+        # the turn is cheap.
+        #
+        # Cleared wholesale by :meth:`new_session`. Agents from
+        # prior sessions have no meaningful way to continue
+        # into a new session's conversation, so the whole
+        # registry resets. Per-entry removal is C1b's
+        # ``close_agent_context`` RPC (agent-tab close button).
+        self._agent_contexts: dict[
+            str, dict[int, ConversationScope]
+        ] = {}
+
         # Agent streaming impl — points at :meth:`_stream_chat`
         # so each spawned agent runs through the full pipeline
         # (LLM call, edit parse, edit apply, persistence,
@@ -4364,6 +4398,17 @@ class LLMService:
         # clear_history on the context manager also purges the
         # tracker's history items via the attachment point.
         self._context.clear_history()
+        # Drop every agent ContextManager from the prior
+        # session. Agents from the previous conversation
+        # have no meaningful continuation in a fresh
+        # session — their turn_ids won't match anything the
+        # new conversation produces, and the frontend's
+        # agent tabs will close as the sessionChanged
+        # broadcast propagates. Clearing here frees every
+        # agent's ContextManager + StabilityTracker +
+        # file_context in one shot; the archive files on
+        # disk stay for audit.
+        self._agent_contexts.clear()
         # Broadcast sessionChanged so collaborator clients clear
         # their chat panels too.
         self._broadcast_event(
@@ -4965,13 +5010,32 @@ class LLMService:
         # mutations don't leak back to the parent. list(...)
         # is sufficient — the elements are strings
         # (immutable).
-        return ConversationScope(
+        scope = ConversationScope(
             context=agent_context,
             tracker=agent_tracker,
             session_id=parent_scope.session_id,
             selected_files=list(parent_scope.selected_files),
             archival_append=agent_context.archival_sink,
         )
+
+        # Register in the agent context registry so the scope
+        # outlives the spawn's asyncio.gather and is reachable
+        # for follow-up replies. Per-turn, per-agent key shape
+        # matches the frontend tab ID convention ({turn_id}/
+        # agent-{NN:02d}) so C2's tab-reply path can look up
+        # the scope by parsing its own tab ID.
+        #
+        # setdefault handles both the first agent of a turn
+        # (outer key missing) and subsequent agents of the
+        # same turn (outer key present). No collision check —
+        # a re-iteration within a turn that reuses the same
+        # agent_idx deliberately replaces the prior scope so
+        # the revised scope becomes authoritative. (The
+        # archive keeps the prior iteration's transcript for
+        # audit via HistoryStore.get_turn_archive.)
+        self._agent_contexts.setdefault(turn_id, {})[agent_idx] = scope
+
+        return scope
 
     async def chat_streaming(
         self,
@@ -5480,6 +5544,7 @@ class LLMService:
             finish_reason=finish_reason if error is None else None,
             request_usage=request_usage,
             scope=scope,
+            turn_id=turn_id,
         )
 
         # Fire completion event.
@@ -5768,6 +5833,7 @@ class LLMService:
         finish_reason: str | None = None,
         request_usage: dict[str, Any] | None = None,
         scope: ConversationScope | None = None,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         """Parse the response, apply edits, build the result dict.
 
@@ -5880,6 +5946,15 @@ class LLMService:
             "files_created": [],
             "user_message": user_message,
             "finish_reason": finish_reason,
+            # turn_id surfaces so the frontend can construct
+            # tab IDs matching the backend's archive paths
+            # ({turn_id}/agent-NN). C2's spawn-path handler
+            # reads this and builds entries in the chat
+            # panel's _tabs / _tabLabels Maps keyed by the
+            # same shape. None when the caller didn't thread
+            # a turn_id through — tests and direct callers
+            # that build results without a turn.
+            "turn_id": turn_id,
         }
         if cancelled:
             result["cancelled"] = True

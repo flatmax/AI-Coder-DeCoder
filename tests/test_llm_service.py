@@ -4813,6 +4813,371 @@ class TestAgentSpawn:
         assert service._agent_stream_impl != service._stream_chat_stub
 
 
+class TestAgentContextRegistry:
+    """C1a — agent ContextManager registry and turn_id surfacing.
+
+    Two concerns pinned here:
+
+    1. The ``_agent_contexts`` registry outlives the spawn's
+       ``asyncio.gather``. When ``_build_agent_scope``
+       constructs a scope, the scope lands in
+       ``service._agent_contexts[turn_id][agent_idx]``. The
+       registry survives across turns so subsequent user
+       replies to agent tabs can look up the scope and route
+       to the correct ContextManager. ``new_session()`` wipes
+       the whole registry.
+
+    2. The completion result dict carries ``turn_id``. The
+       frontend's agent-tab construction needs it to build
+       tab IDs matching the backend's archive paths
+       (``{turn_id}/agent-NN``). ``_stream_chat`` generates
+       the turn_id at the top of the pipeline and threads it
+       into ``_build_completion_result`` on every path —
+       error, cancelled, normal completion.
+
+    These tests exercise the registry API directly (via
+    ``_build_agent_scope`` and ``new_session``) and the
+    completion-result threading (via ``chat_streaming``).
+    C1b's close_agent_context and C1c's agent_tag build on
+    top of what's pinned here.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        """Build a valid AgentBlock."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_registry_empty_on_fresh_service(
+        self,
+        service: LLMService,
+    ) -> None:
+        """A newly-constructed service has no agent contexts."""
+        assert service._agent_contexts == {}
+
+    def test_registry_populated_after_build_agent_scope(
+        self,
+        service: LLMService,
+    ) -> None:
+        """_build_agent_scope registers the scope under (turn_id, idx)."""
+        parent_scope = service._default_scope()
+        block = self._make_agent_block("a0", "t0")
+        turn_id = "turn_abc"
+        scope = service._build_agent_scope(
+            block=block,
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        assert turn_id in service._agent_contexts
+        assert 0 in service._agent_contexts[turn_id]
+        # Registered scope is the exact same object returned
+        # from the factory — identity, not equality.
+        assert service._agent_contexts[turn_id][0] is scope
+
+    def test_registry_handles_multiple_agents_same_turn(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Two agents from one turn each get their own slot."""
+        parent_scope = service._default_scope()
+        turn_id = "turn_same"
+        scope_0 = service._build_agent_scope(
+            block=self._make_agent_block("a0", "t0"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        scope_1 = service._build_agent_scope(
+            block=self._make_agent_block("a1", "t1"),
+            agent_idx=1,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        assert service._agent_contexts[turn_id][0] is scope_0
+        assert service._agent_contexts[turn_id][1] is scope_1
+        assert scope_0 is not scope_1
+
+    def test_registry_handles_multiple_turns(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Scopes from different turns land under different keys."""
+        parent_scope = service._default_scope()
+        scope_a = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_a",
+        )
+        scope_b = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_b",
+        )
+        # Both keys present in the outer dict.
+        assert "turn_a" in service._agent_contexts
+        assert "turn_b" in service._agent_contexts
+        # Each turn's agent-0 slot holds the right scope.
+        assert service._agent_contexts["turn_a"][0] is scope_a
+        assert service._agent_contexts["turn_b"][0] is scope_b
+
+    def test_registry_survives_across_turns(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Registering a second turn's scope doesn't evict the first.
+
+        Pins the "agents stay warm across turns" invariant.
+        Without this, the registry would effectively be a
+        single-turn cache and follow-up replies to prior-turn
+        agent tabs would fail to find their scopes.
+        """
+        parent_scope = service._default_scope()
+        scope_first = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_first",
+        )
+        # Second turn comes along.
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_second",
+        )
+        # First turn's scope still reachable.
+        assert service._agent_contexts["turn_first"][0] is scope_first
+
+    def test_re_registration_with_same_key_replaces(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Re-iteration within a turn replaces the prior scope.
+
+        Specs4/5-webapp/agent-browser.md describes
+        re-iteration — the main LLM spawns agent-0 again
+        with a revised task. The new scope becomes
+        authoritative. The archive still holds both
+        iterations' transcripts for audit, but the registry
+        tracks only the latest.
+        """
+        parent_scope = service._default_scope()
+        turn_id = "turn_iter"
+        scope_v1 = service._build_agent_scope(
+            block=self._make_agent_block("a0", "first task"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        scope_v2 = service._build_agent_scope(
+            block=self._make_agent_block("a0", "revised task"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+        # v2 replaces v1 in the slot.
+        assert service._agent_contexts[turn_id][0] is scope_v2
+        assert service._agent_contexts[turn_id][0] is not scope_v1
+
+    def test_new_session_clears_registry(
+        self,
+        service: LLMService,
+    ) -> None:
+        """new_session drops every agent scope in one shot.
+
+        Prior-session agents have no path forward into a
+        fresh conversation — their turn_ids won't match
+        anything the new conversation produces, and the
+        frontend's sessionChanged broadcast will close any
+        open agent tabs. Clearing the registry here frees
+        every agent's ContextManager + StabilityTracker +
+        file_context immediately rather than relying on
+        Python's garbage collector to notice the tabs are
+        gone.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_one",
+        )
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=1,
+            parent_scope=parent_scope,
+            turn_id="turn_one",
+        )
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_two",
+        )
+        assert len(service._agent_contexts) == 2
+        result = service.new_session()
+        assert "session_id" in result
+        assert service._agent_contexts == {}
+
+    async def test_completion_result_carries_turn_id(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """streamComplete's result dict includes turn_id.
+
+        Frontend reads this to build agent tab IDs matching
+        the backend archive path convention. Without it, C2's
+        spawn-path handler can't construct a tab ID that
+        routes streaming chunks correctly.
+        """
+        fake_litellm.set_streaming_chunks(["ok"])
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        completes = [
+            args for name, args in event_cb.events
+            if name == "streamComplete"
+        ]
+        assert completes
+        _req_id, result = completes[-1]
+        turn_id = result.get("turn_id")
+        assert isinstance(turn_id, str)
+        assert turn_id.startswith("turn_")
+
+    async def test_completion_result_turn_id_matches_history_turn_id(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """turn_id in result matches the one persisted to history.
+
+        Critical for the frontend → backend lookup path: a
+        tab built from result.turn_id must match records in
+        the history store's archive path
+        (.ac-dc4/agents/{turn_id}/agent-NN.jsonl) and the
+        turn_id field on every persisted message of the
+        turn.
+        """
+        fake_litellm.set_streaming_chunks(["ok"])
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        completes = [
+            args for name, args in event_cb.events
+            if name == "streamComplete"
+        ]
+        result_turn_id = completes[-1][1]["turn_id"]
+
+        sid = service.get_current_state()["session_id"]
+        persisted = history_store.get_session_messages(sid)
+        user_turn_ids = {
+            m["turn_id"] for m in persisted
+            if m.get("role") == "user" and m.get("turn_id")
+        }
+        assert result_turn_id in user_turn_ids
+
+    async def test_completion_result_turn_id_on_error_path(
+        self,
+        service: LLMService,
+        fake_litellm: _FakeLiteLLM,
+        event_cb: _RecordingEventCallback,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Errors still carry a turn_id in their completion result.
+
+        The turn_id is generated at the top of _stream_chat
+        before the try block — so even when the completion
+        path raises, the result dict built in the except
+        branch threads the same turn_id through. Frontend
+        can use it to correlate the failed turn with the
+        user message that triggered it.
+        """
+        # Force the LLM call to raise by making
+        # _run_completion_sync blow up.
+        def _raise(*args, **kwargs):
+            raise RuntimeError("simulated failure")
+        monkeypatch.setattr(
+            service, "_run_completion_sync", _raise
+        )
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.2)
+
+        completes = [
+            args for name, args in event_cb.events
+            if name == "streamComplete"
+        ]
+        assert completes
+        _req_id, result = completes[-1]
+        # Error present.
+        assert "error" in result
+        # turn_id still present — not dropped by the error
+        # path.
+        assert isinstance(result.get("turn_id"), str)
+        assert result["turn_id"].startswith("turn_")
+
+    async def test_agent_archive_path_matches_registry_turn_id(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Registry turn_id matches the agent archive directory.
+
+        End-to-end contract: the turn_id that populates the
+        agent registry is the SAME turn_id used to construct
+        the archive path. If the two diverged, the frontend
+        would build tab IDs off the registry key but look up
+        archive transcripts under a different turn_id — the
+        tab would show empty history.
+
+        Exercises via _spawn_agents_for_turn because that's
+        the single path that both (a) calls _build_agent_scope
+        (which registers) and (b) triggers archive writes
+        (via the agent's streaming run).
+        """
+        fake_litellm.queue_streaming_chunks(["agent reply"])
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        turn_id = HistoryStore.new_turn_id()
+        block = self._make_agent_block("a0", "write something")
+
+        await service._spawn_agents_for_turn(
+            agent_blocks=[block],
+            parent_scope=parent_scope,
+            parent_request_id="r-main",
+            turn_id=turn_id,
+        )
+
+        # Registry key matches the turn_id.
+        assert turn_id in service._agent_contexts
+        # Archive directory exists at the same turn_id.
+        archive_dir = repo_dir / ".ac-dc4" / "agents" / turn_id
+        assert archive_dir.exists()
+        # And get_turn_archive returns content for that turn_id.
+        archive = history_store.get_turn_archive(turn_id)
+        assert len(archive) == 1
+
+
 class TestAgentExecutionEndToEnd:
     """Step 3 — agents run through the real _stream_chat pipeline.
 
