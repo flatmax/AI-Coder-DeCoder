@@ -5139,6 +5139,574 @@ class TestAgentExecutionEndToEnd:
         assert files_changed == []
 
 
+class TestAgentAssimilation:
+    """Step 4 — post-agent assimilation into the parent conversation.
+
+    After ``_spawn_agents_for_turn`` runs, the backend folds
+    the union of agent-modified and agent-created files into
+    the parent scope's selection and file context, then
+    broadcasts ``filesChanged`` + ``filesModified`` so the
+    frontend picker reloads. No automatic synthesis LLM call
+    fires — review and iteration are user-driven on follow-up
+    turns per specs4/7-future/parallel-agents.md § Execution
+    Model and § Review Step — User-Driven.
+
+    These tests pin the assimilation contract:
+
+    - Single agent's edit → parent picks up the file in its
+      selection and file context.
+    - Two agents touching independent files → union lands in
+      parent's selection and file context; both broadcasts
+      fire with the union.
+    - Agent emitting no edits → assimilation is a no-op,
+      no spurious broadcasts.
+    - Agent creating a new file → ``files_created`` path
+      assimilates just like ``files_modified``.
+    - Sibling raising mid-gather → surviving agent's changes
+      still assimilate; the exception doesn't block the path.
+    - Parent's follow-up turn sees the assimilated files in
+      its prompt context.
+
+    Most tests invoke ``_spawn_agents_for_turn`` directly
+    rather than going through ``chat_streaming`` — the goal
+    is to pin assimilation behaviour without coordinating a
+    main-LLM fake call alongside the agents' calls. The
+    follow-up-turn test DOES use ``chat_streaming`` because
+    the whole point is the cross-turn observable.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        """Build a valid AgentBlock."""
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def _build_modify_edit(
+        self, path: str, old: str, new: str
+    ) -> str:
+        """Assemble one modify edit block as agent response text."""
+        return (
+            f"{path}\n"
+            "🟧🟧🟧 EDIT\n"
+            f"{old}\n"
+            "🟨🟨🟨 REPL\n"
+            f"{new}\n"
+            "🟩🟩🟩 END\n"
+        )
+
+    def _build_create_edit(
+        self, path: str, content: str
+    ) -> str:
+        """Assemble one create edit block (empty old text)."""
+        return (
+            f"{path}\n"
+            "🟧🟧🟧 EDIT\n"
+            "🟨🟨🟨 REPL\n"
+            f"{content}\n"
+            "🟩🟩🟩 END\n"
+        )
+
+    async def test_single_agent_modify_parent_had_file_selected(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Parent had file selected → agent applies → parent refreshes.
+
+        The agent inherits the parent's selection list as a
+        deep copy. When the agent edits an already-selected
+        file, the edit applies to disk. Assimilation then
+        refreshes the parent's file context so it sees the
+        post-edit content (the parent's cache was stale since
+        it loaded the file before the agent ran).
+        """
+        target = repo_dir / "helper.py"
+        target.write_text("original body\n")
+        service.set_selected_files(["helper.py"])
+        # Load pre-edit content into parent's file context.
+        service._sync_file_context()
+        assert service._file_context.get_content(
+            "helper.py"
+        ) == "original body\n"
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        service._active_user_request = "r-parent"
+        event_cb.events.clear()
+
+        agent_response = self._build_modify_edit(
+            "helper.py", "original body", "modified body"
+        )
+        fake_litellm.queue_streaming_chunks([agent_response])
+
+        try:
+            await service._spawn_agents_for_turn(
+                agent_blocks=[
+                    self._make_agent_block(
+                        "agent-0", "modify helper.py"
+                    ),
+                ],
+                parent_scope=parent_scope,
+                parent_request_id="r-parent",
+                turn_id=HistoryStore.new_turn_id(),
+            )
+        finally:
+            service._active_user_request = None
+
+        # File on disk has the new content (agent's edit landed).
+        assert target.read_text() == "modified body\n"
+
+        # Parent's file context refreshed to the post-edit
+        # content. Without assimilation's refresh pass, the
+        # parent would still see "original body" here.
+        assert service._file_context.get_content(
+            "helper.py"
+        ) == "modified body\n"
+
+        # Parent's selection still contains the file (was
+        # already there; assimilation's append skips duplicates).
+        assert service.get_selected_files() == ["helper.py"]
+        assert service.get_selected_files().count(
+            "helper.py"
+        ) == 1
+
+        # filesChanged broadcast fired from the parent-level
+        # assimilation. Payload is the parent's full selection.
+        files_changed = [
+            args for name, args in event_cb.events
+            if name == "filesChanged"
+        ]
+        # At least one broadcast — the assimilation one. The
+        # agent's own _stream_chat suppresses its filesChanged
+        # broadcast for child streams, so this one comes from
+        # _assimilate_agent_changes.
+        assert files_changed
+        # Most-recent payload carries the updated selection.
+        last_payload = files_changed[-1][0]
+        assert "helper.py" in last_payload
+
+        # filesModified broadcast fired with the touched path.
+        files_modified = [
+            args for name, args in event_cb.events
+            if name == "filesModified"
+        ]
+        assert files_modified
+        # Find the parent-level broadcast (carries just the
+        # unioned paths). The agent's own _stream_chat also
+        # fires filesModified on edit apply; both events are
+        # valid, so we assert that at least one carries
+        # helper.py.
+        assert any(
+            "helper.py" in args[0] for args in files_modified
+        )
+
+    async def test_two_agents_independent_files_union_assimilates(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Two agents each edit a different file → union in parent.
+
+        The parent had both files selected so both edits apply.
+        After assimilation: parent's file context has both files'
+        post-edit content, selection unchanged (already had
+        them), and the parent-level filesModified broadcast
+        carries both paths.
+        """
+        alpha = repo_dir / "alpha.py"
+        beta = repo_dir / "beta.py"
+        alpha.write_text("alpha v1\n")
+        beta.write_text("beta v1\n")
+        service.set_selected_files(["alpha.py", "beta.py"])
+        service._sync_file_context()
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        service._active_user_request = "r-parent"
+        event_cb.events.clear()
+
+        # Queue per-agent responses. Each agent's _stream_chat
+        # consumes one queued directive in FIFO order.
+        fake_litellm.queue_streaming_chunks([
+            self._build_modify_edit(
+                "alpha.py", "alpha v1", "alpha v2"
+            ),
+        ])
+        fake_litellm.queue_streaming_chunks([
+            self._build_modify_edit(
+                "beta.py", "beta v1", "beta v2"
+            ),
+        ])
+
+        try:
+            await service._spawn_agents_for_turn(
+                agent_blocks=[
+                    self._make_agent_block("agent-0", "edit alpha"),
+                    self._make_agent_block("agent-1", "edit beta"),
+                ],
+                parent_scope=parent_scope,
+                parent_request_id="r-parent",
+                turn_id=HistoryStore.new_turn_id(),
+            )
+        finally:
+            service._active_user_request = None
+
+        # Both files on disk updated.
+        assert alpha.read_text() == "alpha v2\n"
+        assert beta.read_text() == "beta v2\n"
+
+        # Parent's file context reflects both post-edit bodies.
+        assert service._file_context.get_content(
+            "alpha.py"
+        ) == "alpha v2\n"
+        assert service._file_context.get_content(
+            "beta.py"
+        ) == "beta v2\n"
+
+        # Parent-level filesModified broadcast carries the
+        # union. There may be multiple filesModified events
+        # (each agent's own _stream_chat fires one); we look
+        # for ONE whose payload contains both paths — that's
+        # the assimilation broadcast.
+        files_modified = [
+            args for name, args in event_cb.events
+            if name == "filesModified"
+        ]
+        union_broadcasts = [
+            args for args in files_modified
+            if isinstance(args[0], list)
+            and "alpha.py" in args[0]
+            and "beta.py" in args[0]
+        ]
+        assert union_broadcasts, (
+            "Expected a filesModified broadcast carrying the "
+            "union of agent-modified files; got: "
+            f"{[a[0] for a in files_modified]}"
+        )
+
+    async def test_no_edits_no_broadcasts(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Agent with no edits → assimilation is a no-op.
+
+        Some agent tasks are read-only (exploration, analysis).
+        The agent's response has no edit blocks, so
+        ``files_modified`` and ``files_created`` are empty in
+        the completion result. Assimilation should skip the
+        broadcast step entirely — bothering the frontend's
+        picker for a no-op turn would cause unnecessary
+        re-fetching.
+        """
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        service._active_user_request = "r-parent"
+        event_cb.events.clear()
+
+        # Agent responds with pure prose, no edit blocks.
+        fake_litellm.queue_streaming_chunks([
+            "I explored the codebase. No changes needed.",
+        ])
+
+        try:
+            await service._spawn_agents_for_turn(
+                agent_blocks=[
+                    self._make_agent_block(
+                        "agent-0", "explore the codebase"
+                    ),
+                ],
+                parent_scope=parent_scope,
+                parent_request_id="r-parent",
+                turn_id=HistoryStore.new_turn_id(),
+            )
+        finally:
+            service._active_user_request = None
+
+        # No filesChanged or filesModified broadcasts fired
+        # from assimilation. (The agent's own _stream_chat
+        # suppresses its filesChanged for child streams and
+        # fires filesModified only on edit apply — with no
+        # edits, it fires nothing either.)
+        files_changed = [
+            args for name, args in event_cb.events
+            if name == "filesChanged"
+        ]
+        files_modified = [
+            args for name, args in event_cb.events
+            if name == "filesModified"
+        ]
+        assert files_changed == []
+        assert files_modified == []
+
+        # Parent's selection unchanged.
+        assert service.get_selected_files() == []
+
+    async def test_agent_creates_new_file_assimilates(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Agent creates a new file → appears in parent's selection.
+
+        Creates bypass the in-context check — an agent can
+        create a file without having it pre-selected. The
+        completion result populates both ``files_created`` and
+        ``files_modified``; assimilation unions both and
+        appends the new path to the parent's selection.
+        """
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        service._active_user_request = "r-parent"
+        event_cb.events.clear()
+
+        # Agent creates a new file.
+        agent_response = self._build_create_edit(
+            "new_module.py", "def added(): pass"
+        )
+        fake_litellm.queue_streaming_chunks([agent_response])
+
+        try:
+            await service._spawn_agents_for_turn(
+                agent_blocks=[
+                    self._make_agent_block(
+                        "agent-0", "create new_module.py"
+                    ),
+                ],
+                parent_scope=parent_scope,
+                parent_request_id="r-parent",
+                turn_id=HistoryStore.new_turn_id(),
+            )
+        finally:
+            service._active_user_request = None
+
+        # File exists on disk.
+        created = repo_dir / "new_module.py"
+        assert created.exists()
+
+        # Parent's selection includes the new file.
+        assert "new_module.py" in service.get_selected_files()
+
+        # Parent's file context has the content loaded.
+        assert service._file_context.has_file("new_module.py")
+        content = service._file_context.get_content(
+            "new_module.py"
+        )
+        assert content is not None
+        assert "def added" in content
+
+        # Parent-level filesChanged broadcast carries the
+        # new selection.
+        files_changed = [
+            args for name, args in event_cb.events
+            if name == "filesChanged"
+        ]
+        assert files_changed
+        last_payload = files_changed[-1][0]
+        assert "new_module.py" in last_payload
+
+    async def test_sibling_exception_does_not_block_assimilation(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """One agent raises → surviving agent's changes still assimilate.
+
+        ``asyncio.gather(return_exceptions=True)`` in
+        ``_spawn_agents_for_turn`` absorbs the exception;
+        ``_assimilate_agent_changes`` skips the exception
+        entry and processes the other agent's result. The
+        parent still sees the surviving agent's file changes.
+        """
+        target = repo_dir / "survived.py"
+        target.write_text("v1\n")
+        service.set_selected_files(["survived.py"])
+        service._sync_file_context()
+
+        parent_scope = service._default_scope()
+        service._main_loop = asyncio.get_event_loop()
+        service._active_user_request = "r-parent"
+        event_cb.events.clear()
+
+        # Agent 0 raises; agent 1 modifies the file.
+        fake_litellm.queue_streaming_error(
+            RuntimeError("simulated agent-0 failure"),
+        )
+        fake_litellm.queue_streaming_chunks([
+            self._build_modify_edit(
+                "survived.py", "v1", "v2"
+            ),
+        ])
+
+        try:
+            await service._spawn_agents_for_turn(
+                agent_blocks=[
+                    self._make_agent_block("agent-0", "will fail"),
+                    self._make_agent_block("agent-1", "will succeed"),
+                ],
+                parent_scope=parent_scope,
+                parent_request_id="r-parent",
+                turn_id=HistoryStore.new_turn_id(),
+            )
+        finally:
+            service._active_user_request = None
+
+        # Surviving agent's edit landed on disk.
+        assert target.read_text() == "v2\n"
+
+        # Parent's file context refreshed to the post-edit
+        # content despite the sibling exception.
+        assert service._file_context.get_content(
+            "survived.py"
+        ) == "v2\n"
+
+        # Parent-level filesModified broadcast carries the
+        # surviving path.
+        files_modified = [
+            args for name, args in event_cb.events
+            if name == "filesModified"
+        ]
+        assert any(
+            isinstance(args[0], list)
+            and "survived.py" in args[0]
+            for args in files_modified
+        )
+
+    async def test_followup_turn_sees_assimilated_files(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        config: ConfigManager,
+    ) -> None:
+        """Parent's next LLM call sees the agent-modified content.
+
+        Drives the full assimilation → next-turn flow:
+
+        1. Parent runs a main LLM turn that emits an agent
+           spawn block. The agent modifies a file.
+        2. Assimilation folds the modified file into the
+           parent's context.
+        3. Parent sends a follow-up user message. Its
+           ``_stream_chat`` assembles a prompt that includes
+           the post-edit file content — proving the follow-up
+           turn sees what the agent did.
+
+        We verify step 3 by inspecting the messages array the
+        fake LiteLLM receives on the follow-up call: it must
+        contain the post-edit content, not the pre-edit.
+
+        Agent mode requires the toggle to be on — we enable
+        it via the config helper pattern used elsewhere in
+        this file.
+        """
+        # Enable agent mode so the main LLM's spawn block
+        # actually dispatches. Otherwise the block is parsed
+        # but the dispatch branch is gated off.
+        import json as _json
+        app_path = config.config_dir / "app.json"
+        app_data = _json.loads(app_path.read_text())
+        app_data.setdefault("agents", {})
+        app_data["agents"]["enabled"] = True
+        app_path.write_text(_json.dumps(app_data))
+        config._app_config = None
+
+        # Seed the file and select it so the agent's edit
+        # applies (agent inherits parent's selection).
+        target = repo_dir / "accumulator.py"
+        target.write_text("counter = 0\n")
+        service.set_selected_files(["accumulator.py"])
+
+        # Queue three responses: main LLM turn 1 (with agent
+        # block), agent's response (edits file), main LLM
+        # turn 2 (follow-up; response doesn't matter, we
+        # only care that the assembled prompt contains the
+        # post-edit content).
+        main_turn_1 = (
+            "I'll delegate this to an agent.\n\n"
+            "🟧🟧🟧 AGENT\n"
+            "id: agent-0\n"
+            "task: bump the counter\n"
+            "🟩🟩🟩 AGEND\n"
+        )
+        agent_resp = self._build_modify_edit(
+            "accumulator.py", "counter = 0", "counter = 1"
+        )
+        main_turn_2 = "Got it."
+        fake_litellm.queue_streaming_chunks([main_turn_1])
+        fake_litellm.queue_streaming_chunks([agent_resp])
+        fake_litellm.queue_streaming_chunks([main_turn_2])
+
+        # First turn — main LLM spawns agent.
+        await service.chat_streaming(
+            request_id="r1", message="bump the counter"
+        )
+        await asyncio.sleep(0.5)
+
+        # Agent's edit landed.
+        assert target.read_text() == "counter = 1\n"
+        # Parent's file context refreshed.
+        assert service._file_context.get_content(
+            "accumulator.py"
+        ) == "counter = 1\n"
+
+        # Second turn — capture the messages the fake receives.
+        # The fake's last_call_args dict is overwritten on each
+        # completion() call, so after turn 2 it holds turn 2's
+        # messages.
+        await service.chat_streaming(
+            request_id="r2", message="what's the value?"
+        )
+        await asyncio.sleep(0.3)
+
+        # The fake's messages array for the follow-up turn
+        # should carry the post-edit content somewhere — the
+        # file got refreshed during assimilation and re-renders
+        # as an active file or cached tier entry.
+        assembled = fake_litellm.last_call_args.get("messages", [])
+        combined = " ".join(
+            str(m.get("content", "")) for m in assembled
+            if isinstance(m.get("content"), (str, list))
+        )
+        # A list-valued content (multimodal) needs flattening.
+        # Rebuild considering list content.
+        parts: list[str] = []
+        for msg in assembled:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        text = block.get("text", "")
+                        if isinstance(text, str):
+                            parts.append(text)
+        combined = " ".join(parts)
+        assert "counter = 1" in combined, (
+            "Follow-up turn's prompt didn't carry post-edit "
+            "file content. Assimilation's file_context refresh "
+            "didn't propagate to the next turn's assembly."
+        )
+        # Defensive: the pre-edit content shouldn't be in the
+        # prompt (the file context was refreshed, not
+        # duplicated).
+        assert "counter = 0" not in combined
+
+
 class TestURLIntegration:
     """URL service integration in LLMService — Layer 4.1.6."""
 

@@ -4698,10 +4698,209 @@ class LLMService:
             )
             tasks.append(task)
         # return_exceptions=True so one agent raising doesn't
-        # take down its siblings. A future synthesis step (D4)
-        # can inspect the results list and surface per-agent
-        # failures to the main LLM.
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # take down its siblings. Each agent's _stream_chat
+        # returns its completion result dict (or the exception
+        # instance when it raised); _assimilate_agent_changes
+        # filters out exceptions and unions files_modified +
+        # files_created across the successful agents.
+        agent_results = await asyncio.gather(
+            *tasks, return_exceptions=True
+        )
+        await self._assimilate_agent_changes(
+            agent_results, parent_scope
+        )
+
+    async def _assimilate_agent_changes(
+        self,
+        agent_results: list[Any],
+        parent_scope: ConversationScope,
+    ) -> None:
+        """Fold agent-modified files into the parent's context.
+
+        Per docs/agent-spawning-plan.md § Step 4 and
+        specs4/7-future/parallel-agents.md § Execution Model,
+        after all agents complete the backend mechanically
+        assimilates their work into the parent conversation
+        rather than firing an automatic synthesis LLM call.
+        The assimilation lets the parent's NEXT user turn see
+        the post-change file state in context without any
+        additional plumbing — review and iteration are
+        user-driven from that point.
+
+        Assimilation steps:
+
+        1. Union ``files_modified`` + ``files_created`` across
+           every agent's completion result. Exception entries
+           from ``asyncio.gather(return_exceptions=True)`` are
+           skipped — a sibling agent raising shouldn't block
+           assimilation of the agents that succeeded. Missing
+           or non-dict entries are also skipped defensively
+           (e.g., if a future test stubs ``_agent_stream_impl``
+           to return None).
+
+        2. For each path in the union:
+
+           - Append to ``parent_scope.selected_files`` if not
+             already present. The parent's picker will show it
+             via the ``filesChanged`` broadcast below.
+           - Refresh content in ``parent_scope.context.file_context``.
+             Agent edits landed on disk during the agents' own
+             ``_stream_chat`` runs, so the parent's cached
+             content is stale — without this refresh the
+             parent's next turn would see the pre-agent file
+             content, defeating the whole point of assimilation.
+             Uses ``add_file(path)`` with no explicit content
+             which re-reads from the repo; idempotent for files
+             already present.
+
+        3. Broadcast ``filesChanged`` with the updated parent
+           selection so connected clients' pickers reflect the
+           new selection state. Each agent's own
+           ``_stream_chat`` already fires ``filesChanged`` on
+           its completion, but that broadcast was suppressed
+           for child streams in ``_stream_chat`` itself (the
+           ``not self._is_child_request(request_id)`` gate) to
+           avoid stomping the user's picker with per-agent
+           selection state. This is the parent-level broadcast
+           that IS meant to be seen.
+
+        4. Broadcast ``filesModified`` with the union of paths
+           so pickers reload their tree (git-status badges,
+           line counts). Agent ``_stream_chat`` calls already
+           fire this for their own modifications, but re-firing
+           here at the parent level catches any race where an
+           earlier broadcast arrived before a just-reconnected
+           client was listening. Belt-and-braces; duplicate
+           reloads are cheap.
+
+        Parameters
+        ----------
+        agent_results:
+            The list returned by ``asyncio.gather(*tasks,
+            return_exceptions=True)`` from
+            ``_spawn_agents_for_turn``. Each entry is either
+            a dict (the agent's completion result from
+            ``_stream_chat``) or an Exception instance (the
+            agent raised). Non-dict, non-Exception entries
+            (None from a stub impl) are skipped silently.
+        parent_scope:
+            The parent turn's :class:`ConversationScope`. This
+            method DOES mutate ``parent_scope.selected_files``
+            (appends newly-modified paths) and
+            ``parent_scope.context.file_context`` (refreshes
+            content). Those are the ONLY mutations; per the
+            plan's invariants the parent's context manager,
+            tracker, session_id, and archival_append remain
+            untouched.
+
+        Returns
+        -------
+        None
+            Fire-and-forget. Failures inside the method are
+            logged but never propagate — a broken assimilation
+            should not take down the whole turn.
+        """
+        if not agent_results:
+            return
+        # Step 1 — union modified + created across successful
+        # agents. sibling_exception tracks whether we saw any
+        # exception entries so the log line at the end
+        # distinguishes "zero agents ran" from "some agents
+        # raised but we assimilated the rest".
+        union_paths: list[str] = []
+        seen: set[str] = set()
+        sibling_exceptions = 0
+        for result in agent_results:
+            if isinstance(result, BaseException):
+                sibling_exceptions += 1
+                logger.warning(
+                    "Agent raised during assimilation: %r",
+                    result,
+                )
+                continue
+            if not isinstance(result, dict):
+                # Stub impl returned None, or a future code
+                # path returned something unexpected. Skip
+                # silently — assimilation is best-effort.
+                continue
+            for key in ("files_modified", "files_created"):
+                entries = result.get(key) or []
+                if not isinstance(entries, list):
+                    continue
+                for path in entries:
+                    if not isinstance(path, str):
+                        continue
+                    if path in seen:
+                        continue
+                    seen.add(path)
+                    union_paths.append(path)
+
+        if not union_paths:
+            # No files changed. This is a legitimate outcome —
+            # agents may have read-only tasks (exploration,
+            # analysis) that produce chat content but no
+            # edits. Nothing to assimilate; skip the broadcasts
+            # so the parent's picker isn't bothered for a
+            # no-op turn.
+            if sibling_exceptions > 0:
+                logger.info(
+                    "Agent assimilation: no files modified "
+                    "across %d agent result(s) (%d raised).",
+                    len(agent_results),
+                    sibling_exceptions,
+                )
+            return
+
+        # Step 2 — extend selection and refresh file context.
+        # selected_files is a list (not a set) to preserve
+        # insertion order — that order matters for the flat-
+        # assembly fallback's "Working Files" rendering.
+        added_to_selection: list[str] = []
+        for path in union_paths:
+            if path not in parent_scope.selected_files:
+                parent_scope.selected_files.append(path)
+                added_to_selection.append(path)
+        # Refresh content for every path in the union, not just
+        # newly-added ones. A path already in the parent's
+        # selection had its content loaded at the start of the
+        # parent's turn; if an agent then edited it, the cached
+        # content is stale. add_file with no explicit content
+        # re-reads from the repo; FileContext.add_file updates
+        # in place for already-present paths (preserving
+        # insertion order per its contract).
+        file_context = parent_scope.context.file_context
+        refresh_failures = 0
+        for path in union_paths:
+            try:
+                file_context.add_file(path)
+            except Exception as exc:
+                refresh_failures += 1
+                logger.warning(
+                    "Agent assimilation: failed to refresh "
+                    "file context for %s: %s. Parent's next "
+                    "turn may see stale content.",
+                    path, exc,
+                )
+
+        # Steps 3 + 4 — broadcast so the frontend picker reloads.
+        # filesChanged carries the updated selection list;
+        # filesModified carries just the touched paths (the
+        # picker uses this to reload its tree, separately from
+        # selection state).
+        self._broadcast_event(
+            "filesChanged", list(parent_scope.selected_files)
+        )
+        self._broadcast_event("filesModified", list(union_paths))
+
+        logger.info(
+            "Agent assimilation: %d file(s) unioned, %d added "
+            "to parent selection (%d refresh failure(s), "
+            "%d sibling exception(s)).",
+            len(union_paths),
+            len(added_to_selection),
+            refresh_failures,
+            sibling_exceptions,
+        )
 
     def _build_agent_scope(
         self,
@@ -5370,6 +5569,20 @@ class LLMService:
                     "Post-response processing for %s failed: %s",
                     request_id, exc,
                 )
+
+        # Return the completion result. The main-conversation
+        # caller (chat_streaming via ensure_future) doesn't
+        # await the return value — it's fire-and-forget. Agent
+        # spawning's asyncio.gather DOES collect the return
+        # value, which is how _assimilate_agent_changes gets
+        # per-agent files_modified / files_created without
+        # re-parsing the archive. See docs/agent-spawning-plan.md
+        # Step 4. A return of {} on early-error paths (e.g.,
+        # _sync_file_context raised before the result was built)
+        # preserves the "always returns a dict" contract so the
+        # assimilation step can use .get() safely without None
+        # checks.
+        return result
 
     async def _detect_and_fetch_urls(
         self,
