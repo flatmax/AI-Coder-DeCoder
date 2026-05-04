@@ -275,9 +275,51 @@ Tests: spawn produces N tabs, streaming chunks route to the right tab, switching
     regression scenarios). Unblocks C2's spawn path — when the spawn
     handler lands, it populates `_tabLabels` by calling this helper,
     and the label format is already pinned.
-  - **C1 — not started.** Backend agent registry, `close_agent_context`
-    RPC, `set_agent_selected_files` RPC, `turn_id` in completion
-    result, `agent_tag` kwarg on `chat_streaming`.
+  - **C1a — agent context registry + `turn_id` in completion result**
+    — delivered `44bc9d2`. Added `_agent_contexts` dict keyed
+    `{turn_id: {agent_idx: ConversationScope}}` so per-agent scopes
+    outlive the spawn's `asyncio.gather` and are reachable for
+    follow-up replies. Populated in `_build_agent_scope`, cleared by
+    `new_session()`. Threaded `turn_id` through `_build_completion_result`
+    on all paths (normal, error, cancelled) so the frontend can
+    construct tab IDs matching the backend archive path convention.
+    Comprehensive test class `TestAgentContextRegistry` covers
+    registry lifecycle (fresh-service empty state, populated after
+    spawn, multi-agent same turn, multi-turn, survives-across-turns,
+    re-registration replaces, cleared by new_session), turn_id
+    surfacing in completion results (success + error paths), and
+    end-to-end registry-vs-archive turn_id equivalence.
+  - **C1b — `close_agent_context` + `set_agent_selected_files` RPCs**
+    — delivered `f8b7b11`. Two mutating RPCs, both localhost-only.
+    `close_agent_context(turn_id, agent_idx)` pops the scope from
+    `_agent_contexts` (cleaning up empty outer buckets to keep the
+    registry compact), leaves the on-disk archive alone, idempotent
+    so stale frontend tab IDs don't raise. `set_agent_selected_files
+    (turn_id, agent_idx, files)` replaces the agent's selection
+    in-place (preserving list identity for downstream reference
+    holders), filters non-existent paths and non-string entries,
+    returns the canonical list or `{error: "agent not found"}`. 26
+    tests across four classes — `TestCloseAgentContext` (8),
+    `TestCloseAgentContextLocalhostOnly` (2), `TestSetAgentSelectedFiles`
+    (9), `TestSetAgentSelectedFilesLocalhostOnly` (1). Spec updates
+    to `specs4/3-llm/history.md` § User-Visible Agent Browsing and
+    `specs4/1-foundation/rpc-inventory.md` name the three frontend-
+    facing agent RPCs together.
+  - **C1c — `agent_tag` kwarg on `chat_streaming`** — delivered
+    `8d72ef6`. Optional `agent_tag=(turn_id, agent_idx)` kwarg
+    routes the call to the registered agent's scope via
+    `_agent_contexts`; accepts both tuple and JSON-array forms via
+    a new `_parse_agent_tag` static method. Added
+    `_active_agent_streams` set keyed by `(turn_id, agent_idx)` as a
+    per-agent single-stream guard disjoint from the main-tab
+    `_active_user_request` slot, so main-tab and agent-tab streams
+    run in parallel; a second concurrent stream for the same agent
+    is rejected. `_stream_chat` takes the new `agent_key` parameter
+    and uses it in the cleanup finally block to drop the per-agent
+    slot. 23 tests across two classes — `TestParseAgentTag` (10,
+    coercion rules for the static method) and
+    `TestAgentTaggedStreaming` (13, routing, guard scoping, parallel
+    streams, error paths, cleanup on error, stale-tag after close).
   - **C2 — not started.** Frontend spawn path on `stream-complete`:
     inspect `result.agent_blocks`, create tabs via the existing
     `_tabs`/`_tabLabels` infrastructure, route agent-tab textareas
