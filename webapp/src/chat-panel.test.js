@@ -25,6 +25,7 @@ import './chat-panel.js';
 import {
   ChatPanel,
   generateRequestId,
+  parseAgentTabId,
   _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
@@ -115,6 +116,103 @@ describe('generateRequestId', () => {
     const ids = new Set();
     for (let i = 0; i < 100; i += 1) ids.add(generateRequestId());
     expect(ids.size).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAgentTabId (C2b)
+// ---------------------------------------------------------------------------
+
+describe('parseAgentTabId', () => {
+  it('returns null for main tab', () => {
+    // Untagged path — the caller drops the agent_tag
+    // argument so the backend uses the main conversation.
+    expect(parseAgentTabId('main')).toBeNull();
+  });
+
+  it('parses a single-digit agent tab ID', () => {
+    expect(parseAgentTabId('turn_abc/agent-00')).toEqual([
+      'turn_abc',
+      0,
+    ]);
+    expect(parseAgentTabId('turn_abc/agent-07')).toEqual([
+      'turn_abc',
+      7,
+    ]);
+  });
+
+  it('parses a multi-digit agent index', () => {
+    // Three-digit indexes grow naturally per the tab ID
+    // format — agent-100, agent-042 both parse.
+    expect(parseAgentTabId('turn_xyz/agent-42')).toEqual([
+      'turn_xyz',
+      42,
+    ]);
+    expect(parseAgentTabId('turn_xyz/agent-100')).toEqual([
+      'turn_xyz',
+      100,
+    ]);
+  });
+
+  it('handles complex turn_id with underscores and digits', () => {
+    // Real turn IDs look like turn_1234567890_abcd.
+    // Parser must preserve the full turn_id verbatim.
+    const tabId = 'turn_1234567890_abcd/agent-03';
+    expect(parseAgentTabId(tabId)).toEqual([
+      'turn_1234567890_abcd',
+      3,
+    ]);
+  });
+
+  it('returns null for empty string', () => {
+    expect(parseAgentTabId('')).toBeNull();
+  });
+
+  it('returns null for non-string input', () => {
+    // Defensive — tab IDs come from Map keys so should
+    // always be strings, but malformed data shouldn't
+    // crash the send path.
+    expect(parseAgentTabId(null)).toBeNull();
+    expect(parseAgentTabId(undefined)).toBeNull();
+    expect(parseAgentTabId(42)).toBeNull();
+    expect(parseAgentTabId({})).toBeNull();
+  });
+
+  it('returns null when no slash present', () => {
+    // "agent-0" without a turn_id prefix — missing
+    // the required format component.
+    expect(parseAgentTabId('agent-0')).toBeNull();
+    expect(parseAgentTabId('random-string')).toBeNull();
+  });
+
+  it('returns null when slash is at start (no turn_id)', () => {
+    expect(parseAgentTabId('/agent-0')).toBeNull();
+  });
+
+  it('returns null when agent part is malformed', () => {
+    // Missing "agent-" prefix.
+    expect(parseAgentTabId('turn_abc/foo-0')).toBeNull();
+    // Non-numeric suffix.
+    expect(parseAgentTabId('turn_abc/agent-abc')).toBeNull();
+    // Empty agent number.
+    expect(parseAgentTabId('turn_abc/agent-')).toBeNull();
+    // Negative number (regex rejects the minus).
+    expect(parseAgentTabId('turn_abc/agent--1')).toBeNull();
+  });
+
+  it('returns null when agent part has whitespace', () => {
+    // Defensive against accidental whitespace in tab IDs.
+    expect(parseAgentTabId('turn_abc/agent- 0')).toBeNull();
+    expect(parseAgentTabId('turn_abc/agent-0 ')).toBeNull();
+  });
+
+  it('handles turn_id containing slashes by taking last slash', () => {
+    // Edge case — turn IDs don't normally contain slashes
+    // but the parser uses lastIndexOf defensively so the
+    // turn_id portion can contain any characters except
+    // the final "/agent-NN" suffix.
+    const result = parseAgentTabId('a/b/agent-1');
+    expect(result).toEqual(['a/b', 1]);
   });
 });
 
@@ -1058,6 +1156,177 @@ describe('ChatPanel send flow', () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2b — per-tab text routing via agent_tag
+// ---------------------------------------------------------------------------
+
+// When the active tab is an agent, _send must pass the
+// parsed [turn_id, agent_idx] as the agent_tag positional
+// argument to LLMService.chat_streaming. The backend's
+// C1c dispatcher routes the call to the agent's scope
+// rather than the main conversation. Main-tab sends pass
+// null for agent_tag.
+
+describe('ChatPanel agent_tag routing', () => {
+  async function setupWithAgentTab() {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab manually — same pattern as B3
+    // tests. The tab ID follows the backend's archive
+    // path convention.
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    return { panel: p, started, agentTabId };
+  }
+
+  it('main tab sends agent_tag=null', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Active tab defaults to "main" — the send path
+    // should pass null for agent_tag.
+    p._input = 'hello from main';
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledOnce();
+    // Args: requestId, message, files, images,
+    // excluded_urls, agent_tag. agent_tag is the 6th.
+    const args = started.mock.calls[0];
+    expect(args).toHaveLength(6);
+    expect(args[5]).toBeNull();
+  });
+
+  it('agent tab sends agent_tag=[turn_id, agent_idx]', async () => {
+    const { panel, started, agentTabId } =
+      await setupWithAgentTab();
+    panel._activeTabId = agentTabId;
+    await settle(panel);
+    panel._input = 'hello from agent';
+    await panel._send();
+    await settle(panel);
+    expect(started).toHaveBeenCalledOnce();
+    const args = started.mock.calls[0];
+    // agent_tag is the 6th positional arg.
+    expect(args[5]).toEqual(['turn_abc', 0]);
+  });
+
+  it('different agent tabs route to their own IDs', async () => {
+    // Two agent tabs in the same turn — each sends
+    // distinct agent_tag values so the backend routes
+    // to the right scope.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Seed two agents.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    // Send from agent-00.
+    p._activeTabId = 'turn_abc/agent-00';
+    await settle(p);
+    p._input = 'from zero';
+    await p._send();
+    await settle(p);
+    // Reset streaming so the next send proceeds.
+    // Normally the stream-complete event clears this;
+    // we shortcut for the test.
+    p._tabs.get('turn_abc/agent-00').streaming = false;
+    p._tabs.get('turn_abc/agent-00').currentRequestId = null;
+    // Send from agent-01.
+    p._activeTabId = 'turn_abc/agent-01';
+    await settle(p);
+    p._input = 'from one';
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledTimes(2);
+    // First call routed to agent-00.
+    expect(started.mock.calls[0][5]).toEqual([
+      'turn_abc',
+      0,
+    ]);
+    // Second call routed to agent-01.
+    expect(started.mock.calls[1][5]).toEqual([
+      'turn_abc',
+      1,
+    ]);
+  });
+
+  it('agent tabs from different turns carry their turn_ids', async () => {
+    // Turn IDs are per-spawn; two agent tabs with the
+    // same agent_idx from different turns must stay
+    // distinct.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_first/agent-00', p._makeTabState());
+    p._tabs.set('turn_second/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_first/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_second/agent-00', 'Agent 00');
+    p._activeTabId = 'turn_second/agent-00';
+    await settle(p);
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[0][5]).toEqual([
+      'turn_second',
+      0,
+    ]);
+  });
+
+  it('agent tab selection list comes from active tab', async () => {
+    // When an agent tab is active, the files argument
+    // reads from THAT tab's selected_files, not main's.
+    // Pinned because the `selectedFiles` getter is
+    // per-tab (D21 A4) — regression guard.
+    const { panel, started, agentTabId } =
+      await setupWithAgentTab();
+    // Different selections per tab.
+    panel._tabs.get('main').selectedFiles = ['main.py'];
+    panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
+    panel._activeTabId = agentTabId;
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    const args = started.mock.calls[0];
+    // files is the 3rd positional arg.
+    expect(args[2]).toEqual(['agent.py']);
+  });
+
+  it('switching back to main after agent send routes correctly', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    // Agent send first.
+    p._activeTabId = 'turn_abc/agent-00';
+    await settle(p);
+    p._input = 'from agent';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[0][5]).toEqual(['turn_abc', 0]);
+    // Reset the agent tab's streaming state.
+    p._tabs.get('turn_abc/agent-00').streaming = false;
+    p._tabs.get('turn_abc/agent-00').currentRequestId = null;
+    // Switch back to main, send.
+    p._activeTabId = 'main';
+    await settle(p);
+    p._input = 'from main';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[1][5]).toBeNull();
   });
 });
 

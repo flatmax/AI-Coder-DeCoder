@@ -100,6 +100,44 @@ function generateRequestId() {
 const _AGENT_LABEL_MAX_LENGTH = 40;
 
 /**
+ * Parse an agent tab ID into the ``[turn_id, agent_idx]``
+ * shape the backend's C1c ``agent_tag`` kwarg expects.
+ *
+ * Tab IDs for agents follow the format
+ * ``{turn_id}/agent-{NN}`` where NN is a zero-padded
+ * integer. The main tab uses the literal string
+ * ``"main"`` — returns null for that case and for any
+ * malformed input so the caller knows to skip the tag
+ * argument entirely (untagged call = main conversation).
+ *
+ * Shape validation is defensive because tab IDs come
+ * from the ``_tabs`` Map keys, which are set by the
+ * spawn path. A future refactor that changes the
+ * format would fail here loudly rather than silently
+ * routing to the wrong agent.
+ *
+ * @param {string} tabId — the tab's identifier
+ * @returns {[string, number] | null}
+ */
+function parseAgentTabId(tabId) {
+  if (typeof tabId !== 'string' || !tabId) return null;
+  if (tabId === 'main') return null;
+  // Split on the last slash so turn IDs containing
+  // slashes (unlikely but defensive) don't break
+  // parsing.
+  const slashIdx = tabId.lastIndexOf('/');
+  if (slashIdx <= 0) return null;
+  const turnId = tabId.slice(0, slashIdx);
+  const agentPart = tabId.slice(slashIdx + 1);
+  // Must be "agent-NN" where NN is non-negative int.
+  const match = /^agent-(\d+)$/.exec(agentPart);
+  if (!match) return null;
+  const agentIdx = parseInt(match[1], 10);
+  if (!Number.isFinite(agentIdx) || agentIdx < 0) return null;
+  return [turnId, agentIdx];
+}
+
+/**
  * Derive a tab-strip label for a spawned agent.
  *
  * Format: `Agent NN` for empty / whitespace tasks, or
@@ -4137,22 +4175,34 @@ export class ChatPanel extends RpcMixin(LitElement) {
           }
         }
       }
+      // agent_tag (6th positional arg) routes the call to
+      // the agent's ConversationScope when the active tab
+      // is an agent. Null for the main tab — the backend's
+      // C1c dispatcher treats null as "use the main
+      // conversation" and takes the untagged path through
+      // the single-stream guard. Parsed from the active
+      // tab ID so the turn_id + agent_idx exactly match
+      // the keys in the backend's _agent_contexts registry.
+      const agentTag = parseAgentTabId(this._activeTabId);
       await this.rpcExtract(
         'LLMService.chat_streaming',
         requestId,
         text,
         // Passed positionally as the 4th arg to match the
         // backend's `chat_streaming(request_id, message,
-        // files=None, images=None, excluded_urls=None)`
-        // signature. Phase 2c's selected-files list lives on
-        // this component as `selectedFiles` (set by the
-        // files-tab orchestrator); passing it through keeps
-        // the backend aware of the current context.
+        // files=None, images=None, excluded_urls=None,
+        // agent_tag=None)` signature. Phase 2c's selected-
+        // files list lives on this component as
+        // `selectedFiles` (set by the files-tab
+        // orchestrator); the per-tab getter routes to the
+        // active tab's state so agent tabs send their own
+        // selection, not the main tab's.
         Array.isArray(this.selectedFiles)
           ? this.selectedFiles
           : [],
         images,
         excludedUrls,
+        agentTag,
       );
       // Response is {status: "started"}. Chunks and completion
       // arrive via server-push events; nothing more to do here.
@@ -7719,6 +7769,7 @@ customElements.define('ac-chat-panel', ChatPanel);
 export {
   generateRequestId,
   deriveAgentTabLabel,
+  parseAgentTabId,
   _AGENT_LABEL_MAX_LENGTH,
   _loadDrawerOpen,
   _saveDrawerOpen,
