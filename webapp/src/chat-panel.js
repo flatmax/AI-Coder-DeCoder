@@ -2159,6 +2159,10 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._onOverflowOutsideClick.bind(this);
     this._onOverflowKeyDown =
       this._onOverflowKeyDown.bind(this);
+    // D2 — document-level chat-tab shortcut handler.
+    // Bound so the listener survives add/remove cycles
+    // (connectedCallback / disconnectedCallback).
+    this._onChatTabShortcut = this._onChatTabShortcut.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -2790,6 +2794,58 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onTabClick(tabId);
   }
 
+  /**
+   * D2 — document-level keyboard handler for chat-tab
+   * cycling. Alt+` moves to the next tab; Alt+Shift+`
+   * moves to the previous. Wraps at both ends.
+   *
+   * Gated on:
+   *   - `event.altKey` without Ctrl/Meta (Ctrl+Alt+`
+   *     is a window-manager binding on some Linux
+   *     distros; Cmd+Alt+` is used by macOS app
+   *     switchers)
+   *   - `event.key === '\`'` — backtick is the trigger
+   *     character. event.code would be 'Backquote'
+   *     but the char form is more robust across
+   *     layouts where backtick appears on a different
+   *     physical key
+   *   - `_tabs.size > 1` — single-tab mode has nothing
+   *     to cycle through, so we don't intercept the
+   *     keystroke and it passes through to any other
+   *     listeners (currently none, but defensive)
+   *
+   * preventDefault fires on every handled press so
+   * browser chrome doesn't interpret the key (some
+   * browsers bind Alt+` to "focus the next window").
+   *
+   * Does NOT fire on the Alt+1..9 number row — those
+   * belong to app-shell's dialog-tab shortcuts. The
+   * conflict with the original agent-browser spec
+   * (which asked for Alt+1..0) is documented in the
+   * connectedCallback comment.
+   */
+  _onChatTabShortcut(event) {
+    if (!event.altKey) return;
+    if (event.ctrlKey || event.metaKey) return;
+    if (event.key !== '`') return;
+    // Only active when multiple tabs exist. Avoids
+    // eating the keystroke when there's nowhere to
+    // cycle to.
+    if (this._tabs.size <= 1) return;
+    event.preventDefault();
+    const tabIds = Array.from(this._tabs.keys());
+    const currentIdx = tabIds.indexOf(this._activeTabId);
+    if (currentIdx < 0) return;
+    const delta = event.shiftKey ? -1 : 1;
+    // Modular arithmetic with positive modulo — JavaScript's
+    // `%` operator returns negative values for negative
+    // dividends, so we add the length before taking the
+    // modulo to force a positive result.
+    const nextIdx =
+      (currentIdx + delta + tabIds.length) % tabIds.length;
+    this._activeTabId = tabIds[nextIdx];
+  }
+
 
   /**
    * Close a tab (D21 Phase B3). Removes the tab from
@@ -3043,6 +3099,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    // D2 — chat-tab keyboard shortcuts. Alt+` cycles to the
+    // next tab, Alt+Shift+` to the previous. Installed at
+    // the document level (bubble phase) so the shortcut
+    // works regardless of focus location within the chat
+    // panel, but does NOT intercept typing in the textarea
+    // — backtick is a normal character and the chat panel
+    // itself doesn't consume it. Alt+` is not claimed by
+    // the app shell's shortcuts (those own Alt+1..4 and
+    // Alt+M).
+    //
+    // The Alt+1..0 variant suggested in the original
+    // agent-browser spec was rejected because app-shell
+    // already owns Alt+1..4 for dialog tab switching;
+    // changing that is out of scope for D2. Backtick
+    // cycling matches the Ctrl+Tab convention used by
+    // browsers and IDEs for tab navigation.
+    document.addEventListener('keydown', this._onChatTabShortcut);
     // `state-loaded` fires once on connect carrying the
     // full backend state snapshot (from get_current_state).
     // Distinct from `session-changed`, which fires when the
@@ -3070,6 +3143,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   disconnectedCallback() {
+    document.removeEventListener('keydown', this._onChatTabShortcut);
     window.removeEventListener('stream-chunk', this._onStreamChunk);
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);

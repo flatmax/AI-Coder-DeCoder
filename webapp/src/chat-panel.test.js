@@ -9287,6 +9287,307 @@ describe('ChatPanel D1 streaming indicator', () => {
 });
 
 // ---------------------------------------------------------------------------
+// D2 — chat-tab keyboard cycling (Alt+` / Alt+Shift+`)
+// ---------------------------------------------------------------------------
+
+// Document-level keyboard handler. Alt+` moves to the
+// next tab, Alt+Shift+` to the previous. Wraps at
+// both ends. Gated on tab count > 1 so single-tab
+// operation doesn't intercept the keystroke.
+//
+// The original agent-browser spec called for Alt+1..0;
+// implemented as Alt+backtick cycling instead because
+// app-shell already owns Alt+1..4 for dialog tab
+// switching. Documented in chat-panel.js.
+
+describe('ChatPanel D2 tab cycling shortcuts', () => {
+  /**
+   * Fire Alt+backtick (with optional shift) at the
+   * document level — matches where the chat panel
+   * installs its listener.
+   */
+  function pressAltBacktick(shift = false) {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: '`',
+        altKey: true,
+        shiftKey: shift,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  it('single-tab mode does not intercept the key', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    // No agent tabs yet. The shortcut should be a
+    // no-op — activeTabId stays main.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('single-tab mode does not preventDefault', async () => {
+    // Gating matters for future features that might
+    // use Alt+` for something else (e.g., a global
+    // command palette). Pinned so a refactor that
+    // forgets the tab-count guard fails here.
+    const p = mountPanel();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('Alt+` cycles to the next tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    // Start at main; Alt+` → agent-00.
+    expect(p._activeTabId).toBe('main');
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-00');
+    // Alt+` again → agent-01.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-01');
+  });
+
+  it('Alt+Shift+` cycles to the previous tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p._activeTabId = 'turn_abc/agent-01';
+    await settle(p);
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-00');
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+` wraps from last to first', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._activeTabId = 'turn_abc/agent-00';
+    await settle(p);
+    // agent-00 is the last tab; Alt+` wraps to main.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+Shift+` wraps from first to last', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    // main is the first tab; Alt+Shift+` wraps to the
+    // last (agent-01).
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-01');
+  });
+
+  it('preventDefault fires on handled keys', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('Ctrl+Alt+` is ignored (WM conflict)', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Meta+Alt+` is ignored (macOS conflict)', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('plain backtick (no Alt) does not cycle', async () => {
+    // Regression — typing ` in a textarea must not
+    // cycle tabs.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+1 does not trigger the shortcut', async () => {
+    // Alt+1..4 belong to app-shell's dialog-tab
+    // shortcuts. The chat panel must NOT consume
+    // them, even with multiple tabs open. Pinned to
+    // prevent accidental conflicts.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '1',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    // activeTabId unchanged AND preventDefault not
+    // called — app-shell needs the event to bubble
+    // through.
+    expect(p._activeTabId).toBe('main');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('dispatches active-tab-changed on cycle', async () => {
+    // Sanity — the cycle uses the same setter that
+    // click handlers use, so sibling components (files
+    // tab) get the same sync signal whether the user
+    // clicked or typed.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      pressAltBacktick();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'turn_abc/agent-00',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('disconnect removes the document listener', async () => {
+    // Without cleanup, a removed chat panel would keep
+    // receiving document keydowns and try to mutate
+    // detached state.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const activeTabIdBefore = p._activeTabId;
+    p.remove();
+    // After remove, the keystroke must NOT mutate the
+    // detached panel. The panel's _activeTabId still
+    // readable but shouldn't change.
+    pressAltBacktick();
+    expect(p._activeTabId).toBe(activeTabIdBefore);
+  });
+
+  it('three-tab cycle: main → agent-00 → agent-01 → main', async () => {
+    // End-to-end sanity check on the full cycle.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    const sequence = [
+      'turn_abc/agent-00',
+      'turn_abc/agent-01',
+      'main',
+      'turn_abc/agent-00',
+    ];
+    for (const expected of sequence) {
+      pressAltBacktick();
+      await settle(p);
+      expect(p._activeTabId).toBe(expected);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // C2d — stale-tag error handling on chat_streaming resolution
 // ---------------------------------------------------------------------------
 
