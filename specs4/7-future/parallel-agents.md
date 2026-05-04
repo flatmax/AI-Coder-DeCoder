@@ -18,6 +18,7 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
 | Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive |
 | Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
+| Assimilation refreshes full file content | [context-model.md](../3-llm/context-model.md) | Post-agent `file_context.add_file` re-reads from disk so the parent's next turn sees full post-edit content, not diffs |
 | Edit parser tolerates unknown markers as prose | [edit-protocol.md](../3-llm/edit-protocol.md#agent-spawn-blocks-reserved-marker) | `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` lines are ignored by the current parser; future agent-spawn handling adds branches without breaking existing edit parsing |
 
 None of these invariants cost anything in single-agent operation. Preserving them in the initial build means agent mode can be added later without refactoring the foundation layers.
@@ -81,7 +82,7 @@ If an agent's edit fails validation (anchor not found, or anchor became ambiguou
 - Edits applied to the working directory via the existing edit-block apply pipeline (per-path mutex ensures atomic writes)
 - When all agents complete, the backend assimilates their work into the parent conversation: the union of agent-modified and agent-created files is loaded (or refreshed) into the parent's file context, added to the parent's selection, and broadcast via `filesChanged` and `filesModified` so the frontend picker reloads. No automatic second LLM call fires
 - The main LLM's assistant message for the turn consists only of its initial response (which contains the spawn blocks as prose narrating what it delegated). The user reads that, inspects the working-tree changes via the picker and diff viewer, and drives review in a follow-up turn — "review what the agents did" is a one-click snippet in the chat panel's code-mode snippets (see [chat.md § Snippet Drawer](../5-webapp/chat.md#snippet-drawer))
-- On the next user turn, the parent LLM sees the newly-assimilated files in its context and can synthesise, iterate, or fix as the user directs. Iteration rounds (main LLM spawns a fresh decomposition after seeing the results) happen through the normal multi-turn flow, not as backend-driven recursion
+- On the next user turn, the parent LLM sees the newly-assimilated files (as full post-edit content) in its context and can synthesise, iterate, or fix as the user directs. Full files rather than diffs means the parent reviews the way a human would — reading the code in its current state — rather than reasoning over a diff that loses context. A parent that wants to see what specifically changed can invoke `git diff` via shell-command detection, but the default review input is the current on-disk state. Iteration rounds (main LLM spawns a fresh decomposition after seeing the results) happen through the normal multi-turn flow, not as backend-driven recursion
 
 ## Main LLM — Decomposition
 
@@ -182,7 +183,7 @@ The user drives review on the next turn. They see:
 
 On the next turn the user can:
 
-- Ask the main LLM to review the agents' work ("review what the agents did" is a one-click snippet). Because the agent-modified files are now in the parent's context, the main LLM sees the post-change content and can judge completeness, flag inconsistencies, and suggest fixes — the same way the user would manually.
+- Ask the main LLM to review the agents' work ("review what the agents did" is a one-click snippet). Because the agent-modified files are now in the parent's context as full post-edit content, the main LLM sees each file the way a human reviewer would — reading the code in its current state rather than reasoning over a diff — and can judge completeness, flag inconsistencies, and suggest fixes.
 - Ask for iteration ("the auth changes are good but the session handling needs another pass"). The main LLM may emit a fresh agent-spawn decomposition if the task still warrants parallelism, or finish the work itself.
 - Ask for specific fixes ("agent 1's edit to `src/logging.py` introduced a bug; fix it"). The main LLM has the full post-change file content and can produce a normal edit block.
 - Ignore the agents' output and continue with something else.
