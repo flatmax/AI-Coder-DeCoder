@@ -8973,6 +8973,320 @@ describe('ChatPanel close-tab backend wiring', () => {
 });
 
 // ---------------------------------------------------------------------------
+// D1 — Streaming indicator on tab labels
+// ---------------------------------------------------------------------------
+
+// Small pulsing dot appears on tab buttons when that
+// tab has an in-flight stream. Visible on all tabs
+// regardless of active state so users see work
+// happening on tabs they're not currently looking at.
+// Read directly from the per-tab `streaming` field,
+// which flips True in _send and False in
+// _onStreamComplete.
+
+describe('ChatPanel D1 streaming indicator', () => {
+  it('does not render indicator on idle tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    // Seed two agent tabs so the strip renders.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    const indicators = p.shadowRoot.querySelectorAll(
+      '.tab-streaming-indicator',
+    );
+    expect(indicators).toHaveLength(0);
+  });
+
+  it('renders indicator on streaming tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    // Flip the tab's streaming flag directly.
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    // Indicator appears inside that tab's button.
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      tabBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+    // Main tab has no indicator.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('renders indicator on active tab too', async () => {
+    // The indicator shows regardless of active state —
+    // the active tab may also be streaming, and the
+    // visual feedback is useful there too.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p._activeTabId = agentTabId;
+    p.requestUpdate();
+    await settle(p);
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(tabBtn.classList.contains('active')).toBe(true);
+    expect(
+      tabBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator on main tab when main is streaming', async () => {
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab so the strip renders.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    // Main is streaming.
+    p._tabs.get('main').streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('multiple tabs can show indicators simultaneously', async () => {
+    // Parallel streams — main plus an agent, or
+    // multiple agents. All get their own indicators.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p._tabs.get('turn_abc/agent-00').streaming = true;
+    p._tabs.get('turn_abc/agent-01').streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const indicators = p.shadowRoot.querySelectorAll(
+      '.tab-streaming-indicator',
+    );
+    // Two indicators — one per streaming tab. Main
+    // isn't streaming so no indicator there. The
+    // overflow menu isn't open so no duplicates.
+    expect(indicators).toHaveLength(2);
+  });
+
+  it('aria-busy reflects streaming state', async () => {
+    // Screen readers need to know which tabs are
+    // active/busy. aria-busy=true is the standard
+    // signal.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(tabBtn.getAttribute('aria-busy')).toBe('true');
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('indicator appears when send starts on active tab', async () => {
+    // End-to-end — start a real stream and verify the
+    // indicator renders. Covers the reactive-setter
+    // path (_streaming = true triggers requestUpdate).
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab so strip is visible.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // No indicators yet.
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-streaming-indicator'),
+    ).toHaveLength(0);
+    // Send from main.
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Main tab now has indicator.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator disappears when stream completes on active tab', async () => {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Complete the stream.
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done' },
+    });
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('indicator persists after switching away from streaming tab', async () => {
+    // User sends from an agent tab, then switches to
+    // main. The agent tab's indicator should stay
+    // visible in the strip so the user knows work is
+    // continuing.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    await settle(p);
+    // Send from agent tab.
+    p._input = 'work';
+    await p._send();
+    await settle(p);
+    // Switch to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Agent tab's indicator is still there.
+    const agentBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      agentBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator disappears when stream completes on inactive tab', async () => {
+    // User streams from agent tab, switches away, stream
+    // completes. The strip must re-render so the
+    // indicator disappears even though the user is on
+    // a different tab. Without the `else requestUpdate()`
+    // branch in _onStreamComplete, this would leak.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Switch to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Stream completes (still on main).
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done' },
+    });
+    await settle(p);
+    // Indicator gone from the (inactive) agent tab.
+    const agentBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      agentBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('indicator renders in overflow menu too', async () => {
+    // Consistency — a user with many tabs scrolling
+    // through the overflow menu should see the same
+    // indicator they'd see on the strip button.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    // Open overflow menu.
+    p.shadowRoot.querySelector('.tab-strip-overflow').click();
+    await settle(p);
+    const menuItem = p.shadowRoot.querySelector(
+      `.tab-strip-overflow-item[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      menuItem.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+    expect(menuItem.getAttribute('aria-busy')).toBe('true');
+  });
+
+  it('indicator is marked aria-hidden', async () => {
+    // The indicator is decorative — screen readers see
+    // the aria-busy attribute instead. Marking the
+    // visual dot aria-hidden prevents double-reporting.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const indicator = p.shadowRoot.querySelector(
+      '.tab-streaming-indicator',
+    );
+    expect(indicator.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // C2d — stale-tag error handling on chat_streaming resolution
 // ---------------------------------------------------------------------------
 

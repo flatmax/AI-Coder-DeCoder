@@ -733,6 +733,30 @@ export class ChatPanel extends RpcMixin(LitElement) {
       border-bottom-color: rgba(22, 27, 34, 0.6);
     }
 
+    /* Streaming pulse indicator (D21 Phase D1). Small
+     * animated dot that appears on tab labels when the
+     * tab has an in-flight stream. Visible on ALL
+     * tabs regardless of active state — the point is
+     * to let users see work happening on tabs they
+     * aren't currently looking at. Positioned inline
+     * with the label text; the tab button's existing
+     * layout accommodates it without re-flow because
+     * the dot has fixed width. */
+    .tab-streaming-indicator {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-primary, #58a6ff);
+      margin-right: 0.35rem;
+      vertical-align: middle;
+      animation: tab-pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes tab-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+
     /* Close button on agent tabs (D21 Phase B3). Small
      * ✕ glyph inline with the label, visible only on
      * hover / focus to avoid visual noise when many
@@ -2915,15 +2939,29 @@ export class ChatPanel extends RpcMixin(LitElement) {
             const label = this._tabLabels.get(tabId) || tabId;
             const active = tabId === this._activeTabId;
             const closable = tabId !== 'main';
+            // Streaming indicator (D1) — read the tab's
+            // own streaming flag directly from the Map
+            // rather than through the active-tab
+            // getters. Shown regardless of active state
+            // so users see work happening on tabs they
+            // aren't currently looking at.
+            const tab = this._tabs.get(tabId);
+            const streaming = !!(tab && tab.streaming);
             return html`
               <button
                 class="tab-strip-tab ${active ? 'active' : ''}"
                 role="tab"
                 aria-selected=${active}
+                aria-busy=${streaming}
                 data-tab-id=${tabId}
                 @click=${() => this._onTabClick(tabId)}
                 title=${label}
-              >${label}${closable
+              >${streaming
+                ? html`<span
+                    class="tab-streaming-indicator"
+                    aria-hidden="true"
+                  ></span>`
+                : ''}${label}${closable
                 ? html`<span
                     class="tab-close"
                     role="button"
@@ -2973,14 +3011,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
         ${tabs.map((tabId) => {
           const label = this._tabLabels.get(tabId) || tabId;
           const active = tabId === this._activeTabId;
+          const tab = this._tabs.get(tabId);
+          const streaming = !!(tab && tab.streaming);
           return html`
             <button
               class="tab-strip-overflow-item ${active ? 'active' : ''}"
               role="menuitem"
               data-tab-id=${tabId}
               title=${label}
+              aria-busy=${streaming}
               @click=${() => this._onOverflowItemClick(tabId)}
-            >${label}</button>
+            >${streaming
+              ? html`<span
+                  class="tab-streaming-indicator"
+                  aria-hidden="true"
+                ></span>`
+              : ''}${label}</button>
           `;
         })}
       </div>
@@ -3278,6 +3324,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
       ownerTab.currentRequestId = null;
       if (ownerIsActive) {
         this.requestUpdate('_streaming');
+      } else {
+        // Inactive tab — the active tab's reactive
+        // state didn't change, but the tab strip
+        // (which reads per-tab `streaming` directly
+        // from the Map) needs to re-render so the
+        // streaming indicator on this tab's button
+        // disappears. Request a plain update with no
+        // property name — Lit re-evaluates the whole
+        // template which picks up the indicator
+        // change.
+        this.requestUpdate();
       }
       // Remember the completed request ID so post-completion
       // events (compaction, URL fetches whose callbacks arrived
