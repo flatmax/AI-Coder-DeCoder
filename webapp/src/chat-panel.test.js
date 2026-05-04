@@ -8971,3 +8971,259 @@ describe('ChatPanel close-tab backend wiring', () => {
     expect(close).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// C2d — stale-tag error handling on chat_streaming resolution
+// ---------------------------------------------------------------------------
+
+// The backend's chat_streaming resolves with an error
+// dict (not a rejection) for gate failures: stale
+// agent_tag, duplicate stream, malformed payload,
+// restricted caller. _handleStreamStartError routes
+// these per-case:
+//
+// - "agent not found" → close stale tab, switch to
+//   main, toast, remove optimistic user message
+// - anything else → assistant error message in the
+//   current tab
+//
+// All paths clear streaming state and the request-ID
+// accumulator so stray stream events are dropped.
+
+describe('ChatPanel stream-start error handling', () => {
+  async function setupAgentTab(panel, tabId = 'turn_abc/agent-00') {
+    panel._tabs.set(tabId, panel._makeTabState());
+    panel._tabLabels.set(tabId, 'Agent 00');
+    panel._activeTabId = tabId;
+    await settle(panel);
+    return tabId;
+  }
+
+  it('stale agent_tag closes tab, switches to main, toasts', async () => {
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    const closeAgent = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: false });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': closeAgent,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabId = await setupAgentTab(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p._input = 'hello stale';
+      await p._send();
+      await settle(p);
+      // Tab is gone, active is main.
+      expect(p._tabs.has(tabId)).toBe(false);
+      expect(p._activeTabId).toBe('main');
+      // Warning toast fired.
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toMatch(/Agent tab closed/);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('stale agent_tag removes optimistic user message', async () => {
+    // The user message added before the RPC completes
+    // is removed — the scope is gone, the message
+    // never landed, pretending it was sent would be
+    // misleading. Cleaner to wipe it.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': vi
+        .fn()
+        .mockResolvedValue({ status: 'ok', closed: false }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await setupAgentTab(p);
+    p._input = 'stale message';
+    await p._send();
+    await settle(p);
+    // Optimistic user message gone from the tab's
+    // state (the tab itself is gone anyway, but
+    // verify we didn't leak it into main).
+    const mainTab = p._tabs.get('main');
+    expect(mainTab.messages).toEqual([]);
+  });
+
+  it('generic error appends assistant error message in current tab', async () => {
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Another stream is active (request xyz)',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Main tab send.
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    // User message still there, error message
+    // appended after it.
+    expect(p.messages).toHaveLength(2);
+    expect(p.messages[0].role).toBe('user');
+    expect(p.messages[0].content).toBe('hello');
+    expect(p.messages[1].role).toBe('assistant');
+    expect(p.messages[1].content).toContain('Another stream');
+  });
+
+  it('generic error clears streaming state', async () => {
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Malformed agent_tag',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(p._streaming).toBe(false);
+    expect(p._streamingContent).toBe('');
+    expect(p._currentRequestId).toBeNull();
+  });
+
+  it('generic error on agent tab keeps the tab open', async () => {
+    // Not "agent not found" — just a duplicate stream
+    // or similar recoverable issue. Tab stays, user
+    // can retry.
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Another stream is active',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabId = await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Tab still there.
+    expect(p._tabs.has(tabId)).toBe(true);
+    expect(p._activeTabId).toBe(tabId);
+    // Error message in that tab.
+    const tab = p._tabs.get(tabId);
+    expect(tab.messages).toHaveLength(2);
+    expect(tab.messages[1].content).toContain('Another stream');
+  });
+
+  it('"agent not found" on main tab does NOT close anything', async () => {
+    // Defensive — if the backend ever returns "agent
+    // not found" for a main-tab send (shouldn't
+    // happen, agent_tag is null), it falls through
+    // to generic error handling because agentTag is
+    // null.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // No agent tabs — main only.
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Main tab still there.
+    expect(p._tabs.has('main')).toBe(true);
+    expect(p._activeTabId).toBe('main');
+    // Error message appended.
+    expect(p.messages[1].content).toContain('agent not found');
+  });
+
+  it('RPC rejection still goes through the catch block', async () => {
+    // Network failures (Promise rejects, not resolves
+    // with error dict) still take the catch path.
+    // Pinned to prevent a refactor that accidentally
+    // conflates the two.
+    const chatStreaming = vi
+      .fn()
+      .mockRejectedValue(new Error('network died'));
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      p._input = 'hi';
+      await p._send();
+      await settle(p);
+      expect(p.messages[1].content).toContain('network died');
+      expect(p._streaming).toBe(false);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('stale tag clears request tracking', async () => {
+    // Stream events arriving for the failed request
+    // shouldn't be routed anywhere. Request ID
+    // accumulator must be cleared.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': vi
+        .fn()
+        .mockResolvedValue({ status: 'ok', closed: false }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Streaming state cleared on main (the tab we
+    // got switched to).
+    expect(p._streaming).toBe(false);
+    expect(p._currentRequestId).toBeNull();
+  });
+
+  it('stale tag still fires close_agent_context via _onTabClose', async () => {
+    // The stale-tag path goes through _onTabClose,
+    // which fires close_agent_context. The backend's
+    // idempotent-or-noop shape means double-firing
+    // is safe (first call already closed the agent,
+    // second returns closed:false).
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    const closeAgent = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: false });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': closeAgent,
+    });
+    const p = mountPanel();
+    await settle(p);
+    await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(closeAgent).toHaveBeenCalledOnce();
+    expect(closeAgent.mock.calls[0]).toEqual(['turn_abc', 0]);
+  });
+});

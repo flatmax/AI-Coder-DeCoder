@@ -4243,7 +4243,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       // tab ID so the turn_id + agent_idx exactly match
       // the keys in the backend's _agent_contexts registry.
       const agentTag = parseAgentTabId(this._activeTabId);
-      await this.rpcExtract(
+      const result = await this.rpcExtract(
         'LLMService.chat_streaming',
         requestId,
         text,
@@ -4263,8 +4263,34 @@ export class ChatPanel extends RpcMixin(LitElement) {
         excludedUrls,
         agentTag,
       );
-      // Response is {status: "started"}. Chunks and completion
-      // arrive via server-push events; nothing more to do here.
+      // Response is {status: "started"} on the happy path.
+      // Chunks and completion arrive via server-push events.
+      //
+      // Error responses (synchronous rejections from the
+      // backend's chat_streaming) don't become exceptions —
+      // they resolve the Promise with an error dict. Handle
+      // them here rather than waiting for stream events
+      // that will never arrive.
+      //
+      // Two error shapes we care about:
+      //
+      // 1. {error: "agent not found"} — C1c's stale-tag
+      //    case. The agent_tag pointed at a scope that no
+      //    longer exists (closed in a race, session
+      //    restarted). The frontend's tab is stale; close
+      //    it and switch to main.
+      //
+      // 2. Anything else — generic errors like "Another
+      //    stream is active", "Malformed agent_tag",
+      //    restricted-caller. Surface as an assistant-
+      //    slot error message so the user sees why the
+      //    stream didn't start, clear streaming state.
+      if (result && typeof result === 'object' && result.error) {
+        this._handleStreamStartError(
+          requestId, result.error, agentTag,
+        );
+        return;
+      }
     } catch (err) {
       console.error('[chat] chat_streaming failed', err);
       this.messages = [
@@ -4299,6 +4325,95 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._currentRequestId = null;
       this._streams.clear();
     }
+  }
+
+  /**
+   * Handle a synchronous error response from
+   * ``chat_streaming``. The backend resolves the
+   * Promise with an error dict (not a rejection) for
+   * gate failures — stale agent_tag, duplicate
+   * stream, restricted caller, malformed payload.
+   *
+   * Two distinct UX paths:
+   *
+   * 1. ``agent not found`` — stale agent tab. The
+   *    scope was closed server-side between tab
+   *    creation and send (close_agent_context raced
+   *    with send, or session restarted). Close the
+   *    tab locally, switch to main, toast the user.
+   *    The tab's message the user just typed is
+   *    lost — acceptable because the scope itself
+   *    is gone and typing into a ghost tab is the
+   *    real bug.
+   *
+   * 2. Everything else — append an error message to
+   *    the current tab's message list so the user
+   *    sees why the stream didn't start. Clear
+   *    streaming state, keep the tab open. User can
+   *    retry.
+   *
+   * Both paths clear request tracking (current/last
+   * IDs, streams map) so stream events that somehow
+   * arrive for the failed request are dropped.
+   *
+   * @param {string} requestId — the request ID
+   *   registered at send time
+   * @param {string} errorMsg — the `error` field
+   *   from the backend response
+   * @param {[string, number] | null} agentTag —
+   *   parsed agent tag, null for main-tab sends
+   */
+  _handleStreamStartError(requestId, errorMsg, agentTag) {
+    // Always clear request tracking first — the
+    // stream isn't happening, so don't leave the
+    // guard slot held or any stale request-ID refs.
+    this._streaming = false;
+    this._streamingContent = '';
+    this._currentRequestId = null;
+    this._streams.delete(requestId);
+
+    // Stale agent tab — C1c returns "agent not found"
+    // for this case. Close the tab, switch to main,
+    // toast. The tab ID we're closing is the ACTIVE
+    // one (we just used it to build agent_tag).
+    const isStaleAgent =
+      errorMsg === 'agent not found' && agentTag !== null;
+    if (isStaleAgent) {
+      const staleTabId = this._activeTabId;
+      // Remove the optimistic user message we added
+      // before sending — the scope is gone, so the
+      // message never landed anywhere useful.
+      if (
+        this.messages.length > 0
+        && this.messages[this.messages.length - 1].role === 'user'
+      ) {
+        this.messages = this.messages.slice(0, -1);
+      }
+      // _onTabClose handles the local removal,
+      // active-tab switch, close-tab event dispatch,
+      // AND the follow-up close_agent_context RPC.
+      // The latter is now idempotent-or-noop
+      // (backend returns closed:false for unknown
+      // agents), so firing it again for an already-
+      // closed agent is safe.
+      this._onTabClose(staleTabId);
+      this._emitToast(
+        'Agent tab closed — scope was no longer available',
+        'warning',
+      );
+      return;
+    }
+
+    // Generic error path. Append as an assistant
+    // message so it renders inline with the failed
+    // user message. Keeps the tab open for retry.
+    this.messages = [
+      ...this.messages,
+      {
+        role: 'assistant',
+        content: `**Error:** ${errorMsg}`,
+      },
+    ];
   }
 
   // ---------------------------------------------------------------
