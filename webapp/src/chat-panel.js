@@ -326,6 +326,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
     _activeTabId: { type: String, state: true, noAccessor: true },
 
     /**
+     * Whether the tab strip's overflow menu is open
+     * (D21 Phase B2). The menu is a dropdown anchored
+     * to the three-dots button at the right edge of
+     * the strip; it lists every tab by label for
+     * direct-jump navigation. Non-per-tab because
+     * it's a UI-level dropdown, not a conversation-
+     * level concern — every tab sees the same menu.
+     * Closed by default; toggled by button click or
+     * menu-item click; dismissed by outside-click or
+     * Escape.
+     */
+    _tabStripOverflowOpen: { type: Boolean, state: true },
+
+    /**
      * Messages as `{role, content, system_event?}` dicts.
      * Replaced wholesale on session load; appended during
      * normal conversation. Always a new array on change so
@@ -537,28 +551,55 @@ export class ChatPanel extends RpcMixin(LitElement) {
       line-height: 1.5;
     }
 
-    /* Tab strip — D21 Phase B1. Renders above the
+    /* Tab strip — D21 Phase B1 + B2. Renders above the
      * messages area when multiple tabs exist. Hidden
      * entirely in single-tab operation (the common
      * case) so it doesn't consume vertical space
      * users will never benefit from. Appears the
      * moment a second tab spawns.
      *
-     * Horizontal flex row; individual tabs shrink if
-     * needed but won't grow past their content. B2
-     * will add overflow scrolling for tab counts that
-     * exceed the panel width. */
+     * B2 adds horizontal overflow scrolling for when
+     * many agent tabs exceed the viewport width. The
+     * outer .tab-strip is a positioning context; the
+     * inner .tab-strip-scroll is the scrollable row
+     * of buttons, and .tab-strip-overflow is pinned
+     * at the right as an always-available direct-jump
+     * affordance. */
     .tab-strip {
       flex-shrink: 0;
+      display: flex;
+      align-items: stretch;
+      background: rgba(22, 27, 34, 0.6);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      position: relative;
+    }
+    .tab-strip-scroll {
+      flex: 1;
+      min-width: 0;
       display: flex;
       align-items: center;
       gap: 0.125rem;
       padding: 0.25rem 0.5rem;
-      background: rgba(22, 27, 34, 0.6);
-      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
-      overflow: hidden;
+      overflow-x: auto;
+      overflow-y: hidden;
+      /* Thin scrollbar — macOS and most Linux themes
+       * auto-hide scrollbars; Firefox and Windows show
+       * them. A 4px track keeps the strip compact
+       * regardless of platform default. */
+      scrollbar-width: thin;
+    }
+    .tab-strip-scroll::-webkit-scrollbar {
+      height: 4px;
+    }
+    .tab-strip-scroll::-webkit-scrollbar-thumb {
+      background: rgba(240, 246, 252, 0.15);
+      border-radius: 2px;
+    }
+    .tab-strip-scroll::-webkit-scrollbar-track {
+      background: transparent;
     }
     .tab-strip-tab {
+      flex-shrink: 0;
       background: transparent;
       border: 1px solid transparent;
       color: var(--text-secondary, #8b949e);
@@ -582,6 +623,114 @@ export class ChatPanel extends RpcMixin(LitElement) {
       color: var(--accent-primary, #58a6ff);
       border-color: rgba(88, 166, 255, 0.3);
       border-bottom-color: rgba(22, 27, 34, 0.6);
+    }
+
+    /* Close button on agent tabs (D21 Phase B3). Small
+     * ✕ glyph inline with the label, visible only on
+     * hover / focus to avoid visual noise when many
+     * tabs are present. Nested inside the tab button
+     * so it shares the tab's layout, but uses its own
+     * click handler with stopPropagation so clicking
+     * the ✕ doesn't also flip activeTabId to the tab
+     * we're about to close. Main tab never renders
+     * this button. */
+    .tab-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      margin-left: 0.4rem;
+      border: none;
+      background: transparent;
+      color: inherit;
+      opacity: 0;
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 0.85rem;
+      line-height: 1;
+      padding: 0;
+      transition: opacity 100ms ease, background 100ms ease;
+    }
+    .tab-strip-tab:hover .tab-close,
+    .tab-strip-tab.active .tab-close,
+    .tab-close:focus-visible {
+      opacity: 0.7;
+    }
+    .tab-close:hover {
+      opacity: 1 !important;
+      background: rgba(240, 246, 252, 0.15);
+    }
+
+    /* Overflow menu — three-dots button at the right
+     * edge, always visible when the strip is visible
+     * (at least 2 tabs). Clicking opens a dropdown
+     * listing every tab by label for direct jumping.
+     *
+     * The button is outside the scroll region so it
+     * stays pinned regardless of scroll position —
+     * users with 15 agent tabs can always find the
+     * jump menu without scrolling to the end. */
+    .tab-strip-overflow {
+      flex-shrink: 0;
+      background: transparent;
+      border: none;
+      border-left: 1px solid rgba(240, 246, 252, 0.08);
+      color: var(--text-secondary, #8b949e);
+      padding: 0 0.6rem;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tab-strip-overflow:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-overflow[aria-expanded="true"] {
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-overflow-menu {
+      position: absolute;
+      top: 100%;
+      right: 0.25rem;
+      z-index: 20;
+      background: var(--bg-primary, #0d1117);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      padding: 0.25rem;
+      min-width: 12rem;
+      max-width: 20rem;
+      max-height: 24rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+    }
+    .tab-strip-overflow-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tab-strip-overflow-item:hover {
+      background: rgba(240, 246, 252, 0.08);
+    }
+    .tab-strip-overflow-item.active {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
     }
 
     .messages-wrapper {
@@ -1820,6 +1969,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._tabLabels = new Map();
     this._tabLabels.set('main', 'Main');
 
+    // Overflow menu open state (D21 Phase B2). The
+    // three-dots button in the strip opens a dropdown
+    // listing every tab by label; clicking an item
+    // jumps directly to that tab. The menu is a
+    // reactive property (declared in `static
+    // properties` above) rather than a per-tab field
+    // because it's a UI-level dropdown — all tabs see
+    // the same menu. Closed by default.
+    this._tabStripOverflowOpen = false;
+
     // ---------------------------------------------------------
     // Cross-tab / component-scoped state (unchanged)
     // ---------------------------------------------------------
@@ -1858,6 +2017,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
     this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
     this._onCommitResult = this._onCommitResult.bind(this);
+
+    // Overflow menu dismissal — bound so add/remove on
+    // document scope find the same reference. The
+    // listeners are attached only while the menu is
+    // open and removed on close to avoid polluting
+    // the document event loop when the menu is idle.
+    this._onOverflowOutsideClick =
+      this._onOverflowOutsideClick.bind(this);
+    this._onOverflowKeyDown =
+      this._onOverflowKeyDown.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -2387,6 +2556,161 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   /**
+   * Toggle the overflow menu open/closed (D21 Phase
+   * B2). Attaches capture-phase document listeners
+   * for outside-click and Escape dismissal when
+   * opening; detaches them when closing. Capture
+   * phase matters because the menu's own button
+   * clicks are inside the shadow root, and the
+   * outside-click check walks `composedPath()` to
+   * distinguish inside vs outside.
+   */
+  _toggleOverflowMenu() {
+    if (this._tabStripOverflowOpen) {
+      this._closeOverflowMenu();
+    } else {
+      this._openOverflowMenu();
+    }
+  }
+
+  _openOverflowMenu() {
+    if (this._tabStripOverflowOpen) return;
+    this._tabStripOverflowOpen = true;
+    // Capture-phase so we see the event before any
+    // child handler stops propagation. Without
+    // capture, a click inside the menu's own
+    // shadow-rooted children could mask the
+    // outside-click check.
+    document.addEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
+  }
+
+  _closeOverflowMenu() {
+    if (!this._tabStripOverflowOpen) return;
+    this._tabStripOverflowOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
+  }
+
+  /**
+   * Document-level click listener (capture phase)
+   * installed while the overflow menu is open. Walks
+   * `composedPath()` to see if the click originated
+   * inside the menu or its toggle button — if yes,
+   * let it through (the item's own click handler
+   * will jump tabs and close). Otherwise close the
+   * menu. Matches the pattern used by the picker's
+   * context menu and the file picker's branch menu.
+   */
+  _onOverflowOutsideClick(event) {
+    const path = event.composedPath ? event.composedPath() : [];
+    const hit = path.some(
+      (el) =>
+        el instanceof Element &&
+        (el.classList?.contains('tab-strip-overflow') ||
+          el.classList?.contains('tab-strip-overflow-menu')),
+    );
+    if (!hit) this._closeOverflowMenu();
+  }
+
+  /**
+   * Document-level keydown listener (capture phase)
+   * installed while the overflow menu is open.
+   * Escape closes the menu and stops propagation so
+   * the textarea's own Escape handler doesn't also
+   * fire (it clears input text, which would be a
+   * surprise when the user just wanted to dismiss
+   * the menu).
+   */
+  _onOverflowKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeOverflowMenu();
+    }
+  }
+
+  /**
+   * Handle an overflow menu item click — jumps to
+   * the target tab and closes the menu. Same
+   * tab-switch path as `_onTabClick` (setter flips
+   * `_activeTabId`, which fires `active-tab-changed`
+   * for sibling components).
+   */
+  _onOverflowItemClick(tabId) {
+    this._closeOverflowMenu();
+    this._onTabClick(tabId);
+  }
+
+
+  /**
+   * Close a tab (D21 Phase B3). Removes the tab from
+   * `_tabs` and `_tabLabels`; if the closed tab was
+   * active, switches to Main. Main tab can never be
+   * closed (the button isn't rendered for it) but a
+   * defensive guard here makes the intent explicit and
+   * protects against a future programmatic call that
+   * bypasses the UI.
+   *
+   * Dispatches `close-tab` with `{tabId}` so Phase C's
+   * backend integration can hook in: when
+   * `LLMService.close_agent_context` lands, wiring it
+   * becomes a handler on this event rather than
+   * modifying the close flow here. Letting the event
+   * fire even when nothing listens costs nothing and
+   * keeps the event surface stable for when it does.
+   */
+  _onTabClose(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === 'main') return;
+    if (!this._tabs.has(tabId)) return;
+    const wasActive = this._activeTabId === tabId;
+    this._tabs.delete(tabId);
+    this._tabLabels.delete(tabId);
+    // Switch to Main first (if the closed tab was
+    // active) so the active-tab-changed event fires
+    // with a valid target. Otherwise the render below
+    // would still see _activeTabId pointing at the
+    // deleted tab, and every per-tab getter would
+    // lazy-create a fresh empty state at the stale key,
+    // reviving the tab we just closed.
+    if (wasActive) {
+      this._activeTabId = 'main';
+    }
+    // Force a re-render so the strip reflects the
+    // deletion — _tabs mutations don't trigger Lit's
+    // dirty-check on their own.
+    this.requestUpdate();
+    this.dispatchEvent(
+      new CustomEvent('close-tab', {
+        detail: { tabId },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+🟨🟨🟨 REPL
+
+Wait — I wrote `🟨🟨🟨 REPL` twice. Let me fix that.
+
+
+  /**
    * Render the tab strip. Returns an empty template
    * when only the main tab exists — the strip consumes
    * vertical space, and users running single-agent
@@ -2398,6 +2722,17 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * ID. Missing labels fall back to the tab ID itself
    * so a stale Map (future bug) produces visible but
    * ugly output rather than empty buttons.
+   *
+   * B2 layout: the outer `.tab-strip` is a flex row
+   * containing a scrollable `.tab-strip-scroll` with
+   * the tab buttons and a pinned `.tab-strip-overflow`
+   * button that toggles a direct-jump dropdown. The
+   * overflow button is always present when the strip
+   * is visible (≥2 tabs) rather than gated on a
+   * "tabs exceed width" measurement — measuring overflow
+   * reliably in jsdom is fragile, and users with many
+   * agents benefit from direct access regardless of
+   * whether the strip is currently overflowing.
    */
   _renderTabStrip() {
     // Hide in single-tab operation. The `_tabs` Map
@@ -2410,18 +2745,77 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // left-to-right reading order for the strip.
     const tabs = Array.from(this._tabs.keys());
     return html`
-      <div class="tab-strip" role="tablist">
+      <div class="tab-strip">
+        <div class="tab-strip-scroll" role="tablist">
+          ${tabs.map((tabId) => {
+            const label = this._tabLabels.get(tabId) || tabId;
+            const active = tabId === this._activeTabId;
+            const closable = tabId !== 'main';
+            return html`
+              <button
+                class="tab-strip-tab ${active ? 'active' : ''}"
+                role="tab"
+                aria-selected=${active}
+                data-tab-id=${tabId}
+                @click=${() => this._onTabClick(tabId)}
+                title=${label}
+              >${label}${closable
+                ? html`<span
+                    class="tab-close"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Close ${label}"
+                    title="Close tab"
+                    @click=${(e) => {
+                      e.stopPropagation();
+                      this._onTabClose(tabId);
+                    }}
+                    @keydown=${(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        this._onTabClose(tabId);
+                      }
+                    }}
+                  >✕</span>`
+                : ''}</button>
+            `;
+          })}
+        </div>
+        <button
+          class="tab-strip-overflow"
+          aria-label="Tab list"
+          aria-haspopup="menu"
+          aria-expanded=${this._tabStripOverflowOpen}
+          title="Jump to tab"
+          @click=${this._toggleOverflowMenu}
+        >⋯</button>
+        ${this._tabStripOverflowOpen
+          ? this._renderOverflowMenu(tabs)
+          : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Render the overflow dropdown menu contents. One
+   * item per tab, labelled the same way as the strip
+   * button (so users see the same text they'd see
+   * without scrolling). Clicking jumps directly.
+   */
+  _renderOverflowMenu(tabs) {
+    return html`
+      <div class="tab-strip-overflow-menu" role="menu">
         ${tabs.map((tabId) => {
           const label = this._tabLabels.get(tabId) || tabId;
           const active = tabId === this._activeTabId;
           return html`
             <button
-              class="tab-strip-tab ${active ? 'active' : ''}"
-              role="tab"
-              aria-selected=${active}
+              class="tab-strip-overflow-item ${active ? 'active' : ''}"
+              role="menuitem"
               data-tab-id=${tabId}
-              @click=${() => this._onTabClick(tabId)}
               title=${label}
+              @click=${() => this._onOverflowItemClick(tabId)}
             >${label}</button>
           `;
         })}
@@ -2488,6 +2882,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._onModeOrReviewChanged,
     );
     window.removeEventListener('commit-result', this._onCommitResult);
+    // If the overflow menu was open at unmount, release
+    // the document listeners so they don't keep a stale
+    // handler alive. Closing via the setter would be
+    // cleaner but also touches reactive state on an
+    // already-tearing-down component.
+    document.removeEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
     if (this._rafHandle != null) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;

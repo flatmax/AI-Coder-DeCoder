@@ -5690,16 +5690,24 @@ describe('ChatPanel tab strip rendering', () => {
     );
   });
 
-  it('tablist role on the strip container', async () => {
+  it('tablist role on the inner scroll container', async () => {
     // ARIA tablist role required for screen-reader
     // users to recognise the strip as a tab widget.
+    // B2 moved `role="tablist"` from the outer
+    // `.tab-strip` (which became a pure layout flex
+    // row) to the inner `.tab-strip-scroll` that
+    // actually holds the tab buttons. The overflow
+    // button is a sibling of the tablist, not a
+    // member, so pinning the role on the scroll
+    // container matches the ARIA tablist contract
+    // (tablist contains tabs — nothing else).
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
     p.requestUpdate();
     await settle(p);
-    const strip = p.shadowRoot.querySelector('.tab-strip');
-    expect(strip.getAttribute('role')).toBe('tablist');
+    const scroll = p.shadowRoot.querySelector('.tab-strip-scroll');
+    expect(scroll.getAttribute('role')).toBe('tablist');
   });
 
   it('buttons carry role="tab"', async () => {
@@ -5849,6 +5857,821 @@ describe('ChatPanel tab strip interaction', () => {
     expect(
       p.shadowRoot.querySelector('.messages').textContent,
     ).not.toContain('main tab message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab strip overflow (D21 Phase B2)
+// ---------------------------------------------------------------------------
+
+// B2 adds horizontal scrolling to the strip (so many
+// agent tabs don't compress the buttons to uselessness)
+// and a three-dots overflow button that opens a direct-
+// jump dropdown menu. Tests pin:
+//
+//   - Scroll container exists with overflow-x: auto
+//   - Overflow button is always visible when the strip
+//     is visible (never gated on measured overflow)
+//   - Menu opens on button click, closes on click again
+//   - Menu items reflect all tabs in insertion order
+//   - Clicking a menu item jumps to that tab and closes
+//     the menu
+//   - Outside-click and Escape both dismiss the menu
+//   - Menu is suppressed in single-tab mode (strip
+//     hidden → no overflow button either)
+
+describe('ChatPanel tab strip overflow — structure', () => {
+  it('has a scroll container inside the strip', async () => {
+    // B2 moved the tab buttons into an inner
+    // `.tab-strip-scroll` flex child so the outer
+    // `.tab-strip` can hold both the scrollable
+    // row AND the pinned overflow button. Pinned
+    // so a future refactor that collapses the two
+    // back into one container fails here.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const scroll = p.shadowRoot.querySelector('.tab-strip-scroll');
+    expect(scroll).toBeTruthy();
+    // Tab buttons live inside it, not the outer
+    // `.tab-strip` directly.
+    const tabsInScroll = scroll.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(tabsInScroll.length).toBeGreaterThan(0);
+  });
+
+  it('overflow button is visible when strip is visible', async () => {
+    // Always-available per the B2 design — not gated
+    // on measured overflow. Users with 10+ agents
+    // benefit from direct access regardless of
+    // scroll position, and jsdom can't reliably
+    // measure overflow.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    expect(btn).toBeTruthy();
+  });
+
+  it('overflow button is absent in single-tab mode', async () => {
+    // The strip itself is hidden, so the overflow
+    // button is hidden with it.
+    const p = mountPanel();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow'),
+    ).toBeNull();
+  });
+
+  it('overflow button carries aria attributes', async () => {
+    // aria-haspopup="menu" + aria-expanded reflects
+    // open state. Pinned because screen-reader
+    // behaviour changes based on these.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    expect(btn.getAttribute('aria-haspopup')).toBe('menu');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('ChatPanel tab strip overflow — open/close', () => {
+  it('menu is closed by default', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeNull();
+  });
+
+  it('clicking the overflow button opens the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeTruthy();
+  });
+
+  it('aria-expanded reflects open state', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('clicking the button again closes the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    btn.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeNull();
+  });
+
+  it('outside click dismisses the menu', async () => {
+    // Document-level capture-phase listener dismisses
+    // when the click doesn't hit the overflow button
+    // or the menu itself. Simulate a click on
+    // document.body.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Click something outside the menu and button.
+    document.body.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+
+  it('click inside the menu does not dismiss', async () => {
+    // The outside-click check walks composedPath —
+    // a click on the menu container itself (not on
+    // an item) should not close. The item handler
+    // closes explicitly.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    // Click the menu's own container (not any item).
+    const menu = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-menu',
+    );
+    menu.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+  });
+
+  it('Escape dismisses the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Fire Escape on the document — capture-phase
+    // listener catches it.
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+});
+
+describe('ChatPanel tab strip overflow — menu items', () => {
+  it('renders one item per tab in insertion order', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    seedLabeledTab(p, 'agent-2', 'Agent 2');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const items = p.shadowRoot.querySelectorAll(
+      '.tab-strip-overflow-item',
+    );
+    expect(items.length).toBe(4);
+    expect(items[0].getAttribute('data-tab-id')).toBe('main');
+    expect(items[1].getAttribute('data-tab-id')).toBe('agent-0');
+    expect(items[2].getAttribute('data-tab-id')).toBe('agent-1');
+    expect(items[3].getAttribute('data-tab-id')).toBe('agent-2');
+  });
+
+  it('item labels match the strip button labels', async () => {
+    // Users should see the same text in the menu as
+    // on the strip, so jumping is unsurprising.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(item.textContent.trim()).toBe(
+      'Agent 0: refactor auth',
+    );
+  });
+
+  it('main item renders as "Main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const mainItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="main"]',
+    );
+    expect(mainItem.textContent.trim()).toBe('Main');
+  });
+
+  it('active item gets the .active class', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const mainItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="main"]',
+    );
+    const agentItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(mainItem.classList.contains('active')).toBe(false);
+    expect(agentItem.classList.contains('active')).toBe(true);
+  });
+
+  it('items carry role="menuitem"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const items = p.shadowRoot.querySelectorAll(
+      '.tab-strip-overflow-item',
+    );
+    for (const item of items) {
+      expect(item.getAttribute('role')).toBe('menuitem');
+    }
+  });
+});
+
+describe('ChatPanel tab strip overflow — jump', () => {
+  it('clicking an item flips _activeTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-1"]',
+    );
+    item.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-1');
+  });
+
+  it('clicking an item closes the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    item.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+
+  it('clicking dispatches active-tab-changed', async () => {
+    // Same path as clicking a strip button — goes
+    // through the setter, which fires the event for
+    // sibling components.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+        )
+        .click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking the already-active item is a no-op', async () => {
+    // The setter short-circuits; no event fires. Menu
+    // still closes though — explicit close in the
+    // item handler.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      // Main is already active; clicking its item is
+      // a no-op event-wise but still closes the menu.
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-overflow-item[data-tab-id="main"]',
+        )
+        .click();
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+      expect(p._tabStripOverflowOpen).toBe(false);
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+});
+
+describe('ChatPanel tab strip overflow — cleanup', () => {
+  it('disconnect releases document listeners', async () => {
+    // If the menu is open at unmount, the document
+    // click and keydown listeners must be removed
+    // (belt-and-braces — a closing transition would
+    // also remove them, but disconnect short-
+    // circuits that path).
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Unmount with menu open.
+    p.remove();
+    // A subsequent document click / Escape must not
+    // throw. No easy way to observe absence directly,
+    // but if the listener were still attached it
+    // would try to mutate a detached component.
+    expect(() => document.body.click()).not.toThrow();
+    expect(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+        }),
+      ),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab close button (D21 Phase B3)
+// ---------------------------------------------------------------------------
+
+// The close button is the user-facing mechanism for
+// retiring an agent tab. Main tab never shows it; agent
+// tabs always do. Clicking dispatches a `close-tab`
+// event (for future backend wiring) and removes the tab
+// from the strip. If the closed tab was active, we
+// switch to Main so no per-tab getter ends up querying
+// a deleted key.
+
+describe('ChatPanel tab close — rendering', () => {
+  it('main tab does not render a close button', async () => {
+    // Main can't be closed — the only conversation
+    // path that always exists. Absence of the button
+    // is load-bearing: a stray ✕ on Main would let
+    // users accidentally delete their primary
+    // conversation.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.querySelector('.tab-close')).toBeNull();
+  });
+
+  it('agent tabs render a close button', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    const close = agentBtn.querySelector('.tab-close');
+    expect(close).toBeTruthy();
+    // ✕ glyph for visual identification.
+    expect(close.textContent.trim()).toBe('✕');
+  });
+
+  it('close button carries accessible label', async () => {
+    // Screen readers need to identify which tab the
+    // button closes when multiple are present.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    expect(close.getAttribute('aria-label')).toBe(
+      'Close Agent 0: refactor',
+    );
+  });
+
+  it('close button has role=button and keyboard affordance', async () => {
+    // Rendered as a <span role="button" tabindex="0">
+    // because a nested <button> inside a <button> is
+    // invalid HTML — browsers may hoist it out of the
+    // parent, breaking the layout. Same screen-reader
+    // semantics, no parser interference.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    expect(close.tagName).toBe('SPAN');
+    expect(close.getAttribute('role')).toBe('button');
+    expect(close.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('overflow menu items have no close affordance', async () => {
+    // Close is strip-only by design. The menu is a
+    // pure jump affordance; destructive actions live
+    // where the user is already aiming precisely.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(item.querySelector('.tab-close')).toBeNull();
+  });
+});
+
+describe('ChatPanel tab close — behavior', () => {
+  it('clicking close removes the tab from _tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(true);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+    // Sibling agent still present.
+    expect(p._tabs.has('agent-1')).toBe(true);
+    // Main always stays.
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('removes from _tabLabels too', async () => {
+    // Label Map is parallel storage; leaving a stale
+    // entry would accumulate over long sessions and
+    // produce ghost labels if a tab with the same ID
+    // were ever spawned again.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._tabLabels.has('agent-0')).toBe(false);
+  });
+
+  it('closing the active tab switches to main', async () => {
+    // Load-bearing — if we didn't switch, the active
+    // ID would point at a deleted key and every
+    // per-tab getter would lazy-create a fresh empty
+    // state there, reviving the tab we just closed.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('closing an inactive tab preserves the active one', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-1';
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-1');
+  });
+
+  it('close click does not flip activeTabId to the closing tab', async () => {
+    // The parent tab button's click handler flips
+    // activeTabId; the close span's handler must call
+    // stopPropagation so clicking ✕ doesn't first
+    // switch to the tab we're about to delete (which
+    // would fire a stray active-tab-changed event).
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-1';
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const close = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      );
+      close.click();
+      await settle(p);
+      // No active-tab-changed fires (the closed tab
+      // wasn't active, and the close handler doesn't
+      // touch active state in that case).
+      expect(listener).not.toHaveBeenCalled();
+      // Active tab unchanged.
+      expect(p._activeTabId).toBe('agent-1');
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('dispatches close-tab event with tabId', async () => {
+    // The event is the hook Phase C's backend
+    // integration will use: a handler on close-tab
+    // will call LLMService.close_agent_context once
+    // that RPC lands. Firing now (with nothing
+    // listening) keeps the surface stable.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('close-tab', listener);
+    try {
+      const close = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      );
+      close.click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+      });
+    } finally {
+      p.removeEventListener('close-tab', listener);
+    }
+  });
+
+  it('event bubbles and composes across shadow DOM', async () => {
+    // Phase C's handler may live in the files-tab or
+    // app shell — needs to cross the shadow boundary
+    // to reach either.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const outerListener = vi.fn();
+    document.body.addEventListener(
+      'close-tab',
+      outerListener,
+    );
+    try {
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+        )
+        .click();
+      await settle(p);
+      expect(outerListener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'close-tab',
+        outerListener,
+      );
+    }
+  });
+
+  it('Enter key on the close button fires close', async () => {
+    // Keyboard users reach the close button via Tab.
+    // Enter / Space activate like a native button.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('Space key on the close button fires close', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: ' ',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('strip disappears when last agent tab closes', async () => {
+    // The strip hides in single-tab operation (only
+    // Main). Closing the last agent tab should
+    // cascade back to that state.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeTruthy();
+    p.shadowRoot
+      .querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      )
+      .click();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+  });
+});
+
+describe('ChatPanel tab close — guards', () => {
+  it('_onTabClose ignores main', async () => {
+    // Programmatic safety guard — the UI never
+    // renders a close button for main, but a future
+    // caller (keyboard shortcut, tests, etc.) could
+    // invoke _onTabClose directly. Must refuse.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._onTabClose('main');
+    await settle(p);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('_onTabClose ignores unknown tab IDs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // No throw, no change.
+    expect(() => p._onTabClose('nonexistent')).not.toThrow();
+    expect(p._tabs.size).toBe(2);
+  });
+
+  it('_onTabClose ignores malformed input', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Non-string, empty, null, undefined all no-op.
+    expect(() => p._onTabClose(null)).not.toThrow();
+    expect(() => p._onTabClose(undefined)).not.toThrow();
+    expect(() => p._onTabClose('')).not.toThrow();
+    expect(() => p._onTabClose(42)).not.toThrow();
+    expect(p._tabs.has('agent-0')).toBe(true);
   });
 });
 
