@@ -17,7 +17,7 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | `agentsSpawned` event fires BEFORE agent dispatch | [streaming.md](../3-llm/streaming.md) | Frontend creates tabs in time to claim child request IDs; without it, fast-completing agents' chunks are dropped |
 | Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
-| Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive |
+| Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive. Lifetime is session-scoped (cleared by `new_session`), NOT turn-scoped, so the agent registry persists across turns for id-based reuse |
 | Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
 | Assimilation refreshes full file content | [context-model.md](../3-llm/context-model.md) | Post-agent `file_context.add_file` re-reads from disk so the parent's next turn sees full post-edit content, not diffs |
 | Edit parser tolerates unknown markers as prose | [edit-protocol.md](../3-llm/edit-protocol.md#agent-spawn-blocks-reserved-marker) | `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` lines are ignored by the current parser; future agent-spawn handling adds branches without breaking existing edit parsing |
@@ -57,7 +57,25 @@ This means agents that need clarification, a file, or a decision just say so as 
 
 Agents from a previous agentic turn are reachable via the history browser: scrolling the main chat back to that turn surfaces a "View agents" affordance which loads read-only tabs from the archive. Archives stay on disk across server restarts; read-only tabs are fully browsable but their input boxes are disabled because the ContextManager is long gone.
 
-The backend exposes one RPC to support this:
+### Frontend agent-block rendering
+
+Agent-spawn blocks emitted in the orchestrator's assistant message render as cards in the main chat, symmetric to the existing edit-block cards. The mechanism mirrors edit-block rendering:
+
+- The chat panel's response segmenter (`webapp/src/edit-blocks.js`) learns an `agent` segment type alongside the existing prose and edit segments. AGENT/AGEND markers in the response are detected and the body is parsed into `{id, task}`.
+- A new module `webapp/src/agent-block-render.js`, symmetric to `edit-block-render.js`, takes an agent segment plus optional execution status (`pending` / `streaming` / `complete` / `error`) and returns the card HTML.
+- The card displays:
+  - The agent's `id` as a clickable chip, styled like edit-block file-path chips
+  - The `task` body, rendered as markdown (collapsible if long)
+  - A status badge reflecting the agent's child stream — pulled from the chat panel's per-request streaming state (keyed by `{parent_request_id}-agent-{idx}`)
+- Clicking the id chip dispatches a custom event that the chat panel handles by switching to that agent's tab — the same code path `_onTabClick` already uses. The agent's tab is guaranteed to exist by the `agentsSpawned` event ordering invariant.
+
+Status integration is the same per-request-id story streaming already uses. The card subscribes to its agent's stream state during the turn and updates as chunks arrive at the child request id; once the child completes, the card freezes at the final status. Across turns the card is static — clicking the id still routes to the agent's tab, where the user can read the full conversation.
+
+This gives the orchestrator's narration a structured shape: when the user reads the orchestrator's response, they see the prose explanation, the agent cards (one per spawn block), and any edit cards from work the orchestrator did itself, all interleaved in source order. Clicking through agent cards navigates to the matching tab; clicking through edit cards opens the diff viewer. Both work the same way.
+
+### Backend RPCs
+
+The backend exposes one RPC to support historical browsing:
 
 - `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
 
@@ -263,34 +281,70 @@ The main LLM decides per-turn whether to spawn agents. Typical cases:
 
 For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. When agent mode is enabled, the decision to decompose is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
 
-## Cross-Turn Agent Reuse (Design Sketch)
+## Agent Reuse by ID
 
-Today each agentic turn produces fresh agent tabs with identities `{turn_id, agent_idx}`. Reusing an earlier agent by name across turns — e.g. the main LLM referencing "the auth agent from turn X" and continuing its conversation in-place — is a future capability, not currently in scope. The agent's `ContextManager` and `StabilityTracker` stay warm across interactions within a turn (provider cache benefits accrue), but a new agentic turn in the main tab produces new agents with fresh identities.
+Agents are addressed by `id` in the spawn block. The backend's dispatch is a single rule:
 
-Continuity across turns requires a richer agent identity — probably a user- or LLM-assigned name that's stable across turns — plus two execution-plane additions: an RPC to continue an existing agent (distinct from spawning a fresh one), and a way for the main LLM to know which agents are still live without digging through archives.
+- Look up the `id` in the live agent registry (`_agent_contexts`)
+- **Hit** — route the new task into the existing agent. Its `ContextManager`, conversation, file context, and `StabilityTracker` are preserved; provider cache stays warm; the new task arrives as the next user message in that agent's existing conversation
+- **Miss** — spawn a fresh agent with the given `id`
+
+There is no separate `CONTINUE` block type. One block, fall-through semantics. The orchestrator picks reuse vs. fresh-spawn by picking the `id` — using a known id continues an existing agent, using a new id spawns one. The parser stays simple, the protocol stays small, and the LLM only has to remember "I name agents by id."
+
+IDs are arbitrary non-empty strings chosen by the orchestrator. The system prompt's agentic appendix should encourage stable, descriptive ids ("frontend-chat", "streaming-pipeline") so the orchestrator can re-address the same agent by name across turns. The backend does not validate id shape beyond non-emptiness.
+
+### Agent lifetime
+
+Agents linger for the life of the session. Once spawned, an agent's `ContextManager`, `StabilityTracker`, and conversation persist across turns and remain available for re-dispatch by id. There is no idle timer, no explicit close block, and no garbage collection — agents stay on the sideline as part of the team until the session ends. This keeps the model simple: the user manages agent population implicitly by directing the orchestrator (asking it to spawn new agents, retask existing ones, or leave them alone).
+
+`new_session` clears the agent registry, including each agent's chat history. This mirrors the behaviour of the main conversation: a fresh session wipes everything user-facing, including the agent-tab conversations browsable in the chat panel. Without this, agent chat history would persist across sessions while the main history was cleared, breaking the chat panel's tab-based browsing model.
 
 ### Per-agent state descriptor
 
-For the main LLM to orchestrate agent reuse — decide which to continue, which to spawn fresh, which to retire — it needs a minimal summary of each live agent's state at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
+For the main LLM to orchestrate agent reuse — decide which existing agent to retask vs. spawn a fresh one — it needs a minimal summary of each live agent at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
 
-Each descriptor entry carries only fields the main LLM can't infer from its own context:
+Each descriptor entry carries exactly two fields:
 
-- Identity — `{turn_id}/agent-NN` plus a human-readable label
-- Last-turn summary — one or two sentences describing the agent's most recent output. The main LLM's primary signal for "what did this agent actually do." Enables "continue from where agent 0 left off" without reading the full transcript
-- Turn count — rough measure of conversation depth
-- Status — idle, streaming, or closed (archive-only)
+- **Identity** — `{turn_id}/agent-NN`, the address used in `🟧🟧🟧 CONTINUE` blocks
+- **Files in context** — paths only, no content. The list of files the agent currently has loaded
+
+That's it. The orchestrator picks an agent for a new task by matching the task's affected files against each agent's loaded paths — an agent already living in `webapp/src/` is a natural home for a frontend change; an agent with `src/ac_dc/llm/` open suits a streaming change. Path lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to the new paths on its next turn.
+
+### Single-copy invariant — assembly-time injection
+
+The descriptor must appear in the prompt sent to the LLM *exactly once per turn*, reflecting the current agent population. It must NOT be persisted to the main history store, because every persisted copy would shadow the previous one in the active context window — wasting tokens and giving the LLM N stale snapshots to disambiguate.
+
+The mechanism is the same one the system reminder uses (see [prompt-assembly.md — System Reminder Injection](../3-llm/prompt-assembly.md#system-reminder-injection)): the descriptor is built at assembly time from the live agent registry and prepended to the outgoing user message *in transit*. The message recorded in `history.jsonl` is the user's plain text; the descriptor never lands on disk and never enters compaction's view.
+
+Concrete contract:
+
+- The orchestrator's `ContextManager` (or `LLMService` at assembly) reads the current `_agent_contexts` registry on every turn
+- A descriptor block is constructed fresh from the live registry — closed agents drop out, new agents appear, file lists reflect each agent's current selection
+- The block is injected into the user message during `assemble_tiered_messages`, alongside the system reminder
+- The persisted user message (via `add_message` and the archival sink) is the user's raw text only
+
+Consequences:
+
+- The LLM sees exactly one descriptor per call: the one current at that turn's assembly time
+- History playback (session restore, search, history-browser) shows clean user messages without descriptor noise
+- An agent that closes between turn N and turn N+1 simply disappears from turn N+1's descriptor with no special invalidation step
+- Compaction operates on the persisted history, which has no descriptors, so summarisation logic doesn't need to know about agent state
+- The descriptor is cheap to rebuild (path lists from the registry); rebuilding per turn is preferable to caching it, because caching invites staleness bugs after agent state changes
 
 ### What's deliberately omitted
 
-Earlier drafts included more fields that turned out to be redundant or unhelpful:
+Earlier drafts included more fields that turned out to be redundant, unhelpful, or actively harmful to retasking:
 
-- **Original task text** — the main LLM cares whether the task *landed*, not what was originally asked. If the task succeeded, the main LLM reads the files modified (already in its own context via assimilation) and judges. If it partially failed, the last-turn summary plus the file diffs convey what's broken. The original brief is already in the agent's history and the assistant-message narration of the turn that spawned it.
-- **Open files (agent's selected_files list)** — the main LLM already has the post-change file content in its own context. Knowing which files the agent happens to have selected is only useful for routing decisions the main LLM isn't well-placed to make; agent reuse decisions are better informed by what the agent *did* than by what it has open.
-- **Fetched URLs** — treated as user-owned state, not routing input for the main LLM. When a URL's ongoing relevance is in question, the main LLM raises it *with the user* — "agent 0 has URLs X, Y, Z loaded; should I keep them for the next round or clear them?" — rather than deciding silently. Keeps the user in control of URL lifecycle across agent turns.
-- **Stability tier summary** — cache warmth isn't actionable without a mental model of the tier system, which the main LLM doesn't have. If a decision needs cache state, the main LLM can request it explicitly via a future RPC.
-- **Full conversation history** — expensive and 90% redundant with the last-turn summary.
+- **Original task text** — task is turn-scoped; agent identity is not. Including the original brief implies the agent has a stable role, which discourages retasking. If the orchestrator wants to know what an agent did last, the per-turn archive is one RPC away.
+- **Focus label / role description** — same problem amplified. A label like "frontend specialist" makes the orchestrator reluctant to send the agent to a backend task even when the agent's loaded files no longer match the label. Paths are the truth; labels lie as soon as the agent is retasked.
+- **Last-turn summary** — useful for review, not for routing. The orchestrator routing on "which agent already has these files open" doesn't care what the agent finished last.
+- **Cache warmth / last-active timestamp** — tracking liveness across turns adds maintenance cost (clock handling, restart semantics, what counts as "active") for a signal that doesn't change routing decisions. An agent either exists with files loaded or it doesn't; staleness is implicit in the path list (an agent with paths that have since been heavily edited will need to re-read them, but that's the apply pipeline's problem, not the descriptor's).
+- **Turn count, status, finish reason, token usage** — turn-scoped review data, not routing data. Surface on demand if the orchestrator asks; not in the standing descriptor.
+- **Fetched URLs** — treated as user-owned state. When URL lifecycle is in question, the main LLM raises it with the user rather than deciding silently.
+- **Stability tier summary** — cache warmth isn't actionable without a mental model of the tier system, which the main LLM doesn't have.
+- **Full conversation history** — expensive and unnecessary; archived already.
 - **Per-agent session totals** — exposed via the token HUD rather than as LLM routing input.
-- **Raw file content** — the main LLM's own context already has the relevant content via assimilation.
+- **Raw file content** — the main LLM's own context already has the relevant content via assimilation; the agent descriptor is metadata, not a content channel.
 
 ### Reference mechanism
 
