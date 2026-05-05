@@ -259,6 +259,10 @@ def update_stability(
                     existing.tier,
                     "excluded file (defensive sweep)",
                 )
+                scope.tracker.log_change(
+                    f"{existing.tier.value} → removed: "
+                    f"{entry_key} (excluded by user)"
+                )
                 scope.tracker._items.pop(entry_key, None)
 
     active_items: dict[str, dict[str, Any]] = {}
@@ -308,6 +312,10 @@ def update_stability(
                     scope.tracker._items.pop(entry_key, None)
                     scope.tracker.mark_broken(
                         tier, "selected file (index→content swap)"
+                    )
+                    scope.tracker.log_change(
+                        f"{tier.value} → removed: {entry_key} "
+                        "(selected, swapped for full content)"
                     )
 
     # Step 3 — Primary index entries for non-selected,

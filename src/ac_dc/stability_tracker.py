@@ -336,6 +336,22 @@ class StabilityTracker:
         """
         self._mark_broken(tier, reason)
 
+    def log_change(self, description: str) -> None:
+        """Public change-log accessor — for external callers.
+
+        :mod:`ac_dc.llm._stability` removes tracker entries
+        directly when files are excluded or when selected
+        files swap their compact index entry for full
+        content. Those removals invalidate cache tiers (and
+        the partner :meth:`mark_broken` calls record *why*)
+        but the per-item removal also belongs in the change
+        log so the post-response HUD can render a demotion
+        line. Without this, the HUD's promotion/demotion
+        counters undercount demotions that happened outside
+        a full :meth:`update` cycle.
+        """
+        self._log_change(description)
+
     def get_broken_reasons(self) -> dict[Tier, list[str]]:
         """Return a snapshot of broken tiers and their reasons.
 
