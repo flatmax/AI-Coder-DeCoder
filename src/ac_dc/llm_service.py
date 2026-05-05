@@ -654,111 +654,14 @@ class LLMService:
     def complete_deferred_init(
         self, symbol_index: "SymbolIndex"
     ) -> None:
-        """Attach the symbol index and flip the init-complete flag.
-
-        Called by the Layer 6 startup sequence after heavy indexing
-        finishes. Does NOT re-run session restore — that happened
-        at construction. Safe to call multiple times; subsequent
-        calls are no-ops.
-
-        Attempts eager stability initialization — if it succeeds,
-        the cache tab shows populated tiers from the first page
-        load, not only after the first chat message. If it fails,
-        lazy initialization on the first chat request catches it.
-
-        Attempts to schedule the doc index background build
-        when a running event loop is reachable from the caller's
-        thread. Production callers (main.py) run this method via
-        ``run_in_executor`` — no loop is running on the worker
-        thread, so the scheduling attempt fails and the caller
-        must invoke :meth:`schedule_doc_index_build` explicitly
-        from the event loop thread afterwards. Test callers
-        (pytest-asyncio) run this method directly on the event
-        loop thread, so the scheduling attempt succeeds inline
-        and no extra call is needed.
-
-        The distinction matters because ``asyncio.get_event_loop``
-        on a worker thread (Python 3.10+) returns a fresh dead
-        loop rather than raising, and tasks scheduled on it
-        never run — producing the confusing "no progress
-        events, no error" failure mode. Using
-        ``asyncio.get_running_loop`` here rather than
-        ``get_event_loop`` makes the worker-thread case raise
-        cleanly (surfaced by schedule_doc_index_build's return
-        value).
-        """
-        if self._init_complete and self._symbol_index is not None:
-            return
-        self._symbol_index = symbol_index
-        self._init_complete = True
-        logger.info("Deferred init complete; chat is ready")
-
-        # Attempt eager stability initialization. Non-blocking —
-        # failure is logged and the lazy path catches it on the
-        # first chat request.
-        self._try_initialize_stability()
-
-        # If __init__ restored a prior session, broadcast
-        # sessionChanged now so the frontend's Context tab and
-        # TokenHUD refresh their token-budget displays from the
-        # restored history. This cannot happen from __init__
-        # itself (no event loop yet); by the time deferred init
-        # completes the loop is up and broadcast targets are
-        # mounted. ChatPanel already gets messages via
-        # get_current_state on reconnect, but the other tabs
-        # have no equivalent path and would otherwise show
-        # stale empty-budget displays until the user sends a
-        # message.
-        if self._restored_on_startup:
-            self._broadcast_event(
-                "sessionChanged",
-                {
-                    "session_id": self._session_id,
-                    "messages": self._context.get_history(),
-                },
-            )
-
-        # Best-effort inline doc-index scheduling. Works when
-        # called from the event loop thread (test path); fails
-        # silently when called from a worker thread (production
-        # path via run_in_executor). Production callers must
-        # invoke schedule_doc_index_build() separately.
-        self.schedule_doc_index_build()
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.complete_deferred_init`."""
+        from ac_dc.llm._rpc_lifecycle import complete_deferred_init
+        complete_deferred_init(self, symbol_index)
 
     def schedule_doc_index_build(self) -> bool:
-        """Schedule the doc index background build on the current loop.
-
-        Must be called from the event loop thread — invokes
-        ``asyncio.ensure_future`` against the currently-running
-        loop. When called from a worker thread,
-        ``asyncio.get_running_loop()`` raises and this method
-        returns False without scheduling (the caller can retry
-        from the correct thread).
-
-        Returns True when the build was scheduled or was
-        already running / complete. Returns False when no
-        running loop was found on the calling thread (build
-        skipped; doc index stays empty and
-        ``_doc_index_ready`` stays False).
-
-        Idempotent — calling when the build is already running
-        or already complete is a no-op that returns True (so
-        the caller doesn't retry).
-        """
-        if self._doc_index_ready or self._doc_index_building:
-            return True
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug(
-                "schedule_doc_index_build called without a "
-                "running event loop; build not scheduled"
-            )
-            return False
-        self._main_loop = loop
-        asyncio.ensure_future(self._build_doc_index_background())
-        logger.info("Doc index background build scheduled")
-        return True
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.schedule_doc_index_build`."""
+        from ac_dc.llm._rpc_lifecycle import schedule_doc_index_build
+        return schedule_doc_index_build(self)
 
     async def _build_doc_index_background(self) -> None:
         """Delegate to :func:`ac_dc.llm._doc_index_background.build_doc_index_background`."""
@@ -815,62 +718,18 @@ class LLMService:
         await send_doc_index_progress(self, stage, message, percent)
 
     def shutdown(self) -> None:
-        """Release executor resources. Called on server shutdown."""
-        # wait=False so shutdown doesn't block on in-flight work;
-        # the event loop is typically already stopping at this point.
-        self._stream_executor.shutdown(wait=False)
-        self._aux_executor.shutdown(wait=False)
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.shutdown`."""
+        from ac_dc.llm._rpc_lifecycle import shutdown
+        shutdown(self)
 
     # ------------------------------------------------------------------
     # Collaboration restriction enforcement
     # ------------------------------------------------------------------
 
     def _check_localhost_only(self) -> dict[str, Any] | None:
-        """Return a restricted-error dict when the caller is non-localhost.
-
-        Matches the pattern on :class:`Repo` — returns None when
-        the caller is allowed (no collab attached, or a localhost
-        caller), otherwise returns the specs4-mandated
-        ``{"error": "restricted", "reason": ...}`` shape. Mutating
-        RPC methods return this dict verbatim; the frontend's
-        RpcMixin surfaces it as a restricted error and hides the
-        UI affordance that triggered the call.
-
-        Fails closed — an exception from the collab check itself
-        is treated as a denial rather than silently allowing the
-        mutation. Better to reject a legitimate call than to let
-        an unauthenticated caller mutate state because the
-        identity check errored out.
-
-        The ``_collab`` attribute is set by ``main.py`` after
-        constructing the service, when collaboration mode is
-        active. In single-user operation it stays None and this
-        helper always returns None.
-        """
-        collab = getattr(self, "_collab", None)
-        if collab is None:
-            return None
-        try:
-            is_local = collab.is_caller_localhost()
-        except Exception as exc:
-            logger.warning(
-                "Collab localhost check raised: %s; denying",
-                exc,
-            )
-            return {
-                "error": "restricted",
-                "reason": (
-                    "Internal error checking caller identity"
-                ),
-            }
-        if is_local:
-            return None
-        return {
-            "error": "restricted",
-            "reason": (
-                "Participants cannot perform this action"
-            ),
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.check_localhost_only`."""
+        from ac_dc.llm._rpc_lifecycle import check_localhost_only
+        return check_localhost_only(self)
 
     def _build_url_service(self) -> URLService:
         """Delegate to :func:`ac_dc.llm._construction.build_url_service`."""
@@ -891,37 +750,9 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def get_current_state(self) -> dict[str, Any]:
-        """Return the state snapshot for browser reconnect.
-
-        Called by the browser on WebSocket connect. Returns the
-        minimal set of fields needed to rebuild the UI — messages,
-        selected files, streaming status, session ID, repo name,
-        init flag, mode, cross-reference state, review state,
-        excluded files, doc convert availability.
-        """
-        # Check doc convert availability dynamically — not cached
-        # at startup since optional deps may be installed later.
-        doc_convert_available = False
-        try:
-            from ac_dc.doc_convert import DocConvert
-            doc_convert_available = DocConvert._probe_import("markitdown")
-        except Exception:
-            pass
-
-        return {
-            "messages": self._context.get_history(),
-            "selected_files": list(self._selected_files),
-            "excluded_index_files": list(self._excluded_index_files),
-            "streaming_active": self._active_user_request is not None,
-            "session_id": self._session_id,
-            "repo_name": self._repo.name if self._repo else "",
-            "init_complete": self._init_complete,
-            "mode": self._context.mode.value,
-            "cross_ref_enabled": self._cross_ref_enabled,
-            "enrichment_status": self._enrichment_status,
-            "review_state": self.get_review_state(),
-            "doc_convert_available": doc_convert_available,
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.get_current_state`."""
+        from ac_dc.llm._rpc_lifecycle import get_current_state
+        return get_current_state(self)
 
     # ------------------------------------------------------------------
     # URL service RPC surface
@@ -1069,23 +900,9 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def get_snippets(self) -> list[dict[str, str]]:
-        """Return snippets appropriate for the current mode.
-
-        Priority:
-
-        1. Review mode active → review snippets
-        2. Document mode → doc snippets
-        3. Otherwise (code mode) → code snippets
-
-        The frontend calls this unconditionally on RPC ready,
-        on review state change, and on mode change — it doesn't
-        need to know which mode or state produced the result.
-        """
-        if self._review_active:
-            return self._config.get_snippets("review")
-        if self._context.mode == Mode.DOC:
-            return self._config.get_snippets("doc")
-        return self._config.get_snippets("code")
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.get_snippets`."""
+        from ac_dc.llm._rpc_lifecycle import get_snippets
+        return get_snippets(self)
 
     # ------------------------------------------------------------------
     # Public RPC — file selection
@@ -1108,15 +925,9 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def navigate_file(self, path: str) -> dict[str, Any]:
-        """Broadcast file navigation to all connected clients.
-
-        Called when a client navigates to a file (file picker click,
-        search result, edit block anchor). All clients open the same
-        file in their viewer. The frontend's ``_fromNav`` flag
-        prevents echo loops.
-        """
-        self._broadcast_event("navigateFile", {"path": path})
-        return {"status": "ok", "path": path}
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.navigate_file`."""
+        from ac_dc.llm._rpc_lifecycle import navigate_file
+        return navigate_file(self, path)
 
     # ------------------------------------------------------------------
     # Public RPC — excluded index files
@@ -1189,59 +1000,18 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def is_tex_preview_available(self) -> dict[str, Any]:
-        """Check if TeX preview dependencies are installed.
-
-        Two-stage probe: ``make4ht`` binary on PATH, and the
-        ``tex4ht.sty`` package resolvable via ``kpsewhich``. Both
-        must be present for compilation to succeed — a common
-        failure mode is ``make4ht`` installed standalone (e.g.
-        from ``luatex`` on a minimal TeX install) but the
-        ``tex4ht`` package missing, which produces a confusing
-        mid-compile LaTeX error about ``tex4ht.sty`` rather than
-        an upfront "not installed" message.
-
-        Returns ``{"available": True}`` when both present, or
-        ``{"available": False, "install_hint": "..."}`` with a
-        targeted hint naming the specific missing piece so the
-        user knows which package to install.
-        """
-        from ac_dc.repo import Repo
-        if not Repo.is_make4ht_available():
-            return {
-                "available": False,
-                "install_hint": (
-                    "make4ht not found on PATH. "
-                    "Install TeX Live or MiKTeX with make4ht. "
-                    "On Ubuntu/Debian: sudo apt install texlive-full"
-                ),
-            }
-        if not Repo.is_tex4ht_package_available():
-            return {
-                "available": False,
-                "install_hint": (
-                    "make4ht is installed, but the tex4ht package "
-                    "is missing. "
-                    "On Ubuntu/Debian: "
-                    "sudo apt install texlive-plain-generic "
-                    "(or texlive-full for everything)."
-                ),
-            }
-        return {"available": True}
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.is_tex_preview_available`."""
+        from ac_dc.llm._rpc_lifecycle import is_tex_preview_available
+        return is_tex_preview_available(self)
 
     def compile_tex_preview(
         self,
         content: str,
         file_path: str | None = None,
     ) -> dict[str, Any]:
-        """Compile TeX source to HTML for live preview.
-
-        Delegates to :meth:`Repo.compile_tex_preview`. Returns
-        ``{"html": "..."}`` on success or ``{"error": "..."}``
-        on failure.
-        """
-        if self._repo is None:
-            return {"error": "No repository attached"}
-        return self._repo.compile_tex_preview(content, file_path)
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.compile_tex_preview`."""
+        from ac_dc.llm._rpc_lifecycle import compile_tex_preview
+        return compile_tex_preview(self, content, file_path)
 
     # ------------------------------------------------------------------
     # Public RPC — cache viewer / map block
@@ -1334,55 +1104,9 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def get_mode(self) -> dict[str, Any]:
-        """Return current mode and cross-reference state.
-
-        The frontend polls this to re-sync on reconnect and to
-        gate the cross-reference toggle on doc-index readiness.
-
-        Readiness flags reflect the two-phase principle from
-        specs4/2-indexing/document-index.md § Two-Phase:
-
-        - ``doc_index_ready`` — structural extraction complete;
-          cross-reference toggle can activate.
-        - ``doc_index_building`` — structural extraction in
-          progress; UI can show a progress indicator.
-        - ``doc_index_enriched`` — keyword enrichment complete.
-          Backwards-compatibility boolean; maps to
-          ``enrichment_status == "complete"``. Prefer
-          ``enrichment_status`` for new callers — it
-          distinguishes "unavailable" from "pending".
-        - ``enrichment_status`` — tristate keyword-enrichment
-          state. Values:
-
-          - ``"pending"`` — background build hasn't started
-            enrichment yet (or the service just started and
-            the build is running structural extraction).
-          - ``"building"`` — enrichment loop is active.
-            Frontend shows a progress overlay.
-          - ``"complete"`` — all files enriched. Overlay fades
-            out.
-          - ``"unavailable"`` — KeyBERT or sentence-transformers
-            not installed, or the model failed to load.
-            Frontend shows a one-time warning toast pointing
-            at ``pip install 'ac-dc[docs]'``.
-        - ``cross_ref_ready`` — currently mirrors
-          ``doc_index_ready``. Structural extraction is the
-          minimum readiness for cross-reference to produce
-          content; enrichment improves the quality of the
-          output but isn't a gate.
-
-        Returned shape matches the specs4 RPC contract and is
-        stable across both code and doc modes.
-        """
-        return {
-            "mode": self._context.mode.value,
-            "doc_index_ready": self._doc_index_ready,
-            "doc_index_building": self._doc_index_building,
-            "doc_index_enriched": self._doc_index_enriched,
-            "enrichment_status": self._enrichment_status,
-            "cross_ref_ready": self._doc_index_ready,
-            "cross_ref_enabled": self._cross_ref_enabled,
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.get_mode`."""
+        from ac_dc.llm._rpc_lifecycle import get_mode
+        return get_mode(self)
 
     def refresh_system_prompt(self) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_state.refresh_system_prompt`."""
@@ -1535,97 +1259,18 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def _default_scope(self) -> ConversationScope:
-        """Build a scope pointing at the main-conversation state.
-
-        The main user-facing session's state lives on ``self``.
-        Every entry point that runs ``_stream_chat`` for the main
-        conversation (today: ``chat_streaming``) builds a default
-        scope via this helper and threads it through.
-
-        Future parallel-agent mode will NOT call this — each
-        spawned agent constructs its own scope from
-        :func:`ac_dc.agent_factory.build_agent_context_manager`
-        plus a per-agent tracker and a per-agent selection list.
-
-        The ``archival_append`` closure wraps
-        :meth:`HistoryStore.append_message` so the scope can
-        invoke it without caring whether the backing target is
-        the main JSONL or a per-turn archive. When no history
-        store is attached (tests that skip persistence), the
-        field is None and callers check before invoking.
-        """
-        archival: ArchivalAppend | None
-        if self._history_store is not None:
-            store = self._history_store  # closure capture
-
-            def _append_to_main_store(
-                role: str,
-                content: str,
-                *,
-                session_id: str,
-                **kwargs: Any,
-            ) -> Any:
-                """Wrap HistoryStore.append_message.
-
-                The main-store method takes ``session_id`` as a
-                keyword argument and accepts a small fixed set of
-                optional kwargs (files, images, files_modified,
-                edit_results, system_event, turn_id). Callers at
-                the streaming-handler level already know the
-                right keyword shape — we pass through verbatim.
-                """
-                return store.append_message(
-                    session_id=session_id,
-                    role=role,
-                    content=content,
-                    **kwargs,
-                )
-
-            archival = _append_to_main_store
-        else:
-            archival = None
-
-        return ConversationScope(
-            context=self._context,
-            tracker=self._stability_tracker,
-            session_id=self._session_id,
-            selected_files=self._selected_files,
-            archival_append=archival,
-        )
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.default_scope`."""
+        from ac_dc.llm._rpc_lifecycle import default_scope
+        return default_scope(self)
 
     # ------------------------------------------------------------------
     # Public RPC — streaming
     # ------------------------------------------------------------------
 
     def _is_child_request(self, request_id: str) -> bool:
-        """Return True when ``request_id`` is a child of the active parent.
-
-        Per specs4/7-future/parallel-agents.md § Transport, agent
-        streams spawned under a user-initiated turn carry request
-        IDs of the form ``{parent_id}-agent-N`` — the parent's ID
-        as a prefix followed by a dash and a child suffix. This
-        helper is the single place the child-vs-user
-        classification happens; the single-stream guard uses it
-        to let child streams through.
-
-        Returns False when no user-initiated stream is active
-        (nothing to be a child of). Returns False when the
-        request ID is the parent ID itself — a reconnect or
-        duplicate that matches the parent exactly is treated as
-        a conflicting user-initiated request, not a child.
-
-        Today no code path produces child request IDs, so this
-        method always returns False in practice. Landing it now
-        keeps the guard's shape correct for when agent spawning
-        arrives; the guard is a single-line diff instead of a
-        gate rewrite.
-        """
-        parent = self._active_user_request
-        if parent is None:
-            return False
-        if request_id == parent:
-            return False
-        return request_id.startswith(parent + "-")
+        """Delegate to :func:`ac_dc.llm._rpc_streaming.is_child_request`."""
+        from ac_dc.llm._rpc_streaming import is_child_request
+        return is_child_request(self, request_id)
 
     def _filter_dispatchable_agents(
         self,
@@ -1732,174 +1377,17 @@ class LLMService:
         excluded_urls: list[str] | None = None,
         agent_tag: tuple[str, int] | list[Any] | None = None,
     ) -> dict[str, Any]:
-        """Start a streaming chat request.
-
-        Returns synchronously with ``{"status": "started"}``. The
-        actual streaming runs as a background task; chunks and the
-        completion arrive via the event callback.
-
-        Rejects if the service isn't fully initialised, or if
-        another stream is active for the same scope (main
-        conversation OR the tagged agent).
-
-        ``excluded_urls`` carries the set of fetched URLs the user
-        has unchecked in the chip UI. These URLs stay in the URL
-        service's session-scoped ``_fetched`` dict (so the chip
-        remains visible and can be re-included on a later turn)
-        but are omitted from this turn's injected URL context.
-        See specs4/4-features/url-content.md § URL Chips UI.
-
-        ``agent_tag`` routes the call to an agent conversation
-        when present (C1c). Shape is ``(turn_id, agent_idx)`` —
-        the frontend's agent tab derives this from its
-        ``{turn_id}/agent-NN`` tab ID. The scope is looked up in
-        :attr:`_agent_contexts`; a stale tab ID (agent already
-        closed, or the session rolled over via
-        :meth:`new_session`) produces an ``agent not found``
-        error rather than silently falling back to the main
-        conversation, which would append to the main history in
-        confusing ways.
-
-        Single-stream guard scoping:
-
-        - Untagged calls gate on :attr:`_active_user_request`
-          (the main user-facing session's slot).
-        - Tagged calls gate on :attr:`_active_agent_streams`
-          keyed by ``(turn_id, agent_idx)`` — per-agent
-          mutual exclusion. A user typing in the main tab
-          AND an agent tab sees both streams proceed in
-          parallel; typing again in the same agent tab while
-          a stream is active returns the active-stream error.
-
-        JRPC-OO delivers array args as lists, so ``agent_tag``
-        may arrive as ``[turn_id, agent_idx]``. The tuple form
-        is accepted for test convenience and direct Python
-        callers; both shapes coerce to the ``(turn_id, agent_idx)``
-        tuple used as the registry key.
-        """
-        # Capture event loop on the RPC thread — this is the
-        # event-loop thread. D10 contract: the capture happens
-        # HERE, not inside the background task.
-        self._main_loop = asyncio.get_event_loop()
-
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-
-        if not self._init_complete:
-            return {
-                "error": (
-                    "Server is still initializing — please wait "
-                    "a moment"
-                )
-            }
-
-        # Resolve the scope. Three cases:
-        #
-        # 1. agent_tag is None → default scope (main conversation).
-        # 2. agent_tag is well-formed and points at a registered
-        #    agent → use the registered scope.
-        # 3. agent_tag is well-formed but the agent isn't
-        #    registered (stale tab) → error.
-        #
-        # Malformed agent_tag (wrong shape, non-string turn_id,
-        # non-integer agent_idx) falls through to the error
-        # path with a different message so the frontend can
-        # distinguish "my tab is stale, close it" from "my RPC
-        # payload was malformed, file a bug".
-        agent_key: tuple[str, int] | None = None
-        scope: ConversationScope
-        if agent_tag is None:
-            scope = self._default_scope()
-        else:
-            # Accept both tuple and list shapes. JRPC-OO
-            # serialises Python tuples to JS arrays, so the
-            # frontend always sends a two-element array; tests
-            # and direct callers use the tuple form. Either way
-            # we normalise to a tuple for the registry key.
-            parsed = self._parse_agent_tag(agent_tag)
-            if parsed is None:
-                return {
-                    "error": (
-                        "Malformed agent_tag — expected "
-                        "[turn_id, agent_idx] or "
-                        "(turn_id, agent_idx)"
-                    )
-                }
-            agent_key = parsed
-            turn_id_part, agent_idx_part = agent_key
-            turn_bucket = self._agent_contexts.get(turn_id_part)
-            agent_scope = (
-                turn_bucket.get(agent_idx_part)
-                if turn_bucket is not None
-                else None
-            )
-            if agent_scope is None:
-                return {"error": "agent not found"}
-            scope = agent_scope
-
-        # Single-stream guard. Tagged calls gate on the
-        # per-agent set; untagged calls gate on the main-
-        # session slot. A tagged call does NOT consult
-        # ``_active_user_request`` — the main session's guard
-        # is for the main tab; an agent tab is its own
-        # conversation and can stream in parallel with it.
-        if agent_key is not None:
-            if agent_key in self._active_agent_streams:
-                return {
-                    "error": (
-                        f"Another stream is active for agent "
-                        f"{agent_key[0]}/agent-{agent_key[1]:02d}"
-                    )
-                }
-            # Register the agent slot. Cleared in the background
-            # task's finally block.
-            self._active_agent_streams.add(agent_key)
-        else:
-            # Main-tab untagged path — unchanged from pre-C1c.
-            # User-initiated single-stream guard per
-            # specs4/7-future/parallel-agents.md § Foundation
-            # Requirements. Blocks a second user-initiated
-            # stream but allows child streams that share an
-            # active parent's request ID prefix.
-            if (
-                self._active_user_request is not None
-                and not self._is_child_request(request_id)
-            ):
-                return {
-                    "error": (
-                        f"Another stream is active (request "
-                        f"{self._active_user_request})"
-                    )
-                }
-            # Register the active request. Only user-initiated
-            # requests register here — child requests share
-            # their parent's slot and don't overwrite it.
-            if not self._is_child_request(request_id):
-                self._active_user_request = request_id
-
-        # Launch the background task. ensure_future rather than
-        # await so we return {"status": "started"} immediately.
-        #
-        # For the untagged path, the default scope points at the
-        # main-conversation state on ``self``. For the tagged
-        # path, the scope is the registered agent's scope from
-        # ``_agent_contexts`` — its own ContextManager,
-        # StabilityTracker, and archival sink. ``_stream_chat``
-        # doesn't distinguish between the two; it just threads
-        # scope through.
-        asyncio.ensure_future(
-            self._stream_chat(
-                request_id,
-                message,
-                files or [],
-                images or [],
-                excluded_urls or [],
-                scope=scope,
-                agent_key=agent_key,
-            )
+        """Delegate to :func:`ac_dc.llm._rpc_streaming.chat_streaming`."""
+        from ac_dc.llm._rpc_streaming import chat_streaming
+        return await chat_streaming(
+            self,
+            request_id,
+            message,
+            files,
+            images,
+            excluded_urls,
+            agent_tag,
         )
-        return {"status": "started"}
 
     @staticmethod
     def _parse_agent_tag(
@@ -1935,24 +1423,9 @@ class LLMService:
         return (turn_id_raw, agent_idx_raw)
 
     def cancel_streaming(self, request_id: str) -> dict[str, Any]:
-        """Signal a streaming request to abort.
-
-        The worker thread polls the cancellation set on each chunk
-        and breaks out when it finds its ID. The background task's
-        finally handler clears the active-request flag and fires
-        streamComplete with cancelled=True.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        if request_id != self._active_user_request:
-            return {
-                "error": (
-                    f"Request {request_id} is not the active stream"
-                )
-            }
-        self._cancelled_requests.add(request_id)
-        return {"status": "cancelling"}
+        """Delegate to :func:`ac_dc.llm._rpc_streaming.cancel_streaming`."""
+        from ac_dc.llm._rpc_streaming import cancel_streaming
+        return cancel_streaming(self, request_id)
 
     async def _stream_chat(
         self,
