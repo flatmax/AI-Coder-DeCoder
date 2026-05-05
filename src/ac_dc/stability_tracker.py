@@ -237,9 +237,13 @@ class StabilityTracker:
     - ``_changes``: list of change descriptions for the most recent
       cascade cycle. Cleared at the start of each update.
     - ``_broken_tiers``: set of tiers whose cache block has been
-      invalidated this cycle. Consumed by the cascade to decide
-      which tiers can accept promotions; also controls underfill
-      demotion (broken tiers don't demote).
+      invalidated. Sticky across boundaries — external mutation
+      paths (cross-reference disable, file exclusion, selection
+      change, history purge) accumulate into this set between
+      turns, and :meth:`update` consumes them on the next
+      cascade. Cleared only after the cascade completes a stable
+      pass. Controls underfill demotion (broken tiers don't
+      demote) and preserves signal for promotion bookkeeping.
 
     Not thread-safe — the orchestrator drives updates from a single
     executor. Multiple tracker instances are independent; they
@@ -408,10 +412,16 @@ class StabilityTracker:
             :meth:`get_changes` would return afterwards; returned
             for convenience so callers don't need a second call.
         """
-        # Reset per-cycle state. Broken tiers accumulate during
-        # the cycle (hash changes, item removals, graduation).
+        # Change log is per-cycle — wipe on entry.
         self._changes = []
-        self._broken_tiers = set()
+        # NOTE: _broken_tiers is NOT wiped here. External mutation
+        # paths (cross-reference disable, file exclusion, selection
+        # change, history purge) populate it between turns; wiping
+        # on entry would discard those signals before the cascade
+        # could act on them. Broken tiers accumulate from all
+        # sources and are consumed by the cascade — cleared at the
+        # end of :meth:`_run_cascade` once the cascade has
+        # stabilised.
 
         # Phase 0 — stale removal. Also filters active_items so
         # Phase 1 doesn't re-register entries for files that no
@@ -778,8 +788,10 @@ class StabilityTracker:
         2. N-cap — items above the anchor line increment N but
            cap at the promotion threshold if the tier above is
            stable
-        3. Promotion — items with N ≥ promote_n move up if the
-           tier above is broken or empty
+        3. Promotion — items with N ≥ promote_n move up. Cascade
+           happens every turn for every eligible item — the
+           cache block's re-ingestion cost is the price of
+           letting content flow upward to where it belongs.
 
         Post-cascade — any tier below cache_target (except L0
         and broken tiers) demotes one item level as underfill
@@ -788,26 +800,75 @@ class StabilityTracker:
         Tracked via ``processed`` set so anchoring and cap math
         run at most once per tier per cascade cycle, even when
         multiple passes happen.
+
+        Promotion gating uses a snapshot of ``_broken_tiers``
+        taken at cascade entry. Per the spec's Ripple Promotion
+        rule — "if a tier is stable, nothing promotes into it
+        and tiers below remain cached" — one external
+        invalidation opens exactly one upward promotion path,
+        not a chain. Mutations to ``_broken_tiers`` made during
+        the cascade (for external consumers and the L0 backfill
+        probe) are preserved but do not feed back into
+        promotion gating within the same cycle. Without the
+        snapshot, an external L1 invalidation would mark L2
+        broken when L2→L1 promotes, then mark L3 broken when
+        L3→L2 follows, cascading a single user action into
+        full-stack drain.
         """
+        # Snapshot the broken-tiers set at cascade entry. All
+        # promotion gating below reads from this snapshot; the
+        # live self._broken_tiers set continues to receive
+        # updates during the cascade (for the L0 backfill probe,
+        # _demote_underfilled, and the post-cascade clear) but
+        # those updates do not feed back into _try_promote_from.
+        cascade_broken = set(self._broken_tiers)
+        # Also snapshot which tiers were EMPTY at entry. The
+        # promotion gate accepts "broken OR empty" destinations
+        # — and emptiness must be frozen at entry too, not
+        # recomputed per-iteration. Without this snapshot, a
+        # tier that was stable (populated, not broken) at entry
+        # but becomes empty mid-cascade (because its own
+        # residents promoted upward) would start accepting
+        # content from the tier below, recreating the
+        # chain-cascade bug through a different path. The spec's
+        # "tiers below remain cached" rule is that one external
+        # invalidation opens exactly one upward path — and that
+        # path is pinned by BOTH the broken set and the empty
+        # set, captured at the same instant.
+        cascade_empty: set[Tier] = set()
+        for tier in _CASCADE_ORDER + (Tier.ACTIVE,):
+            has_items = any(
+                it.tier == tier for it in self._items.values()
+            )
+            if not has_items:
+                cascade_empty.add(tier)
         # Up to 8 iterations — real cascades converge in 1–2,
         # cap is defensive against logic bugs creating a cycle.
         processed: set[Tier] = set()
         for _ in range(8):
             made_progress = False
             # L0 backfill probe — if L0's token total is below
-            # cache target, mark it broken so _try_promote_from
-            # treats it as "needs content" and promotes eligible
-            # L1 items upward. Without this, an underfilled L0
-            # is neither broken nor empty per _try_promote_from's
-            # check, so nothing ever promotes into it and L0
-            # sits permanently under the provider's cache-min
+            # cache target, add L0 to the promotion-gate
+            # snapshot so _try_promote_from treats it as "needs
+            # content" and promotes eligible L1 items upward.
+            # Without this, an underfilled L0 is neither broken
+            # nor empty per _try_promote_from's check, so
+            # nothing ever promotes into it and L0 sits
+            # permanently under the provider's cache-min
             # threshold — meaning the provider silently refuses
-            # to cache it and we pay the full ingestion cost on
-            # every request. Per specs4/3-llm/cache-tiering.md
+            # to cache it and we pay the full ingestion cost
+            # on every request. Per specs4/3-llm/cache-tiering.md
             # § "L0 Backfill". Runs every iteration so a
             # promotion that lands in L0 mid-cascade still
             # triggers further backfill if the newly-promoted
             # content didn't meet the target.
+            #
+            # The backfill probe legitimately opens an upward
+            # path, so it's added to BOTH the live set (so
+            # external consumers see L0 as broken) and the
+            # snapshot (so promotion gating responds this
+            # cycle). This is distinct from the chain-propagation
+            # we're guarding against in _try_promote_from.
             if self._cache_target_tokens > 0:
                 l0_tokens = sum(
                     item.tokens
@@ -815,7 +876,8 @@ class StabilityTracker:
                     if item.tier == Tier.L0
                 )
                 if l0_tokens < self._cache_target_tokens:
-                    if Tier.L0 not in self._broken_tiers:
+                    if Tier.L0 not in cascade_broken:
+                        cascade_broken.add(Tier.L0)
                         self._broken_tiers.add(Tier.L0)
                         made_progress = True
             for tier in _CASCADE_ORDER:
@@ -823,13 +885,17 @@ class StabilityTracker:
                     # Re-visit only to check promotion eligibility
                     # based on a newly-broken upper tier; skip
                     # the anchor/cap pass which we already did.
-                    if self._try_promote_from(tier):
+                    if self._try_promote_from(
+                        tier, cascade_broken, cascade_empty
+                    ):
                         made_progress = True
                     continue
                 # First visit — full processing.
                 self._process_tier_veterans(tier)
                 processed.add(tier)
-                if self._try_promote_from(tier):
+                if self._try_promote_from(
+                    tier, cascade_broken, cascade_empty
+                ):
                     made_progress = True
             if not made_progress:
                 break
@@ -839,6 +905,15 @@ class StabilityTracker:
         # can flow through to L2's own underfill check in the
         # same call.
         self._demote_underfilled()
+
+        # Cascade has consumed the broken-tier signals. Clear the
+        # set so the next cycle starts fresh — external mutations
+        # between now and the next :meth:`update` will repopulate
+        # it. Note: _demote_underfilled may have added entries
+        # (its own source/destination marks), so we clear AFTER
+        # it runs. The next update's cascade will see an empty
+        # set plus whatever external paths added since.
+        self._broken_tiers.clear()
 
     def _process_tier_veterans(self, tier: Tier) -> None:
         """Anchor items below cache target; cap N above it.
@@ -888,53 +963,131 @@ class StabilityTracker:
         promote_n = _TIER_CONFIG[tier]["promote_n"]
         for item in tier_items:
             if accumulated < self._cache_target_tokens:
-                # Below the line — anchored.
+                # Below the line — anchored. N is frozen this
+                # cycle; the item cannot promote and stays
+                # pinned to the bottom of the tier keeping the
+                # cache block valid.
                 item._anchored = True  # type: ignore[attr-defined]
             else:
-                # Above the line — not anchored. Cap N at
-                # promotion threshold if the tier above is
-                # stable (can't promote there anyway, so N
-                # shouldn't grow).
+                # Above the line — not anchored. N is NOT
+                # capped here; letting it grow means items
+                # above the anchor stay promotion-eligible
+                # every turn rather than bouncing between
+                # promote_n and promote_n+1 under stable
+                # upstream conditions.
                 item._anchored = False  # type: ignore[attr-defined]
-                if upper_is_stable and item.n_value > promote_n:
-                    item.n_value = promote_n
             accumulated += item.tokens
 
-    def _try_promote_from(self, tier: Tier) -> bool:
+    def _try_promote_from(
+        self,
+        tier: Tier,
+        cascade_broken: set[Tier] | None = None,
+        cascade_empty: set[Tier] | None = None,
+    ) -> bool:
         """Promote eligible items from ``tier`` to the tier above.
+
+        Promotion is gated on the destination tier being
+        broken or empty — ripple-promotion per
+        specs4/3-llm/cache-tiering.md § Ripple Promotion.
+        When the upper tier's cache block is already
+        invalidated (or doesn't exist), moving veterans in
+        costs nothing extra. When it's stable, we leave it
+        alone — disturbing a cached tier for a steady-state
+        promotion would trash the cache on every turn.
+
+        The ``cascade_broken`` and ``cascade_empty`` parameters
+        are snapshots of the broken-tiers set and the set of
+        empty tiers, taken at cascade entry (see
+        :meth:`_run_cascade`) and then augmented during the
+        cascade to track **structural** invalidations — tiers
+        that became broken because their own residents
+        promoted upward and drained them. When provided,
+        gating reads from these augmented snapshots rather
+        than the live tracker state.
+
+        The subtle point: two kinds of invalidation exist, and
+        they chain differently.
+
+        - **External** invalidation (user deselects a file,
+          a file's hash changes, the orchestrator marks a
+          tier broken before calling :meth:`update`) must
+          NOT chain. Per spec § Ripple Promotion, one
+          external invalidation opens exactly one upward
+          path. Without this constraint, a single deselect
+          of an L1 item would cascade L2→L1, L3→L2, active
+          graduation, potentially drain L0 — tearing down
+          the whole cache.
+
+        - **Structural** invalidation (a tier's cache block
+          needs rebuilding because its own residents just
+          promoted out, leaving the tier's token content
+          changed) MUST chain. This is the legitimate Ripple
+          Promotion the spec describes: L2 veterans promote
+          into broken L1, L2 is now structurally broken,
+          L3 veterans flow into L2, and so on up the chain.
+          Stopping at the external invalidation point
+          instead of propagating structural invalidations
+          leaves tiers stranded — L3 veterans ready to flow
+          upward but the cascade blocks them because "L2
+          wasn't broken at cascade entry".
+
+        The snapshots handle both cases: they start with
+        only the external invalidations (what ``_broken_tiers``
+        held at cascade entry) and what was empty at entry.
+        When a promotion succeeds, the source tier is added
+        to the snapshot — subsequent iterations see it as
+        broken and allow the chain to continue. The
+        destination tier is NOT added to the snapshot (it
+        was the target of the invalidation, not a new source
+        of one) — this preserves the "external L1
+        invalidation doesn't drain L0" guarantee, because
+        the L1 destination mark never feeds back into
+        gating.
+
+        When either snapshot is None (callers outside the
+        cascade, plus tests), gating falls back to the live
+        ``self._broken_tiers`` set and a live emptiness
+        probe — preserves the prior contract for direct
+        callers who don't need cycle-stable gating.
 
         An item is eligible when:
 
-        - It is not anchored
+        - The tier above was broken OR empty at cascade entry,
+          OR the tier above became structurally broken
+          earlier in this cascade (per augmented snapshot),
+          AND
+        - It is not anchored (above the cache-target anchor
+          line within its current tier), AND
         - Its N ≥ the tier's promote_n threshold
-        - The tier above is broken or empty (no tier above = L0
-          = not promotable)
 
-        Returns True if any items promoted. The cascade uses this
-        to decide whether another pass is needed.
+        Returns True if any items promoted. The cascade uses
+        this to decide whether another pass is needed.
         """
         above = _TIER_ABOVE[tier]
         if above is None:
             # L0 — no tier above, can't promote.
             return False
 
-        # Promotion only flows into broken or empty tiers.
-        # Empty check doesn't require knowing all tier contents
-        # ahead of time — we can compute it here.
-        upper_items = [
-            item for item in self._items.values() if item.tier == above
-        ]
-        upper_empty = len(upper_items) == 0
-        upper_broken = above in self._broken_tiers
-
-        if not (upper_broken or upper_empty):
+        # Gate: only promote into tiers that were broken OR
+        # empty at cascade entry. Both signals are snapshotted
+        # so mid-cascade mutations (source-tier marking after
+        # promotion, a tier emptying because its residents just
+        # promoted upward) do not feed back into gating. See
+        # docstring for why both snapshots matter.
+        broken_gate = cascade_broken if cascade_broken is not None else self._broken_tiers
+        if cascade_empty is not None:
+            empty_gate = above in cascade_empty
+        else:
+            # Live fallback for non-cascade callers — probe
+            # the current state.
+            empty_gate = not any(
+                it.tier == above for it in self._items.values()
+            )
+        upper_broken = above in broken_gate
+        if not upper_broken and not empty_gate:
             return False
 
         promote_n = _TIER_CONFIG[tier]["promote_n"]
-        promoted_any = False
-
-        # Collect candidates first — mutating during iteration
-        # is error-prone.
         candidates = [
             item
             for item in self._items.values()
@@ -942,7 +1095,10 @@ class StabilityTracker:
             and not getattr(item, "_anchored", False)
             and item.n_value >= promote_n
         ]
+        if not candidates:
+            return False
 
+        promoted_any = False
         for item in candidates:
             item.tier = above
             item.n_value = _TIER_CONFIG[above]["entry_n"]
@@ -952,11 +1108,39 @@ class StabilityTracker:
             promoted_any = True
 
         if promoted_any:
-            # Source tier loses items → broken. Destination was
-            # already broken (that's why we promoted into it) or
-            # was empty; either way it now has content.
+            # Source tier shed items → its cache block needs
+            # rebuilding. Destination tier gained items → its
+            # cache block also needs rebuilding. Mark both in
+            # the live set so external consumers (prompt
+            # assembler, underfill demotion which skips broken
+            # tiers) see the structural change.
             self._broken_tiers.add(tier)
             self._broken_tiers.add(above)
+
+            # Structural invalidation propagation — the
+            # source tier just lost residents, so its cache
+            # block is genuinely broken for the remainder of
+            # this cascade. Add it to the snapshot so the
+            # next iteration's gate sees the invalidation
+            # and allows the tier below to chain into it.
+            # This is the spec's Ripple Promotion: L1
+            # invalidation opens L2→L1, which opens L3→L2,
+            # which opens active→L3.
+            #
+            # The DESTINATION tier is deliberately NOT added
+            # to ``cascade_broken``. The destination received
+            # content — it's being rebuilt because it was
+            # already broken (the precondition of this
+            # promotion firing). Adding it to the snapshot
+            # would re-open a path that was just closed by
+            # this very promotion, producing the chain-
+            # cascade bug that the snapshot was introduced
+            # to prevent: external L1 invalidation would
+            # mark L0 "broken" when L1→L0 promotes, letting
+            # L2 promote up through the chain without any
+            # L0-side invalidation having occurred.
+            if cascade_broken is not None:
+                cascade_broken.add(tier)
 
         return promoted_any
 

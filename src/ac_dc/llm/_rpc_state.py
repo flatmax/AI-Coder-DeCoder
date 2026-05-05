@@ -259,6 +259,15 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
     effect on the next LLM request. Respects review mode —
     skips the refresh when review is active so the review
     prompt isn't clobbered.
+
+    Also re-registers the prompt with the stability tracker so
+    the cache viewer's ``system:<hash>`` entry reflects the
+    new content immediately, without waiting for the next
+    ``_post_response`` cycle. Includes the symbol-index legend
+    in the hash exactly like :func:`try_initialize_stability`
+    and :func:`update_stability` do, so the hash matches what
+    those paths would produce on the next turn — otherwise
+    we'd churn the cache one extra time.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
@@ -274,6 +283,36 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
         prompt = service._config.get_system_prompt()
     has_appendix = "Agent-Spawn Capability" in prompt
     service._context.set_system_prompt(prompt)
+
+    # Re-register with the tracker so the cache viewer's
+    # system:<hash> row updates immediately. Must hash the
+    # same combined prompt+legend string that the stability
+    # paths hash, or we'll mint a different key here than
+    # update_stability will mint on the next turn and
+    # trigger an unnecessary L0 churn.
+    import hashlib
+    if service._context.mode == Mode.DOC:
+        legend = service._doc_index.get_legend()
+    else:
+        legend = ""
+        if service._symbol_index is not None:
+            try:
+                legend = service._symbol_index.get_legend()
+            except Exception:
+                legend = ""
+    combined = prompt + ("\n\n" + legend if legend else "")
+    prompt_hash = hashlib.sha256(combined.encode()).hexdigest()
+    tokens = service._counter.count(combined)
+    try:
+        service._stability_tracker.register_system_prompt(
+            prompt_hash, tokens
+        )
+    except Exception as exc:
+        logger.warning(
+            "refresh_system_prompt: tracker update failed: %s",
+            exc,
+        )
+
     return {
         "status": "ok",
         "mode": service._context.mode.value,

@@ -80,8 +80,11 @@ Active history is not forced to graduate on its own. A long conversation that ne
 ## Ripple Promotion
 
 - When a tier's cache block is invalidated, veterans from the tier below may promote upward
-- Cascades downward through the tier stack
-- Only promote into broken tiers — if a tier is stable, nothing promotes into it and tiers below remain cached
+- Two kinds of invalidation behave differently in the cascade:
+  - **External** invalidation — user deselects a file, a hash changes, a tier is marked broken by the orchestrator before the cascade runs. Opens exactly one upward path. The tier itself becomes a promotion target for the tier below, but the chain does not propagate past it uninvited — e.g. an L1 deselect must not drain L0
+  - **Structural** invalidation — a tier loses residents because they promoted upward, so its cache block genuinely needs rebuilding. Propagates: the now-drained tier becomes a legitimate promotion target for the tier below it. This is how ripple promotion chains upward through multiple levels (external L1 break → L2→L1, L2 now structurally broken → L3→L2, L3 now structurally broken → active→L3 graduates)
+- Only promote into broken tiers — if a tier is stable at cascade entry AND no upstream structural invalidation has reached it, nothing promotes into it and tiers below remain cached
+- The destination of an external invalidation is never itself a source of structural invalidation — receiving content is the purpose of the invalidation, not a sign that further drain is needed. This is what keeps external L1 invalidation from draining L0
 
 ## L0 Backfill
 

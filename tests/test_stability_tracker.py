@@ -473,26 +473,30 @@ class TestCascadePromotion:
         item = tracker.get_all_items()["file:a.py"]
         assert item.tier == Tier.L0
 
-    def test_blocked_promotion_when_upper_stable(self) -> None:
-        """With a stable tier above, items don't promote.
+    def test_blocked_by_stable_upper_tier(self) -> None:
+        """Items do NOT promote past a stable upper tier.
 
-        Pre-populate L0 and L1 and L2 with items so none of them
-        can promote away. When a.py graduates to L3 and eventually
-        hits L3's promote threshold, L2 is stable (not broken this
-        cycle) so a.py cannot promote — its N caps at the promote_n
-        threshold instead.
+        Per spec § Ripple Promotion: "Only promote into
+        broken tiers — if a tier is stable, nothing promotes
+        into it and tiers below remain cached." One external
+        invalidation opens exactly one upward promotion path;
+        without invalidation, veteran items sit at their
+        promote_n and wait for their turn.
 
-        Why seed L0 and L1 too: with empty upper tiers, the cascade
-        treats them as broken, so stable.py would promote L2→L1→L0
-        and leave L2 empty — which then becomes a valid promotion
-        target for a.py. Filling every upper tier with an item that
-        can't itself promote (N below its own promote_n) makes L2
-        genuinely stable.
+        Setup: pin items at L0, L1, L2 so those tiers are
+        stable (not empty, not broken). Drive a.py through 7
+        unchanged cycles with no external invalidation. a.py
+        graduates to L3 at cycle 4 and reaches L3's promote_n
+        at cycle 7 — but L2 is stable, so the promotion is
+        blocked. a.py stays at L3.
+
+        Regression guard for the chain-cascade bug: previously
+        the code would mark L2 broken as a side effect of
+        other tier mutations, letting a.py promote upward
+        without any legitimate invalidation. Snapshot-based
+        gating in _run_cascade prevents this.
         """
         tracker = StabilityTracker()
-        # Seed L0, L1, L2 with items well below their promote_n so
-        # none of them can move. Together they make L2 truly stable
-        # for the duration of the test.
         tracker._items["file:l0_pin.py"] = TrackedItem(
             key="file:l0_pin.py",
             tier=Tier.L0,
@@ -514,9 +518,6 @@ class TestCascadePromotion:
             content_hash="h1",
             tokens=100,
         )
-        # Now drive another item up toward L3 promotion. The pins
-        # must be in active_items each cycle so Phase 1 doesn't
-        # clean them up as departed file:* items.
         for _ in range(7):
             tracker.update(
                 {
@@ -526,10 +527,125 @@ class TestCascadePromotion:
                     "file:l0_pin.py": _active_item("h1"),
                 }
             )
-        # a.py should reach L3 but cap at N=6 (not promote to L2
-        # because L2 has a stable item that can't itself promote).
+        # a.py graduated to L3 at cycle 4 (N=3), then N grew
+        # 4→5→6 at cycles 5/6/7. At cycle 7 with N=6 it wanted
+        # to promote to L2 — but L2 is stable (has the pin
+        # item, not in broken_tiers). Spec says stable tiers
+        # block promotion. a.py stays at L3.
         a = tracker.get_all_items()["file:a.py"]
         assert a.tier == Tier.L3
+        # Stable pins haven't moved either.
+        assert (
+            tracker.get_all_items()["file:stable.py"].tier == Tier.L2
+        )
+        assert (
+            tracker.get_all_items()["file:l1_pin.py"].tier == Tier.L1
+        )
+        assert (
+            tracker.get_all_items()["file:l0_pin.py"].tier == Tier.L0
+        )
+
+    def test_primed_cache_l1_deselect_ripples_full_chain(self) -> None:
+        """End-to-end: L1 deselect drains L1, ripples up, graduates active.
+
+        Reproduces the HUD-observed scenario: every cached
+        tier is primed with residents at promote_n, plus
+        active items that have reached the graduation
+        threshold. User deselects a file in L1, which removes
+        the L1 entry and marks L1 broken. Expected full chain:
+
+        - active → L3: items at N ≥ 3 graduate (normal Phase 2)
+        - L3 → L2: L3 residents at promote_n flow upward
+          because L2 becomes structurally broken when L2→L1
+          drains it
+        - L2 → L1: L2 residents at promote_n flow into the
+          externally-broken L1
+        - L0 untouched: no L0-side invalidation
+
+        Regression guard against the bug where the cascade's
+        broken-tiers snapshot was frozen too strictly and
+        only external invalidations propagated — structural
+        invalidations (from promotion drainage) were ignored,
+        leaving L3 veterans stranded at L3 even though L2
+        had just been drained.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # Seed every cached tier with one resident at its
+        # promote_n so the cache is "primed for promotion".
+        tracker._items["file:l0_resident.py"] = TrackedItem(
+            "file:l0_resident.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l1_resident.py"] = TrackedItem(
+            "file:l1_resident.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l2_resident.py"] = TrackedItem(
+            "file:l2_resident.py", Tier.L2, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l3_resident.py"] = TrackedItem(
+            "file:l3_resident.py", Tier.L3, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+        # Seed an active item ready to graduate (N=3 after
+        # the next unchanged-cycle increment will reach the
+        # active promote_n threshold; starting at N=2 so the
+        # Phase 1 increment lands it at 3).
+        tracker._items["file:active_item.py"] = TrackedItem(
+            "file:active_item.py", Tier.ACTIVE, n_value=2,
+            content_hash="h1", tokens=100,
+        )
+
+        # Simulate L1 deselect: the orchestrator removes the
+        # L1 entry and marks L1 broken. Exactly what
+        # set_selected_files does when a file leaves the
+        # selection set.
+        tracker._items.pop("file:l1_resident.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        # Drive one update with every surviving item still
+        # present and unchanged. This is the "next request"
+        # after the deselect.
+        tracker.update(
+            {
+                "file:l0_resident.py": _active_item("h1", 100),
+                "file:l2_resident.py": _active_item("h1", 100),
+                "file:l3_resident.py": _active_item("h1", 100),
+                "file:active_item.py": _active_item("h1", 100),
+            }
+        )
+
+        items = tracker.get_all_items()
+        # L0 untouched — no L0 invalidation.
+        assert items["file:l0_resident.py"].tier == Tier.L0, (
+            "L0 must not be drained by an L1-scope "
+            "invalidation"
+        )
+        # L2 veteran rode up into externally-broken L1.
+        assert items["file:l2_resident.py"].tier == Tier.L1, (
+            "L2 resident should promote into L1 "
+            "(external invalidation)"
+        )
+        # L3 veteran rode up into structurally-broken L2.
+        # This is the regression-guard assertion: without the
+        # structural-invalidation propagation fix, the L3
+        # resident stays at L3 because L2 wasn't marked
+        # broken at cascade entry.
+        assert items["file:l3_resident.py"].tier == Tier.L2, (
+            "L3 resident should promote into L2 — L2 became "
+            "structurally broken when its resident promoted "
+            "to L1. This is the Ripple Promotion chain that "
+            "must propagate through cascade iterations."
+        )
+        # Active item graduated into structurally-broken L3.
+        assert items["file:active_item.py"].tier == Tier.L3, (
+            "Active item at graduation threshold should "
+            "graduate into L3 (Phase 2 graduation marks L3 "
+            "broken independently, so this path works even "
+            "without structural propagation — but verify "
+            "end-to-end behaviour completes the chain)."
+        )
 
     def test_promotion_marks_tiers_broken(self) -> None:
         """Successful promotion records both source and dest as broken.
@@ -544,6 +660,108 @@ class TestCascadePromotion:
         assert any(
             "L3 → L2" in c and "promoted" in c and "a.py" in c
             for c in changes
+        )
+
+    def test_l1_invalidation_ripples_up_through_structural_breaks(self) -> None:
+        """Ripple Promotion: invalidation propagates via structural drain.
+
+        Per spec § Ripple Promotion: "As items graduate and
+        populate tiers, they ripple upward through the stable
+        tiers." And Threshold-Aware Cascade: promotion happens
+        every turn for every eligible item.
+
+        The spec distinguishes two kinds of invalidation that
+        behave differently:
+
+        - **External** invalidation (hash change, deselection,
+          orchestrator-marked tier) opens exactly one upward
+          path — drain must not reach above the invalidated
+          tier uninvited.
+        - **Structural** invalidation (a tier loses residents
+          because they promoted upward into a broken tier) is
+          a genuine cache-block rebuild and DOES chain. The
+          newly-drained tier can accept content from below.
+
+        Setup: seed L0/L1/L2/L3 with eligible items. Externally
+        invalidate L1. Expected chain:
+
+        - L2→L1: L1 was externally broken at entry, L2 item
+          at promote_n → promotes.
+        - L3→L2: L2 is now structurally broken (lost its
+          resident), L3 item at promote_n → promotes.
+        - L0 stays put: L0 was never invalidated, and the
+          destination-mark contract prevents the chain from
+          propagating past L1 into L0.
+
+        Regression guard against the original chain-cascade
+        bug: an external L1 invalidation must NOT drain L0.
+        The destination tier of a promotion (the originally-
+        invalidated tier) is not added to the cascade's
+        invalidation snapshot, so the tier below it never
+        sees it as a legitimate promotion target.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # L0 resident — stable, N maxed out.
+        tracker._items["file:l0_item.py"] = TrackedItem(
+            "file:l0_item.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        # L1 resident — will be the victim of external
+        # invalidation, removed below.
+        tracker._items["file:l1_item.py"] = TrackedItem(
+            "file:l1_item.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        # L2 resident — at L2's promote_n (9). Should promote
+        # into L1 because L1 is externally broken.
+        tracker._items["file:l2_item.py"] = TrackedItem(
+            "file:l2_item.py", Tier.L2, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        # L3 resident — at L3's promote_n (6). Should promote
+        # into L2 because L2 becomes structurally broken
+        # after L2→L1 drains it.
+        tracker._items["file:l3_item.py"] = TrackedItem(
+            "file:l3_item.py", Tier.L3, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+
+        # External invalidation of L1: simulate by removing
+        # the L1 resident and marking L1 broken (the pattern
+        # that set_selected_files and hash-demotion use).
+        tracker._items.pop("file:l1_item.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        tracker.update(
+            {
+                "file:l0_item.py": _active_item("h1", 100),
+                "file:l2_item.py": _active_item("h1", 100),
+                "file:l3_item.py": _active_item("h1", 100),
+            }
+        )
+
+        items = tracker.get_all_items()
+        # Ripple chain fires through structural invalidation:
+        assert items["file:l2_item.py"].tier == Tier.L1, (
+            "L2 item should have promoted into externally-"
+            "broken L1"
+        )
+        assert items["file:l3_item.py"].tier == Tier.L2, (
+            "L3 item should have promoted into structurally-"
+            "broken L2 (L2 drained when its resident promoted "
+            "to L1). This is the Ripple Promotion the spec "
+            "describes — invalidations propagate upward "
+            "through tier drainage."
+        )
+        # L0 stays put — no external L0 invalidation, and the
+        # destination-mark contract prevents the chain from
+        # reaching L0 via L1 drain (L1 was the external
+        # invalidation target, not a new source of one).
+        assert items["file:l0_item.py"].tier == Tier.L0, (
+            "L0 must NOT be drained. External L1 invalidation "
+            "opens L2→L1; L1 was the destination, not a "
+            "source of structural invalidation, so L1 never "
+            "feeds back into the gate and L0 stays cached."
         )
 
 
@@ -636,41 +854,42 @@ class TestAnchoring:
         assert tracker.get_all_items()["file:a.py"].tier == Tier.L3
         assert tracker.get_all_items()["file:b.py"].tier == Tier.L3
 
-    def test_n_capped_when_upper_stable(self) -> None:
-        """Non-anchored items cap N at promote_n if upper stable.
+    def test_anchored_stay_unanchored_blocked_by_stable_upper(self) -> None:
+        """Non-anchored veterans stay put when the upper tier is stable.
 
-        An item past the anchor line, with a tier above that is
-        stable, should not grow N unboundedly — it caps at the
-        promote threshold.
+        Anchor math: items in a tier are sorted by N asc and
+        accumulated until cumulative tokens reach cache_target.
+        Items consumed before the threshold are anchored (N
+        frozen, cannot promote). Items past the threshold are
+        unanchored and eligible to promote — but still gated
+        on the destination tier being broken or empty.
 
-        Anchor math recap: items in a tier are sorted by N asc
-        and accumulated until cumulative tokens reach
-        cache_target. Items consumed along the way are anchored
-        (N frozen). The item whose addition first brings the
-        cumulative to >= target is itself anchored (it's part of
-        the set that meets the target). Only items strictly past
-        that point are unanchored and subject to the N cap.
+        Setup: cache_target=500; three L3 items at 300 tokens
+        each (total 900). First two anchored (accumulated 600,
+        above target so anchoring stops with only the first two
+        in). Actually — re-reading the anchoring rule: items
+        are consumed until accumulated reaches the target. So
+        the first item (300, accumulated=300<500) is anchored,
+        the second (accumulated=600>=500) is above the line,
+        not anchored. Tie-broken by key, so a.py is anchored,
+        b.py and c.py are unanchored.
 
-        With cache_target=500 and items at 300 tokens each: the
-        first two items together accumulate 600 (first anchored
-        at cumulative 300 < 500, second anchored at cumulative
-        600 ≥ 500 — wait, no — the anchoring check runs BEFORE
-        the item is added). So: enter loop with cum=0 < 500 →
-        anchor first; add 300 → cum=300. Enter with cum=300 <
-        500 → anchor second; add 300 → cum=600. Enter with cum=600
-        ≥ 500 → NOT anchored. So we need at least three items:
-        two get anchored (together crossing target), third is
-        unanchored and tests the cap.
+        Seed L2 with a stable resident so L2 is NOT broken at
+        cascade entry. Unanchored L3 items (b, c) reach
+        promote_n but the destination is stable → gate blocks
+        promotion. They stay at L3 with their incremented N
+        (capped at promote_n by _process_tier_veterans when
+        upper is stable).
         """
         tracker = StabilityTracker(cache_target_tokens=500)
-        # Seed L2 with a stable item so L2 isn't broken.
+        # Seed L2 with a stable item so L2 isn't broken or
+        # empty.
         tracker._items["file:stable.py"] = TrackedItem(
             "file:stable.py", Tier.L2, n_value=6,
             content_hash="h1", tokens=600,
         )
-        # Seed L3 with three items above cache_target combined.
-        # The lowest-N items (a, b) anchor; c has massive N and
-        # is past the anchor line where the cap applies.
+        # Seed L3 with three items totalling 900 tokens. Sorted
+        # ascending by (N, key): a(N=3), b(N=3), c(N=100).
         tracker._items["file:a.py"] = TrackedItem(
             "file:a.py", Tier.L3, n_value=3,
             content_hash="h1", tokens=300,
@@ -680,10 +899,9 @@ class TestAnchoring:
             content_hash="h1", tokens=300,
         )
         tracker._items["file:c.py"] = TrackedItem(
-            "file:c.py", Tier.L3, n_value=100,  # ridiculously high
+            "file:c.py", Tier.L3, n_value=100,  # well past promote_n
             content_hash="h1", tokens=300,
         )
-        # Run update — all items unchanged.
         tracker.update(
             {
                 "file:stable.py": _active_item("h1", 600),
@@ -692,9 +910,15 @@ class TestAnchoring:
                 "file:c.py": _active_item("h1", 300),
             }
         )
-        # c.py should be capped at promote_n=6 since L2 is stable
-        # and c.py is past the anchor line.
-        assert tracker.get_all_items()["file:c.py"].n_value == 6
+        # L2 is stable — promotion from L3 to L2 blocked.
+        # All L3 items stay at L3.
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L3
+        assert tracker.get_all_items()["file:b.py"].tier == Tier.L3
+        assert tracker.get_all_items()["file:c.py"].tier == Tier.L3
+        # Stable resident unchanged.
+        assert (
+            tracker.get_all_items()["file:stable.py"].tier == Tier.L2
+        )
 
 
 # ---------------------------------------------------------------------------

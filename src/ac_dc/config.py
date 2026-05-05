@@ -107,6 +107,7 @@ CONFIG_TYPES: dict[str, str] = {
 _HIGH_MIN_MODELS = (
     "opus-4-5", "opus-4.5",
     "opus-4-6", "opus-4.6",
+    "opus-4-7", "opus-4.7",
     "haiku-4-5", "haiku-4.5",
 )
 _HIGH_MIN_TOKENS = 4096
@@ -848,20 +849,33 @@ class ConfigManager:
         """
         main = self._read_user_file("system.md")
         if self.agents_enabled:
-            # Read only from the user dir — not the bundle.
-            # A user who deletes the appendix from their
-            # config dir is explicitly opting out of the
-            # agent-spawn instructions even with the toggle
-            # on; falling back to the bundled copy would
-            # override that choice. The Settings-tab toggle
-            # remains the normal way to control this; file
-            # deletion is the escape hatch for users who
-            # want the toggle state without the prompt text.
-            appendix_path = self._user_dir / "system_agentic_appendix.md"
-            try:
-                appendix = appendix_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                appendix = ""
+            # Read from the user dir first, falling back to
+            # the bundle when the user file is absent.
+            #
+            # The user-dir file is created by the upgrade
+            # pass on install. However, users who installed
+            # AC⚡DC before `system_agentic_appendix.md` was
+            # added to the managed-files set have a version
+            # marker that prevents the upgrade pass from
+            # copying the file — the early-return on
+            # matching versions skips the per-file check.
+            # The bundle fallback papers over this
+            # cross-version gap so "toggle on" reliably
+            # produces agent instructions regardless of
+            # install history.
+            #
+            # A user who wants to opt out of the appendix
+            # text while keeping the toggle on must set
+            # `agents.enabled: false` in `app.json` —
+            # deleting the appendix file no longer
+            # suppresses it (the bundle is still present).
+            # This is a deliberate trade-off: reliability
+            # of the toggle across install histories
+            # outweighs the niche escape hatch of partial
+            # opt-out via file deletion.
+            appendix = self._read_user_file(
+                "system_agentic_appendix.md"
+            ).strip()
             if appendix:
                 main = f"{main}\n\n{appendix}"
         return self._concat_prompt(main)
