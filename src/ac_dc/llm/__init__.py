@@ -30,6 +30,14 @@ from ac_dc.llm._helpers import (
     _parse_agent_tag,
     _resolve_max_output_tokens,
 )
+from ac_dc.llm._breakdown import (
+    get_context_breakdown,
+    get_file_map_block,
+    get_meta_block,
+    print_init_hud,
+    print_post_response_hud,
+    wide_map_exclude_set,
+)
 
 __all__ = [
     "ArchivalAppend",
@@ -49,4 +57,10 @@ __all__ = [
     "_generate_request_id",
     "_parse_agent_tag",
     "_resolve_max_output_tokens",
+    "get_context_breakdown",
+    "get_file_map_block",
+    "get_meta_block",
+    "print_init_hud",
+    "print_post_response_hud",
+    "wide_map_exclude_set",
 ]
