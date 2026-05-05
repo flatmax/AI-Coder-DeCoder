@@ -16,6 +16,16 @@ descriptor:
   so closed agents drop out and new agents appear
   without invalidation logic
 
+Identity contract (commit "honor LLM-chosen ids; flatten
+registry"): the agent's identity is the LLM-chosen id
+from its ``🟧🟧🟧 AGENT`` block. The registry is keyed
+flat by that id. The descriptor surfaces the id directly
+— no synthesis from turn_id+agent_idx, no
+``{turn_id}/agent-NN`` label format. ``new_session``
+clears each agent's chat history but PRESERVES its scope,
+so an agent's id stays addressable across turns until
+the application exits.
+
 The tests construct scopes directly via
 :func:`LLMService._build_agent_scope` rather than driving
 the spawn pipeline end-to-end. That keeps each test
@@ -79,16 +89,6 @@ class TestEmptyRegistry:
     def test_no_agents_returns_empty_string(self, service) -> None:
         assert build_agent_descriptor(service) == ""
 
-    def test_empty_inner_dict_still_empty(self, service) -> None:
-        # Defensive: a turn dict with no inner agents
-        # (cleanup race: outer key created but inner
-        # never populated, or every agent closed
-        # individually) should produce NO descriptor
-        # at all — not a heading with no body.
-        service._agent_contexts["turn_orphan"] = {}
-        result = build_agent_descriptor(service)
-        assert result == ""
-
 
 class TestSingleAgent:
     def test_descriptor_carries_id(self, service) -> None:
@@ -101,12 +101,13 @@ class TestSingleAgent:
             turn_id="turn_001",
         )
         result = build_agent_descriptor(service)
-        # Identity field uses the {turn_id}/agent-NN
-        # convention pinned in the spec — id-based
-        # identity flips this in a later commit, but
-        # the descriptor builder's job is to surface
-        # whatever the registry currently uses.
-        assert "turn_001/agent-00" in result
+        # Identity is the LLM-chosen id from the spawn
+        # block. The descriptor surfaces it directly —
+        # no ``{turn_id}/agent-NN`` synthesis.
+        assert "frontend-chat" in result
+        # Confirm the old synthesised label format is NOT
+        # produced.
+        assert "turn_001/agent-00" not in result
 
     def test_no_files_shows_placeholder(self, service) -> None:
         parent = service._default_scope()
@@ -229,45 +230,44 @@ class TestMultipleAgents:
         parent = service._default_scope()
         for i in range(3):
             service._build_agent_scope(
-                block=_make_block(f"agent-{i}"),
+                block=_make_block(f"worker-{i}"),
                 agent_idx=i,
                 parent_scope=parent,
                 turn_id="turn_001",
             )
         result = build_agent_descriptor(service)
-        assert "turn_001/agent-00" in result
-        assert "turn_001/agent-01" in result
-        assert "turn_001/agent-02" in result
+        assert "worker-0" in result
+        assert "worker-1" in result
+        assert "worker-2" in result
 
-    def test_agents_sorted_by_turn_then_idx(self, service) -> None:
+    def test_agents_sorted_alphabetically_by_id(
+        self, service
+    ) -> None:
+        # Insertion order shuffled; output is sorted by id.
         parent = service._default_scope()
-        # Insert in non-sorted order to exercise the
-        # sort.
         service._build_agent_scope(
-            block=_make_block("b"),
+            block=_make_block("zebra"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        service._build_agent_scope(
+            block=_make_block("alpha"),
             agent_idx=1,
             parent_scope=parent,
-            turn_id="turn_002",
+            turn_id="t",
         )
         service._build_agent_scope(
-            block=_make_block("a"),
-            agent_idx=0,
+            block=_make_block("mango"),
+            agent_idx=2,
             parent_scope=parent,
-            turn_id="turn_001",
-        )
-        service._build_agent_scope(
-            block=_make_block("c"),
-            agent_idx=0,
-            parent_scope=parent,
-            turn_id="turn_002",
+            turn_id="t",
         )
         result = build_agent_descriptor(service)
-        # turn_001/agent-00 < turn_002/agent-00 <
-        # turn_002/agent-01 in document order.
-        idx_001_00 = result.index("turn_001/agent-00")
-        idx_002_00 = result.index("turn_002/agent-00")
-        idx_002_01 = result.index("turn_002/agent-01")
-        assert idx_001_00 < idx_002_00 < idx_002_01
+        idx_alpha = result.index("alpha")
+        idx_mango = result.index("mango")
+        idx_zebra = result.index("zebra")
+        assert idx_alpha < idx_mango < idx_zebra
 
     def test_independent_file_lists(self, service, repo_dir) -> None:
         # Two agents with non-overlapping file sets.
@@ -294,25 +294,24 @@ class TestMultipleAgents:
         scope_b.context.file_context.clear()
         scope_b.context.file_context.add_file("b.py")
         result = build_agent_descriptor(service)
-        # Find each agent's section and check the
-        # full-files line is correct for that section
-        # only.
+        # Find each agent's section by its id and check
+        # the full-files line is correct for that section
+        # only. Sort order is alphabetical — a-only < b-only.
         lines = result.split("\n")
-        # Walk to first agent header, read its full line.
-        idx_00 = next(
+        idx_a = next(
             i for i, line in enumerate(lines)
-            if "turn_001/agent-00" in line
+            if "a-only" in line
         )
-        idx_01 = next(
+        idx_b = next(
             i for i, line in enumerate(lines)
-            if "turn_001/agent-01" in line
+            if "b-only" in line
         )
-        section_00 = "\n".join(lines[idx_00:idx_01])
-        section_01 = "\n".join(lines[idx_01:])
-        assert "full: a.py" in section_00
-        assert "b.py" not in section_00
-        assert "full: b.py" in section_01
-        assert "a.py" not in section_01
+        section_a = "\n".join(lines[idx_a:idx_b])
+        section_b = "\n".join(lines[idx_b:])
+        assert "full: a.py" in section_a
+        assert "b.py" not in section_a
+        assert "full: b.py" in section_b
+        assert "a.py" not in section_b
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +384,7 @@ class TestDescriptorInjection:
         content = last["content"]
         assert isinstance(content, str)
         assert "## Live agents" in content
-        assert "t/agent-00" in content
+        assert "frontend" in content
 
     def test_no_descriptor_when_no_agents(self, service) -> None:
         parent = service._default_scope()

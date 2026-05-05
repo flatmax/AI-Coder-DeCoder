@@ -79,18 +79,26 @@ async def chat_streaming(
     files: list[str] | None = None,
     images: list[str] | None = None,
     excluded_urls: list[str] | None = None,
-    agent_tag: tuple[str, int] | list[Any] | None = None,
+    agent_tag: str | None = None,
 ) -> dict[str, Any]:
     """Start a streaming chat request.
 
     Returns ``{"status": "started"}`` synchronously; chunks and
     the completion arrive via the event callback. Rejects if
-    the service isn't fully initialised, if the agent_tag is
-    malformed or stale, or if another stream is active for the
-    same scope (main conversation OR the tagged agent).
+    the service isn't fully initialised, if the ``agent_tag``
+    is malformed or stale, or if another stream is active for
+    the same scope (main conversation OR the tagged agent).
 
-    See :meth:`LLMService.chat_streaming` for the full prose on
-    single-stream guard scoping and agent_tag semantics.
+    ``agent_tag`` is the agent's LLM-chosen id (a non-empty
+    string) when routing to an agent scope, or None for the
+    main conversation. Empty strings and non-string values
+    are rejected as malformed. Unknown ids return
+    ``{"error": "agent not found"}`` — distinct from
+    malformed so the frontend can surface different toasts
+    for "tab is stale" vs "frontend bug".
+
+    See :meth:`LLMService.chat_streaming` for the full prose
+    on single-stream guard scoping and agent_tag semantics.
     """
     # Capture event loop on the RPC thread — this is the
     # event-loop thread. D10 contract: the capture happens
@@ -110,30 +118,26 @@ async def chat_streaming(
         }
 
     # Resolve the scope.
-    agent_key: tuple[str, int] | None = None
+    agent_key: str | None = None
     scope: ConversationScope
     if agent_tag is None:
         scope = service._default_scope()
     else:
-        parsed = service._parse_agent_tag(agent_tag)
-        if parsed is None:
+        # Validate shape: non-empty string. Reject everything
+        # else as malformed so callers get the actionable
+        # error message rather than a confusing "agent not
+        # found" for what's actually a frontend bug.
+        if not isinstance(agent_tag, str) or not agent_tag:
             return {
                 "error": (
-                    "Malformed agent_tag — expected "
-                    "[turn_id, agent_idx] or "
-                    "(turn_id, agent_idx)"
+                    "Malformed agent_tag — expected a "
+                    "non-empty agent id string"
                 )
             }
-        agent_key = parsed
-        turn_id_part, agent_idx_part = agent_key
-        turn_bucket = service._agent_contexts.get(turn_id_part)
-        agent_scope = (
-            turn_bucket.get(agent_idx_part)
-            if turn_bucket is not None
-            else None
-        )
+        agent_scope = service._agent_contexts.get(agent_tag)
         if agent_scope is None:
             return {"error": "agent not found"}
+        agent_key = agent_tag
         scope = agent_scope
 
     # Single-stream guard. Per-agent for tagged calls; main-
@@ -143,7 +147,7 @@ async def chat_streaming(
             return {
                 "error": (
                     f"Another stream is active for agent "
-                    f"{agent_key[0]}/agent-{agent_key[1]:02d}"
+                    f"{agent_key}"
                 )
             }
         service._active_agent_streams.add(agent_key)

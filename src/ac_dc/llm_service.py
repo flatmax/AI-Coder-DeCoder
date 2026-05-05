@@ -490,13 +490,14 @@ class LLMService:
         # no USER-initiated stream is active, not that the set is
         # empty.
         self._active_user_request: str | None = None
-        # Per-agent active stream tracking (C1c). Keyed by the
-        # ``(turn_id, agent_idx)`` tuple that tags an agent-
-        # conversation stream. An entry being present means that
-        # agent currently has a stream in flight; a second
-        # ``chat_streaming`` call with the same agent_tag while
-        # this entry is set returns the "another stream is
-        # active" error (per-agent, not per-session).
+        # Per-agent active stream tracking. Keyed by the
+        # agent's LLM-chosen id (the same string used in
+        # ``🟧🟧🟧 AGENT`` blocks and as the registry key).
+        # An entry being present means that agent currently
+        # has a stream in flight; a second ``chat_streaming``
+        # call with the same ``agent_tag`` while this entry
+        # is set returns the "another stream is active"
+        # error (per-agent, not per-session).
         #
         # Lives alongside ``_active_user_request`` rather than
         # replacing it because the two slots enforce different
@@ -512,7 +513,7 @@ class LLMService:
         #
         # Cleared in the background task's finally block, same
         # pattern as ``_active_user_request``.
-        self._active_agent_streams: set[tuple[str, int]] = set()
+        self._active_agent_streams: set[str] = set()
         # Cancellation flags keyed by request ID. Populated by
         # cancel_streaming; the worker thread polls and breaks out
         # when it finds its ID.
@@ -545,38 +546,38 @@ class LLMService:
         # signal.
         self._request_accumulators: dict[str, str] = {}
 
-        # Agent context registry — per-turn, per-agent
-        # ConversationScope storage so the scopes outlive the
-        # spawn's ``asyncio.gather`` and remain reachable for
-        # follow-up user replies to the agent tab.
+
+        # Agent context registry — flat by LLM-chosen id.
+        # Each ``ConversationScope`` outlives the spawn's
+        # ``asyncio.gather`` and remains reachable across
+        # turns for follow-up user replies to the agent tab.
         #
-        # Keyed ``{turn_id: {agent_idx: ConversationScope}}``.
-        # Nested shape (rather than flat tuple keys) makes
-        # per-turn invalidation cleanly expressible —
-        # ``new_session()`` wipes the whole dict, and
-        # ``close_agent_context(turn_id, agent_idx)`` pops the
-        # inner entry plus the outer dict when it empties.
+        # Keyed ``{agent_id: ConversationScope}`` where
+        # ``agent_id`` is the string the LLM chose in its
+        # ``🟧🟧🟧 AGENT`` block. Identity is stable across
+        # turns: the orchestrator can re-address the same
+        # agent by name, and :meth:`_spawn_agents_for_turn`
+        # treats a known id as retasking (preserve the scope)
+        # and an unknown id as a fresh spawn.
         #
         # Populated in :meth:`_build_agent_scope` — the single
-        # chokepoint for agent scope construction. Today the
-        # spawn path (:meth:`_spawn_agents_for_turn`) builds a
-        # scope and immediately feeds it to
-        # :attr:`_agent_stream_impl`; the scope becomes
-        # garbage-collectable when the gathered task returns.
-        # Registering here keeps a reference alive so the main
-        # LLM's follow-up turns can route user replies back to
-        # the same ContextManager + StabilityTracker + file
-        # context — the agent's conversation state stays warm,
-        # the provider cache stays warm, and iteration within
-        # the turn is cheap.
+        # chokepoint for agent scope construction. The spawn
+        # path (:meth:`_spawn_agents_for_turn`) builds a scope
+        # and immediately feeds it to
+        # :attr:`_agent_stream_impl`; the registry holds a
+        # reference so the main LLM's follow-up turns can
+        # route user replies back to the same ContextManager
+        # + StabilityTracker + file context.
         #
-        # Cleared wholesale by :meth:`new_session`. Agents from
-        # prior sessions have no meaningful way to continue
-        # into a new session's conversation, so the whole
-        # registry resets. Per-entry removal is C1b's
-        # ``close_agent_context`` RPC (agent-tab close button).
+        # Per :doc:`specs4/7-future/parallel-agents`,
+        # :meth:`new_session` clears each agent's chat history
+        # but PRESERVES the scopes (the team stays warm; only
+        # the conversation messages reset). Per-entry removal
+        # is :meth:`close_agent_context` (agent-tab close
+        # button). Application exit is the only event that
+        # actually drops scope objects.
         self._agent_contexts: dict[
-            str, dict[int, ConversationScope]
+            str, ConversationScope
         ] = {}
 
         # Agent streaming impl — points at :meth:`_stream_chat`
@@ -1235,35 +1236,32 @@ class LLMService:
 
     def close_agent_context(
         self,
-        turn_id: str,
-        agent_idx: int,
+        agent_id: str,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_state.close_agent_context`."""
         from ac_dc.llm._rpc_state import close_agent_context
-        return close_agent_context(self, turn_id, agent_idx)
+        return close_agent_context(self, agent_id)
 
     def set_agent_selected_files(
         self,
-        turn_id: str,
-        agent_idx: int,
+        agent_id: str,
         files: list[str],
     ) -> list[str] | dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_selected_files`."""
         from ac_dc.llm._rpc_state import set_agent_selected_files
         return set_agent_selected_files(
-            self, turn_id, agent_idx, files
+            self, agent_id, files
         )
 
     def set_agent_excluded_index_files(
         self,
-        turn_id: str,
-        agent_idx: int,
+        agent_id: str,
         files: list[str],
     ) -> list[str] | dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_excluded_index_files`."""
         from ac_dc.llm._rpc_state import set_agent_excluded_index_files
         return set_agent_excluded_index_files(
-            self, turn_id, agent_idx, files
+            self, agent_id, files
         )
 
     # ------------------------------------------------------------------
@@ -1305,6 +1303,7 @@ class LLMService:
         excluded_urls: list[str] | None = None,
         *,
         scope: ConversationScope | None = None,
+        agent_key: str | None = None,
     ) -> None:
         """No-op stand-in for ``_stream_chat`` during Step 2.
 
@@ -1328,7 +1327,7 @@ class LLMService:
         plumbing worked without thinking something broke when
         no LLM call fired.
         """
-        del files, images, excluded_urls  # unused in stub
+        del files, images, excluded_urls, agent_key  # unused
         task_preview = message[:60].replace("\n", " ")
         logger.info(
             "Agent stream stub: request=%s task=%r (scope=%s). "
@@ -1387,7 +1386,7 @@ class LLMService:
         files: list[str] | None = None,
         images: list[str] | None = None,
         excluded_urls: list[str] | None = None,
-        agent_tag: tuple[str, int] | list[Any] | None = None,
+        agent_tag: str | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_streaming.chat_streaming`."""
         from ac_dc.llm._rpc_streaming import chat_streaming
@@ -1404,35 +1403,25 @@ class LLMService:
     @staticmethod
     def _parse_agent_tag(
         agent_tag: Any,
-    ) -> tuple[str, int] | None:
-        """Coerce an incoming agent_tag into a ``(turn_id, agent_idx)`` tuple.
+    ) -> str | None:
+        """Validate an incoming agent_tag as a non-empty string id.
 
-        JRPC-OO serialises tuples to JS arrays on the wire;
-        tests and direct callers use the tuple form. Both
-        shapes are accepted. Returns None when the payload
-        is structurally malformed (wrong length, wrong types).
+        Agent identity is the LLM-chosen id alone. The tag
+        arrives from the frontend via JRPC-OO as a string (or
+        None for main-conversation calls). Anything other than
+        a non-empty string is structurally malformed and
+        returns None — the caller surfaces a "frontend bug"
+        toast distinct from the "tab is stale" toast that
+        fires on registry-miss.
 
         Kept as a ``@staticmethod`` so it's trivially testable
         without constructing a service.
         """
-        if not isinstance(agent_tag, (list, tuple)):
+        if not isinstance(agent_tag, str):
             return None
-        if len(agent_tag) != 2:
+        if not agent_tag:
             return None
-        turn_id_raw, agent_idx_raw = agent_tag
-        if not isinstance(turn_id_raw, str) or not turn_id_raw:
-            return None
-        # Accept int or int-compatible. Reject bool because
-        # ``bool`` is a subclass of ``int`` and True/False
-        # silently matching agent_idx 1/0 would mask bugs in
-        # upstream code that forgot to parse a string.
-        if isinstance(agent_idx_raw, bool):
-            return None
-        if not isinstance(agent_idx_raw, int):
-            return None
-        if agent_idx_raw < 0:
-            return None
-        return (turn_id_raw, agent_idx_raw)
+        return agent_tag
 
     def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_streaming.cancel_streaming`."""
@@ -1448,7 +1437,7 @@ class LLMService:
         excluded_urls: list[str] | None = None,
         *,
         scope: ConversationScope | None = None,
-        agent_key: tuple[str, int] | None = None,
+        agent_key: str | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._streaming.stream_chat`.
 
@@ -1611,7 +1600,7 @@ class LLMService:
 
     def get_context_breakdown(
         self,
-        agent_tag: tuple[str, int] | list[Any] | None = None,
+        agent_tag: str | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._breakdown.get_context_breakdown`.
 
@@ -1619,9 +1608,8 @@ class LLMService:
         every stream-complete + mode/session change.
 
         ``agent_tag`` is ``None`` for the main conversation or
-        a ``(turn_id, agent_idx)`` tuple/list for an agent tab.
-        JRPC-OO serialises tuples as JS arrays, so the parser
-        accepts both shapes via :meth:`_parse_agent_tag`.
+        the agent's LLM-chosen id (a non-empty string) for an
+        agent tab.
         """
         from ac_dc.llm._breakdown import get_context_breakdown
         parsed = (

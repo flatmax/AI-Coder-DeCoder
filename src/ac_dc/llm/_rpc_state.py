@@ -327,7 +327,23 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
 
 
 def new_session(service: "LLMService") -> dict[str, Any]:
-    """Start a fresh session — clear history, purge tracker, wipe agents."""
+    """Start a fresh session — clear chat history; preserve agent scopes.
+
+    Per :doc:`specs4/7-future/parallel-agents` § "Agent
+    lifetime", ``new_session`` clears each agent's chat
+    history but does NOT tear down the agent itself. The
+    agent's :class:`ContextManager` retains its file context,
+    the :class:`StabilityTracker` keeps its tier assignments
+    and provider-cache state, and the agent remains
+    addressable by its id for the next turn.
+
+    The symmetry matters: from the user's perspective,
+    ``new_session`` is "start a fresh conversation with the
+    same warm team" — applied uniformly to the orchestrator
+    (whose ContextManager survives this call too) and every
+    live agent. Application exit is the only event that
+    drops the agents themselves.
+    """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
@@ -339,8 +355,13 @@ def new_session(service: "LLMService") -> dict[str, Any]:
             f"sess_{int(time.time() * 1000)}_nostore"
         )
     service._context.clear_history()
-    # Drop every agent ContextManager from the prior session.
-    service._agent_contexts.clear()
+    # Clear each agent's chat history but preserve the
+    # scope itself. The agent's ContextManager, file context,
+    # and stability tracker survive — only the conversation
+    # messages are wiped. Mirrors the orchestrator's own
+    # behaviour above (clear_history on _context).
+    for scope in service._agent_contexts.values():
+        scope.context.clear_history()
     service._broadcast_event(
         "sessionChanged",
         {"session_id": service._session_id, "messages": []},
@@ -355,54 +376,50 @@ def new_session(service: "LLMService") -> dict[str, Any]:
 
 def close_agent_context(
     service: "LLMService",
-    turn_id: str,
-    agent_idx: int,
+    agent_id: str,
 ) -> dict[str, Any]:
     """Free an agent's ContextManager + tracker + file_context.
 
-    Called when the user clicks ✕ on an agent tab. Idempotent —
-    unknown turn_id or agent_idx returns ``closed: False`` rather
-    than raising. Archive file on disk stays; transcript is still
-    readable via :meth:`LLMService.get_turn_archive`.
+    Called when the user clicks ✕ on an agent tab. Identifies
+    the agent by its LLM-chosen id (the same id used in
+    ``🟧🟧🟧 AGENT`` blocks). Idempotent — unknown id returns
+    ``closed: False`` rather than raising. Archive files on
+    disk survive; transcripts remain readable via
+    :meth:`LLMService.get_turn_archive` for any turn this
+    agent participated in.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
-    turn_bucket = service._agent_contexts.get(turn_id)
-    if turn_bucket is None:
+    if not isinstance(agent_id, str) or not agent_id:
         return {"status": "ok", "closed": False}
-    scope = turn_bucket.pop(agent_idx, None)
+    scope = service._agent_contexts.pop(agent_id, None)
     if scope is None:
         return {"status": "ok", "closed": False}
-    # Drop the outer key when empty so the registry doesn't
-    # accumulate empty buckets over long sessions.
-    if not turn_bucket:
-        service._agent_contexts.pop(turn_id, None)
     return {"status": "ok", "closed": True}
 
 
 def set_agent_selected_files(
     service: "LLMService",
-    turn_id: str,
-    agent_idx: int,
+    agent_id: str,
     files: list[str],
 ) -> list[str] | dict[str, Any]:
     """Replace an agent's selected-files list.
 
-    Per-agent analogue of :func:`set_selected_files`. Replaces
-    in-place so the scope's stored list identity is preserved —
-    downstream code holds references to ``scope.selected_files``.
-    No filesChanged broadcast — agent selection is per-tab; a
+    Per-agent analogue of :func:`set_selected_files`. Identifies
+    the agent by its LLM-chosen id. Replaces in-place so the
+    scope's stored list identity is preserved — downstream code
+    holds references to ``scope.selected_files``. No
+    ``filesChanged`` broadcast — agent selection is per-tab; a
     broadcast would overwrite other clients' main-tab or
     different-agent-tab state.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
-    turn_bucket = service._agent_contexts.get(turn_id)
-    if turn_bucket is None:
+    if not isinstance(agent_id, str) or not agent_id:
         return {"error": "agent not found"}
-    scope = turn_bucket.get(agent_idx)
+    scope = service._agent_contexts.get(agent_id)
     if scope is None:
         return {"error": "agent not found"}
     if service._repo is not None:
@@ -419,17 +436,17 @@ def set_agent_selected_files(
 
 def set_agent_excluded_index_files(
     service: "LLMService",
-    turn_id: str,
-    agent_idx: int,
+    agent_id: str,
     files: list[str],
 ) -> list[str] | dict[str, Any]:
     """Replace an agent's excluded-index-files list.
 
     Per-agent analogue of :func:`set_excluded_index_files`.
-    Excluded files have no content, no index block, and no
-    tracker item in the agent's scope. Mirrors the selection
-    RPC shape: `{error: "agent not found"}` when the tab has
-    been closed, otherwise returns the canonical list.
+    Identifies the agent by its LLM-chosen id. Excluded files
+    have no content, no index block, and no tracker item in
+    the agent's scope. Mirrors the selection RPC shape:
+    ``{error: "agent not found"}`` when the tab has been
+    closed, otherwise returns the canonical list.
 
     Unlike the main-conversation version, this does NOT remove
     stale tracker entries from every mode's tracker — agent
@@ -441,10 +458,9 @@ def set_agent_excluded_index_files(
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
-    turn_bucket = service._agent_contexts.get(turn_id)
-    if turn_bucket is None:
+    if not isinstance(agent_id, str) or not agent_id:
         return {"error": "agent not found"}
-    scope = turn_bucket.get(agent_idx)
+    scope = service._agent_contexts.get(agent_id)
     if scope is None:
         return {"error": "agent not found"}
     valid = [p for p in files if isinstance(p, str)]

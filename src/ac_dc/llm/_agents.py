@@ -130,13 +130,22 @@ async def spawn_agents_for_turn(
 ) -> None:
     """Fan out N agents under a single user turn.
 
-    See :meth:`LLMService._spawn_agents_for_turn` for the full
-    prose. Each block gets a fresh scope via
-    :func:`build_agent_scope`; each child request ID follows
-    ``{parent}-agent-{NN}``. All tasks run concurrently via
-    :func:`asyncio.gather` with ``return_exceptions=True``.
-    After gathering, :func:`assimilate_agent_changes` folds
-    per-agent file changes into the parent.
+    Each block has an LLM-chosen ``id`` (e.g.
+    ``"frontend-chat"``). The id is the registry key — re-using
+    a known id retasks an existing agent (preserving its
+    ContextManager, file context, tracker, and identity);
+    a new id spawns a fresh agent. See
+    :meth:`LLMService._spawn_agents_for_turn` for the full
+    prose.
+
+    Each child request ID follows
+    ``{parent}-agent-{NN:02d}`` where NN is the block's
+    positional index — used only for stream routing on
+    the frontend, not for identity. All tasks run
+    concurrently via :func:`asyncio.gather` with
+    ``return_exceptions=True``. After gathering,
+    :func:`assimilate_agent_changes` folds per-agent file
+    changes into the parent.
     """
     if not agent_blocks:
         return
@@ -160,6 +169,7 @@ async def spawn_agents_for_turn(
                 [],  # images — agents never carry images
                 [],  # excluded_urls — agents start fresh
                 scope=agent_scope,
+                agent_key=block.id,
             )
         )
         tasks.append(task)
@@ -298,10 +308,19 @@ def build_agent_scope(
 ) -> ConversationScope:
     """Construct a per-agent :class:`ConversationScope`.
 
-    See :meth:`LLMService._build_agent_scope` for the full
-    prose describing each field's semantics. Registers the
-    scope in ``service._agent_contexts`` so follow-up user
-    replies to the agent tab can look it up.
+    Registry shape: ``service._agent_contexts`` is flat,
+    keyed by ``block.id`` directly. Reusing a known id is
+    not handled here — :func:`spawn_agents_for_turn` does
+    the lookup-or-spawn dispatch and only calls this
+    function on a miss. When called, this function creates
+    a fresh scope unconditionally.
+
+    The ``agent_idx`` parameter is positional only — used
+    by the archive sink (file naming on disk follows
+    ``agent-NN.jsonl`` for stable ordering) and surfaced to
+    the agent's ContextManager for diagnostics. It is NOT
+    part of the agent's identity. Identity is the LLM-chosen
+    id alone.
 
     Agent mode requires a history store — the archive IS
     the transcript the main LLM reads in synthesis. Without
@@ -351,10 +370,12 @@ def build_agent_scope(
         archival_append=agent_context.archival_sink,
     )
 
-    # Register in the agent context registry so the scope
-    # outlives the spawn's asyncio.gather and is reachable
-    # for follow-up replies.
-    service._agent_contexts.setdefault(turn_id, {})[agent_idx] = scope
+    # Register flat under the LLM-chosen id. Agents persist
+    # for the lifetime of the session and survive across
+    # ``new_session`` (which clears each agent's chat
+    # history but keeps the scope alive — see
+    # :func:`new_session` in ``_rpc_state.py``).
+    service._agent_contexts[block.id] = scope
 
     return scope
 
@@ -419,29 +440,15 @@ def build_agent_descriptor(service: "LLMService") -> str:
     if not contexts:
         return ""
 
-    # Flatten {turn_id: {agent_idx: scope}} into a list
-    # of (turn_id, agent_idx, scope) tuples sorted for
-    # determinism. Sort by turn_id first then agent_idx
-    # so multiple turns appear in spawn order; within a
-    # turn, lower indices come first.
-    flat: list[tuple[str, int, ConversationScope]] = []
-    for turn_id, agents in contexts.items():
-        for agent_idx, scope in agents.items():
-            flat.append((turn_id, agent_idx, scope))
-
-    # Empty after flattening (every turn key holds an
-    # empty inner dict — defensive against partial
-    # cleanup races) means no descriptor at all, not a
-    # heading with no body.
-    if not flat:
-        return ""
-
-    flat.sort(key=lambda item: (item[0], item[1]))
+    # Flat registry: {agent_id: scope}. Sort by agent id
+    # for deterministic output regardless of insertion
+    # order — operator-friendly, test-friendly.
+    sorted_ids = sorted(contexts.keys())
 
     lines: list[str] = ["## Live agents", ""]
 
-    for turn_id, agent_idx, scope in flat:
-        agent_id = f"{turn_id}/agent-{agent_idx:02d}"
+    for agent_id in sorted_ids:
+        scope = contexts[agent_id]
         lines.append(f"- **{agent_id}**")
 
         full_paths, symbol_paths, doc_paths = _classify_agent_paths(scope)

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 def _resolve_scope(
     service: "LLMService",
-    agent_tag: tuple[str, int] | None,
+    agent_tag: str | None,
 ) -> ConversationScope | None:
     """Return the ConversationScope for an agent tag, or None for main.
 
@@ -46,11 +46,9 @@ def _resolve_scope(
     """
     if agent_tag is None:
         return None
-    turn_id, agent_idx = agent_tag
-    turn_bucket = service._agent_contexts.get(turn_id)
-    if turn_bucket is None:
+    if not isinstance(agent_tag, str) or not agent_tag:
         return False  # type: ignore[return-value]
-    scope = turn_bucket.get(agent_idx)
+    scope = service._agent_contexts.get(agent_tag)
     if scope is None:
         return False  # type: ignore[return-value]
     return scope
@@ -426,8 +424,9 @@ def get_context_breakdown(
         file_context = context.file_context
         selected_files = scope.selected_files
         excluded_set = set(scope.excluded_index_files)
-        turn_id, agent_idx = agent_tag  # type: ignore[misc]
-        scope_label = f"{turn_id}/agent-{agent_idx:02d}"
+        # ``agent_tag`` is the LLM-chosen id at this point —
+        # use it directly as the scope label.
+        scope_label = agent_tag  # type: ignore[assignment]
 
     # Sync file context with current selection so the breakdown
     # reflects the next request's state, not a stale snapshot.

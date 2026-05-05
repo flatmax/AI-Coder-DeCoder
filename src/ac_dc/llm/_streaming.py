@@ -77,13 +77,17 @@ async def stream_chat(
     excluded_urls: list[str] | None = None,
     *,
     scope: "ConversationScope | None" = None,
-    agent_key: tuple[str, int] | None = None,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """Background task — the actual streaming logic.
 
-    See :meth:`LLMService._stream_chat` for the full prose
-    describing every step. This function is the extracted
-    implementation; the service method is a thin delegator.
+    ``agent_key`` is the agent's LLM-chosen id when this
+    stream runs under an agent scope, None for the
+    main-conversation path. Used for the per-agent
+    single-stream guard slot in
+    ``service._active_agent_streams``. See
+    :meth:`LLMService._stream_chat` for the full prose
+    describing every step.
     """
     if scope is None:
         scope = service._default_scope()

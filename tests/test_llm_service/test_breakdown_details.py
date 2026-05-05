@@ -386,24 +386,31 @@ class TestBreakdownSymbolMapDetails:
 
 
 class TestBreakdownAgentTag:
-    """D23 — ``get_context_breakdown(agent_tag)`` routing.
+    """``get_context_breakdown(agent_tag)`` routing.
 
     Per specs4/5-webapp/viewers-hud.md § Per-Context-Manager
     Breakdown, the RPC accepts an optional agent identifier
     to target a specific ContextManager. When ``agent_tag``
     is None (the default), reads the main scope; when it
-    names an existing agent, reads that scope's state.
+    names an existing agent by its LLM-chosen id, reads
+    that scope's state.
+
+    Identity contract: the agent's identity is the id from
+    its ``🟧🟧🟧 AGENT`` block — the same string used as
+    the registry key and as the ``agent_tag`` argument
+    here. No turn_id+agent_idx tuple, no list form.
 
     Tests pin:
 
     - The response's top-level ``scope`` field identifies
-      which conversation the data represents ("main" or
-      "{turn_id}/agent-NN"). Lets the frontend detect stale
-      data when the user switches tabs mid-fetch.
+      which conversation the data represents (``"main"``
+      or the agent's id directly). Lets the frontend
+      detect stale data when the user switches tabs
+      mid-fetch.
     - Agent scopes report their own tracker tiers, selected
       files, excluded files, and ContextManager history —
       not the main scope's.
-    - Unknown agent tags return ``{"error": "agent not
+    - Unknown agent ids return ``{"error": "agent not
       found"}`` rather than silently falling back to main
       (which would confuse the frontend's tab state).
     """
@@ -433,103 +440,64 @@ class TestBreakdownAgentTag:
         result = service.get_context_breakdown(None)
         assert result.get("scope") == "main"
 
-    def test_unknown_turn_returns_error(
+    def test_unknown_id_returns_error(
         self,
         service: LLMService,
     ) -> None:
-        """Unknown turn_id → agent-not-found error.
+        """Unknown agent id → agent-not-found error.
 
         No fallback to main — the frontend needs to know
         the tag was stale so it can close the tab rather
         than silently showing main's data in an agent tab
         slot.
         """
-        result = service.get_context_breakdown(
-            ("turn_nonexistent", 0),
-        )
+        result = service.get_context_breakdown("phantom")
         assert result == {"error": "agent not found"}
 
-    def test_unknown_agent_idx_returns_error(
+    def test_agent_scope_label_is_agent_id(
         self,
         service: LLMService,
     ) -> None:
-        """Known turn but unknown agent_idx → error."""
-        parent_scope = service._default_scope()
-        service._build_agent_scope(
-            block=self._make_agent_block(),
-            agent_idx=0,
-            parent_scope=parent_scope,
-            turn_id="turn_known",
-        )
-        result = service.get_context_breakdown(
-            ("turn_known", 99),
-        )
-        assert result == {"error": "agent not found"}
+        """Scope label is the agent's LLM-chosen id directly.
 
-    def test_agent_scope_label_includes_turn_and_idx(
-        self,
-        service: LLMService,
-    ) -> None:
-        """Scope label matches the frontend tab ID shape."""
+        No ``{turn_id}/agent-NN`` synthesis — identity is
+        the id, period. The frontend's tab state keys by
+        the same string.
+        """
         parent_scope = service._default_scope()
         service._build_agent_scope(
-            block=self._make_agent_block(),
+            block=self._make_agent_block("frontend-chat"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_abc",
         )
         result = service.get_context_breakdown(
-            ("turn_abc", 0),
+            "frontend-chat",
         )
-        # Frontend's tab IDs are "{turn_id}/agent-{NN:02d}";
-        # the scope label matches so the frontend can compare
-        # directly.
-        assert result.get("scope") == "turn_abc/agent-00"
+        assert result.get("scope") == "frontend-chat"
 
-    def test_agent_scope_two_digit_padding(
+    def test_descriptive_id_preserved_verbatim(
         self,
         service: LLMService,
     ) -> None:
-        """Agent index zero-padded to two digits.
+        """Ids with hyphens, slashes, spaces pass through unchanged.
 
-        Matches the backend's archive path convention
-        (``.ac-dc4/agents/{turn_id}/agent-NN.jsonl``) and
-        the frontend's tab ID format. A single-digit label
-        here would break the frontend's tab ID comparison.
+        The parser permits any non-empty string; the
+        breakdown's scope label echoes whatever id the
+        registry holds. Operator-friendly: the scope
+        label in logs and UI matches the spawn block.
         """
         parent_scope = service._default_scope()
         service._build_agent_scope(
-            block=self._make_agent_block(),
-            agent_idx=7,
+            block=self._make_agent_block("backend/api-v2"),
+            agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_xyz",
         )
         result = service.get_context_breakdown(
-            ("turn_xyz", 7),
+            "backend/api-v2",
         )
-        assert result.get("scope") == "turn_xyz/agent-07"
-
-    def test_list_agent_tag_accepted(
-        self,
-        service: LLMService,
-    ) -> None:
-        """JRPC-OO array form parses identically to tuple.
-
-        Over the wire jrpc-oo serialises Python tuples to
-        JS arrays. The frontend sends ``[turn_id, idx]``;
-        the parser must accept both shapes.
-        """
-        parent_scope = service._default_scope()
-        service._build_agent_scope(
-            block=self._make_agent_block(),
-            agent_idx=0,
-            parent_scope=parent_scope,
-            turn_id="turn_list",
-        )
-        result = service.get_context_breakdown(
-            ["turn_list", 0],
-        )
-        assert result.get("scope") == "turn_list/agent-00"
+        assert result.get("scope") == "backend/api-v2"
 
     def test_malformed_agent_tag_falls_back_to_main(
         self,
@@ -537,20 +505,25 @@ class TestBreakdownAgentTag:
     ) -> None:
         """Malformed tag parses to None; resolver treats as main.
 
-        Matches the delegator's behaviour — a non-None
-        agent_tag that fails to parse is treated as a
-        client bug and routed to main rather than erroring.
-        The debug log records the malformed payload for
-        operators.
+        Empty strings and non-string types fail
+        :meth:`LLMService._parse_agent_tag` and route to
+        main rather than erroring. Old tuple/list forms
+        are now also malformed — the parser explicitly
+        rejects them so stale frontend code surfaces
+        rather than silently looking like an unknown id.
+
+        The delegator logs a debug message recording the
+        malformed payload for operators.
         """
         # Various malformed shapes.
         for bad in [
-            "not-a-tuple",
-            [],
-            ["only-one"],
-            ["turn", "not-int"],
-            ("turn", -1),
-            {"turn": "x"},
+            "",
+            ("turn_abc", 0),
+            ["turn_abc", 0],
+            42,
+            {"id": "frontend"},
+            True,
+            False,
         ]:
             result = service.get_context_breakdown(bad)
             assert result.get("scope") == "main", (
@@ -568,7 +541,7 @@ class TestBreakdownAgentTag:
         )
         parent_scope = service._default_scope()
         service._build_agent_scope(
-            block=self._make_agent_block(),
+            block=self._make_agent_block("worker"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_sel",
@@ -576,7 +549,7 @@ class TestBreakdownAgentTag:
         # Seed different selections per scope.
         service.set_selected_files([])
         service.set_agent_selected_files(
-            "turn_sel", 0, ["agent-only.py"],
+            "worker", ["agent-only.py"],
         )
 
         # Main breakdown — no file details for agent-only.py.
@@ -585,25 +558,17 @@ class TestBreakdownAgentTag:
             f["path"] for f in
             main["breakdown"]["file_details"]
         ]
-        # Agent breakdown — should see the agent's selection.
-        # The file_context is per-scope; agent's scope has
-        # agent-only.py loaded (via the _sync path when the
-        # agent's ContextManager reads).
-        #
-        # The agent breakdown skips the _sync_file_context
-        # call (inspection-only path per commit 2's code),
-        # so we don't check file_details here — we just
-        # check that the scope resolution picked up the
-        # right conversation. Specifically, the selected
-        # count reflects the agent's list, not main's.
-        agent = service.get_context_breakdown(("turn_sel", 0))
-        assert agent.get("scope") == "turn_sel/agent-00"
+        # Agent breakdown — scope label is the agent's id.
+        # The file_context is per-scope; we check the
+        # selection routing succeeded by inspecting the
+        # scope label rather than file_details (the
+        # breakdown skips _sync_file_context for agent
+        # scopes — file_details depends on the agent's
+        # streaming pipeline having loaded content).
+        agent = service.get_context_breakdown("worker")
+        assert agent.get("scope") == "worker"
         # Main has no selection → no files appear in main's
         # wide_map_exclude_set-driven breakdown.
-        # (Full file_details coverage depends on file_context
-        # contents, which the agent's own streaming pipeline
-        # drives; the per-scope selection is the load-bearing
-        # signal here.)
         assert "agent-only.py" not in main_paths
 
     def test_agent_scope_reports_its_own_exclusion(
@@ -623,7 +588,7 @@ class TestBreakdownAgentTag:
         """
         parent_scope = service._default_scope()
         service._build_agent_scope(
-            block=self._make_agent_block(),
+            block=self._make_agent_block("guarded"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_excl",
@@ -631,12 +596,12 @@ class TestBreakdownAgentTag:
         # Set different exclusions on each scope.
         service._excluded_index_files = ["main-excl.py"]
         service.set_agent_excluded_index_files(
-            "turn_excl", 0, ["agent-excl.py"],
+            "guarded", ["agent-excl.py"],
         )
         # Fetching agent breakdown — no raise, scope label
         # correct.
-        agent = service.get_context_breakdown(("turn_excl", 0))
-        assert agent.get("scope") == "turn_excl/agent-00"
+        agent = service.get_context_breakdown("guarded")
+        assert agent.get("scope") == "guarded"
         # Main breakdown reports main scope.
         main = service.get_context_breakdown()
         assert main.get("scope") == "main"
@@ -656,7 +621,7 @@ class TestBreakdownAgentTag:
 
         parent_scope = service._default_scope()
         scope = service._build_agent_scope(
-            block=self._make_agent_block(),
+            block=self._make_agent_block("tracked"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_tracker",
@@ -671,7 +636,7 @@ class TestBreakdownAgentTag:
         )
 
         # Agent breakdown includes the item.
-        agent = service.get_context_breakdown(("turn_tracker", 0))
+        agent = service.get_context_breakdown("tracked")
         agent_keys: list[str] = []
         for block in agent.get("blocks", []):
             for item in block.get("contents", []):
@@ -702,7 +667,7 @@ class TestBreakdownAgentTag:
         """
         parent_scope = service._default_scope()
         scope = service._build_agent_scope(
-            block=self._make_agent_block(),
+            block=self._make_agent_block("historian"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_hist",
@@ -711,13 +676,9 @@ class TestBreakdownAgentTag:
         scope.context.add_message(
             "user", "agent-only question",
         )
-        # Main's history stays empty.
-        main_history_tokens = (
-            service._context.history_token_count()
-        )
         # Agent breakdown → history_messages count reflects
         # the agent's scope.
-        agent = service.get_context_breakdown(("turn_hist", 0))
+        agent = service.get_context_breakdown("historian")
         assert agent["breakdown"]["history_messages"] >= 1
         # Main breakdown → reflects main's (empty) history.
         main = service.get_context_breakdown()

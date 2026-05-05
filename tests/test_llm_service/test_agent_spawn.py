@@ -311,11 +311,13 @@ class TestAgentDispatchScaffold:
             excluded_urls: list[str] | None = None,
             *,
             scope: Any = None,
+            agent_key: str | None = None,
         ) -> None:
             recordings.append({
                 "request_id": request_id,
                 "message": message,
                 "scope": scope,
+                "agent_key": agent_key,
             })
 
         service._agent_stream_impl = _recorder
@@ -600,6 +602,7 @@ class TestAgentSpawn:
             excluded_urls: list[str] | None = None,
             *,
             scope: Any = None,
+            agent_key: str | None = None,
         ) -> None:
             recordings.append({
                 "request_id": request_id,
@@ -610,6 +613,7 @@ class TestAgentSpawn:
                 "excluded_urls": (
                     list(excluded_urls) if excluded_urls else []
                 ),
+                "agent_key": agent_key,
             })
 
         service._agent_stream_impl = _recorder
@@ -909,6 +913,7 @@ class TestAgentSpawn:
             excluded_urls: list[str] | None = None,
             *,
             scope: Any = None,
+            agent_key: str | None = None,
         ) -> None:
             invocations.append(request_id)
             if "agent-01" in request_id:

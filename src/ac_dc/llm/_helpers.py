@@ -649,29 +649,18 @@ def _classify_litellm_error(
 
 def _parse_agent_tag(
     agent_tag: Any,
-) -> tuple[str, int] | None:
-    """Coerce an incoming agent_tag into a ``(turn_id, agent_idx)`` tuple.
+) -> str | None:
+    """Validate an incoming agent_tag as a non-empty string id.
 
-    JRPC-OO serialises tuples to JS arrays on the wire; tests
-    and direct callers use the tuple form. Both shapes are
-    accepted. Returns None when the payload is structurally
-    malformed (wrong length, wrong types).
+    Agent identity is the LLM-chosen id alone. The tag arrives
+    from the frontend via JRPC-OO as a string (or None for
+    main-conversation calls). Anything other than a non-empty
+    string is structurally malformed and returns None — the
+    caller surfaces a "frontend bug" toast distinct from the
+    "tab is stale" toast that fires on registry-miss.
     """
-    if not isinstance(agent_tag, (list, tuple)):
+    if not isinstance(agent_tag, str):
         return None
-    if len(agent_tag) != 2:
+    if not agent_tag:
         return None
-    turn_id_raw, agent_idx_raw = agent_tag
-    if not isinstance(turn_id_raw, str) or not turn_id_raw:
-        return None
-    # Accept int or int-compatible. Reject bool because ``bool``
-    # is a subclass of ``int`` and True/False silently matching
-    # agent_idx 1/0 would mask bugs in upstream code that forgot
-    # to parse a string.
-    if isinstance(agent_idx_raw, bool):
-        return None
-    if not isinstance(agent_idx_raw, int):
-        return None
-    if agent_idx_raw < 0:
-        return None
-    return (turn_id_raw, agent_idx_raw)
+    return agent_tag
