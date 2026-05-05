@@ -783,14 +783,17 @@ class StabilityTracker:
 
         Each pass processes each tier once in L3 → L0 order:
 
-        1. Anchoring — items below cache target freeze their N
-           (can't promote)
-        2. N-cap — items above the anchor line increment N but
-           cap at the promotion threshold if the tier above is
-           stable
-        3. Promotion — items with N ≥ promote_n move up. Cascade
-           happens every turn for every eligible item — the
-           cache block's re-ingestion cost is the price of
+        1. Anchoring — items below the cache-target anchor line
+           freeze their N this cycle (cannot promote). Items
+           above the line are unanchored and increment N
+           normally. N is NOT capped — letting it grow means
+           items above the anchor stay promotion-eligible every
+           turn rather than bouncing between promote_n and
+           promote_n+1 under stable upstream conditions.
+        2. Promotion — items with N ≥ promote_n move up into
+           tiers that are broken or empty at cascade entry.
+           Cascade happens every turn for every eligible item —
+           the cache block's re-ingestion cost is the price of
            letting content flow upward to where it belongs.
 
         Post-cascade — any tier below cache_target (except L0
@@ -955,12 +958,6 @@ class StabilityTracker:
         # Accumulate tokens; items consumed before reaching
         # cache_target are anchored (N frozen this cycle).
         accumulated = 0
-        above_tier = _TIER_ABOVE[tier]
-        upper_is_stable = (
-            above_tier is not None
-            and above_tier not in self._broken_tiers
-        )
-        promote_n = _TIER_CONFIG[tier]["promote_n"]
         for item in tier_items:
             if accumulated < self._cache_target_tokens:
                 # Below the line — anchored. N is frozen this

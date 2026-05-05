@@ -508,17 +508,27 @@ def test_system_prompt_includes_appendix_when_enabled(isolated_config_dir):
 def test_system_prompt_handles_missing_appendix_gracefully(
     isolated_config_dir,
 ):
-    """Missing appendix file when agents enabled → no crash.
+    """Missing appendix file in user dir → falls back to bundle.
 
-    Defensive against stripped-down releases or users who
-    deleted the file. The prompt is assembled without the
-    appendix; the LLM won't know about agent mode, which is
-    consistent with the disabled state. Better than raising
-    and breaking every chat request.
+    Per the documented contract in ``get_system_prompt``'s
+    docstring: deleting the user-dir copy is NOT an escape
+    hatch for opting out of the appendix text. Users who
+    installed AC⚡DC before ``system_agentic_appendix.md``
+    was added to the managed-files set have a version
+    marker that prevents the upgrade pass from copying the
+    file into the user dir — but their toggle-enabled state
+    still expects the appendix text to flow into the prompt.
+    The bundle fallback papers over this cross-version gap.
 
-    Users hitting this state should see a warning somewhere,
-    but the exact warning mechanism isn't part of this test
-    — the behavioural contract here is "don't crash".
+    The proper opt-out is ``agents.enabled: false`` in
+    ``app.json`` (which the Settings-tab toggle writes to).
+    This test pins that contract: with the toggle on and
+    the user-dir file absent, the appendix text is still
+    present because it loaded from the bundle.
+
+    Deliberate trade-off — reliability of the toggle across
+    install histories outweighs the niche escape hatch of
+    partial opt-out via file deletion.
     """
     cfg = ConfigManager()
     # Enable agents.
@@ -528,15 +538,16 @@ def test_system_prompt_handles_missing_appendix_gracefully(
     app_path.write_text(json.dumps(data), encoding="utf-8")
     cfg.reload_app_config()
 
-    # Delete the appendix file.
+    # Delete the user-dir appendix file. The bundle copy
+    # still exists and serves as the fallback.
     (cfg.config_dir / "system_agentic_appendix.md").unlink()
 
     # Must not raise.
     prompt = cfg.get_system_prompt()
     # Base prompt still present.
     assert "coding agent" in prompt.lower()
-    # But no appendix content.
-    assert "Agent-Spawn Capability" not in prompt
+    # Appendix content present via bundle fallback.
+    assert "Agent-Spawn Capability" in prompt
 
 
 def test_system_prompt_assembly_order(isolated_config_dir):
