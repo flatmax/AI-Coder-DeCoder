@@ -47,6 +47,12 @@ from ac_dc.llm._doc_index_background import (
     run_enrichment_background,
     send_doc_index_progress,
 )
+from ac_dc.llm._rebuild import (
+    distribute_orphan_files,
+    rebuild_cache,
+    rebuild_cache_impl,
+    rebuild_graduate_history,
+)
 from ac_dc.llm._review import (
     build_and_set_review_context,
     check_review_ready,
@@ -79,6 +85,7 @@ __all__ = [
     "build_doc_index_background",
     "build_enrichment_config",
     "check_review_ready",
+    "distribute_orphan_files",
     "end_review",
     "enrich_one_file_sync",
     "enrich_written_file",
@@ -91,6 +98,9 @@ __all__ = [
     "on_doc_file_written",
     "print_init_hud",
     "print_post_response_hud",
+    "rebuild_cache",
+    "rebuild_cache_impl",
+    "rebuild_graduate_history",
     "run_enrichment_background",
     "send_doc_index_progress",
     "start_review",
