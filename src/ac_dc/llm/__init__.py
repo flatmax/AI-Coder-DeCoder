@@ -30,6 +30,11 @@ from ac_dc.llm._helpers import (
     _parse_agent_tag,
     _resolve_max_output_tokens,
 )
+from ac_dc.llm._assembly import (
+    assemble_messages_flat,
+    assemble_tiered,
+    build_tiered_content,
+)
 from ac_dc.llm._breakdown import (
     get_context_breakdown,
     get_file_map_block,
@@ -88,9 +93,12 @@ __all__ = [
     "_generate_request_id",
     "_parse_agent_tag",
     "_resolve_max_output_tokens",
+    "assemble_messages_flat",
+    "assemble_tiered",
     "build_and_set_review_context",
     "build_doc_index_background",
     "build_enrichment_config",
+    "build_tiered_content",
     "check_review_ready",
     "distribute_orphan_files",
     "end_review",
