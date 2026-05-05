@@ -996,6 +996,90 @@ def print_post_response_hud(service: "LLMService") -> None:
             "L1": 3,
             "L0": 4,
         }
+
+        # Macro summary — bucket the per-item changes into
+        # categories so the operator sees a one-line "why"
+        # before scrolling through hundreds of individual
+        # promotion lines. The buckets correspond to the
+        # distinct call sites in StabilityTracker that emit
+        # change-log entries; the trailing parenthetical in
+        # each entry (e.g. "(promoted)", "(graduated)",
+        # "(piggyback)") is the ground truth.
+        bucket_counts: dict[str, int] = {}
+        promotions = 0
+        demotions = 0
+        for change in changes:
+            arrow_idx = change.find(" → ")
+            colon_idx = (
+                change.find(":", arrow_idx)
+                if arrow_idx >= 0 else -1
+            )
+            if arrow_idx > 0 and colon_idx > arrow_idx:
+                src = change[:arrow_idx].strip()
+                dst = change[arrow_idx + 3:colon_idx].strip()
+                src_rank = _tier_rank.get(src)
+                dst_rank = _tier_rank.get(dst)
+                if src_rank is not None and dst_rank is not None:
+                    if dst_rank > src_rank:
+                        promotions += 1
+                    elif dst_rank < src_rank:
+                        demotions += 1
+            # Trailing reason in parentheses identifies the
+            # macro cause. Default to "other" so unknown
+            # entries still show up in the summary.
+            paren_idx = change.rfind("(")
+            close_idx = change.rfind(")")
+            reason = "other"
+            if paren_idx >= 0 and close_idx > paren_idx:
+                reason = change[paren_idx + 1:close_idx]
+            bucket_counts[reason] = bucket_counts.get(reason, 0) + 1
+
+        # Render the summary. Order reasons by descending
+        # count so the dominant cause comes first; this is
+        # what an operator scanning the terminal will read.
+        summary_parts = [
+            f"{count}× {reason}"
+            for reason, count in sorted(
+                bucket_counts.items(),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+        ]
+        # Surface the *triggers* that motivated this cascade —
+        # external mutations from the prior turn that landed in
+        # ``_broken_reasons`` before :meth:`update` ran. These
+        # are typically the macro "why" an operator wants to see
+        # ("user deselected a file", "cross-ref enabled", etc.)
+        # rather than the per-item promote/demote churn. Reasons
+        # are deduplicated per tier; multiple identical entries
+        # collapse so a single "user excluded file" doesn't
+        # render once per excluded path.
+        entry_reasons = (
+            service._stability_tracker.get_entry_broken_reasons()
+        )
+        trigger_str = ""
+        if entry_reasons:
+            tier_parts: list[str] = []
+            for tier_value in sorted(
+                entry_reasons.keys(), key=lambda t: t.value
+            ):
+                seen: set[str] = set()
+                unique_reasons: list[str] = []
+                for reason in entry_reasons[tier_value]:
+                    if reason in seen:
+                        continue
+                    seen.add(reason)
+                    unique_reasons.append(reason)
+                tier_parts.append(
+                    f"{tier_value.value}({', '.join(unique_reasons)})"
+                )
+            trigger_str = f" | triggers: {'; '.join(tier_parts)}"
+        print(
+            f"🔁 Tier changes: {len(changes)} total "
+            f"(📈{promotions} 📉{demotions}) — "
+            f"{', '.join(summary_parts)}{trigger_str}",
+            file=sys.stderr,
+        )
+
         for change in changes:
             arrow_idx = change.find(" → ")
             colon_idx = change.find(":", arrow_idx) if arrow_idx >= 0 else -1

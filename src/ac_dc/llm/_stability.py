@@ -255,7 +255,10 @@ def update_stability(
             entry_key = prefix + path
             existing = scope.tracker._items.get(entry_key)
             if existing is not None:
-                scope.tracker._broken_tiers.add(existing.tier)
+                scope.tracker.mark_broken(
+                    existing.tier,
+                    "excluded file (defensive sweep)",
+                )
                 scope.tracker._items.pop(entry_key, None)
 
     active_items: dict[str, dict[str, Any]] = {}
@@ -303,7 +306,9 @@ def update_stability(
                 if item is not None:
                     tier = item.tier
                     scope.tracker._items.pop(entry_key, None)
-                    scope.tracker._broken_tiers.add(tier)
+                    scope.tracker.mark_broken(
+                        tier, "selected file (index→content swap)"
+                    )
 
     # Step 3 — Primary index entries for non-selected,
     # non-excluded files.
@@ -576,4 +581,4 @@ def remove_cross_reference_items(service: "LLMService") -> None:
         tracker._items.pop(key, None)
 
     for tier in affected_tiers:
-        tracker._broken_tiers.add(tier)
+        tracker.mark_broken(tier, "cross-ref disable")

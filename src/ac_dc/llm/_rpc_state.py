@@ -112,7 +112,9 @@ def set_excluded_index_files(
                     item = all_items.get(key)
                     if item is not None:
                         tracker._items.pop(key, None)
-                        tracker._broken_tiers.add(item.tier)
+                        tracker.mark_broken(
+                            item.tier, "user excluded file"
+                        )
     service._broadcast_event(
         "filesChanged", list(service._selected_files)
     )
@@ -476,5 +478,7 @@ def set_agent_excluded_index_files(
                 item = all_items.get(key)
                 if item is not None:
                     tracker._items.pop(key, None)
-                    tracker._broken_tiers.add(item.tier)
+                    tracker.mark_broken(
+                        item.tier, "agent excluded file"
+                    )
     return list(valid)

@@ -272,6 +272,17 @@ class StabilityTracker:
         self._items: dict[str, TrackedItem] = {}
         self._changes: list[str] = []
         self._broken_tiers: set[Tier] = set()
+        # Parallel diagnostic map — every entry in
+        # ``_broken_tiers`` has matching reason strings here.
+        # Set membership and reasons are kept in lockstep via
+        # :meth:`_mark_broken`, which is the only sanctioned
+        # write path. Read by the post-response HUD to surface
+        # *why* a cascade fired, not just which tiers
+        # invalidated. External callers in
+        # :mod:`ac_dc.llm._rpc_state` and
+        # :mod:`ac_dc.llm._stability` use the public
+        # :meth:`mark_broken` so their reasons land here too.
+        self._broken_reasons: dict[Tier, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Configuration accessors
@@ -290,6 +301,77 @@ class StabilityTracker:
         target is model-aware.
         """
         self._cache_target_tokens = value
+
+    # ------------------------------------------------------------------
+    # Broken-tier tracking with diagnostic reasons
+    # ------------------------------------------------------------------
+
+    def _mark_broken(self, tier: Tier, reason: str) -> None:
+        """Mark ``tier`` as broken and record the diagnostic reason.
+
+        The single sanctioned write path for ``_broken_tiers``
+        and its parallel ``_broken_reasons`` map. Internal
+        callers use this helper so the post-response HUD can
+        surface *why* a cascade fired, not just which tiers
+        invalidated.
+
+        Multiple reasons accumulate on the same tier across a
+        cycle (a tier might be marked broken first by an
+        external mutation, then again by a graduation, then
+        again by a promotion). The HUD reports them all so the
+        operator can see the full set of triggers.
+        """
+        self._broken_tiers.add(tier)
+        self._broken_reasons.setdefault(tier, []).append(reason)
+
+    def mark_broken(self, tier: Tier, reason: str) -> None:
+        """Public mark-broken — for external callers to record reasons.
+
+        :mod:`ac_dc.llm._rpc_state` (selection, exclusion,
+        mode switch) and :mod:`ac_dc.llm._stability`
+        (defensive removal during update) need to mark tiers
+        broken without invoking a full update cycle. Calling
+        this method instead of mutating ``_broken_tiers``
+        directly attaches a reason that the HUD will surface.
+        """
+        self._mark_broken(tier, reason)
+
+    def get_broken_reasons(self) -> dict[Tier, list[str]]:
+        """Return a snapshot of broken tiers and their reasons.
+
+        Read-only — caller mutations don't leak. Empty
+        immediately after a cascade clears state, populated
+        between turns as external mutations accumulate
+        signals for the next cascade. The post-response HUD
+        captures this BEFORE the cascade clears it.
+        """
+        return {
+            tier: list(reasons)
+            for tier, reasons in self._broken_reasons.items()
+        }
+
+    def get_entry_broken_reasons(self) -> dict[Tier, list[str]]:
+        """Return the snapshot of broken-tier reasons at cycle entry.
+
+        Captured by :meth:`update` BEFORE the cascade runs
+        and BEFORE the live ``_broken_reasons`` map is
+        cleared. Surfaces the *triggers* that motivated the
+        cascade — typically external mutations from the
+        previous turn (file exclusion, cross-ref toggle,
+        history purge, mode switch). Distinct from
+        :meth:`get_broken_reasons`, which after a cascade
+        is empty (cleared by :meth:`_run_cascade`).
+
+        Returns an empty dict before the first :meth:`update`
+        call. Read-only — caller mutations don't leak.
+        """
+        snapshot = getattr(self, "_entry_broken_reasons", None)
+        if not snapshot:
+            return {}
+        return {
+            tier: list(reasons)
+            for tier, reasons in snapshot.items()
+        }
 
     # ------------------------------------------------------------------
     # Introspection
@@ -376,7 +458,8 @@ class StabilityTracker:
         # Every tier that held history is now potentially
         # under-full; mark them broken so the next update cascade
         # re-balances correctly.
-        self._broken_tiers |= tiers_affected
+        for tier in tiers_affected:
+            self._mark_broken(tier, "history purge")
 
     # ------------------------------------------------------------------
     # Update entry point (the main driver)
@@ -414,6 +497,24 @@ class StabilityTracker:
         """
         # Change log is per-cycle — wipe on entry.
         self._changes = []
+        # Snapshot broken-tier reasons at cycle entry so the
+        # post-response HUD can surface *why* the cascade fired
+        # — purely a diagnostic. Captured here, before any of
+        # this update's mutations add their own reasons,
+        # AND before :meth:`_run_cascade` clears the live
+        # ``_broken_reasons`` map at end-of-cycle. The
+        # snapshot stays readable via
+        # :meth:`get_entry_broken_reasons` until the next
+        # update overwrites it. Mutations during this update
+        # (graduations, demotions, promotions, backfill, etc.)
+        # accumulate on the live ``_broken_reasons`` and the
+        # HUD also reads them via :meth:`get_changes`-derived
+        # buckets — so the snapshot here covers *only* the
+        # external triggers that motivated the cascade.
+        self._entry_broken_reasons: dict[Tier, list[str]] = {
+            tier: list(reasons)
+            for tier, reasons in self._broken_reasons.items()
+        }
         # NOTE: _broken_tiers is NOT wiped here. External mutation
         # paths (cross-reference disable, file exclusion, selection
         # change, history purge) populate it between turns; wiping
@@ -497,7 +598,7 @@ class StabilityTracker:
 
         for key in to_remove:
             item = self._items.pop(key)
-            self._broken_tiers.add(item.tier)
+            self._mark_broken(item.tier, "stale file removal")
             self._log_change(
                 f"{item.tier.value} → removed (stale): {key}"
             )
@@ -595,7 +696,7 @@ class StabilityTracker:
                 existing.n_value = 0
                 if old_tier != Tier.ACTIVE:
                     existing.tier = Tier.ACTIVE
-                    self._broken_tiers.add(old_tier)
+                    self._mark_broken(old_tier, "hash changed")
                     self._log_change(
                         f"{old_tier.value} → active: {key} (hash changed)"
                     )
@@ -633,7 +734,7 @@ class StabilityTracker:
             if not (key.startswith("file:") or key.startswith("history:")):
                 continue
             item = self._items.pop(key)
-            self._broken_tiers.add(item.tier)
+            self._mark_broken(item.tier, "item departed")
             self._log_change(
                 f"{item.tier.value} → removed: {key} (not in active)"
             )
@@ -664,7 +765,7 @@ class StabilityTracker:
             self._log_change(
                 f"{old_tier.value} → L3: {key} (graduated)"
             )
-        self._broken_tiers.add(Tier.L3)
+        self._mark_broken(Tier.L3, "graduation incoming")
 
     # ------------------------------------------------------------------
     # Phase 2b — controlled history graduation
@@ -772,7 +873,7 @@ class StabilityTracker:
             graduated_any = True
 
         if graduated_any:
-            self._broken_tiers.add(Tier.L3)
+            self._mark_broken(Tier.L3, "history piggyback")
 
     # ------------------------------------------------------------------
     # Phase 3 — cascade (the complex bit)
@@ -890,7 +991,9 @@ class StabilityTracker:
                 if l0_tokens < self._cache_target_tokens:
                     if Tier.L0 not in cascade_broken:
                         cascade_broken.add(Tier.L0)
-                        self._broken_tiers.add(Tier.L0)
+                        self._mark_broken(
+                            Tier.L0, "L0 backfill probe"
+                        )
                         made_progress = True
             for tier in _CASCADE_ORDER:
                 if tier in processed:
@@ -926,6 +1029,7 @@ class StabilityTracker:
         # it runs. The next update's cascade will see an empty
         # set plus whatever external paths added since.
         self._broken_tiers.clear()
+        self._broken_reasons.clear()
 
     def _process_tier_veterans(self, tier: Tier) -> None:
         """Anchor items below cache target; cap N above it.
@@ -1120,8 +1224,8 @@ class StabilityTracker:
             # the live set so external consumers (prompt
             # assembler, underfill demotion which skips broken
             # tiers) see the structural change.
-            self._broken_tiers.add(tier)
-            self._broken_tiers.add(above)
+            self._mark_broken(tier, "promoted out")
+            self._mark_broken(above, "promoted in")
 
             # Structural invalidation propagation — the
             # source tier just lost residents, so its cache
@@ -1215,8 +1319,8 @@ class StabilityTracker:
                     f"(underfill demotion)"
                 )
             # Both tiers experience structural change.
-            self._broken_tiers.add(tier)
-            self._broken_tiers.add(below)
+            self._mark_broken(tier, "underfill demotion (source)")
+            self._mark_broken(below, "underfill demotion (dest)")
 
     # ------------------------------------------------------------------
     # Initialisation from reference graph (startup seeding)
@@ -1564,7 +1668,7 @@ class StabilityTracker:
         # request would use stale cache breakpoints that
         # predate the seeding.
         for tier in affected_tiers:
-            self._broken_tiers.add(tier)
+            self._mark_broken(tier, "cross-ref seed")
 
     def register_system_prompt(
         self,
@@ -1767,7 +1871,7 @@ class StabilityTracker:
         # their L0 slot via ref-count ranking; we don't want
         # the cascade immediately reconsidering them.
         for tier in affected_source_tiers:
-            self._broken_tiers.add(tier)
+            self._mark_broken(tier, "post-measurement backfill")
 
         return promoted
 
