@@ -761,513 +761,46 @@ class LLMService:
         return True
 
     async def _build_doc_index_background(self) -> None:
-        """Structurally extract every doc-index-eligible file.
-
-        Runs in the aux executor so the blocking per-file parsing
-        doesn't starve the event loop. Emits startupProgress
-        events as it walks. Flips `_doc_index_ready` on success
-        so cross-reference toggle can activate.
-
-        Non-fatal — failures log and leave `_doc_index_ready`
-        False. The doc index stays empty; doc mode produces no
-        content; cross-reference stays disabled. No error
-        propagates to the user's chat session.
-
-        Per specs4/2-indexing/document-index.md § Two-Phase
-        Principle: this is the structural pass only. Keyword
-        enrichment (2.8.4) is a separate background task that
-        runs after this completes.
-        """
-        if self._doc_index_building:
-            # Already running. Should never happen given the
-            # guard in complete_deferred_init, but defensive
-            # against a future caller that invokes this directly.
-            return
-
-        self._doc_index_building = True
-        try:
-            # Discover files. Use the repo's flat file list when
-            # available so we respect .gitignore and excluded
-            # directories; fall back to the doc index's own
-            # walker when no repo is attached.
-            file_list: list[str] = []
-            if self._repo is not None:
-                try:
-                    flat = self._repo.get_flat_file_list()
-                    file_list = [f for f in flat.split("\n") if f]
-                except Exception as exc:
-                    logger.warning(
-                        "Doc index: failed to fetch file list "
-                        "from repo: %s; falling back to walker",
-                        exc,
-                    )
-                    file_list = []
-
-            # Filter to files the doc index has an extractor
-            # for. Done here rather than letting index_repo do
-            # it so we can emit accurate progress events (total
-            # count is known up front).
-            doc_files = [
-                f for f in file_list
-                if self._doc_index._extension_of(f)
-                in self._doc_index._extractors
-            ]
-
-            total = len(doc_files)
-            if total == 0:
-                # No doc files. Still flip the ready flag — an
-                # empty doc index is a valid state (repo has no
-                # markdown). Cross-reference in code mode with
-                # an empty doc index is a no-op that produces
-                # no entries; the toggle works but doesn't
-                # surface any content.
-                logger.info(
-                    "Doc index: no eligible files found; "
-                    "marking ready with empty outlines"
-                )
-                self._doc_index_ready = True
-                return
-
-            logger.info(
-                "Doc index: starting background build for %d files",
-                total,
-            )
-
-            # Send an initial progress event so the shell's
-            # dialog header progress bar appears at 0%.
-            await self._send_doc_index_progress(
-                stage="doc_index",
-                message=f"Indexing documentation ({total} files)",
-                percent=0,
-            )
-
-            # Run the full index_repo pass in the aux executor.
-            # index_repo handles the per-file loop internally;
-            # we don't currently get per-file progress events
-            # during the run. Future work can add a callback
-            # parameter to DocIndex.index_repo for finer-grained
-            # progress; for 2.8.2b, start-and-end events are
-            # sufficient.
-            assert self._main_loop is not None
-            loop = self._main_loop
-            await loop.run_in_executor(
-                self._aux_executor,
-                self._doc_index.index_repo,
-                doc_files,
-            )
-
-            # Build complete. Flip readiness flag; the frontend's
-            # next get_mode call will see doc_index_ready=True
-            # and enable the cross-reference toggle.
-            self._doc_index_ready = True
-            logger.info(
-                "Doc index: background build complete — %d "
-                "outlines in memory",
-                len(self._doc_index._all_outlines),
-            )
-
-            # Send a final progress event at 100% so the dialog
-            # header progress bar fades out cleanly.
-            await self._send_doc_index_progress(
-                stage="doc_index",
-                message="Documentation indexing complete",
-                percent=100,
-            )
-
-            # Chain keyword enrichment. Fire-and-forget — the
-            # enrichment loop emits its own progress events
-            # and flips _doc_index_enriched on completion.
-            # We schedule rather than await so the _building
-            # flag flips off promptly (structural extraction
-            # IS complete at this point) while enrichment
-            # runs in the background. A user who switches to
-            # doc mode mid-enrichment sees unenriched outlines
-            # via the cache's structure-only lookup; the
-            # enriched versions land on the next chat request
-            # after their per-file enrichment completes.
-            assert self._main_loop is not None
-            asyncio.ensure_future(
-                self._run_enrichment_background()
-            )
-        except Exception as exc:
-            # Background-build failure. Log; leave readiness
-            # False; emit a compaction-error-style event so the
-            # frontend can surface a toast if it wants to.
-            logger.exception(
-                "Doc index: background build failed: %s", exc
-            )
-            try:
-                await self._send_doc_index_progress(
-                    stage="doc_index_error",
-                    message=f"Documentation indexing failed: {exc}",
-                    percent=0,
-                )
-            except Exception:
-                # If even the error event can't be sent, we've
-                # done all we can. Swallow and continue.
-                pass
-        finally:
-            self._doc_index_building = False
+        """Delegate to :func:`ac_dc.llm._doc_index_background.build_doc_index_background`."""
+        from ac_dc.llm._doc_index_background import (
+            build_doc_index_background,
+        )
+        await build_doc_index_background(self)
 
     def _build_enrichment_config(self) -> EnrichmentConfig:
-        """Build an EnrichmentConfig from the config manager.
-
-        Delegates to :meth:`EnrichmentConfig.from_dict` so the
-        config dict shape stays owned by the dataclass. Called
-        on construction; a future hot-reload pathway could
-        re-read and swap the config on the enricher instance
-        without reconstructing.
-
-        ``keyword_model`` and ``keywords_enabled`` live in the
-        config dict but not on :class:`EnrichmentConfig` — the
-        caller reads those separately from
-        :attr:`ConfigManager.doc_index_config`.
-        """
-        return EnrichmentConfig.from_dict(self._config.doc_index_config)
+        """Delegate to :func:`ac_dc.llm._doc_index_background.build_enrichment_config`."""
+        from ac_dc.llm._doc_index_background import (
+            build_enrichment_config,
+        )
+        return build_enrichment_config(self)
 
     async def _run_enrichment_background(self) -> None:
-        """Enrich every queued doc-index file in the aux executor.
-
-        Called by _build_doc_index_background after structural
-        extraction completes. Per-file operation:
-
-        1. Read source text (disk I/O — batched with the GIL-
-           heavy extraction in the same executor task).
-        2. Call :meth:`DocIndex.enrich_single_file` with the
-           source text.
-        3. Emit a progress event so the frontend's dialog
-           header bar advances.
-
-        Yields to the event loop between files via
-        ``await asyncio.sleep(0)`` so WebSocket traffic flows
-        during long enrichment runs (specs4 — "background
-        enrichment splits work into per-file executor calls
-        so the event loop stays responsive").
-
-        Eager model load happens before the loop starts so the
-        first file doesn't pay the model-download cost (can be
-        10+ seconds on a fresh install). Failure to load the
-        model (KeyBERT missing, no network, invalid model
-        name) flips the enricher's availability flag and the
-        loop exits cleanly — structural doc index still works.
-
-        Progress event stages per specs4/2-indexing/
-        keyword-enrichment.md § "Progress Feedback":
-
-        - ``doc_enrichment_queued`` — fired once at the top
-          with the total count so the bar can size itself
-        - ``doc_enrichment_file_done`` — fired per file with
-          per-file progress + current filename
-        - ``doc_enrichment_complete`` — fired on completion;
-          the bar fades out
-
-        Sets ``_doc_index_enriched = True`` on completion so
-        ``get_mode`` reports the new state. Non-fatal — if
-        enrichment fails mid-loop, the flag stays False and
-        the structural outlines remain fully functional.
-        """
-        if self._enricher is None:
-            # Shouldn't happen given we construct one in
-            # __init__, but defensive against future refactors
-            # that make the field optional.
-            return
-        if not self._enricher.is_available():
-            logger.info(
-                "Keyword enrichment disabled — KeyBERT not "
-                "available. Structural doc outlines remain "
-                "fully functional."
-            )
-            self._enrichment_status = "unavailable"
-            self._broadcast_enrichment_status()
-            return
-
-        # Eager model load. Failure is non-fatal — the enricher
-        # flips its availability flag internally and subsequent
-        # enrich calls become no-ops.
-        assert self._main_loop is not None
-        loop = self._main_loop
-        loaded = await loop.run_in_executor(
-            self._aux_executor,
-            self._enricher.ensure_loaded,
+        """Delegate to :func:`ac_dc.llm._doc_index_background.run_enrichment_background`."""
+        from ac_dc.llm._doc_index_background import (
+            run_enrichment_background,
         )
-        if not loaded:
-            logger.warning(
-                "Keyword enrichment model failed to load. "
-                "Structural outlines remain functional."
-            )
-            self._enrichment_status = "unavailable"
-            self._broadcast_enrichment_status()
-            return
-
-        queue = self._doc_index.queue_enrichment()
-        if not queue:
-            # No files need enrichment (rare but possible —
-            # every file was already enriched in a prior
-            # session and the disk cache carried over). Flip
-            # the flag and emit the completion event anyway
-            # so the UI can show "enriched" rather than
-            # "building".
-            self._doc_index_enriched = True
-            self._enrichment_status = "complete"
-            await self._send_doc_index_progress(
-                stage="doc_enrichment_complete",
-                message="Keyword enrichment complete",
-                percent=100,
-            )
-            return
-
-        total = len(queue)
-        logger.info(
-            "Keyword enrichment: %d files queued", total
-        )
-        # Flip to "building" after the queued event so the
-        # frontend's progress overlay can show a determinate
-        # bar. "pending" → "building" is the normal transition;
-        # a direct "pending" → "complete" is possible when the
-        # queue is empty (handled above).
-        self._enrichment_status = "building"
-        await self._send_doc_index_progress(
-            stage="doc_enrichment_queued",
-            message=f"Enriching {total} documents",
-            percent=0,
-        )
-
-        # Per-file loop. Each iteration runs the read + enrich
-        # in the aux executor, emits a progress event, and
-        # yields to the event loop via sleep(0) so the
-        # WebSocket heartbeat and any chat traffic keep
-        # flowing. Per-file failures are logged but don't
-        # abort — one corrupt file shouldn't block enrichment
-        # for the rest of the repo.
-        for idx, rel_path in enumerate(queue, start=1):
-            try:
-                await loop.run_in_executor(
-                    self._aux_executor,
-                    self._enrich_one_file_sync,
-                    rel_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Enrichment failed for %s: %s",
-                    rel_path, exc,
-                )
-                # Continue — next file.
-
-            percent = int((idx / total) * 100)
-            await self._send_doc_index_progress(
-                stage="doc_enrichment_file_done",
-                message=f"Enriched {rel_path}",
-                percent=percent,
-            )
-            # Yield so other coroutines (chat streaming,
-            # WebSocket pings) get scheduling time.
-            await asyncio.sleep(0)
-
-        self._doc_index_enriched = True
-        self._enrichment_status = "complete"
-        logger.info("Keyword enrichment: complete")
-        await self._send_doc_index_progress(
-            stage="doc_enrichment_complete",
-            message="Keyword enrichment complete",
-            percent=100,
-        )
+        await run_enrichment_background(self)
 
     def _enrich_one_file_sync(self, rel_path: str) -> None:
-        """Read source text and run enrichment. Executor-side.
-
-        Split out as a named method so ``run_in_executor`` has
-        something to call without a closure. The read + enrich
-        pair runs on a single worker thread so the disk I/O
-        is adjacent to the GIL-heavy extraction work rather
-        than ping-ponging across threads.
-
-        Missing files (deleted between structural extraction
-        and enrichment) are handled by the enricher itself —
-        :meth:`DocIndex.enrich_single_file` returns None when
-        the file's mtime can't be stat'd. We don't distinguish
-        here; missing files get "enriched" as no-ops, which
-        leaves them in the unenriched state and a future
-        index_repo pass will prune them.
-        """
-        if self._repo is None:
-            # Can't resolve the path without a repo.
-            return
-        try:
-            source_text = self._repo.get_file_content(rel_path)
-        except Exception as exc:
-            # File vanished, turned binary, or became
-            # unreadable. Skip silently — next index_repo
-            # pass will clean up the stale cache entry.
-            logger.debug(
-                "Enrichment source read failed for %s: %s",
-                rel_path, exc,
-            )
-            return
-        self._doc_index.enrich_single_file(
-            rel_path, source_text=source_text
+        """Delegate to :func:`ac_dc.llm._doc_index_background.enrich_one_file_sync`."""
+        from ac_dc.llm._doc_index_background import (
+            enrich_one_file_sync,
         )
+        enrich_one_file_sync(self, rel_path)
 
     def _on_doc_file_written(self, rel_path: str) -> None:
-        """Post-write hook — invalidate + re-extract + enqueue.
-
-        Wired to :attr:`Repo._post_write_callback` by
-        ``main.py``. Fires after every successful write,
-        create, or rename. This method decides whether the
-        path is interesting and whether the current mode
-        cares about doc-index freshness.
-
-        Gating rules (spec: specs4/2-indexing/
-        document-index.md § Triggers — "LLM edits a doc
-        file" and "User edits in viewer"):
-
-        1. Path extension must be registered with the doc
-           index (``.md`` today; ``.svg`` when Layer 2.8.3
-           lands).
-        2. Service must be in doc mode OR cross-reference
-           must be enabled. In code mode without cross-ref,
-           doc outlines are never consulted, so refreshing
-           them on save is wasted work. This also avoids
-           enrichment load when the user is purely doing
-           code work and happens to touch a markdown file.
-        3. Doc index background build must have completed
-           (``_doc_index_ready``). If it's still running,
-           the background pass will re-walk and pick up
-           this file's new mtime naturally — triggering a
-           second pass now would race with the ongoing one.
-
-        When gates pass:
-
-        - Invalidate the cache sidecar (drops keyword tag
-          so structure-only lookup forces a re-parse).
-        - Call ``index_file`` — this picks up the new
-          mtime and produces an unenriched outline, which
-          becomes immediately available for tier assembly
-          and cross-reference rendering.
-        - Schedule enrichment via the aux executor. The
-          schedule call requires a running event loop; we
-          only have one when called from an event-loop
-          thread. The RPC entry points
-          (:meth:`Repo.write_file` etc.) are awaited from
-          the event-loop thread, so the callback fires
-          there too — safe to call ``ensure_future``.
-
-        Never raises — the caller (``Repo._fire_post_write``)
-        already swallows exceptions, but defensive wrapping
-        here surfaces a clearer log message tied to the
-        enrichment layer rather than a generic repo-layer
-        "callback failed" entry.
-        """
-        try:
-            # Extension gate — cheap, first.
-            extension = self._doc_index._extension_of(rel_path)
-            if extension not in self._doc_index._extractors:
-                return
-            # Mode gate. Doc mode always cares; code mode
-            # only cares when cross-reference is pulling
-            # doc outlines into prompts.
-            if (
-                self._context.mode != Mode.DOC
-                and not self._cross_ref_enabled
-            ):
-                return
-            # Readiness gate. If the background build is
-            # still walking, let it finish; it'll pick up
-            # the new mtime on its own.
-            if not self._doc_index_ready:
-                return
-            # Invalidate + re-extract. index_file handles
-            # the cache miss (we just invalidated) and
-            # produces a structural outline from the new
-            # content. repo_files=None is fine — markdown
-            # extraction doesn't use the repo set today.
-            self._doc_index.invalidate_file(rel_path)
-            keyword_model = (
-                self._enricher.model_name
-                if self._enricher is not None
-                else None
-            )
-            outline = self._doc_index.index_file(
-                rel_path,
-                keyword_model=keyword_model,
-            )
-            if outline is None:
-                # Extraction failed (unlikely for a file
-                # we just wrote, but defensive). Nothing
-                # more to do.
-                return
-            # Schedule enrichment. Only meaningful when
-            # we have an enricher AND the outline has
-            # enrichable units. DocIndex.enrich_single_file
-            # degrades to a no-op otherwise, so we don't
-            # gate here — ensure_future is cheap.
-            if self._enricher is None:
-                return
-            if not self._doc_index.needs_enrichment(outline):
-                return
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # Callback fired from a thread without a
-                # running loop (shouldn't happen via
-                # Repo.write_file, but guard defensively).
-                # The next chat turn's _stream_chat will
-                # call queue_enrichment and pick this file
-                # up; no harm in skipping immediate
-                # enrichment here.
-                logger.debug(
-                    "Doc file %s written outside event loop; "
-                    "enrichment deferred to next chat turn",
-                    rel_path,
-                )
-                return
-            # Fire-and-forget enrichment on the aux
-            # executor. The coroutine reads the file,
-            # runs the enricher, replaces the cache
-            # entry. Matches the post-LLM-edit deferred
-            # enrichment pattern.
-            asyncio.ensure_future(
-                self._enrich_written_file(rel_path),
-                loop=loop,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Doc-file post-write hook failed for %s: %s",
-                rel_path, exc,
-            )
+        """Delegate to :func:`ac_dc.llm._doc_index_background.on_doc_file_written`."""
+        from ac_dc.llm._doc_index_background import (
+            on_doc_file_written,
+        )
+        on_doc_file_written(self, rel_path)
 
     async def _enrich_written_file(self, rel_path: str) -> None:
-        """Enrich a single file in the aux executor.
-
-        Coroutine wrapper so the post-write hook can
-        ``ensure_future`` without constructing a lambda.
-        Delegates to :meth:`_enrich_one_file_sync` which
-        reads the file and runs the enricher on the
-        worker thread (enricher is GIL-bound; the sync
-        helper batches the read + extract so both happen
-        on the same thread).
-        """
-        if self._main_loop is None:
-            # No loop captured yet — shouldn't happen
-            # when called from ensure_future, but
-            # defensive. Fall back to the current
-            # running loop.
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                return
-        else:
-            loop = self._main_loop
-        try:
-            await loop.run_in_executor(
-                self._aux_executor,
-                self._enrich_one_file_sync,
-                rel_path,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Deferred enrichment failed for %s: %s",
-                rel_path, exc,
-            )
+        """Delegate to :func:`ac_dc.llm._doc_index_background.enrich_written_file`."""
+        from ac_dc.llm._doc_index_background import (
+            enrich_written_file,
+        )
+        await enrich_written_file(self, rel_path)
 
     async def _send_doc_index_progress(
         self,
@@ -1275,33 +808,11 @@ class LLMService:
         message: str,
         percent: int,
     ) -> None:
-        """Send a startupProgress event for doc index builds.
-
-        Thin wrapper over the event callback. Matches the
-        signature the startup orchestrator uses for its own
-        progress events, so the shell's event router handles
-        both uniformly.
-
-        Stage is intercepted by the shell per shell.md § "Doc
-        Index Stage Filtering" and routed to the dialog header
-        rather than the startup overlay. Percent below 100
-        indicates in-progress; percent == 100 indicates
-        completion.
-        """
-        if self._event_callback is None:
-            return
-        try:
-            await self._event_callback(
-                "startupProgress",
-                stage,
-                message,
-                percent,
-            )
-        except Exception as exc:
-            logger.debug(
-                "Doc index progress event failed for %s: %s",
-                stage, exc,
-            )
+        """Delegate to :func:`ac_dc.llm._doc_index_background.send_doc_index_progress`."""
+        from ac_dc.llm._doc_index_background import (
+            send_doc_index_progress,
+        )
+        await send_doc_index_progress(self, stage, message, percent)
 
     def shutdown(self) -> None:
         """Release executor resources. Called on server shutdown."""
