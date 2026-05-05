@@ -249,7 +249,7 @@ A segmented control plus overlay toggle lives inline in the dialog header, betwe
 Two independent toast layers:
 
 - **Chat panel local toast** — rendered inside the chat panel, positioned near the input; used for chat-specific feedback (copy, commit, stream errors, URL fetch notifications)
-- **App shell global toast** — rendered in the app shell, supports multiple simultaneous toasts with independent fade-out; used by components outside the chat panel
+- **App shell global toast** — rendered in the app shell at the bottom-left of the viewport (z-index above the dialog so toasts remain visible when the dialog is docked left), supports multiple simultaneous toasts with independent fade-out; used by components outside the chat panel.
 
 Components dispatch toast events; the shell catches and renders them. Chat panel's local toast does not dispatch global events.
 

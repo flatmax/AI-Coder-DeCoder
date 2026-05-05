@@ -699,7 +699,7 @@ export class AppShell extends JRPCClient {
     .toast-layer {
       position: fixed;
       bottom: 1rem;
-      right: 1rem;
+      left: 1rem;
       z-index: 2000;
       display: flex;
       flex-direction: column;
@@ -721,7 +721,7 @@ export class AppShell extends JRPCClient {
     .toast.error { border-left: 3px solid #f85149; }
     .toast.warning { border-left: 3px solid #d29922; }
     @keyframes toast-in {
-      from { opacity: 0; transform: translateX(20px); }
+      from { opacity: 0; transform: translateX(-20px); }
       to { opacity: 1; transform: translateX(0); }
     }
   `;
