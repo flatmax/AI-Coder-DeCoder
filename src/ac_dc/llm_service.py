@@ -4135,6 +4135,25 @@ class LLMService:
         # iterates all items and skips mismatched prefixes.
         self._measure_tracker_tokens()
 
+        # Step 6b: post-measurement L0 backfill. Same rationale
+        # as _try_initialize_stability — placeholder tokens in
+        # step 5 overestimated, real counts are much smaller,
+        # so L0 sits below the provider's cache-min floor
+        # after measurement. Backfill pulls high-ref-count
+        # items up from L1-L3 to restore L0 to target + buffer.
+        # Uses the primary ref_index (the same one used in
+        # step 5) so the ranking stays consistent with initial
+        # seeding. Cross-reference secondary items landed in
+        # L1-L3 in step 5b; they participate in the candidate
+        # pool naturally via the tracker's own item list.
+        promoted = tracker.backfill_l0_after_measurement(ref_index)
+        if promoted > 0:
+            logger.info(
+                "Rebuild L0 backfill: promoted %d items to meet "
+                "cache-min threshold",
+                promoted,
+            )
+
         # Step 7: swap selected files — for each selected file
         # that landed as a symbol: or doc: entry, replace it
         # with a file: entry at the same tier and with the same
@@ -7296,6 +7315,29 @@ class LLMService:
             # Step 4: Measure real token counts for all tier items,
             # replacing placeholders from initialization.
             self._measure_tracker_tokens()
+
+            # Step 4b: Post-measurement L0 backfill. The 400-
+            # token placeholder used in step 2 overestimates
+            # real symbol/doc block sizes — most blocks are
+            # 50-300 tokens — so L0 ends up well below the
+            # provider's cache-min floor (4096 on Sonnet 4.6,
+            # 1024 on older Sonnets). The provider then refuses
+            # to cache L0 at all, AND the cascade's anchoring
+            # logic never triggers because L0 is never over
+            # target, so L1 veterans never promote upward. The
+            # backfill pulls high-ref-count candidates from
+            # L1-L3 into L0 until real tokens reach the target
+            # with overshoot headroom. See
+            # StabilityTracker.backfill_l0_after_measurement.
+            promoted = self._stability_tracker.backfill_l0_after_measurement(
+                ref_index,
+            )
+            if promoted > 0:
+                logger.info(
+                    "L0 backfill: promoted %d items to meet "
+                    "cache-min threshold",
+                    promoted,
+                )
 
             self._stability_initialized[mode] = True
             logger.info(

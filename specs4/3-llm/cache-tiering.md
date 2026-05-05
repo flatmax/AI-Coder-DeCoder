@@ -84,9 +84,13 @@ Each tier maps to a single cached message block in the LLM request.
 
 ## L0 Backfill
 
-- When L0 drops below cache target (items removed, selection change), the provider won't cache it
-- Rather than proactively breaking L1, the system piggybacks — if L1 is broken for any reason AND L0 is underfilled, L0 is also marked broken
-- Threshold anchoring in L1 ensures L1 retains at least the cache target; L0 backfill never drains L1 below its caching threshold
+L0 can fall below `cache_target_tokens` in three ways, each with its own repair path:
+
+- **Post-measurement underfill** — init placeholder tokens overestimated real block sizes; the Post-Measurement L0 Backfill pass (above) deterministically pulls high-ref-count candidates up from L1/L2/L3 until L0 meets target × overshoot. Runs once per init / rebuild.
+- **Item removal** — selected files deselected, history compacted, files deleted. The cascade-time backfill handles this: if L1 is broken for any reason AND L0 is underfilled, L0 is also marked broken, letting L1 veterans promote upward as the cascade processes.
+- **Hash change** — a file's content changed, demoting its L0 entry to active. Same cascade-time backfill path applies.
+
+Threshold anchoring in L1 ensures L1 retains at least the cache target across any of these paths; L0 backfill never drains L1 below its caching threshold. The system prefers a cache-warm L1 with a slightly-underfilled L0 over a cache-warm L0 with a broken L1 — cache misses cost the same either way, and L1 typically has more content to lose.
 
 ## Threshold-Aware Cascade Algorithm
 
@@ -214,6 +218,24 @@ Index entries for *unselected* files are never in this list — they live in whi
 - Content hashes updated from signature hashes for accurate stability tracking
 - Ensures the cache viewer displays per-item token counts immediately
 
+### Post-Measurement L0 Backfill
+
+The placeholder token count used during L0 seeding is a pessimistic upper bound — real symbol/doc blocks are typically much smaller than the per-entry estimate. Once measurement replaces placeholders with real counts, L0's actual token total is almost always well below `cache_target_tokens`. Two consequences if left unaddressed:
+
+- The provider refuses to cache L0 at all — its total falls below the provider's cache-min threshold (4096 tokens on Sonnet 4.6, 1024 on Sonnet 4.5, etc.), and the provider silently charges full ingestion on every request
+- L0 has no churn capacity — every item fits comfortably under the target, so the cascade's anchor-veterans-above-threshold path never triggers and L1 items never promote upward even after they've earned it
+
+The backfill pass fires immediately after measurement:
+
+- Ranks every L1/L2/L3 item with a file path by reference count descending (same signal as initial L0 seeding)
+- Promotes candidates into L0 until real token total reaches `cache_target_tokens × overshoot_multiplier`
+- Source tiers marked broken so the next cascade rebalances L1/L2/L3 distribution
+- No-op when `cache_target_tokens == 0` (caching disabled) or when L0 already exceeds the overshoot target
+
+The overshoot is deliberate — it pushes L0 clear of the cache-min floor AND gives the cascade's anchoring logic something to work with. Without overshoot, L0 sits exactly at target and normal content churn immediately pushes it below the floor again. A multiplier around 1.5 produces ~50% headroom: enough for the cascade to anchor some items and let newly-promoted content displace low-ref veterans, not so much that L1/L2/L3 distribution starves.
+
+Fires in both init paths — startup stability initialization and manual cache rebuild — immediately after the measurement pass. Manual rebuild inherits the same backfill so user-triggered redistribution converges to the same healthy L0 state as startup.
+
 ### Clustering Algorithm
 
 - Mutual reference graph — bidirectional edges only
@@ -278,3 +300,5 @@ When a file is in active context, its index entry is excluded from all tiers to 
 - Manual rebuild swaps selected files from index entries to file entries at the same tier; selected files never land in active after rebuild
 - Manual rebuild distributes orphan selected files (non-indexed) across L1/L2/L3, never into active or L0
 - Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape
+- Post-init L0 backfill fires after measurement on every init and rebuild path; L0 exceeds the provider cache-min floor by a deliberate overshoot so the cascade has churn capacity and L1 items can promote
+- Post-init L0 backfill fires after measurement on every init and rebuild path; L0 exceeds the provider cache-min floor by a deliberate overshoot so the cascade has churn capacity and L1 items can promote

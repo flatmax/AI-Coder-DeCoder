@@ -1507,3 +1507,386 @@ class TestHistoryGraduation:
         tracker.update({"history:0": _active_item("h1", 100)})
         item = tracker.get_all_items()["history:0"]
         assert item.tier == Tier.L2
+
+
+# ---------------------------------------------------------------------------
+# Post-measurement L0 backfill
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillL0AfterMeasurement:
+    """Post-measurement backfill tops up L0 to the overshoot target.
+
+    The placeholder token count used during L0 seeding (400
+    per file) is a pessimistic upper bound. After measurement
+    replaces placeholders with real counts, L0's actual token
+    total is usually well below cache_target_tokens — meaning
+    the provider won't cache it and the cascade's anchoring
+    logic never fires. The backfill pass pulls high-ref-count
+    candidates up from L1/L2/L3 until L0 reaches the overshoot
+    target.
+
+    Governing spec: specs4/3-llm/cache-tiering.md § L0 Backfill
+    and § Post-Measurement L0 Backfill.
+    """
+
+    def test_noop_when_cache_target_zero(self) -> None:
+        """cache_target_tokens=0 disables caching entirely.
+
+        No backfill target to meet, nothing to promote.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_noop_when_l0_already_exceeds_overshoot(self) -> None:
+        """L0 at or above target × overshoot → nothing promotes."""
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 already holds 2000 tokens (target * 1.5 = 1500).
+        tracker._items["symbol:big.py"] = TrackedItem(
+            "symbol:big.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=2000,
+        )
+        # L1 has candidates, but L0 is full.
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        ref = _FakeRefIndex(ref_counts={"big.py": 5, "a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_noop_when_no_candidates(self) -> None:
+        """L0 underfilled but L1/L2/L3 empty → nothing to promote."""
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 is empty (no candidates needed); below target.
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+
+    def test_promotes_highest_ref_first(self) -> None:
+        """Candidates ranked by ref count descending.
+
+        Three L1 items at 500 tokens each; target × 1.5 = 1500.
+        Backfill pulls two items (accumulated=1000, then 1500)
+        then stops. The two with the highest ref counts should
+        be the ones that promoted.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:low.py"] = TrackedItem(
+            "symbol:low.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:mid.py"] = TrackedItem(
+            "symbol:mid.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:high.py"] = TrackedItem(
+            "symbol:high.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"low.py": 1, "mid.py": 5, "high.py": 10},
+        )
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # accumulated starts at 0. Loop: add high (500 < 1500),
+        # add mid (1000 < 1500), add low (1500 >= 1500 → break
+        # BEFORE adding). But the loop structure is "if
+        # accumulated >= target: break" at the top, so:
+        #   iter 1: acc=0 < 1500, promote high → acc=500
+        #   iter 2: acc=500 < 1500, promote mid → acc=1000
+        #   iter 3: acc=1000 < 1500, promote low → acc=1500
+        # Then loop ends (no more candidates).
+        # All three get promoted to reach the target.
+        assert promoted == 3
+        assert tracker.get_all_items()["symbol:high.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:mid.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:low.py"].tier == Tier.L0
+
+    def test_stops_at_overshoot_target(self) -> None:
+        """Backfill stops once L0 reaches target × overshoot.
+
+        Four items at 500 tokens each, target=1000, overshoot=1.5
+        → backfill target = 1500. After three promotions
+        accumulated reaches 1500; the fourth is not touched.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        for i, ref_count in enumerate([10, 9, 8, 1]):
+            tracker._items[f"symbol:f{i}.py"] = TrackedItem(
+                f"symbol:f{i}.py", Tier.L1, n_value=9,
+                content_hash="h1", tokens=500,
+            )
+        ref = _FakeRefIndex(
+            ref_counts={
+                "f0.py": 10, "f1.py": 9, "f2.py": 8, "f3.py": 1,
+            },
+        )
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 3
+        # f3 (lowest ref, lowest rank) stays in L1.
+        assert tracker.get_all_items()["symbol:f3.py"].tier == Tier.L1
+
+    def test_ranking_tiebreak_by_key(self) -> None:
+        """Equal ref counts → tie-broken by key for determinism."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        # Same ref count; key ordering decides.
+        ref = _FakeRefIndex(ref_counts={"a.py": 5, "b.py": 5})
+        # Target × 1.5 = 750. One promotion (400) brings L0 to
+        # 400 < 750 — a second promotion (800) exceeds target.
+        # So both get promoted. Let's choose tokens that only
+        # allow one to fit.
+        tracker._items["symbol:b.py"].tokens = 500
+        tracker._items["symbol:a.py"].tokens = 500
+        # Target × 1.5 = 750. Promote one → acc=500 < 750,
+        # promote another → acc=1000 ≥ 750 AFTER; but the
+        # check is at top of loop so we promote both. Tweak
+        # sizes to make the bound actually limiting:
+        tracker._items["symbol:b.py"].tokens = 800
+        tracker._items["symbol:a.py"].tokens = 800
+        # acc=0 < 750 → promote first → acc=800
+        # acc=800 ≥ 750 → break
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 1
+        # Tie-break: key ascending → a.py promotes first.
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:b.py"].tier == Tier.L1
+
+    def test_preserves_tokens_and_hash(self) -> None:
+        """Promoted items retain their real token count and hash.
+
+        Measurement already populated real counts; backfill must
+        not clobber them with placeholders.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="real-hash-123", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        item = tracker.get_all_items()["symbol:a.py"]
+        assert item.tier == Tier.L0
+        assert item.content_hash == "real-hash-123"
+        assert item.tokens == 300
+
+    def test_promoted_item_gets_l0_entry_n(self) -> None:
+        """Promoted items enter L0 at L0's entry_n (=12)."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,  # L1's entry_n
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        assert tracker.get_all_items()["symbol:a.py"].n_value == 12
+
+    def test_marks_source_tiers_broken(self) -> None:
+        """Source tiers of promoted items are marked broken.
+
+        Signals the next cascade to rebalance L1/L2/L3
+        distribution after the backfill's selective promotions.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L2, n_value=6,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10, "b.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        # Both L1 and L2 should now be in broken_tiers.
+        assert Tier.L1 in tracker._broken_tiers
+        assert Tier.L2 in tracker._broken_tiers
+
+    def test_l0_not_marked_broken(self) -> None:
+        """L0 itself not marked broken — promoted items earned their slot.
+
+        If L0 were broken, the next cascade would reconsider
+        the backfill's placements and potentially undo them.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        assert Tier.L0 not in tracker._broken_tiers
+
+    def test_skips_non_file_keys(self) -> None:
+        """system:* and url:* and history:* are not candidates.
+
+        Only file:/symbol:/doc: keys are eligible for backfill.
+        Other prefixes are intentionally excluded — system is
+        L0-only, urls are session-scoped, history follows its
+        own graduation path.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["history:0"] = TrackedItem(
+            "history:0", Tier.L3, n_value=3,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+        assert tracker.get_all_items()["history:0"].tier == Tier.L3
+
+    def test_skips_items_already_in_l0(self) -> None:
+        """L0 residents aren't re-promoted."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:already.py"] = TrackedItem(
+            "symbol:already.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["symbol:candidate.py"] = TrackedItem(
+            "symbol:candidate.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"already.py": 100, "candidate.py": 5},
+        )
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # already.py stays in L0 without being re-promoted.
+        # candidate.py promotes to bring L0 from 100 to 400
+        # (target × 1.5 = 750, still under).
+        assert promoted == 1
+        assert tracker.get_all_items()["symbol:already.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:candidate.py"].tier == Tier.L0
+
+    def test_accumulated_counts_existing_l0_tokens(self) -> None:
+        """Backfill target measured against TOTAL L0 tokens.
+
+        If L0 already has some real tokens, the backfill only
+        needs to add enough to reach the overshoot target —
+        not the full target on top of existing content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 has 800 real tokens already.
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h1", tokens=800,
+        )
+        # Two L1 candidates at 500 each.
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"a.py": 10, "b.py": 5},
+        )
+        # target = 1000 × 1.5 = 1500. L0 has 800. Need 700 more.
+        # Promote a.py (highest ref): acc = 800 + 500 = 1300 < 1500.
+        # Promote b.py: acc = 1300 + 500 = 1800 ≥ 1500 → break
+        # AT TOP OF NEXT ITERATION (both already promoted).
+        # Actually: acc=800, iter 1 acc<1500 promote a → acc=1300,
+        # iter 2 acc<1500 promote b → acc=1800, iter 3 acc>=1500 break.
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 2
+
+    def test_custom_overshoot_multiplier(self) -> None:
+        """Overshoot multiplier is tunable.
+
+        Default is 1.5 but the parameter is exposed for tuning.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:c.py"] = TrackedItem(
+            "symbol:c.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"a.py": 10, "b.py": 5, "c.py": 1},
+        )
+        # Use overshoot=1.0 (no headroom). Target = 1000.
+        # iter 1 acc=0 < 1000 → promote a → acc=500
+        # iter 2 acc=500 < 1000 → promote b → acc=1000
+        # iter 3 acc=1000 >= 1000 → break
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.0,
+        )
+        assert promoted == 2
+        # c.py stays in L1.
+        assert tracker.get_all_items()["symbol:c.py"].tier == Tier.L1
+
+    def test_doc_keys_eligible(self) -> None:
+        """doc:{path} keys are also valid backfill candidates.
+
+        Cross-reference mode seeds doc: entries into L1/L2/L3;
+        they should compete for L0 slots alongside symbol: entries.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["doc:readme.md"] = TrackedItem(
+            "doc:readme.md", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        ref = _FakeRefIndex(ref_counts={"readme.md": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 1
+        assert tracker.get_all_items()["doc:readme.md"].tier == Tier.L0
+
+    def test_file_keys_eligible(self) -> None:
+        """file:{path} keys are valid candidates.
+
+        Selected files swapped to file: entries during rebuild
+        should be able to earn L0 via backfill too.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:selected.py"] = TrackedItem(
+            "file:selected.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        ref = _FakeRefIndex(ref_counts={"selected.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 1
+        assert tracker.get_all_items()["file:selected.py"].tier == Tier.L0
+
+    def test_change_log_records_backfill(self) -> None:
+        """Change log distinguishes backfill promotions."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        changes = tracker.get_changes()
+        # Should include a "backfill" annotation so the terminal
+        # HUD can distinguish from normal cascade promotions.
+        assert any(
+            "L1 → L0" in c and "backfill" in c and "a.py" in c
+            for c in changes
+        )

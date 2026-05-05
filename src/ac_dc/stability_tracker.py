@@ -1258,6 +1258,151 @@ class StabilityTracker:
         item.tokens = tokens
 
     # ------------------------------------------------------------------
+    # Post-measurement L0 backfill
+    # ------------------------------------------------------------------
+
+    def backfill_l0_after_measurement(
+        self,
+        ref_index: Any,
+        overshoot_multiplier: float = 1.5,
+    ) -> int:
+        """Top up L0 with real-token-count awareness post-measurement.
+
+        The init-time placeholder (400 tokens/file) is a pessimistic
+        upper bound — once ``_measure_tracker_tokens`` (the caller,
+        on :class:`LLMService`) replaces placeholders with real
+        counts, L0's actual token total is almost always well
+        below ``cache_target_tokens``. Two consequences:
+
+        1. The provider refuses to cache L0 at all (total below
+           the provider's cache-min threshold — 4096 tokens on
+           Sonnet 4.6, 1024 on Sonnet 4.5, etc.).
+        2. L0 has no churn capacity — every item fits comfortably,
+           so the cascade's "tier exceeds cache target → anchor
+           veterans, promote above the line" path never triggers,
+           and L1 items never promote upward even after they've
+           earned it.
+
+        This method pulls additional high-ref-count items from
+        L1/L2/L3 into L0 until the real token total reaches
+        ``cache_target_tokens × overshoot_multiplier``. The
+        overshoot is deliberate — it pushes L0 well clear of
+        the cache-min floor AND gives the cascade's anchoring
+        logic something to work with, so L1 items can be
+        promoted into L0 as lower-ref content cycles out.
+
+        Ranking uses the reference index's ``file_ref_count``
+        (same signal as initial L0 seeding) so the backfill
+        preserves the "most-connected files live longest"
+        intent. Ties break by key for determinism.
+
+        Called post-measurement by both init paths
+        (:meth:`LLMService._try_initialize_stability` and
+        :meth:`LLMService._rebuild_cache_impl`). A no-op when
+        ``cache_target_tokens == 0`` (caching disabled) or
+        when no candidates exist below L0.
+
+        Parameters
+        ----------
+        ref_index:
+            Object implementing ``file_ref_count(path)``. Same
+            object used by :meth:`initialize_with_keys`.
+        overshoot_multiplier:
+            Target token total is ``cache_target_tokens ×
+            overshoot_multiplier``. Default 1.5 produces
+            ~50% headroom above the cache-min floor — enough
+            for the cascade to anchor some items and let
+            newly-promoted content displace low-ref veterans.
+            Values below 1.0 would leave L0 perpetually
+            underfilled; values above 2.0 push too much into
+            L0 at the expense of L1-L3 distribution.
+
+        Returns
+        -------
+        int
+            The number of items promoted into L0. Useful for
+            logging / debug.
+        """
+        if self._cache_target_tokens <= 0:
+            return 0
+
+        target = int(self._cache_target_tokens * overshoot_multiplier)
+
+        # Compute current L0 token total from real (post-
+        # measurement) counts. Iterates _items rather than
+        # calling get_tier_items() to avoid the copy cost.
+        current_l0_tokens = sum(
+            item.tokens
+            for item in self._items.values()
+            if item.tier == Tier.L0
+        )
+        if current_l0_tokens >= target:
+            return 0
+
+        # Candidate pool — every item currently in L1, L2, or
+        # L3 whose key references a file path. ``system:`` and
+        # ``history:`` are L0-only or tier-protected and never
+        # backfill candidates; ``url:`` is skipped because URL
+        # content is session-scoped and shouldn't compete for
+        # the cache-anchor slot.
+        candidates: list[TrackedItem] = []
+        for item in self._items.values():
+            if item.tier not in (Tier.L1, Tier.L2, Tier.L3):
+                continue
+            path = self._path_from_key(item.key)
+            if path is None:
+                continue
+            candidates.append(item)
+
+        if not candidates:
+            return 0
+
+        # Rank by reference count descending, then by key for
+        # deterministic tie-breaking (critical for test
+        # stability and for reproducible startup behaviour).
+        def _rank_key(it: TrackedItem) -> tuple[int, str]:
+            path = self._path_from_key(it.key)
+            # path is never None here — candidate loop already
+            # filtered. Defensive fallback to empty string.
+            count = ref_index.file_ref_count(path or "")
+            return (-int(count), it.key)
+
+        candidates.sort(key=_rank_key)
+
+        # Promote until the target is met. Each promoted item
+        # keeps its content_hash and its token count (both
+        # already real post-measurement); only the tier and
+        # n_value change. L0's entry_n is used so the item
+        # lands as a fresh L0 resident, not mid-cycle.
+        promoted = 0
+        accumulated = current_l0_tokens
+        l0_entry_n = _TIER_CONFIG[Tier.L0]["entry_n"]
+        affected_source_tiers: set[Tier] = set()
+        for item in candidates:
+            if accumulated >= target:
+                break
+            source_tier = item.tier
+            item.tier = Tier.L0
+            item.n_value = l0_entry_n
+            accumulated += item.tokens
+            promoted += 1
+            affected_source_tiers.add(source_tier)
+            self._log_change(
+                f"{source_tier.value} → L0: {item.key} "
+                f"(post-measurement backfill)"
+            )
+
+        # Mark source tiers broken so the next cascade can
+        # rebalance L1/L2/L3 distribution after the promotions.
+        # L0 itself isn't marked broken — these items earned
+        # their L0 slot via ref-count ranking; we don't want
+        # the cascade immediately reconsidering them.
+        for tier in affected_source_tiers:
+            self._broken_tiers.add(tier)
+
+        return promoted
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

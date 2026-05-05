@@ -65,7 +65,26 @@ Initial tier assignment from the reference graph seeds L0 with highest-ref-count
 |---|---|
 | 400 tokens | Conservative per-entry estimate during L0 seeding |
 
-Chosen conservatively — the real post-measurement values are usually higher, so the placeholder under-seeds slightly rather than over-seeding. Post-measurement, anchored items below the real threshold get unanchored naturally via the next cascade.
+Chosen conservatively — the real post-measurement values are usually *lower* than the 400-token placeholder (real symbol/doc blocks are typically 50–300 tokens), so the placeholder under-seeds. The post-measurement backfill pass (below) corrects the under-seed.
+
+### L0 post-measurement backfill overshoot
+
+After the measurement pass replaces placeholder tokens with real counts, a backfill pass pulls high-ref-count candidates from L1/L2/L3 into L0 until the real token total meets a target with deliberate overshoot:
+
+| Value | Purpose |
+|---|---|
+| 1.5 | `overshoot_multiplier` — multiplies `cache_target_tokens` to produce the backfill target |
+
+Target computation: `backfill_target = cache_target_tokens × overshoot_multiplier`. At the default 1.5, L0 is filled to ~150% of the cache-min threshold, providing ~50% headroom above the provider's floor. The overshoot is load-bearing:
+
+- Below 1.0 — L0 sits at or below the cache-min floor; the provider refuses to cache it
+- Exactly 1.0 — any single-request content change drops L0 below the floor again
+- 1.5 (default) — enough headroom for the cascade's anchor-veterans-above-threshold path to trigger, so L1 items can promote upward as low-ref L0 content cycles out
+- Above 2.0 — too much pull from L1/L2/L3, starves the lower tiers
+
+The backfill preserves each promoted item's real token count and content hash (measurement already populated them); only `tier` and `n_value` change, with `n_value` set to L0's entry N (12). Source tiers are marked broken so the next cascade rebalances their distribution.
+
+Fires in both init paths — startup stability initialization and manual cache rebuild — immediately after the measurement pass. No-op when `cache_target_tokens == 0` (caching disabled) or when L0 already exceeds the overshoot target.
 
 ### Cascade iteration cap
 
