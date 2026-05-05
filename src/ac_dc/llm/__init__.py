@@ -38,6 +38,15 @@ from ac_dc.llm._breakdown import (
     print_post_response_hud,
     wide_map_exclude_set,
 )
+from ac_dc.llm._review import (
+    build_and_set_review_context,
+    check_review_ready,
+    end_review,
+    get_commit_graph,
+    get_review_file_diff,
+    get_review_state,
+    start_review,
+)
 
 __all__ = [
     "ArchivalAppend",
@@ -57,10 +66,17 @@ __all__ = [
     "_generate_request_id",
     "_parse_agent_tag",
     "_resolve_max_output_tokens",
+    "build_and_set_review_context",
+    "check_review_ready",
+    "end_review",
+    "get_commit_graph",
     "get_context_breakdown",
     "get_file_map_block",
     "get_meta_block",
+    "get_review_file_diff",
+    "get_review_state",
     "print_init_hud",
     "print_post_response_hud",
+    "start_review",
     "wide_map_exclude_set",
 ]
