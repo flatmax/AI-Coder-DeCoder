@@ -983,6 +983,22 @@ def print_post_response_hud(service: "LLMService") -> None:
     # Section 3: Tier Changes
     changes = service._stability_tracker.get_changes()
     if changes:
+        # Drain the live change log immediately. We already
+        # have our snapshot in ``changes`` (a copy returned
+        # by :meth:`get_changes`); rendering below iterates
+        # the snapshot, never the live list. Draining FIRST
+        # — before any rendering — guarantees the next turn
+        # starts clean even if a downstream print raises.
+        # An end-of-block drain leaves the log populated on
+        # any exception, and the next turn's
+        # :meth:`StabilityTracker.update` then prepends the
+        # leaked entries as ``pre_cycle_changes``, replaying
+        # last turn's tier moves into this turn's HUD even
+        # though no such moves happened — the visible
+        # symptom being identical promotion/demotion lines
+        # appearing turn after turn while tier sizes stay
+        # constant.
+        service._stability_tracker._changes = []
         # Tier rank for direction detection. Higher rank =
         # more cached / more stable. 📈 means the item moved
         # to a higher rank (promotion / graduation). 📉 means
@@ -1018,12 +1034,24 @@ def print_post_response_hud(service: "LLMService") -> None:
                 src = change[:arrow_idx].strip()
                 dst = change[arrow_idx + 3:colon_idx].strip()
                 src_rank = _tier_rank.get(src)
-                dst_rank = _tier_rank.get(dst)
-                if src_rank is not None and dst_rank is not None:
-                    if dst_rank > src_rank:
-                        promotions += 1
-                    elif dst_rank < src_rank:
-                        demotions += 1
+                # "removed" is not a tier — it's a tracker
+                # eviction (selected file index→content swap,
+                # excluded file sweep, stale file removal,
+                # departed history/file). Count these as
+                # demotions so the HUD counter reflects them;
+                # otherwise a swap-driven cascade reads as
+                # "79 promotions, 0 demotions" when in reality
+                # at least one item was evicted from a cached
+                # tier to set up those promotions.
+                if dst == "removed" and src_rank is not None:
+                    demotions += 1
+                else:
+                    dst_rank = _tier_rank.get(dst)
+                    if src_rank is not None and dst_rank is not None:
+                        if dst_rank > src_rank:
+                            promotions += 1
+                        elif dst_rank < src_rank:
+                            demotions += 1
             # Trailing reason in parentheses identifies the
             # macro cause. Default to "other" so unknown
             # entries still show up in the summary.
@@ -1088,10 +1116,17 @@ def print_post_response_hud(service: "LLMService") -> None:
                 src = change[:arrow_idx].strip()
                 dst = change[arrow_idx + 3:colon_idx].strip()
                 src_rank = _tier_rank.get(src)
-                dst_rank = _tier_rank.get(dst)
-                if src_rank is not None and dst_rank is not None:
-                    if dst_rank > src_rank:
-                        icon = "📈"
-                    elif dst_rank < src_rank:
-                        icon = "📉"
+                # Removals are evictions from a cached tier;
+                # render with the demotion icon so they're
+                # visually distinct from promotions in the
+                # change log.
+                if dst == "removed" and src_rank is not None:
+                    icon = "🗑️"
+                else:
+                    dst_rank = _tier_rank.get(dst)
+                    if src_rank is not None and dst_rank is not None:
+                        if dst_rank > src_rank:
+                            icon = "📈"
+                        elif dst_rank < src_rank:
+                            icon = "📉"
             print(f"{icon} {change}", file=sys.stderr)

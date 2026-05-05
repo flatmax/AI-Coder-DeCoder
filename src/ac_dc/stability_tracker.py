@@ -511,7 +511,19 @@ class StabilityTracker:
             :meth:`get_changes` would return afterwards; returned
             for convenience so callers don't need a second call.
         """
-        # Change log is per-cycle — wipe on entry.
+        # Change log is per-cycle, but external mutators
+        # (selection index→content swap, exclusion sweep,
+        # history purge) call ``log_change`` before update()
+        # runs to record their removals. Those pre-cycle
+        # entries belong in this cycle's log so the post-
+        # response HUD can render them as 🗑️ demotion lines
+        # alongside the cascade's promotion output. Capture
+        # the pre-cycle entries, then reset the log to collect
+        # this cycle's cascade entries, then prepend the
+        # captured ones at the end so the final ordering is
+        # external-mutations-first, cascade-second — the right
+        # reading order for an operator debugging a cascade.
+        pre_cycle_changes = list(self._changes)
         self._changes = []
         # Snapshot broken-tier reasons at cycle entry so the
         # post-response HUD can surface *why* the cascade fired
@@ -585,6 +597,12 @@ class StabilityTracker:
         # Phase 3 — cascade. Bottom-up pass, anchoring,
         # promotion, post-cascade underfill demotion.
         self._run_cascade()
+
+        # Prepend the pre-cycle changes (external mutations
+        # captured at update() entry) so the final log reads
+        # external-first, cascade-second.
+        if pre_cycle_changes:
+            self._changes = pre_cycle_changes + self._changes
 
         return self.get_changes()
 
