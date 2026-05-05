@@ -195,15 +195,28 @@ def cancel_streaming(
     and breaks out when it finds its ID. The background task's
     finally handler clears the active-request flag and fires
     streamComplete with cancelled=True.
+
+    Accepts any request id from a localhost caller without
+    checking it against the active main request. Three classes
+    of id legitimately need to be cancellable:
+
+    1. The main user-initiated request id, when it's the
+       currently-active stream.
+    2. Child agent request ids of shape ``{parent}-agent-NN``,
+       which are running concurrently while the parent main
+       LLM finalises (or after it has completed — agent streams
+       outlive their parent).
+    3. Stale/unknown ids — the worker's membership check
+       (``request_id in service._cancelled_requests``) is the
+       authoritative consumer; an id that doesn't match any
+       live stream is harmless noise in the set.
+
+    The previous guard rejected (2) outright because the child
+    id never equals ``_active_user_request``. With the guard
+    removed, ``Stop`` on an agent tab now reaches the worker.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
-    if request_id != service._active_user_request:
-        return {
-            "error": (
-                f"Request {request_id} is not the active stream"
-            )
-        }
     service._cancelled_requests.add(request_id)
     return {"status": "cancelling"}

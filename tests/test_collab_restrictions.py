@@ -545,17 +545,25 @@ class TestLLMServiceLocalhostAllowed:
         result = service.reset_to_head()
         assert result.get("status") == "ok"
 
-    def test_cancel_streaming_wrong_id_still_gated(
+    def test_cancel_streaming_localhost_accepts_any_id(
         self, service: LLMService
     ) -> None:
-        """Localhost caller, but request_id doesn't match — the
-        existing "not the active stream" error surfaces, not a
-        restriction error."""
+        """Localhost caller — cancel accepts any id and adds it
+        to the cancelled set.
+
+        The previous "not the active stream" guard rejected ids
+        that didn't match ``_active_user_request``. Removed
+        because agent tabs send child ids of shape
+        ``{parent}-agent-NN`` which never match the parent —
+        Stop on an agent tab silently no-op'd. The worker's
+        per-chunk membership check is the authoritative
+        consumer; stale ids in the set are harmless."""
         service._collab = _StubCollab(is_localhost=True)
-        result = service.cancel_streaming("bogus-id")
+        result = service.cancel_streaming("any-id")
         # Not restricted — the method got past the guard.
         assert result.get("error") != "restricted"
-        assert "not the active stream" in result.get("error", "")
+        assert result == {"status": "cancelling"}
+        assert "any-id" in service._cancelled_requests
 
     def test_invalidate_url_cache(
         self, service: LLMService

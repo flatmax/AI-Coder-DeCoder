@@ -29,23 +29,72 @@ from .conftest import _FakeLiteLLM
 
 
 class TestCancellation:
-    """cancel_streaming aborts the in-flight stream."""
+    """cancel_streaming aborts the in-flight stream.
 
-    def test_wrong_request_id_rejected(
-        self, service: LLMService
-    ) -> None:
-        """Canceling a non-active request returns an error."""
-        service._active_user_request = "actual"
-        result = service.cancel_streaming("different")
-        assert "error" in result
+    The cancel RPC accepts any request id from a localhost
+    caller and adds it to ``_cancelled_requests``. The worker
+    thread's per-chunk membership check is the authoritative
+    consumer; a stale id sitting in the set is harmless.
+
+    The previous "wrong id rejected" guard blocked
+    cancellation on agent tabs, where the frontend sends the
+    child request id ``{parent}-agent-NN`` and
+    ``_active_user_request`` holds the parent (or None once
+    the parent finished). See ``_rpc_streaming.cancel_streaming``
+    for the full prose.
+    """
 
     def test_active_request_added_to_cancelled_set(
         self, service: LLMService
     ) -> None:
-        """Active cancellation registers the ID."""
+        """Active main-tab cancellation registers the ID."""
         service._active_user_request = "r1"
         service.cancel_streaming("r1")
         assert "r1" in service._cancelled_requests
+
+    def test_child_request_added_to_cancelled_set(
+        self, service: LLMService
+    ) -> None:
+        """Agent-tab cancel (child id) reaches the worker.
+
+        The cancel RPC no longer gates on
+        ``_active_user_request`` — it just adds the id to the
+        set. The worker thread checks membership per chunk
+        and breaks out when its id appears.
+        """
+        service._active_user_request = "parent-id"
+        child_id = "parent-id-agent-00"
+        result = service.cancel_streaming(child_id)
+        assert result == {"status": "cancelling"}
+        assert child_id in service._cancelled_requests
+
+    def test_unknown_id_added_harmlessly(
+        self, service: LLMService
+    ) -> None:
+        """Stale or unknown ids land in the set without error.
+
+        The worker's membership check is the authoritative
+        consumer; an id that doesn't match any live stream is
+        harmless noise. Pinning this contract so a future
+        guard re-introduction breaks the test loudly.
+        """
+        service._active_user_request = "actual"
+        result = service.cancel_streaming("different")
+        assert result == {"status": "cancelling"}
+        assert "different" in service._cancelled_requests
+
+    def test_no_active_request_still_accepted(
+        self, service: LLMService
+    ) -> None:
+        """Cancel works even when no main stream is active.
+
+        Agent streams outlive their parent — once the main
+        LLM completes, ``_active_user_request`` is None but
+        agent streams are still running.
+        """
+        assert service._active_user_request is None
+        service.cancel_streaming("some-id")
+        assert "some-id" in service._cancelled_requests
 
 
 # ---------------------------------------------------------------------------
