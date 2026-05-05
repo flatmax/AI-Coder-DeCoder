@@ -983,10 +983,31 @@ def print_post_response_hud(service: "LLMService") -> None:
     # Section 3: Tier Changes
     changes = service._stability_tracker.get_changes()
     if changes:
+        # Tier rank for direction detection. Higher rank =
+        # more cached / more stable. 📈 means the item moved
+        # to a higher rank (promotion / graduation). 📉 means
+        # it moved to a lower rank (demotion / invalidation).
+        # The arrow direction in the change string is the
+        # ground truth — parse "{src} → {dst}:" out of it.
+        _tier_rank = {
+            "active": 0,
+            "L3": 1,
+            "L2": 2,
+            "L1": 3,
+            "L0": 4,
+        }
         for change in changes:
-            if "promoted" in change:
-                print(f"📈 {change}", file=sys.stderr)
-            elif "active" in change:
-                print(f"📉 {change}", file=sys.stderr)
-            else:
-                print(f"   {change}", file=sys.stderr)
+            arrow_idx = change.find(" → ")
+            colon_idx = change.find(":", arrow_idx) if arrow_idx >= 0 else -1
+            icon = "  "
+            if arrow_idx > 0 and colon_idx > arrow_idx:
+                src = change[:arrow_idx].strip()
+                dst = change[arrow_idx + 3:colon_idx].strip()
+                src_rank = _tier_rank.get(src)
+                dst_rank = _tier_rank.get(dst)
+                if src_rank is not None and dst_rank is not None:
+                    if dst_rank > src_rank:
+                        icon = "📈"
+                    elif dst_rank < src_rank:
+                        icon = "📉"
+            print(f"{icon} {change}", file=sys.stderr)

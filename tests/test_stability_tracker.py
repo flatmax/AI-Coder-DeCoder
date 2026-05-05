@@ -770,6 +770,150 @@ class TestCascadePromotion:
 # ---------------------------------------------------------------------------
 
 
+class TestStaticUnderfillDoesNotDrainL1:
+    """Regression guard: static L0 underfill does not chain-drain.
+
+    The bug: the cascade's L0 backfill probe used to run
+    unconditionally — every turn it checked whether L0 was
+    below cache_target_tokens and, if so, marked L0 broken.
+    That opened a promotion path L1 → L0, which (via
+    structural-invalidation propagation) opened L2 → L1, which
+    opened L3 → L2. So a long-lived stable conversation that
+    happened to leave L0 sitting a bit below cache_target
+    would see mass promotions on every turn — exactly the
+    "70 items L1→L0, 70 items L2→L1" pattern users observed
+    in the terminal HUD.
+
+    The fix: the L0 backfill probe is gated on
+    ``had_external_invalidation`` — it only piggybacks on a
+    cascade entry that already had something broken. Static
+    underfill is a one-shot init/rebuild concern, repaired by
+    :meth:`backfill_l0_after_measurement`, not the per-turn
+    cascade.
+
+    The full coverage of "is the probe still wired correctly
+    for legitimate piggyback?" is in
+    :class:`TestCascadePromotion`'s
+    ``test_l1_invalidation_ripples_up_through_structural_breaks``
+    and
+    ``test_primed_cache_l1_deselect_ripples_full_chain``,
+    which exercise external L1 invalidation.
+    """
+
+    def test_underfilled_l0_does_not_drain_l1_when_no_invalidation(self) -> None:
+        """L0 below target + L1 veterans + nothing broken = no drain.
+
+        Setup: L0 has 100 tokens (well below cache_target=10000).
+        L1 has 5 veterans at promote_n with substantial tokens.
+        L2 and L3 are empty. No external invalidation, no hash
+        changes. Drive one update with all items unchanged.
+
+        Expectation: nothing moves. L0 stays at 100 tokens, L1
+        stays full. The cascade must not invent an L0
+        invalidation to chase the underfill — that would chain-
+        drain L1 every single turn the user is in this state.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        # L0 with one small resident — well below cache_target.
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        # L1 with five veterans at promote_n (12), so they
+        # WOULD promote if the gate let them. Total tokens
+        # well above cache_target so anchoring rules apply
+        # normally (some anchored, some not).
+        for i in range(5):
+            tracker._items[f"file:l1_{i}.py"] = TrackedItem(
+                f"file:l1_{i}.py", Tier.L1, n_value=12,
+                content_hash="h1", tokens=3000,
+            )
+        # Drive one update with every item unchanged. No hash
+        # change, no deselection, no rebuild — the cascade has
+        # zero external invalidations to piggyback on.
+        active = {
+            "system:prompt": _active_item("h_sys", 100),
+        }
+        for i in range(5):
+            active[f"file:l1_{i}.py"] = _active_item("h1", 3000)
+        tracker.update(active)
+
+        items = tracker.get_all_items()
+        # L0 unchanged — system prompt stays at L0 (n_value
+        # may increment via Phase 1, that's fine; tier is the
+        # contract).
+        assert items["system:prompt"].tier == Tier.L0
+        # Every L1 resident still in L1. Nothing promoted.
+        # This is the regression assertion: even with veterans
+        # AT promote_n and L0 underfilled, the cascade must
+        # not invent an L0 invalidation to drain L1.
+        for i in range(5):
+            assert items[f"file:l1_{i}.py"].tier == Tier.L1, (
+                f"file:l1_{i}.py promoted to L0 despite no "
+                f"L0 invalidation. The cascade must not chase "
+                f"static underfill — that's "
+                f"backfill_l0_after_measurement's job."
+            )
+
+    def test_underfilled_l0_with_external_invalidation_does_drain(self) -> None:
+        """Confirm the legitimate piggyback path still works.
+
+        Same setup as the previous test but this time we mark
+        L1 broken before calling update (simulating a deselect
+        of an L1-resident file). Now the probe is permitted —
+        ``had_external_invalidation`` is True at cascade entry —
+        and L0 underfill should be opportunistically repaired.
+
+        Expectation: L1 → L0 promotions fire (legitimate ripple
+        from the L1 break). The structural-invalidation chain
+        propagates upward as designed.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        # Seed L1 residents AT promote_n (12) so they're
+        # eligible for promotion if the gate opens. Anything
+        # below promote_n stays at L1 regardless of broken-tier
+        # state — the eligibility check is independent of the
+        # gate. Use 5000-token items so anchoring leaves at
+        # least one item unanchored: with cache_target=10_000
+        # the per-item check is ``accumulated < target``
+        # BEFORE adding this item's tokens, so the first two
+        # items end up anchored (acc=0 and acc=5000, both
+        # under 10_000) and items 3-5 sit above the line.
+        for i in range(5):
+            tracker._items[f"file:l1_{i}.py"] = TrackedItem(
+                f"file:l1_{i}.py", Tier.L1, n_value=12,
+                content_hash="h1", tokens=5000,
+            )
+        # External invalidation: simulate deselect by removing
+        # one L1 resident and marking L1 broken.
+        tracker._items.pop("file:l1_0.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        active = {
+            "system:prompt": _active_item("h_sys", 100),
+        }
+        for i in range(1, 5):
+            active[f"file:l1_{i}.py"] = _active_item("h1", 5000)
+        tracker.update(active)
+
+        items = tracker.get_all_items()
+        # L1 was externally broken; the probe gate opens; L0 is
+        # underfilled so the probe marks it broken too; L1
+        # residents at promote_n flow into L0.
+        promoted_count = sum(
+            1 for i in range(1, 5)
+            if items[f"file:l1_{i}.py"].tier == Tier.L0
+        )
+        assert promoted_count > 0, (
+            "Legitimate L1 invalidation + L0 underfill should "
+            "trigger backfill piggyback. Got no promotions to L0."
+        )
+
+
 class TestAnchoring:
     """Items below cache target have N frozen in the cascade.
 

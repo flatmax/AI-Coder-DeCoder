@@ -845,34 +845,43 @@ class StabilityTracker:
             )
             if not has_items:
                 cascade_empty.add(tier)
+        # Did external mutations invalidate any tier at cascade
+        # entry? When yes, the cascade is permitted to piggyback
+        # an L0 backfill probe on the existing invalidation —
+        # the cache block is going to be rebuilt regardless, so
+        # topping L0 up costs nothing extra. When no, the
+        # cascade must NOT invent a fresh L0 invalidation: doing
+        # so would chain L1 → L0, then L2 → L1, then L3 → L2
+        # every turn that L0 happened to sit a few hundred
+        # tokens below cache_target, draining cached tiers
+        # without any structural reason. Permanent L0 underfill
+        # is the dedicated job of
+        # :meth:`backfill_l0_after_measurement`, called once at
+        # init / cache rebuild — not the per-turn cascade.
+        had_external_invalidation = bool(cascade_broken)
+
         # Up to 8 iterations — real cascades converge in 1–2,
         # cap is defensive against logic bugs creating a cycle.
         processed: set[Tier] = set()
         for _ in range(8):
             made_progress = False
-            # L0 backfill probe — if L0's token total is below
-            # cache target, add L0 to the promotion-gate
-            # snapshot so _try_promote_from treats it as "needs
-            # content" and promotes eligible L1 items upward.
-            # Without this, an underfilled L0 is neither broken
-            # nor empty per _try_promote_from's check, so
-            # nothing ever promotes into it and L0 sits
-            # permanently under the provider's cache-min
-            # threshold — meaning the provider silently refuses
-            # to cache it and we pay the full ingestion cost
-            # on every request. Per specs4/3-llm/cache-tiering.md
-            # § "L0 Backfill". Runs every iteration so a
-            # promotion that lands in L0 mid-cascade still
-            # triggers further backfill if the newly-promoted
-            # content didn't meet the target.
+            # L0 backfill probe — only fires when we're already
+            # rebuilding some cache block this cycle. See the
+            # ``had_external_invalidation`` comment above for
+            # why this is gated rather than unconditional.
             #
-            # The backfill probe legitimately opens an upward
-            # path, so it's added to BOTH the live set (so
-            # external consumers see L0 as broken) and the
-            # snapshot (so promotion gating responds this
-            # cycle). This is distinct from the chain-propagation
-            # we're guarding against in _try_promote_from.
-            if self._cache_target_tokens > 0:
+            # When permitted, the probe adds L0 to the
+            # promotion-gate snapshot so _try_promote_from
+            # treats it as "needs content" and promotes
+            # eligible L1 items upward. The probe legitimately
+            # opens an upward path so it's added to BOTH the
+            # live set (so external consumers see L0 as broken)
+            # and the snapshot (so promotion gating responds
+            # this cycle).
+            if (
+                self._cache_target_tokens > 0
+                and had_external_invalidation
+            ):
                 l0_tokens = sum(
                     item.tokens
                     for item in self._items.values()

@@ -88,11 +88,11 @@ Active history is not forced to graduate on its own. A long conversation that ne
 
 ## L0 Backfill
 
-L0 can fall below `cache_target_tokens` in three ways, each with its own repair path:
+L0 can fall below `cache_target_tokens` for several reasons, but only one of them is a cascade-time concern:
 
-- **Post-measurement underfill** — init placeholder tokens overestimated real block sizes; the Post-Measurement L0 Backfill pass (above) deterministically pulls high-ref-count candidates up from L1/L2/L3 until L0 meets target × overshoot. Runs once per init / rebuild.
-- **Item removal** — selected files deselected, history compacted, files deleted. The cascade-time backfill handles this: if L1 is broken for any reason AND L0 is underfilled, L0 is also marked broken, letting L1 veterans promote upward as the cascade processes.
-- **Hash change** — a file's content changed, demoting its L0 entry to active. Same cascade-time backfill path applies.
+- **Post-measurement underfill** — init placeholder tokens overestimated real block sizes. Repaired by the Post-Measurement L0 Backfill pass (above) which deterministically pulls high-ref-count candidates up from L1/L2/L3 until L0 meets target × overshoot. Runs once per init / rebuild — never per turn.
+- **L0 item demotion** — a hash change on an L0 resident demotes it to active, marking L0 broken. The cascade then opportunistically backfills: while L0 is already broken this turn, L1 veterans at promote_n flow upward to refill the slot. This is a piggyback on a real invalidation, not a fresh probe.
+- **Static underfill (no event this turn)** — L0 sits below `cache_target_tokens` but no L0-side invalidation has occurred. **The cascade does not act on this.** Inventing an L0 invalidation just because the token total is low would chain-drain L1 → L0, then L2 → L1, then L3 → L2 every turn, destroying cache stability for a notional benefit that the next hash-shift would erase. Static underfill is the dedicated job of `backfill_l0_after_measurement`, called at init / rebuild, not the per-turn cascade.
 
 Threshold anchoring in L1 ensures L1 retains at least the cache target across any of these paths; L0 backfill never drains L1 below its caching threshold. The system prefers a cache-warm L1 with a slightly-underfilled L0 over a cache-warm L0 with a broken L1 — cache misses cost the same either way, and L1 typically has more content to lose.
 
