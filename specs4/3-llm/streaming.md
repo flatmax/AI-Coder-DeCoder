@@ -171,9 +171,9 @@ When a user turn's main-LLM response contains valid agent-spawn blocks AND the `
 
 Ordering is load-bearing. Agent child streams begin as soon as the spawn step dispatches them; without `agentsSpawned` firing first, a fast-completing agent can finish its entire stream before the main `streamComplete` arrives carrying `agent_blocks` in its result dict — and the frontend's tab-lookup logic silently drops every chunk whose request ID doesn't match an existing tab's current request. Firing `agentsSpawned` between response parse and agent dispatch lets the frontend create the tabs and seed their child request IDs before any child chunk reaches the chunk handler.
 
-Child request IDs follow the format `{parent_request_id}-agent-{NN:02d}` where NN is the zero-padded agent index. The frontend derives tab IDs from the same shape (`{turn_id}/agent-{NN:02d}`) so tab identity, archive path, and child request ID all share the same index convention.
+Child request IDs follow the format `{parent_request_id}-agent-{NN:02d}` where NN is the zero-padded agent index. Archive files use the same NN convention (`{turn_id}/agent-NN.jsonl`). Tab identity is decoupled from this index — tab ids are the agent's LLM-chosen id from its spawn block — so the frontend's `_findTabForRequest` matches the child request ID against each tab's stored `currentRequestId` rather than reconstructing the tab id from the index.
 
-Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComplete` fallback path: the frontend's tab creation short-circuits when a tab for `{turn_id, agent_idx}` already exists, so an older backend that only surfaces `agent_blocks` via `streamComplete` continues to work (tabs appear after all agents finish, as before — child chunks still dropped, but the final transcripts become visible via the archive).
+Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComplete` fallback path: the frontend's tab creation short-circuits when a tab for the same agent id already exists, so an older backend that only surfaces `agent_blocks` via `streamComplete` continues to work (tabs appear after all agents finish, as before — child chunks still dropped, but the final transcripts become visible via the archive).
 
 ## Stream Completion Result
 

@@ -41,7 +41,7 @@ This is the whole interaction surface. No dedicated question blocks, no pause-re
 The chat panel keeps a per-tab state slot for each open conversation, keyed by a tab identifier:
 
 - **Main tab** — identifier `"main"`. State carried by existing ChatPanel properties.
-- **Agent tabs** — identifier `{turn_id, agent_idx}` (typically stringified as `"{turn_id}/agent-{NN}"`). State scoped to that agent.
+- **Agent tabs** — identifier is the agent's LLM-chosen id from its `🟧🟧🟧 AGENT` block (e.g., `"frontend-trivial"`). The same id is the registry key in the backend's `_agent_contexts` and the value passed as `agent_tag` on RPC calls. Identity is flat — no compound `{turn_id, agent_idx}` shape, no parsing required.
 
 Per-tab state includes:
 
@@ -67,9 +67,9 @@ Agent tabs must exist in the chat panel's tab registry before any child stream c
 
 The backend solves this by firing an `agentsSpawned` event immediately after the main LLM's response is parsed and BEFORE dispatching agent streams. The event carries `{turn_id, parent_request_id, agent_blocks: [{id, task, agent_idx}, ...]}` — everything the frontend needs to create tabs with pre-populated child request IDs. The spawn step awaits nothing between emitting `agentsSpawned` and starting the first agent stream, so by the time the frontend's event handler creates the tabs, the race window has closed to zero.
 
-The main LLM's `streamComplete` event also carries `agent_blocks` as a fallback. The frontend's tab-creation path is idempotent — creating a tab for a `{turn_id, agent_idx}` pair that already exists is a no-op. This keeps older backends (that only surface agent blocks via `streamComplete`) working: tabs appear after all agents finish, which means child chunks and completion events are still dropped, but the final transcripts become visible via the archive (see [history.md](../3-llm/history.md#agent-turn-archive)).
+The main LLM's `streamComplete` event also carries `agent_blocks` as a fallback. The frontend's tab-creation path is idempotent — creating a tab for an agent id that already exists is a no-op. This keeps older backends (that only surface agent blocks via `streamComplete`) working: tabs appear after all agents finish, which means child chunks and completion events are still dropped, but the final transcripts become visible via the archive (see [history.md](../3-llm/history.md#agent-turn-archive)).
 
-Tab identity — the key in the chat panel's `_tabs` Map — is `{turn_id}/agent-{NN:02d}`, matching the backend's archive directory layout. Parsing the tab ID back into `[turn_id, agent_idx]` produces the exact tuple the backend's `agent_tag` RPC kwarg expects (see [close tab behaviour](#tab-lifetime)).
+Tab identity — the key in the chat panel's `_tabs` Map — is the agent's LLM-chosen id from its `🟧🟧🟧 AGENT` block. The id is the same string the backend's `_agent_contexts` registry is keyed by, so `parseAgentTabId(tabId)` returns the id directly with no parsing. The padded numeric index in child request IDs (`{parent}-agent-NN`) and archive file names (`{turn_id}/agent-NN.jsonl`) is a routing/storage detail — it does not feed back into tab identity, and the frontend never reconstructs identity from it.
 
 ## File Picker Scope
 
@@ -146,7 +146,7 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 
 - The chat panel is one component. Multiple tabs are additional per-tab state slots, not duplicated components.
 - Tab switching is pure UI — no backend notification, no tracker invalidation, no cache eviction.
-- The Main tab's identifier is always `"main"`. Agent tabs always have `{turn_id, agent_idx}` identifiers. No overlap, no confusion about which conversation is which.
+- The Main tab's identifier is always `"main"`. Agent tab identifiers are the agent's LLM-chosen id directly. No overlap (the literal `"main"` is reserved), no parsing required to recover identity from the tab id.
 - Streaming is routed by request ID. A chunk's destination tab is determined before the chunk is applied — switching tabs mid-stream never routes chunks to the wrong conversation.
 - File picker selection is per-tab. Changing a tab's selection never affects another tab's ContextManager.
 - Agent tabs persist until the next agentic turn or explicit close. Streaming-stopped is not the same as tab-closed.
