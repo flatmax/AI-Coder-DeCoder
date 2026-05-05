@@ -50,8 +50,12 @@ def rebuild_cache(service: "LLMService") -> dict[str, Any]:
             )
         }
 
+    # Call through the service's method so tests can
+    # monkey-patch _rebuild_cache_impl without needing to
+    # know about this module. The method delegates back to
+    # rebuild_cache_impl in normal operation.
     try:
-        return rebuild_cache_impl(service)
+        return service._rebuild_cache_impl()
     except Exception as exc:
         logger.exception("Cache rebuild failed: %s", exc)
         return {"error": f"Cache rebuild failed: {exc}"}

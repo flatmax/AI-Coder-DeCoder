@@ -62,6 +62,13 @@ from ac_dc.llm._review import (
     get_review_state,
     start_review,
 )
+from ac_dc.llm._stability import (
+    measure_tracker_tokens,
+    remove_cross_reference_items,
+    seed_cross_reference_items,
+    try_initialize_stability,
+    update_stability,
+)
 
 __all__ = [
     "ArchivalAppend",
@@ -95,14 +102,19 @@ __all__ = [
     "get_meta_block",
     "get_review_file_diff",
     "get_review_state",
+    "measure_tracker_tokens",
     "on_doc_file_written",
     "print_init_hud",
     "print_post_response_hud",
     "rebuild_cache",
     "rebuild_cache_impl",
     "rebuild_graduate_history",
+    "remove_cross_reference_items",
     "run_enrichment_background",
+    "seed_cross_reference_items",
     "send_doc_index_progress",
     "start_review",
+    "try_initialize_stability",
+    "update_stability",
     "wide_map_exclude_set",
 ]
