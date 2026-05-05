@@ -1,7 +1,7 @@
 """Agent spawning — filter, spawn, assimilate.
 
 Extracted from :mod:`ac_dc.llm_service` to keep that module
-focused on the service class and its RPC surface. Three entry
+focused on the service class and its RPC surface. Five entry
 points:
 
 - :func:`filter_dispatchable_agents` — gate + filter for
@@ -29,6 +29,15 @@ points:
   is easy to test in isolation. Registers the scope in
   ``service._agent_contexts`` so follow-up user replies
   to the agent tab can look it up by ``(turn_id, agent_idx)``.
+- :func:`build_agent_descriptor` — render the per-turn
+  agent-state descriptor for orchestrator-prompt
+  injection. Walks every live agent in
+  ``service._agent_contexts``, classifies each loaded path
+  by depth (``full`` from file_context, ``symbol`` /
+  ``doc`` from the agent's stability tracker), and returns
+  a markdown block. Empty registry returns an empty
+  string so the assembly path can drop the section
+  cleanly.
 
 Governing spec: :doc:`specs4/7-future/parallel-agents`.
 """
@@ -348,3 +357,159 @@ def build_agent_scope(
     service._agent_contexts.setdefault(turn_id, {})[agent_idx] = scope
 
     return scope
+
+
+# ---------------------------------------------------------------------------
+# Per-turn agent-state descriptor
+# ---------------------------------------------------------------------------
+
+
+def build_agent_descriptor(service: "LLMService") -> str:
+    """Render the per-turn agent-state descriptor.
+
+    Walks every live agent in ``service._agent_contexts`` and
+    builds a markdown block listing each agent's id and the
+    paths it currently has loaded, classified by depth.
+
+    Three depth values per
+    :doc:`specs4/7-future/parallel-agents` § "Per-agent state
+    descriptor":
+
+    - ``full`` — file content is in the agent's
+      ``file_context`` (selected by the user, auto-added
+      from edit blocks, or created by the agent). The
+      orchestrator can retask precise edits onto this
+      agent without a re-read penalty.
+    - ``symbol`` — only the symbol-map summary. The agent
+      has structural awareness but will re-read the body
+      to edit.
+    - ``doc`` — only the document-index outline. Heading
+      and link structure only; same re-read implication
+      as ``symbol``.
+
+    A path that appears at ``full`` depth is omitted from
+    ``symbol`` / ``doc`` listings — the orchestrator only
+    needs to know the deepest level the agent has loaded.
+
+    Empty registry returns an empty string. Callers (the
+    assembly path) drop the section cleanly when the
+    descriptor is empty so single-agent and zero-agent
+    operation produces no descriptor noise in the prompt.
+
+    The descriptor is built fresh on every call. There is
+    no caching: ``new_session`` clears each agent's chat
+    history but preserves their identity and file context,
+    file selections change between turns as agents work,
+    and tier promotions reshape the symbol/doc lists.
+    Rebuilding from live state is cheap (dict iteration
+    plus prefix matching) and avoids invalidation bugs.
+
+    See the spec's "Single-copy invariant — assembly-time
+    injection" section for why this is a transient
+    string and not persisted to history.
+
+    Returns
+    -------
+    str
+        Markdown block starting with a level-2 heading
+        (``## Live agents``) and one bullet per agent.
+        Empty string when no agents are registered.
+    """
+    contexts = service._agent_contexts
+    if not contexts:
+        return ""
+
+    # Flatten {turn_id: {agent_idx: scope}} into a list
+    # of (turn_id, agent_idx, scope) tuples sorted for
+    # determinism. Sort by turn_id first then agent_idx
+    # so multiple turns appear in spawn order; within a
+    # turn, lower indices come first.
+    flat: list[tuple[str, int, ConversationScope]] = []
+    for turn_id, agents in contexts.items():
+        for agent_idx, scope in agents.items():
+            flat.append((turn_id, agent_idx, scope))
+
+    # Empty after flattening (every turn key holds an
+    # empty inner dict — defensive against partial
+    # cleanup races) means no descriptor at all, not a
+    # heading with no body.
+    if not flat:
+        return ""
+
+    flat.sort(key=lambda item: (item[0], item[1]))
+
+    lines: list[str] = ["## Live agents", ""]
+
+    for turn_id, agent_idx, scope in flat:
+        agent_id = f"{turn_id}/agent-{agent_idx:02d}"
+        lines.append(f"- **{agent_id}**")
+
+        full_paths, symbol_paths, doc_paths = _classify_agent_paths(scope)
+
+        if not full_paths and not symbol_paths and not doc_paths:
+            lines.append("  - (no files loaded)")
+            continue
+
+        if full_paths:
+            joined = ", ".join(full_paths)
+            lines.append(f"  - full: {joined}")
+        if symbol_paths:
+            joined = ", ".join(symbol_paths)
+            lines.append(f"  - symbol: {joined}")
+        if doc_paths:
+            joined = ", ".join(doc_paths)
+            lines.append(f"  - doc: {joined}")
+
+    return "\n".join(lines)
+
+
+def _classify_agent_paths(
+    scope: ConversationScope,
+) -> tuple[list[str], list[str], list[str]]:
+    """Bucket an agent's loaded paths into full / symbol / doc.
+
+    Reads three sources:
+
+    - ``scope.context.file_context`` — paths whose full
+      content is loaded
+    - ``scope.tracker`` items prefixed ``symbol:`` —
+      symbol-map entries
+    - ``scope.tracker`` items prefixed ``doc:`` —
+      doc-index entries
+
+    Deduplication: a path that's in ``file_context`` is
+    always classified as ``full`` and removed from the
+    ``symbol`` / ``doc`` lists. ``symbol`` and ``doc``
+    can overlap when cross-reference mode is enabled (the
+    same path appears in both indexes); we keep both
+    listings so the orchestrator sees the full picture.
+
+    Each list is sorted alphabetically for deterministic
+    output. Sort cost is negligible compared to assembly
+    overhead.
+    """
+    full_set: set[str] = set()
+    if scope.context is not None:
+        full_set = set(scope.context.file_context.get_files())
+
+    symbol_set: set[str] = set()
+    doc_set: set[str] = set()
+    if scope.tracker is not None:
+        for key in scope.tracker.get_all_items().keys():
+            if key.startswith("symbol:"):
+                symbol_set.add(key[len("symbol:"):])
+            elif key.startswith("doc:"):
+                doc_set.add(key[len("doc:"):])
+
+    # Deepest-only: if a path is in file_context, drop it
+    # from the structural lists. The orchestrator already
+    # knows the agent has full content; the structural
+    # entry is redundant.
+    symbol_set -= full_set
+    doc_set -= full_set
+
+    return (
+        sorted(full_set),
+        sorted(symbol_set),
+        sorted(doc_set),
+    )

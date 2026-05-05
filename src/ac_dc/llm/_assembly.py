@@ -283,11 +283,36 @@ def assemble_tiered(
     if scope is None:
         scope = service._default_scope()
 
+    # Per-turn agent-state descriptor — only for the
+    # orchestrator's prompt. Agent ContextManagers don't
+    # see the descriptor (they're already that scope's
+    # peers, and self-referencing the live registry
+    # would be confusing for them). Identity check on
+    # ``scope.context`` rather than ``scope`` because
+    # ``_default_scope()`` builds a fresh wrapper each
+    # call but always around the same long-lived
+    # ``service._context``. Per
+    # :doc:`specs4/7-future/parallel-agents` § "Single-
+    # copy invariant — assembly-time injection", the
+    # descriptor is assembled fresh per turn and never
+    # persisted to history.
+    descriptor = ""
+    if scope.context is service._context:
+        from ac_dc.llm._agents import build_agent_descriptor
+        descriptor = build_agent_descriptor(service)
+
     # Append the system reminder before assembly so it lands
     # at the end of the user's text — closest to where the
-    # model generates.
+    # model generates. Descriptor goes before the user's
+    # text (informational header); reminder goes after
+    # (behavioural tail).
     reminder = service._config.get_system_reminder()
-    augmented_prompt = user_prompt + (reminder or "")
+    descriptor_prefix = (
+        descriptor + "\n\n" if descriptor else ""
+    )
+    augmented_prompt = (
+        descriptor_prefix + user_prompt + (reminder or "")
+    )
 
     # Build the exclusion set: selected files (full content
     # in active Working Files) plus every path graduated into
@@ -378,8 +403,21 @@ def assemble_messages_flat(
         scope = service._default_scope()
 
     system_prompt = scope.context.get_system_prompt()
+
+    # Descriptor injection — orchestrator only. Same
+    # rationale as in :func:`assemble_tiered` above.
+    descriptor = ""
+    if scope.context is service._context:
+        from ac_dc.llm._agents import build_agent_descriptor
+        descriptor = build_agent_descriptor(service)
+
     reminder = service._config.get_system_reminder()
-    augmented_prompt = user_prompt + (reminder or "")
+    descriptor_prefix = (
+        descriptor + "\n\n" if descriptor else ""
+    )
+    augmented_prompt = (
+        descriptor_prefix + user_prompt + (reminder or "")
+    )
 
     # Assemble a repo-context block.
     system_parts: list[str] = [system_prompt]

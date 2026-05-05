@@ -67,7 +67,7 @@ Agent-spawn blocks emitted in the orchestrator's assistant message render as car
   - The agent's `id` as a clickable chip, styled like edit-block file-path chips
   - The `task` body, rendered as markdown (collapsible if long)
   - A status badge reflecting the agent's child stream — pulled from the chat panel's per-request streaming state (keyed by `{parent_request_id}-agent-{idx}`)
-- Clicking the id chip dispatches a custom event that the chat panel handles by switching to that agent's tab — the same code path `_onTabClick` already uses. The agent's tab is guaranteed to exist by the `agentsSpawned` event ordering invariant.
+- Clicking the id chip dispatches a custom event that the chat panel handles by switching to that agent's tab — the same code path `_onTabClick` already uses. The agent's tab is guaranteed to exist by the `agentsSpawned` event ordering invariant. Tab IDs are the agent's id directly (no `{turnId}/agent-NN` compound shape) — `parseAgentTabId` becomes a no-op identity function since the agent id IS the tab id.
 
 Status integration is the same per-request-id story streaming already uses. The card subscribes to its agent's stream state during the turn and updates as chunks arrive at the child request id; once the child completes, the card freezes at the final status. Across turns the card is static — clicking the id still routes to the agent's tab, where the user can read the full conversation.
 
@@ -295,9 +295,13 @@ IDs are arbitrary non-empty strings chosen by the orchestrator. The system promp
 
 ### Agent lifetime
 
-Agents linger for the life of the session. Once spawned, an agent's `ContextManager`, `StabilityTracker`, and conversation persist across turns and remain available for re-dispatch by id. There is no idle timer, no explicit close block, and no garbage collection — agents stay on the sideline as part of the team until the session ends. This keeps the model simple: the user manages agent population implicitly by directing the orchestrator (asking it to spawn new agents, retask existing ones, or leave them alone).
+Agents linger for the life of the session and survive across user-initiated session resets. Once spawned, an agent's `ContextManager`, `StabilityTracker`, file context, file selection, and identity all persist. There is no idle timer, no explicit close block, and no garbage collection — agents stay on the sideline as part of the team until the application exits. The user manages agent population implicitly by directing the orchestrator (asking it to spawn new agents, retask existing ones, or leave them alone).
 
-`new_session` clears the agent registry, including each agent's chat history. This mirrors the behaviour of the main conversation: a fresh session wipes everything user-facing, including the agent-tab conversations browsable in the chat panel. Without this, agent chat history would persist across sessions while the main history was cleared, breaking the chat panel's tab-based browsing model.
+`new_session` clears each agent's *chat history* — the per-agent conversation messages — but does NOT tear down the agent itself. The agent's `ContextManager` retains its file context, the `StabilityTracker` keeps its tier assignments and provider-cache state, and the agent remains addressable by its id for the next turn. This mirrors the main conversation's `new_session` behaviour: the main chat history is wiped, but the main `ContextManager` survives intact.
+
+The symmetry matters. From the user's perspective, `new_session` is "start a fresh conversation with the same warm team" — applied uniformly to the orchestrator and every live agent. Stability trackers, file contexts, and identities are session-scoped state that survives history resets; only the conversation messages themselves are turn-scoped enough to be wiped. Application exit is the only event that drops the agents themselves.
+
+Implication for the chat panel: agent tabs persist across `new_session` with empty message lists. Users see their team is still there but the conversations have been reset. Tab-based browsing of historical archives (via `get_turn_archive`) is unaffected — those are read-only and live on disk regardless.
 
 ### Per-agent state descriptor
 
@@ -305,10 +309,15 @@ For the main LLM to orchestrate agent reuse — decide which existing agent to r
 
 Each descriptor entry carries exactly two fields:
 
-- **Identity** — `{turn_id}/agent-NN`, the address used in `🟧🟧🟧 CONTINUE` blocks
-- **Files in context** — paths only, no content. The list of files the agent currently has loaded
+- **Identity** — the agent's id, the same string used in `🟧🟧🟧 AGENT` blocks to address it
+- **Files in context** — a list of `{path, depth}` entries, where `depth` distinguishes how deeply the agent has loaded the file. Three values:
+  - `full` — the agent has the file's full text in its context (loaded into `file_context` either by user selection, edit-block auto-add, or file-create). The agent can reason about the file's exact content; the orchestrator can retask precise work onto this agent without a re-read penalty.
+  - `symbol` — the agent has only the symbol-map summary for this file (in code mode, with cross-reference disabled or enabled). Structural awareness only; the agent will re-read the body if asked to edit it.
+  - `doc` — the agent has only the document-index outline for this file (in doc mode, with cross-reference disabled or enabled). Heading and link structure only; same re-read implication.
 
-That's it. The orchestrator picks an agent for a new task by matching the task's affected files against each agent's loaded paths — an agent already living in `webapp/src/` is a natural home for a frontend change; an agent with `src/ac_dc/llm/` open suits a streaming change. Path lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to the new paths on its next turn.
+That's it. The orchestrator picks an agent for a new task by matching the task's affected files against each agent's loaded paths *and* depth — an agent already holding `webapp/src/chat-panel.js` at `full` depth is the cheapest target for an edit there; an agent with the same path at `symbol` depth would have to re-read it (still cheaper than a cold spawn, but more expensive than the warm one). Path-and-depth lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to reflect the new paths and depths on its next turn.
+
+The descriptor builder reads each agent's `ContextManager.file_context` for `full` entries, then walks the agent's stability tracker for `file:`-prefixed entries (symbol map) and `doc:`-prefixed entries (doc index) to populate the `symbol` and `doc` lists. A path that appears at `full` depth is omitted from `symbol`/`doc` to avoid redundancy — the orchestrator only needs to know the deepest level the agent has loaded.
 
 ### Single-copy invariant — assembly-time injection
 
