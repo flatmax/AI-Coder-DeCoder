@@ -542,6 +542,25 @@ export class FilePicker extends LitElement {
      */
     _contextMenu: { type: Object, state: true },
     /**
+     * Inline-input state — populated while a rename,
+     * duplicate, or create operation is in progress.
+     * Declared as reactive so the public `beginRename` /
+     * `beginDuplicate` / `beginCreate*` methods trigger a
+     * re-render (which mounts the input) and the `updated`
+     * hook sees the change and can focus it. Without these
+     * the inline input would only appear when some other
+     * reactive property happened to change in the same
+     * tick, and focus would never land because the
+     * `updated` guard keys on these fields changing.
+     *
+     * Mutually exclusive: at most one of the three is
+     * non-null at any time. The public API enforces this
+     * by clearing the other two when setting one.
+     */
+    _renaming: { type: String, state: true },
+    _duplicating: { type: String, state: true },
+    _creating: { type: Object, state: true },
+    /**
      * Branch switcher popover state. Null when closed;
      * populated shape when open:
      *   {x, y, branches, current, loading}

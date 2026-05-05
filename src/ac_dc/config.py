@@ -848,13 +848,20 @@ class ConfigManager:
         """
         main = self._read_user_file("system.md")
         if self.agents_enabled:
-            # Read from user dir first; fall back to bundle
-            # when the user file is absent. _read_user_file
-            # already implements that two-stage lookup —
-            # defer to it rather than duplicating the logic.
-            appendix = self._read_user_file(
-                "system_agentic_appendix.md"
-            ).strip()
+            # Read only from the user dir — not the bundle.
+            # A user who deletes the appendix from their
+            # config dir is explicitly opting out of the
+            # agent-spawn instructions even with the toggle
+            # on; falling back to the bundled copy would
+            # override that choice. The Settings-tab toggle
+            # remains the normal way to control this; file
+            # deletion is the escape hatch for users who
+            # want the toggle state without the prompt text.
+            appendix_path = self._user_dir / "system_agentic_appendix.md"
+            try:
+                appendix = appendix_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                appendix = ""
             if appendix:
                 main = f"{main}\n\n{appendix}"
         return self._concat_prompt(main)

@@ -174,6 +174,13 @@ export class SettingsTab extends RpcMixin(LitElement) {
       border-color: rgba(88, 166, 255, 0.4);
       background: rgba(88, 166, 255, 0.04);
     }
+    .card-description {
+      font-size: 0.6875rem;
+      color: var(--text-secondary, #8b949e);
+      line-height: 1.35;
+      text-align: center;
+      padding: 0 0.25rem;
+    }
     .toggle-switch {
       display: inline-flex;
       align-items: center;
@@ -762,6 +769,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
       >
         <span class="card-icon">${card.icon}</span>
         <span class="card-label">${card.label}</span>
+        ${card.description
+          ? html`<span class="card-description">${card.description}</span>`
+          : ''}
         <button
           class="toggle-switch ${value ? 'on' : 'off'}"
           role="switch"
