@@ -340,6 +340,7 @@ See [specs4/4-features/collaboration.md](specs4/4-features/collaboration.md) for
 | `Up` / `Down` / `Home` / `End` | File picker | Navigate tree |
 | `Left` / `Right` | File picker | Collapse / expand / traverse |
 | `Space` / `Enter` | File picker | Toggle selection / expand |
+| `F2` | File picker (file row) | Rename focused file (inline input) |
 | `Shift+Click` | File picker checkbox | Toggle exclusion (three-state) |
 | `Middle-click` | File picker (file row) | Insert path into chat input |
 ---

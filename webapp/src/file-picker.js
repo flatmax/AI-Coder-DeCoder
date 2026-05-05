@@ -2791,8 +2791,11 @@ export class FilePicker extends LitElement {
 
   _onDirClick(event, node) {
     // Clicking anywhere on a directory row (outside the checkbox)
-    // toggles its expansion.
+    // toggles its expansion. Also sets keyboard focus so
+    // subsequent keyboard navigation has a defined starting
+    // point — same reasoning as `_onFileClick`.
     if (event.target.classList.contains('checkbox')) return;
+    this._focusedPath = node.path;
     this._toggleExpanded(node.path);
   }
 
@@ -2885,6 +2888,13 @@ export class FilePicker extends LitElement {
     // context, not about preventing the user from reading
     // the file in the editor.
     if (event.target.classList.contains('checkbox')) return;
+    // Set keyboard focus as a side effect of the click so
+    // subsequent keyboard actions (F2 rename, arrow keys)
+    // have a defined "current" row. Without this, clicking
+    // a file gives the tree container focus (the blue
+    // outline) but `_focusedPath` stays null and F2 is a
+    // silent no-op.
+    this._focusedPath = node.path;
     this.dispatchEvent(
       new CustomEvent('file-clicked', {
         detail: { path: node.path },
@@ -3671,6 +3681,24 @@ export class FilePicker extends LitElement {
    * navigation order matches what the user sees.
    */
   _onTreeKeyDown(event) {
+    // Bail out when the user is typing in an inline
+    // rename / duplicate / new-file / new-directory
+    // input. The input lives inside `.tree-scroll`, so
+    // keystrokes bubble up to this handler; without the
+    // guard, Space toggles selection, arrow keys navigate
+    // the tree, Enter commits rename, etc. — all at the
+    // expense of the text the user is actually typing.
+    // Escape and Enter are the input's own commit/cancel
+    // shortcuts (handled by `_onInlineKeyDown`), so they
+    // don't need to reach the tree handler either.
+    const target = event.target;
+    if (
+      target &&
+      target.classList &&
+      target.classList.contains('inline-input')
+    ) {
+      return;
+    }
     const rows = this._collectVisibleRows();
     if (rows.length === 0) return;
     // Establish a focused row. First-ever key press with
@@ -3782,6 +3810,26 @@ export class FilePicker extends LitElement {
       case 'End': {
         event.preventDefault();
         this._setFocusedAndScroll(rows[rows.length - 1].path);
+        return;
+      }
+      case 'F2': {
+        // Rename the focused row. F2 is the de facto
+        // rename key on Windows and KDE; users reach
+        // for it reflexively. No-op when nothing is
+        // focused — picking arbitrarily would surprise
+        // users who hit the key before navigating.
+        if (!current) return;
+        event.preventDefault();
+        if (current.type === 'file') {
+          this.beginRename(current.path);
+        }
+        // Directories fall through silently for now —
+        // rename-dir exists as a context-menu action but
+        // uses the same beginRename path, so wiring it
+        // here would be a one-liner. Leaving it off
+        // until someone asks, to avoid accidentally
+        // renaming a large subtree from a stray
+        // keystroke.
         return;
       }
       default:

@@ -59,6 +59,7 @@ Three sort modes selectable via buttons in the filter bar:
 - Arrow keys move focus
 - Space/Enter toggles selection
 - Auto-scroll to focused item
+- F2 renames the focused file row via the inline-input flow. Click a file row first to give it focus, then press F2. No-op when nothing is focused or when focus is on a directory row — directory rename remains context-menu-only to prevent accidental subtree renames from a stray keystroke
 ## Git Status Badges
 | State | Color | Badge |
 |---|---|---|
