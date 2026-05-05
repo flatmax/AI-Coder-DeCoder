@@ -873,99 +873,18 @@ class LLMService:
         }
 
     def _build_url_service(self) -> URLService:
-        """Construct the URL service from config values.
-
-        Wires the filesystem cache (from ``url_cache`` app config),
-        the smaller model name, and the SymbolIndex class. When
-        the config omits a cache path, the cache uses a
-        system-temp-directory default. When the symbol index
-        isn't available (pre-deferred-init or tests that skip
-        it), the GitHub repo fetcher still works but produces
-        content without a symbol map.
-        """
-        cache_config = self._config.url_cache_config
-        cache_path = cache_config.get("path")
-        ttl_hours = cache_config.get("ttl_hours", 24)
-        if cache_path:
-            from pathlib import Path as _Path
-            cache = URLCache(_Path(cache_path), ttl_hours=ttl_hours)
-        else:
-            # Fall back to a per-user temp dir. URLCache creates
-            # the directory if missing.
-            import tempfile
-            from pathlib import Path as _Path
-            default_path = _Path(tempfile.gettempdir()) / "ac-dc-url-cache"
-            cache = URLCache(default_path, ttl_hours=ttl_hours)
-
-        # Lazy symbol-index class import — avoids paying the
-        # tree-sitter grammar load cost when the URL service
-        # doesn't actually hit a GitHub repo URL. The URLService
-        # accepts None for symbol_index_cls and the repo fetcher
-        # degrades gracefully (no symbol map field on the result).
-        symbol_index_cls = None
-        try:
-            from ac_dc.symbol_index.index import SymbolIndex
-            symbol_index_cls = SymbolIndex
-        except ImportError:
-            logger.debug(
-                "SymbolIndex not available; URL service will fetch "
-                "GitHub repos without symbol maps"
-            )
-
-        return URLService(
-            cache=cache,
-            smaller_model=self._config.smaller_model,
-            symbol_index_cls=symbol_index_cls,
-        )
+        """Delegate to :func:`ac_dc.llm._construction.build_url_service`."""
+        from ac_dc.llm._construction import build_url_service
+        return build_url_service(self)
 
     # ------------------------------------------------------------------
     # Session restore
     # ------------------------------------------------------------------
 
     def _restore_last_session(self) -> None:
-        """Load the most recent session's messages into context.
-
-        Called from __init__. If no sessions exist, is a no-op.
-        If loading fails for any reason, logs and starts fresh —
-        never blocks construction.
-        """
-        if self._history_store is None:
-            return
-        try:
-            sessions = self._history_store.list_sessions(limit=1)
-        except Exception as exc:  # defensive
-            logger.warning(
-                "Failed to list sessions during restore: %s", exc
-            )
-            return
-        if not sessions:
-            return
-        target = sessions[0]
-        try:
-            messages = self._history_store.get_session_messages_for_context(
-                target.session_id
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to load session %s during restore: %s",
-                target.session_id, exc,
-            )
-            return
-        if not messages:
-            return
-        # Replace the session ID so future messages persist to the
-        # same session. Reuses the session ID rather than creating
-        # a new one — specs3 calls this out explicitly.
-        self._session_id = target.session_id
-        # Add each message to the context manager's working copy.
-        # set_history copies each entry so caller mutations don't
-        # leak.
-        self._context.set_history(messages)
-        self._restored_on_startup = True
-        logger.info(
-            "Restored session %s with %d messages",
-            target.session_id, len(messages),
-        )
+        """Delegate to :func:`ac_dc.llm._construction.restore_last_session`."""
+        from ac_dc.llm._construction import restore_last_session
+        restore_last_session(self)
 
     # ------------------------------------------------------------------
     # Public RPC — state snapshot
@@ -1015,13 +934,9 @@ class LLMService:
     # delegations.
 
     def detect_urls(self, text: str) -> list[dict[str, Any]]:
-        """Return detected URLs with classification and display names.
-
-        Shape: ``[{url, type, display_name}, ...]``. ``type`` is the
-        string form of :class:`URLType` so the frontend doesn't
-        need to unwrap an enum.
-        """
-        return self._url_service.detect_urls(text)
+        """Delegate to :func:`ac_dc.llm._rpc_urls.detect_urls`."""
+        from ac_dc.llm._rpc_urls import detect_urls
+        return detect_urls(self, text)
 
     async def fetch_url(
         self,
@@ -1030,29 +945,11 @@ class LLMService:
         summarize: bool = True,
         user_text: str | None = None,
     ) -> dict[str, Any]:
-        """Fetch a URL with optional summarization.
-
-        Runs in the aux executor so the blocking HTTP / git-clone
-        / LLM summarization doesn't starve the event loop. The
-        returned dict is the URLContent dataclass's ``to_dict``
-        form — frontend consumes the same fields regardless of
-        whether it came from a fresh fetch or a cache hit.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        assert self._main_loop is not None
-        loop = self._main_loop
-        content = await loop.run_in_executor(
-            self._aux_executor,
-            lambda: self._url_service.fetch_url(
-                url,
-                use_cache=use_cache,
-                summarize=summarize,
-                user_text=user_text,
-            ),
+        """Delegate to :func:`ac_dc.llm._rpc_urls.fetch_url`."""
+        from ac_dc.llm._rpc_urls import fetch_url
+        return await fetch_url(
+            self, url, use_cache, summarize, user_text
         )
-        return content.to_dict()
 
     async def detect_and_fetch(
         self,
@@ -1060,74 +957,31 @@ class LLMService:
         use_cache: bool = True,
         summarize: bool = True,
     ) -> list[dict[str, Any]] | dict[str, Any]:
-        """Detect and fetch all URLs in text.
-
-        Convenience wrapper for the frontend's "fetch all" button
-        on the URL chips panel. Sequential per-URL, capped by
-        the URL service's ``max_urls`` parameter (None here,
-        since the frontend already decides how many to fetch).
-        Runs in the aux executor for the same reason as
-        :meth:`fetch_url`.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        assert self._main_loop is not None
-        loop = self._main_loop
-        results = await loop.run_in_executor(
-            self._aux_executor,
-            lambda: self._url_service.detect_and_fetch(
-                text,
-                use_cache=use_cache,
-                summarize=summarize,
-            ),
+        """Delegate to :func:`ac_dc.llm._rpc_urls.detect_and_fetch`."""
+        from ac_dc.llm._rpc_urls import detect_and_fetch
+        return await detect_and_fetch(
+            self, text, use_cache, summarize
         )
-        return [c.to_dict() for c in results]
 
     def get_url_content(self, url: str) -> dict[str, Any]:
-        """Return the stored content for a URL (or a sentinel error).
-
-        Checks in-memory first, falls back to filesystem cache.
-        Returns a URLContent dict; the frontend checks the
-        ``error`` field to distinguish fetched content from
-        "not yet fetched" (sentinel) vs "fetch failed" (real
-        error).
-        """
-        content = self._url_service.get_url_content(url)
-        return content.to_dict()
+        """Delegate to :func:`ac_dc.llm._rpc_urls.get_url_content`."""
+        from ac_dc.llm._rpc_urls import get_url_content
+        return get_url_content(self, url)
 
     def invalidate_url_cache(self, url: str) -> dict[str, Any]:
-        """Remove a URL from both cache and in-memory dict.
-
-        Used by the "refresh this URL" action on the chip UI —
-        forces the next fetch to hit the network.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        return self._url_service.invalidate_url_cache(url)
+        """Delegate to :func:`ac_dc.llm._rpc_urls.invalidate_url_cache`."""
+        from ac_dc.llm._rpc_urls import invalidate_url_cache
+        return invalidate_url_cache(self, url)
 
     def remove_fetched_url(self, url: str) -> dict[str, Any]:
-        """Remove a URL from the in-memory fetched dict only.
-
-        Preserves the filesystem cache — a later re-fetch will
-        hit the cache. Used by the "remove from this conversation"
-        action on the chip UI.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        return self._url_service.remove_fetched(url)
+        """Delegate to :func:`ac_dc.llm._rpc_urls.remove_fetched_url`."""
+        from ac_dc.llm._rpc_urls import remove_fetched_url
+        return remove_fetched_url(self, url)
 
     def clear_url_cache(self) -> dict[str, Any]:
-        """Clear all cached and fetched URLs.
-
-        Used by the "clear URL cache" RPC in the settings UI.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        return self._url_service.clear_url_cache()
+        """Delegate to :func:`ac_dc.llm._rpc_urls.clear_url_cache`."""
+        from ac_dc.llm._rpc_urls import clear_url_cache
+        return clear_url_cache(self)
 
     # ------------------------------------------------------------------
     # Public RPC — code review mode
@@ -1240,37 +1094,14 @@ class LLMService:
     def set_selected_files(
         self, files: list[str]
     ) -> list[str] | dict[str, Any]:
-        """Replace the selected-files list.
-
-        Stored as a copy so caller mutations don't leak. Broadcast
-        to all connected clients via ``filesChanged`` so each
-        client's picker updates. Returns the canonical list on
-        success, or a restricted-error dict when the caller is a
-        non-localhost participant in collaboration mode.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        # Defensive: filter non-existent files when a repo is
-        # attached. Matches the specs3 deleted-file cleanup rule —
-        # the selection should never contain a phantom path.
-        if self._repo is not None:
-            valid = [
-                p for p in files
-                if isinstance(p, str) and self._repo.file_exists(p)
-            ]
-        else:
-            valid = [p for p in files if isinstance(p, str)]
-        self._selected_files = valid
-        # Broadcast. Fire-and-forget: if the callback fails we log
-        # but don't raise, since file-selection state isn't
-        # critical-path.
-        self._broadcast_event("filesChanged", valid)
-        return list(self._selected_files)
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_selected_files`."""
+        from ac_dc.llm._rpc_state import set_selected_files
+        return set_selected_files(self, files)
 
     def get_selected_files(self) -> list[str]:
-        """Return a copy of the selected-files list."""
-        return list(self._selected_files)
+        """Delegate to :func:`ac_dc.llm._rpc_state.get_selected_files`."""
+        from ac_dc.llm._rpc_state import get_selected_files
+        return get_selected_files(self)
 
     # ------------------------------------------------------------------
     # Public RPC — navigation broadcast
@@ -1293,40 +1124,10 @@ class LLMService:
 
     def set_excluded_index_files(
         self, files: list[str]
-    ) -> list[str]:
-        """Store the set of files excluded from the index.
-
-        Excluded files have no content, no index block, and no
-        tracker item in the stability system. Used by the file
-        picker's three-state checkbox (shift+click to exclude).
-
-        Returns the canonical excluded list.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted  # type: ignore[return-value]
-        self._excluded_index_files = list(files)
-        # Remove excluded items from EVERY mode's tracker,
-        # not just the currently-active one. Without this,
-        # excluding files in one mode leaves stale entries
-        # in the other mode's tracker — visible in the cache
-        # viewer after a mode switch. `_update_stability`
-        # step 0a eventually cleans them up on the next chat
-        # request, but the Context tab's breakdown call
-        # doesn't trigger that path, so users see excluded
-        # files rendered as cached tier entries in the UI.
-        for tracker in self._trackers.values():
-            for path in files:
-                for prefix in ("symbol:", "doc:", "file:"):
-                    key = prefix + path
-                    if tracker.has_item(key):
-                        all_items = tracker.get_all_items()
-                        item = all_items.get(key)
-                        if item is not None:
-                            tracker._items.pop(key, None)
-                            tracker._broken_tiers.add(item.tier)
-        self._broadcast_event("filesChanged", list(self._selected_files))
-        return list(self._excluded_index_files)
+    ) -> list[str] | dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_excluded_index_files`."""
+        from ac_dc.llm._rpc_state import set_excluded_index_files
+        return set_excluded_index_files(self, files)
 
     def get_excluded_index_files(self) -> list[str]:
         """Return the current excluded-files list."""
@@ -1342,139 +1143,46 @@ class LLMService:
         role: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """Search conversation history across all sessions."""
-        if self._history_store is None:
-            return []
-        return self._history_store.search_messages(
-            query, role=role, limit=limit
-        )
+        """Delegate to :func:`ac_dc.llm._rpc_history.history_search`."""
+        from ac_dc.llm._rpc_history import history_search
+        return history_search(self, query, role, limit)
 
     def history_list_sessions(
         self, limit: int | None = None
     ) -> list[dict[str, Any]]:
-        """Return recent sessions for the history browser."""
-        if self._history_store is None:
-            return []
-        sessions = self._history_store.list_sessions(limit=limit)
-        return [
-            {
-                "session_id": s.session_id,
-                "timestamp": s.timestamp,
-                "message_count": s.message_count,
-                "preview": s.preview,
-                "first_role": s.first_role,
-            }
-            for s in sessions
-        ]
+        """Delegate to :func:`ac_dc.llm._rpc_history.history_list_sessions`."""
+        from ac_dc.llm._rpc_history import history_list_sessions
+        return history_list_sessions(self, limit)
 
     def history_get_session(
         self, session_id: str
     ) -> list[dict[str, Any]]:
-        """Return all messages for a session (full metadata)."""
-        if self._history_store is None:
-            return []
-        return self._history_store.get_session_messages(session_id)
+        """Delegate to :func:`ac_dc.llm._rpc_history.history_get_session`."""
+        from ac_dc.llm._rpc_history import history_get_session
+        return history_get_session(self, session_id)
 
     def get_turn_archive(
         self, turn_id: str
     ) -> list[dict[str, Any]]:
-        """Return the per-agent archive for a turn.
-
-        Reads ``.ac-dc4/agents/{turn_id}/agent-NN.jsonl`` files
-        and returns one entry per agent, ordered by agent index.
-        Empty list when the turn didn't spawn agents or the
-        archive was deleted.
-
-        Per specs4/5-webapp/agent-browser.md, the frontend calls
-        this lazily as the user scrolls the chat — only the
-        turns in the active viewport (plus a small pre-fetch
-        window) have their archives loaded into memory at any
-        one time.
-
-        The response shape:
-
-        ```
-        [
-          {"agent_idx": 0, "messages": [{...}, {...}]},
-          {"agent_idx": 1, "messages": [{...}, {...}]},
-          ...
-        ]
-        ```
-
-        Messages within each agent are in write order, which
-        matches conversation order since timestamps are
-        monotonic within a single write stream. Re-iteration
-        within a turn (agents respawned with revised scope)
-        produces further messages appended to the same agent's
-        file — iteration boundaries are implicit in the
-        conversation flow, matching the spec.
-
-        Returns empty list when no history store is attached
-        (tests that skip the store) — the frontend treats this
-        as "no archive data" identically to a missing directory.
-        """
-        if self._history_store is None:
-            return []
-        return self._history_store.get_turn_archive(turn_id)
+        """Delegate to :func:`ac_dc.llm._rpc_history.get_turn_archive`."""
+        from ac_dc.llm._rpc_history import get_turn_archive
+        return get_turn_archive(self, turn_id)
 
     def load_session_into_context(
         self, session_id: str
     ) -> dict[str, Any]:
-        """Load a previous session into the active context.
-
-        Clears current history, loads the target session's
-        messages, and reuses that session's ID so subsequent
-        messages persist to the same session.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        if self._history_store is None:
-            return {"error": "No history store available"}
-        messages = self._history_store.get_session_messages_for_context(
-            session_id
-        )
-        if not messages:
-            return {"error": f"Session {session_id} not found or empty"}
-        # Clear and replace.
-        self._context.clear_history()
-        self._context.set_history(messages)
-        self._session_id = session_id
-        # Broadcast to all clients so collaborators see the loaded
-        # conversation.
-        self._broadcast_event(
-            "sessionChanged",
-            {
-                "session_id": session_id,
-                "messages": messages,
-            },
-        )
-        return {
-            "session_id": session_id,
-            "messages": messages,
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_history.load_session_into_context`."""
+        from ac_dc.llm._rpc_history import load_session_into_context
+        return load_session_into_context(self, session_id)
 
     def history_new_session(self) -> dict[str, Any]:
         """Create a new history session (alias for new_session)."""
         return self.new_session()
 
     def get_history_status(self) -> dict[str, Any]:
-        """Return history token counts and compaction status.
-
-        Used by the dialog's history bar to show usage percentage.
-        """
-        budget = self._context.get_token_budget()
-        compaction = self._context.get_compaction_status()
-        return {
-            "session_id": self._session_id,
-            "history_tokens": budget["history_tokens"],
-            "max_history_tokens": budget["max_history_tokens"],
-            "remaining": budget["remaining"],
-            "needs_compaction": budget["needs_compaction"],
-            "compaction_enabled": compaction["enabled"],
-            "compaction_trigger": compaction["trigger_tokens"],
-            "compaction_percent": compaction["percent"],
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_history.get_history_status`."""
+        from ac_dc.llm._rpc_history import get_history_status
+        return get_history_status(self)
 
     # ------------------------------------------------------------------
     # Public RPC — TeX preview
@@ -1677,264 +1385,19 @@ class LLMService:
         }
 
     def refresh_system_prompt(self) -> dict[str, Any]:
-        """Re-read the current mode's system prompt from config.
-
-        Called by the Settings service after a successful
-        ``reload_app_config`` so that app-config changes which
-        affect prompt composition take effect on the next LLM
-        request — not on the next mode switch.
-
-        Specifically covers the ``agents.enabled`` toggle in
-        ``app.json``: flipping it changes whether
-        :meth:`ConfigManager.get_system_prompt` appends the
-        agentic appendix, but the change is only visible to
-        the LLM after the context manager reloads the prompt.
-        Without this method, the prompt stays cached at
-        whatever value was installed at last mode switch (or
-        session start) and the toggle only takes effect on
-        the NEXT mode switch — a confusing UX where the UI
-        says "agents on" but the LLM doesn't see the
-        appendix for several turns.
-
-        Non-localhost callers are rejected with the standard
-        restricted-error shape. The Settings service applies
-        its own localhost gate on its reload methods, but a
-        future caller that skips Settings and goes straight
-        to this method must still be gated.
-
-        Idempotent — calling multiple times in succession
-        produces the same final state as one call. The
-        read-from-config path is cheap (config is cached; the
-        prompt-assembly step is string concatenation).
-
-        Respects the active mode: in review mode the review
-        prompt was installed via
-        :meth:`ContextManager.save_and_replace_system_prompt`
-        and should not be disturbed. We skip the refresh when
-        ``_review_active`` is True; the review exit path will
-        restore the original prompt via
-        :meth:`restore_system_prompt` at which point the
-        next turn picks up the current config. Mode switch
-        and session restore both read from config too, so
-        refresh is always eventually consistent.
-
-        Returns a small status dict. Broadcasts nothing —
-        Settings already broadcasts a settings-changed event
-        (via the modeChanged channel) for the toggle's UI
-        state; the prompt refresh is invisible backend
-        plumbing that surfaces on the next turn.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        if self._review_active:
-            # Review prompt is authoritative; don't clobber.
-            # Exit path will restore the current base prompt
-            # via restore_system_prompt → ContextManager reads
-            # it from config at that point.
-            return {
-                "status": "skipped",
-                "reason": "review mode active",
-            }
-        if self._context.mode == Mode.DOC:
-            prompt = self._config.get_doc_system_prompt()
-        else:
-            prompt = self._config.get_system_prompt()
-        has_appendix = "Agent-Spawn Capability" in prompt
-        self._context.set_system_prompt(prompt)
-        return {
-            "status": "ok",
-            "mode": self._context.mode.value,
-            "prompt_len": len(prompt),
-            "appendix_present": has_appendix,
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_state.refresh_system_prompt`."""
+        from ac_dc.llm._rpc_state import refresh_system_prompt
+        return refresh_system_prompt(self)
 
     def switch_mode(self, mode: str) -> dict[str, Any]:
-        """Switch between code and document mode.
-
-        Matches specs4/3-llm/modes.md:
-
-        - Reset cross-reference to OFF (mode-scoped UI state)
-        - Swap system prompt (code → doc or doc → code)
-        - Swap stability tracker (each mode has its own; lazy
-          construction for the DOC tracker on first switch)
-        - Insert system-event message into conversation history
-          so the LLM sees the mode change
-        - Broadcast ``modeChanged`` to collaborators
-
-        Rejects unknown mode strings. Switching to the
-        already-active mode is a no-op that still returns the
-        current mode — matches idempotence expectations of the
-        frontend's mode-refresh flow.
-
-        Doc mode currently works only with an empty doc index;
-        once Layer 2's doc-index sub-layer lands, doc mode will
-        feed doc outlines into context. Switching is still
-        meaningful today because the system prompt swap changes
-        the LLM's behaviour.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        # Validate the mode string. Mode(mode) raises ValueError
-        # on unknown inputs — we catch and return a clean RPC
-        # error rather than propagating.
-        try:
-            target = Mode(mode)
-        except ValueError:
-            return {
-                "error": (
-                    f"Unknown mode {mode!r}; expected 'code' or 'doc'"
-                )
-            }
-
-        current = self._context.mode
-        if target == current:
-            # Already in the requested mode. Return the current
-            # state without side effects — matches the
-            # frontend's mode-refresh auto-switch logic which
-            # may call switch_mode redundantly.
-            return {
-                "mode": target.value,
-                "message": f"Already in {target.value} mode",
-            }
-
-        # Cross-reference toggle resets to OFF on mode switch.
-        # If it was on, remove cross-ref items from the current
-        # tracker BEFORE swapping so the removal runs against
-        # the right prefix (code-mode tracker removes doc:*,
-        # doc-mode tracker removes symbol:*).
-        if self._cross_ref_enabled:
-            self._remove_cross_reference_items()
-            self._cross_ref_enabled = False
-
-        # Lazy-construct the target mode's tracker on first use.
-        if target not in self._trackers:
-            self._trackers[target] = StabilityTracker(
-                cache_target_tokens=(
-                    self._config.cache_target_tokens_for_model()
-                ),
-            )
-
-        # Swap prompts. The context manager's save/replace
-        # saves the CURRENT prompt and installs the new one, so
-        # a switch back restores the saved prompt. But we want
-        # the new prompt to persist across another switch —
-        # set_system_prompt (non-saving) is the right primitive.
-        if target == Mode.DOC:
-            new_prompt = self._config.get_doc_system_prompt()
-        else:
-            new_prompt = self._config.get_system_prompt()
-        self._context.set_system_prompt(new_prompt)
-
-        # Swap trackers.
-        self._stability_tracker = self._trackers[target]
-        self._context.set_stability_tracker(self._stability_tracker)
-
-        # Update the context manager's mode flag.
-        self._context.set_mode(target)
-
-        # Initialize the target mode's tracker if this is the
-        # first time we've switched into it. Without this, the
-        # new mode's tracker starts empty — the cache viewer
-        # shows nothing until the user clicks Rebuild (which
-        # bypasses the flag via _rebuild_cache_impl). Running
-        # init here produces the expected behaviour: switching
-        # modes immediately surfaces that mode's index entries
-        # in the tracker. _try_initialize_stability checks its
-        # own readiness gates (symbol index attached for code
-        # mode, doc index ready for doc mode) and is a no-op
-        # when the per-mode flag is already set.
-        self._try_initialize_stability()
-
-        # Record a system event so the LLM sees the transition
-        # in its next request. The streaming handler will
-        # persist this to JSONL on the next append cycle via
-        # the standard system-event flag.
-        event_text = f"Switched to {target.value} mode."
-        self._context.add_message(
-            "user", event_text, system_event=True
-        )
-        if self._history_store is not None:
-            self._history_store.append_message(
-                session_id=self._session_id,
-                role="user",
-                content=event_text,
-                system_event=True,
-            )
-
-        # Broadcast to collaborators. Fire-and-forget per the
-        # general event-callback contract.
-        self._broadcast_event("modeChanged", {"mode": target.value})
-
-        return {"mode": target.value}
+        """Delegate to :func:`ac_dc.llm._rpc_state.switch_mode`."""
+        from ac_dc.llm._rpc_state import switch_mode
+        return switch_mode(self, mode)
 
     def set_cross_reference(self, enabled: bool) -> dict[str, Any]:
-        """Toggle cross-reference mode.
-
-        When enabled, the opposite index's items are added to
-        the active tracker. In code mode that means ``doc:*``
-        items; in doc mode that means ``symbol:*`` items.
-
-        Readiness gate — enabling cross-reference requires
-        structural doc-index extraction to be complete
-        (``_doc_index_ready`` flipped True via 2.8.2b's
-        background build). Enabling before readiness returns
-        an error rather than silently producing an empty
-        secondary index. Disable is always allowed (it's the
-        cleanup path; gating it would leave users stuck).
-
-        On enable, seeds the active tracker with cross-ref
-        items from the reference graph so content appears on
-        the VERY NEXT request rather than waiting one full
-        cycle for ``_update_stability`` to discover them. On
-        disable, removes all cross-ref items from the tracker
-        and marks their tiers broken so the next cascade
-        rebalances cleanly.
-
-        Both paths broadcast ``modeChanged`` to collaborators
-        with the new state.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        new_state = bool(enabled)
-        if new_state == self._cross_ref_enabled:
-            return {
-                "status": "ok",
-                "cross_ref_enabled": new_state,
-            }
-
-        # Enable requires readiness. Disable doesn't — the
-        # caller may be cleaning up after a failed enable or
-        # after a mode switch that left stale items.
-        if new_state and not self._doc_index_ready:
-            return {
-                "error": "cross-reference not ready",
-                "reason": (
-                    "Doc index is still building; try again "
-                    "in a moment"
-                ),
-            }
-
-        self._cross_ref_enabled = new_state
-        if new_state:
-            self._seed_cross_reference_items()
-        else:
-            self._remove_cross_reference_items()
-
-        # Broadcast so collaborators see the state update.
-        self._broadcast_event(
-            "modeChanged",
-            {
-                "mode": self._context.mode.value,
-                "cross_ref_enabled": new_state,
-            },
-        )
-        return {
-            "status": "ok",
-            "cross_ref_enabled": new_state,
-        }
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_cross_reference`."""
+        from ac_dc.llm._rpc_state import set_cross_reference
+        return set_cross_reference(self, enabled)
 
     def _seed_cross_reference_items(self) -> None:
         """Delegate to :func:`ac_dc.llm._stability.seed_cross_reference_items`."""
@@ -2038,36 +1501,9 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def new_session(self) -> dict[str, Any]:
-        """Start a fresh session — clear history, purge tracker."""
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        if self._history_store is not None:
-            from ac_dc.history_store import HistoryStore
-            self._session_id = HistoryStore.new_session_id()
-        else:
-            self._session_id = f"sess_{int(time.time() * 1000)}_nostore"
-        # clear_history on the context manager also purges the
-        # tracker's history items via the attachment point.
-        self._context.clear_history()
-        # Drop every agent ContextManager from the prior
-        # session. Agents from the previous conversation
-        # have no meaningful continuation in a fresh
-        # session — their turn_ids won't match anything the
-        # new conversation produces, and the frontend's
-        # agent tabs will close as the sessionChanged
-        # broadcast propagates. Clearing here frees every
-        # agent's ContextManager + StabilityTracker +
-        # file_context in one shot; the archive files on
-        # disk stay for audit.
-        self._agent_contexts.clear()
-        # Broadcast sessionChanged so collaborator clients clear
-        # their chat panels too.
-        self._broadcast_event(
-            "sessionChanged",
-            {"session_id": self._session_id, "messages": []},
-        )
-        return {"session_id": self._session_id}
+        """Delegate to :func:`ac_dc.llm._rpc_state.new_session`."""
+        from ac_dc.llm._rpc_state import new_session
+        return new_session(self)
 
     # ------------------------------------------------------------------
     # Public RPC — agent context lifecycle (C1b)
@@ -2078,54 +1514,9 @@ class LLMService:
         turn_id: str,
         agent_idx: int,
     ) -> dict[str, Any]:
-        """Free an agent's ContextManager + tracker + file_context.
-
-        Called by the frontend when the user clicks the ✕ on an
-        agent tab (D21 Phase B3). Pops the per-agent entry from
-        :attr:`_agent_contexts`; the ContextManager, stability
-        tracker, and file_context become garbage-collectable
-        immediately. The per-turn archive file on disk stays —
-        the agent's transcript is still readable via
-        :meth:`get_turn_archive` for audit / synthesis-on-
-        follow-up-turn purposes.
-
-        If closing the agent empties the outer per-turn dict,
-        pop the turn_id key too so the registry doesn't
-        accumulate empty buckets. A later new_session() clears
-        whatever's left anyway, but per-turn cleanup keeps the
-        registry tidy during long single-session usage.
-
-        Idempotent:
-
-        - Unknown turn_id → ``{status: "ok", closed: False}``
-        - Known turn_id but unknown agent_idx →
-          ``{status: "ok", closed: False}``
-        - Successful close → ``{status: "ok", closed: True}``
-
-        The ``closed`` boolean lets the frontend tell "actually
-        freed state" from "no-op on a stale tab ID" — helpful
-        for diagnostics but not behaviorally load-bearing (the
-        frontend just removes its own tab either way).
-
-        Localhost-only. Remote collaborators can't free session
-        state.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        turn_bucket = self._agent_contexts.get(turn_id)
-        if turn_bucket is None:
-            return {"status": "ok", "closed": False}
-        scope = turn_bucket.pop(agent_idx, None)
-        if scope is None:
-            return {"status": "ok", "closed": False}
-        # Inner dict empty → drop the outer key too. Keeps the
-        # registry compact; a long-running session with many
-        # turns would otherwise accumulate empty {turn_id: {}}
-        # buckets indefinitely.
-        if not turn_bucket:
-            self._agent_contexts.pop(turn_id, None)
-        return {"status": "ok", "closed": True}
+        """Delegate to :func:`ac_dc.llm._rpc_state.close_agent_context`."""
+        from ac_dc.llm._rpc_state import close_agent_context
+        return close_agent_context(self, turn_id, agent_idx)
 
     def set_agent_selected_files(
         self,
@@ -2133,57 +1524,11 @@ class LLMService:
         agent_idx: int,
         files: list[str],
     ) -> list[str] | dict[str, Any]:
-        """Replace an agent's selected-files list.
-
-        Per-agent analogue of :meth:`set_selected_files`. The
-        frontend routes file picker checkbox toggles to this
-        method when an agent tab is active (D21 per-tab
-        selection); the main tab's checkbox toggles still go
-        through :meth:`set_selected_files`.
-
-        Returns the canonical list (after filesystem existence
-        filtering, matching the main-tab path) on success, or
-        a restricted-error dict for non-localhost callers, or
-        ``{error: "agent not found"}`` when no scope exists
-        at ``{turn_id, agent_idx}``.
-
-        The agent's scope's ``selected_files`` list is replaced
-        in-place so existing references (e.g., the scope's
-        copy in the registry) see the new list on their next
-        read. No filesChanged broadcast fires — agent selection
-        state is per-tab on the frontend, and broadcasting to
-        other clients would overwrite their main-tab or
-        different-agent-tab state.
-
-        Localhost-only.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        turn_bucket = self._agent_contexts.get(turn_id)
-        if turn_bucket is None:
-            return {"error": "agent not found"}
-        scope = turn_bucket.get(agent_idx)
-        if scope is None:
-            return {"error": "agent not found"}
-        # Filter non-existent files when a repo is attached.
-        # Mirrors the main-tab path so agents can't carry
-        # phantom paths in their selection.
-        if self._repo is not None:
-            valid = [
-                p for p in files
-                if isinstance(p, str) and self._repo.file_exists(p)
-            ]
-        else:
-            valid = [p for p in files if isinstance(p, str)]
-        # Replace in-place so the scope's stored list identity
-        # is preserved. Downstream code (_sync_file_context)
-        # reads scope.selected_files and would break if the
-        # list object was swapped for a new one between
-        # references.
-        scope.selected_files.clear()
-        scope.selected_files.extend(valid)
-        return list(scope.selected_files)
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_selected_files`."""
+        from ac_dc.llm._rpc_state import set_agent_selected_files
+        return set_agent_selected_files(
+            self, turn_id, agent_idx, files
+        )
 
     # ------------------------------------------------------------------
     # Conversation scope construction
