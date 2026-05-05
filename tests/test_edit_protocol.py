@@ -751,27 +751,35 @@ class TestAgentBlockParsing:
         assert block.id == "agent-5"
         assert block.task == "do it"
 
-    def test_unknown_fields_captured_in_extras(self) -> None:
-        """Forward-compat: unknown keys land in ``extras``.
+    def test_unknown_fields_folded_into_task(self) -> None:
+        """Unknown ``word:`` lines are continuations, not fields.
 
-        Per specs4/7-future/mcp-integration.md § Agent block
-        extension for MCP, a future ``tools:`` field uses the
-        extras slot without requiring a parser change. This
-        test uses ``tools`` as the representative unknown
-        field.
+        A task body containing markdown-like headings
+        (``Requirements:``, ``Notes:``) must not terminate the
+        ``task`` field at the first such heading. The parser's
+        allowlist pins ``id`` and ``task`` as the only
+        recognised structured fields; everything else is prose
+        that lands in the accumulated ``task`` value verbatim.
+
+        Extending the allowlist for future structured fields
+        (e.g. ``tools:`` when MCP integration lands per
+        specs4/7-future/mcp-integration.md) is a one-line
+        change in ``edit_protocol.py``.
         """
         body = "id: a\ntask: t\ntools: gitlab, slack\n"
         text = _agent_block(body)
         result = parse_text(text)
         assert len(result.agent_blocks) == 1
         block = result.agent_blocks[0]
-        assert block.extras == {"tools": "gitlab, slack"}
-        # Required fields still populated.
+        # Unknown ``tools:`` line is a continuation of ``task``.
+        assert block.extras == {}
         assert block.id == "a"
-        assert block.task == "t"
+        # The literal ``tools: gitlab, slack`` text is part of
+        # the task body, joined with a newline separator.
+        assert block.task == "t\ntools: gitlab, slack"
 
-    def test_multiple_unknown_fields(self) -> None:
-        """Every unknown key is captured independently."""
+    def test_multiple_unknown_keys_all_fold_in(self) -> None:
+        """Every unrecognised ``word:`` line is a continuation."""
         body = (
             "id: a\n"
             "task: t\n"
@@ -782,11 +790,12 @@ class TestAgentBlockParsing:
         text = _agent_block(body)
         result = parse_text(text)
         block = result.agent_blocks[0]
-        assert block.extras == {
-            "tools": "jira",
-            "priority": "high",
-            "timeout": "30s",
-        }
+        assert block.extras == {}
+        # All three unknown lines survive inside ``task`` in
+        # source order, each on its own line.
+        assert block.task == (
+            "t\ntools: jira\npriority: high\ntimeout: 30s"
+        )
 
     def test_value_with_spaces(self) -> None:
         """Values with internal whitespace round-trip verbatim."""
@@ -798,6 +807,56 @@ class TestAgentBlockParsing:
         result = parse_text(text)
         block = result.agent_blocks[0]
         assert block.task == "analyse src/foo.py and src/bar.py"
+
+    def test_markdown_heading_in_task_body_preserved(self) -> None:
+        """Regression: markdown headings inside ``task`` survive.
+
+        The orchestrator's decomposition prompt typically
+        writes multi-paragraph tasks with markdown-style
+        headings — ``Requirements:``, ``Notes:``, etc.
+        Previously the parser's field-start regex matched
+        these as new fields, silently terminating ``task`` at
+        the first heading and routing the rest into
+        ``extras``. The agent's first user message would then
+        be just the pre-heading summary line, with the real
+        instructions lost.
+
+        This test pins the fix: a realistic orchestrator-
+        style task with multiple markdown headings,
+        continuation bullets, and blank-line paragraph
+        breaks must round-trip into ``block.task`` verbatim.
+        """
+        body = (
+            "id: agent-0\n"
+            "task: Build the Python backend for a calculator"
+            " app under `backend/`.\n"
+            "\n"
+            "Requirements:\n"
+            "- Create `backend/pyproject.toml` declaring"
+            " the project.\n"
+            "- Create `backend/config.toml` with a"
+            " `[calculator]` section.\n"
+            "\n"
+            "Notes:\n"
+            "- Use `tomllib` from the stdlib.\n"
+            "- Do NOT touch `frontend/`.\n"
+        )
+        text = _agent_block(body)
+        result = parse_text(text)
+        assert len(result.agent_blocks) == 1
+        block = result.agent_blocks[0]
+        assert block.valid is True
+        assert block.id == "agent-0"
+        # No fields escaped into extras.
+        assert block.extras == {}
+        # The full multi-paragraph body survives in task,
+        # with the markdown headings intact.
+        assert "Requirements:" in block.task
+        assert "Notes:" in block.task
+        assert "Do NOT touch `frontend/`." in block.task
+        assert block.task.startswith(
+            "Build the Python backend for a calculator app"
+        )
 
     def test_empty_value_on_header_line_with_continuation(self) -> None:
         """Field with no inline value takes its value from continuations.

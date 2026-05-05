@@ -109,6 +109,31 @@ _MARKER_AGEND = "🟩🟩🟩 AGEND"
 # accidentally match as new fields.
 _AGENT_FIELD_REGEX = re.compile(r"^(\w+):\s*(.*)$")
 
+# Known agent-block field names. A ``word:`` line inside an
+# agent block is treated as a field-start ONLY when the word
+# appears here; otherwise the line is a continuation of the
+# current field's value.
+#
+# Why an allowlist rather than accepting every ``word:``
+# match: the ``task`` field typically contains multi-paragraph
+# markdown prose, and markdown headings like ``Requirements:``
+# or ``Notes:`` match the field-start pattern. Without this
+# filter, the parser would silently terminate ``task`` at the
+# first such heading and route everything after it into an
+# ``extras`` key — so the agent's user message ends up as just
+# the first line of its task. This was a real bug: a task body
+# starting with "Build the thing." followed by a blank line
+# and then "Requirements:\n- do X\n- do Y" reached the agent
+# as "Build the thing." with everything else lost.
+#
+# Extending this set when new structured fields are added
+# (e.g., ``tools:`` for the future MCP integration per
+# specs4/7-future/mcp-integration.md) is a one-line change
+# here. Until then, ``id`` and ``task`` are the only
+# structured fields the parser knows about; everything else
+# is prose.
+_AGENT_KNOWN_FIELDS: frozenset[str] = frozenset({"id", "task"})
+
 
 # ---------------------------------------------------------------------------
 # File path detection — Python-side authoritative heuristic
@@ -635,9 +660,18 @@ class EditParser:
         # Field-start detection. The regex matches leading
         # word-character sequences followed by a colon; lines
         # starting with whitespace or punctuation fall through
-        # to continuation handling.
+        # to continuation handling. We additionally gate on the
+        # known-fields allowlist so markdown prose inside a
+        # field's value (``Requirements:``, ``Notes:``, etc.)
+        # doesn't terminate the current field — such lines are
+        # treated as continuations and land in the accumulated
+        # value verbatim. See ``_AGENT_KNOWN_FIELDS`` for the
+        # full rationale.
         match = _AGENT_FIELD_REGEX.match(line)
-        if match is not None:
+        if (
+            match is not None
+            and match.group(1) in _AGENT_KNOWN_FIELDS
+        ):
             field_name = match.group(1)
             field_value = match.group(2)
             self._agent_fields[field_name] = field_value
