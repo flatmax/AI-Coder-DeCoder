@@ -100,41 +100,34 @@ function generateRequestId() {
 const _AGENT_LABEL_MAX_LENGTH = 40;
 
 /**
- * Parse an agent tab ID into the ``[turn_id, agent_idx]``
- * shape the backend's C1c ``agent_tag`` kwarg expects.
+ * Map a tab id to its backend agent identifier.
  *
- * Tab IDs for agents follow the format
- * ``{turn_id}/agent-{NN}`` where NN is a zero-padded
- * integer. The main tab uses the literal string
- * ``"main"`` — returns null for that case and for any
- * malformed input so the caller knows to skip the tag
- * argument entirely (untagged call = main conversation).
+ * Agent identity is the LLM-chosen id from the
+ * ``🟧🟧🟧 AGENT`` block (e.g., ``"frontend-trivial"``).
+ * Tab ids for agent tabs ARE that id directly; the
+ * literal string ``"main"`` denotes the main
+ * conversation.
  *
- * Shape validation is defensive because tab IDs come
- * from the ``_tabs`` Map keys, which are set by the
- * spawn path. A future refactor that changes the
- * format would fail here loudly rather than silently
- * routing to the wrong agent.
+ * Returns the agent id (a non-empty string) for agent
+ * tabs, or ``null`` for the main tab and for malformed
+ * inputs. ``null`` tells the caller to omit the
+ * ``agent_tag`` argument entirely (untagged call =
+ * main conversation).
+ *
+ * Pre-flat-identity history: tab ids used to be
+ * ``{turn_id}/agent-{NN}`` and this returned a
+ * ``[turn_id, agent_idx]`` tuple. Both the tuple shape
+ * and the embedded turn id are gone — the backend
+ * registry is keyed flat by the agent's id and
+ * scopes survive across turns.
  *
  * @param {string} tabId — the tab's identifier
- * @returns {[string, number] | null}
+ * @returns {string | null}
  */
 function parseAgentTabId(tabId) {
   if (typeof tabId !== 'string' || !tabId) return null;
   if (tabId === 'main') return null;
-  // Split on the last slash so turn IDs containing
-  // slashes (unlikely but defensive) don't break
-  // parsing.
-  const slashIdx = tabId.lastIndexOf('/');
-  if (slashIdx <= 0) return null;
-  const turnId = tabId.slice(0, slashIdx);
-  const agentPart = tabId.slice(slashIdx + 1);
-  // Must be "agent-NN" where NN is non-negative int.
-  const match = /^agent-(\d+)$/.exec(agentPart);
-  if (!match) return null;
-  const agentIdx = parseInt(match[1], 10);
-  if (!Number.isFinite(agentIdx) || agentIdx < 0) return null;
-  return [turnId, agentIdx];
+  return tabId;
 }
 
 /**
@@ -3011,11 +3004,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // (tests, pre-connect).
     const agentTag = parseAgentTabId(tabId);
     if (agentTag && this.rpcConnected) {
-      const [turnId, agentIdx] = agentTag;
+      // agentTag IS the agent's LLM-chosen id post-flat-
+      // identity refactor.
       this.rpcExtract(
         'LLMService.close_agent_context',
-        turnId,
-        agentIdx,
+        agentTag,
       ).then((result) => {
         // Restricted caller — surface as warning.
         // C1b's non-localhost path returns the
@@ -3679,12 +3672,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
       if (!block || typeof block !== 'object') continue;
       const agentIdx = block.agent_idx;
       if (typeof agentIdx !== 'number' || agentIdx < 0) continue;
+      const agentId = typeof block.id === 'string' ? block.id : '';
+      if (!agentId) continue;
       const task = typeof block.task === 'string' ? block.task : '';
-      // Tab ID — zero-padded to 2 digits for stable sort
-      // order in the strip (agent-02 < agent-10) and to
-      // match the backend's archive path convention.
+      // Tab ID = the agent's LLM-chosen id. Identity is
+      // flat at the backend (registry keyed by id alone),
+      // and the tab id mirrors that so parseAgentTabId
+      // can return the id directly with no parsing. The
+      // padded numeric index is still used for the child
+      // stream's request id and for the on-disk archive
+      // file name (`{turn_id}/agent-NN.jsonl`), but
+      // those are routing details and not the agent's
+      // identity.
       const paddedIdx = String(Math.floor(agentIdx)).padStart(2, '0');
-      const tabId = `${turnId}/agent-${paddedIdx}`;
+      const tabId = agentId;
       // Idempotent — existing tab wins.
       if (this._tabs.has(tabId)) continue;
       // Fresh tab state with the task seeded as the initial

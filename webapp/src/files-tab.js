@@ -1689,11 +1689,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     try {
       let result;
       if (agentTag) {
-        const [turnId, agentIdx] = agentTag;
+        // agentTag IS the agent's LLM-chosen id —
+        // post-flat-identity refactor flattened the
+        // (turn_id, agent_idx) tuple into a single
+        // string keyed in the backend registry.
         result = await this.rpcExtract(
           'LLMService.set_agent_selected_files',
-          turnId,
-          agentIdx,
+          agentTag,
           files,
         );
       } else {
@@ -1774,11 +1776,11 @@ export class FilesTab extends RpcMixin(LitElement) {
     try {
       let result;
       if (agentTag) {
-        const [turnId, agentIdx] = agentTag;
+        // agentTag IS the agent's LLM-chosen id —
+        // matches the backend's flat registry key.
         result = await this.rpcExtract(
           'LLMService.set_agent_excluded_index_files',
-          turnId,
-          agentIdx,
+          agentTag,
           files,
         );
       } else {
