@@ -13,6 +13,7 @@
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import { fuzzyMatch } from './file-picker.js';
+import { parseAgentTabId } from './chat-panel.js';
 
 /** localStorage key for the active sub-view. */
 const _SUBVIEW_KEY = 'ac-dc-context-subview';
@@ -744,11 +745,22 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._budgetExpanded = this._loadBudgetExpanded();
     this._cacheFilter = '';
     this._sortMode = this._loadSortMode();
+    // Active tab ID — driven by `active-tab-changed`
+    // events from the chat panel. Default 'main' so
+    // the initial breakdown fetch targets the main
+    // conversation before any tab switch fires. Per
+    // specs4/5-webapp/viewers-hud.md § Per-Context-
+    // Manager Breakdown: "The breakdown RPC accepts
+    // an optional agent ID parameter to target a
+    // specific context manager, defaulting to the
+    // user-facing context when absent."
+    this._activeTabId = 'main';
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
     this._onModalKeyDown = this._onModalKeyDown.bind(this);
   }
 
@@ -765,6 +777,13 @@ export class ContextTab extends RpcMixin(LitElement) {
     // visible so the refresh runs when the user switches to
     // it — matches the other listeners' behaviour.
     window.addEventListener('session-changed', this._onSessionChanged);
+    // Agent-tab switches fire `active-tab-changed` from the
+    // chat panel (bubbles + composed). Refreshing on every
+    // switch means the breakdown always reflects whatever
+    // tab the user is looking at.
+    window.addEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
     window.addEventListener('keydown', this._onModalKeyDown);
   }
 
@@ -773,6 +792,9 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener('mode-changed', this._onModeChanged);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
     window.removeEventListener('keydown', this._onModalKeyDown);
     super.disconnectedCallback();
   }
@@ -836,14 +858,48 @@ export class ContextTab extends RpcMixin(LitElement) {
     }
   }
 
+  _onActiveTabChanged(event) {
+    const tabId = event?.detail?.tabId;
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === this._activeTabId) return;
+    this._activeTabId = tabId;
+    if (this._isTabActive()) {
+      this._refresh();
+    } else {
+      this._stale = true;
+    }
+  }
+
   async _refresh() {
     if (this._loading) return;
     if (!this.rpcConnected) return;
     this._loading = true;
+    // Resolve the active tab into an agent_tag for the
+    // backend. null for main; a [turn_id, agent_idx]
+    // array for agent tabs. JRPC-OO sends JS arrays on
+    // the wire and the backend's _parse_agent_tag
+    // accepts both tuple and list shapes.
+    const agentTag = parseAgentTabId(this._activeTabId);
     try {
       const result = await this.rpcExtract(
         'LLMService.get_context_breakdown',
+        agentTag,
       );
+      // Agent-not-found — the tab was closed server-side
+      // between our refresh firing and the RPC landing.
+      // Leave existing data in place so the UI doesn't
+      // flash empty; the next tab switch or stream-
+      // complete will retry.
+      if (result && typeof result === 'object' && result.error) {
+        if (result.error !== 'agent not found') {
+          console.warn(
+            '[context-tab] get_context_breakdown error',
+            result.error,
+          );
+        }
+        this._stale = false;
+        return;
+      }
       this._data = result && typeof result === 'object' ? result : null;
       this._stale = false;
     } catch (err) {

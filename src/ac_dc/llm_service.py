@@ -1254,6 +1254,18 @@ class LLMService:
             self, turn_id, agent_idx, files
         )
 
+    def set_agent_excluded_index_files(
+        self,
+        turn_id: str,
+        agent_idx: int,
+        files: list[str],
+    ) -> list[str] | dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_excluded_index_files`."""
+        from ac_dc.llm._rpc_state import set_agent_excluded_index_files
+        return set_agent_excluded_index_files(
+            self, turn_id, agent_idx, files
+        )
+
     # ------------------------------------------------------------------
     # Conversation scope construction
     # ------------------------------------------------------------------
@@ -1597,14 +1609,37 @@ class LLMService:
     # Context breakdown (RPC)
     # ------------------------------------------------------------------
 
-    def get_context_breakdown(self) -> dict[str, Any]:
+    def get_context_breakdown(
+        self,
+        agent_tag: tuple[str, int] | list[Any] | None = None,
+    ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._breakdown.get_context_breakdown`.
 
         Public RPC — Context tab + TokenHUD consume this on
         every stream-complete + mode/session change.
+
+        ``agent_tag`` is ``None`` for the main conversation or
+        a ``(turn_id, agent_idx)`` tuple/list for an agent tab.
+        JRPC-OO serialises tuples as JS arrays, so the parser
+        accepts both shapes via :meth:`_parse_agent_tag`.
         """
         from ac_dc.llm._breakdown import get_context_breakdown
-        return get_context_breakdown(self)
+        parsed = (
+            self._parse_agent_tag(agent_tag)
+            if agent_tag is not None
+            else None
+        )
+        # A non-None agent_tag that fails to parse is a client
+        # bug; the helper returns None and the resolver will
+        # also see None and treat it as "main". Log at debug so
+        # operators diagnosing a stale-tab race can find it.
+        if agent_tag is not None and parsed is None:
+            import logging
+            logging.getLogger("ac_dc.llm_service").debug(
+                "Malformed agent_tag for get_context_breakdown: %r",
+                agent_tag,
+            )
+        return get_context_breakdown(self, parsed)
 
     # ------------------------------------------------------------------
     # Tiered content builder

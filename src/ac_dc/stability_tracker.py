@@ -1206,6 +1206,135 @@ class StabilityTracker:
                     tokens=_PLACEHOLDER_TOKENS,
                 )
 
+    def distribute_keys_by_clustering(
+        self,
+        ref_index: Any,
+        keys: list[str],
+        files: list[str],
+    ) -> None:
+        """Append keys to the tracker, distributed across L1/L2/L3.
+
+        Used by cross-reference enable to seed opposite-index
+        items into cached tiers on activation, mirroring how the
+        primary index is distributed at startup — without the
+        L0 seeding (L0 is reserved for primary content + the
+        system prompt) and without touching any tracker entries
+        that already exist.
+
+        Keys already present in the tracker are skipped —
+        preserves accumulated tier / N state from a prior
+        cross-ref session, and keeps primary-index entries
+        (``symbol:`` in code mode, ``doc:`` in doc mode) safe
+        when the caller naively passes an overlapping key list.
+
+        Uses placeholder hash and placeholder tokens; the
+        caller should immediately measure real tokens via
+        :meth:`measure_tokens` so downstream cascade passes
+        work with accurate counts.
+
+        Parameters
+        ----------
+        ref_index:
+            Object implementing :meth:`connected_components` and
+            :meth:`file_ref_count`. Same shape as
+            :meth:`initialize_from_reference_graph` consumes.
+        keys:
+            List of tracker keys (e.g. ``doc:{path}`` or
+            ``symbol:{path}``).
+        files:
+            Parallel list of repo-relative file paths.
+        """
+        if not keys:
+            return
+        if len(keys) != len(files):
+            raise ValueError(
+                f"keys length ({len(keys)}) must match "
+                f"files length ({len(files)})"
+            )
+
+        # Skip keys already tracked — preserves existing tier
+        # state from prior cross-ref enables and protects the
+        # primary index's entries.
+        pairs = [
+            (key, path)
+            for key, path in zip(keys, files)
+            if key not in self._items
+        ]
+        if not pairs:
+            return
+
+        path_to_key = {path: key for key, path in pairs}
+        remaining_paths = {path for _key, path in pairs}
+
+        components = ref_index.connected_components()
+        filtered_components: list[set[str]] = []
+        seen_in_components: set[str] = set()
+        for comp in components:
+            filtered = {p for p in comp if p in remaining_paths}
+            if filtered:
+                filtered_components.append(filtered)
+                seen_in_components.update(filtered)
+
+        # Orphan files — not in any component. Each becomes its
+        # own singleton "component" for the bin-packer.
+        orphan_paths = remaining_paths - seen_in_components
+        if orphan_paths:
+            orphan_list = sorted(
+                orphan_paths,
+                key=lambda p: (-ref_index.file_ref_count(p), p),
+            )
+            for p in orphan_list:
+                filtered_components.append({p})
+
+        # Bin-pack across L1/L2/L3 — skip L0 (reserved for
+        # primary content). Greedy: assign each component
+        # (descending size) to the tier with the smallest
+        # current size.
+        tier_sizes = {Tier.L1: 0, Tier.L2: 0, Tier.L3: 0}
+        tier_contents: dict[Tier, list[str]] = {
+            Tier.L1: [],
+            Tier.L2: [],
+            Tier.L3: [],
+        }
+        filtered_components.sort(
+            key=lambda c: (-len(c), tuple(sorted(c)))
+        )
+        for comp in filtered_components:
+            target_tier = min(
+                tier_sizes,
+                key=lambda t: (tier_sizes[t], t.value),
+            )
+            for path in sorted(comp):
+                key = path_to_key.get(path)
+                if key is None:
+                    continue
+                tier_contents[target_tier].append(key)
+            tier_sizes[target_tier] += len(comp)
+
+        # Instantiate. Placeholder hash so Phase 1 of the next
+        # update cycle accepts the first real hash without
+        # demoting (same contract as primary init).
+        affected_tiers: set[Tier] = set()
+        for tier in (Tier.L1, Tier.L2, Tier.L3):
+            for key in tier_contents[tier]:
+                self._items[key] = TrackedItem(
+                    key=key,
+                    tier=tier,
+                    n_value=_TIER_CONFIG[tier]["entry_n"],
+                    content_hash=_PLACEHOLDER_HASH,
+                    tokens=_PLACEHOLDER_TOKENS,
+                )
+                affected_tiers.add(tier)
+
+        # Mark destination tiers broken so the next cascade
+        # pass considers them and — critically — so the
+        # provider cache for those tiers is rebuilt with the
+        # new content included. Without this, the next
+        # request would use stale cache breakpoints that
+        # predate the seeding.
+        for tier in affected_tiers:
+            self._broken_tiers.add(tier)
+
     def register_system_prompt(
         self,
         prompt_hash: str,
@@ -1261,6 +1390,7 @@ class StabilityTracker:
         self,
         ref_index: Any,
         overshoot_multiplier: float = 1.5,
+        candidate_keys: set[str] | None = None,
     ) -> int:
         """Top up L0 with real-token-count awareness post-measurement.
 
@@ -1341,12 +1471,22 @@ class StabilityTracker:
         # backfill candidates; ``url:`` is skipped because URL
         # content is session-scoped and shouldn't compete for
         # the cache-anchor slot.
+        #
+        # When ``candidate_keys`` is supplied, only items in
+        # that set are eligible. Used by cross-reference
+        # enable to restrict the backfill to the keys just
+        # seeded by that pass — without the filter, a user-
+        # accumulated tier state (e.g., a deliberately-placed
+        # L2 entry from a prior session) would get promoted
+        # to L0 as a side effect of toggling cross-ref on.
         candidates: list[TrackedItem] = []
         for item in self._items.values():
             if item.tier not in (Tier.L1, Tier.L2, Tier.L3):
                 continue
             path = self._path_from_key(item.key)
             if path is None:
+                continue
+            if candidate_keys is not None and item.key not in candidate_keys:
                 continue
             candidates.append(item)
 

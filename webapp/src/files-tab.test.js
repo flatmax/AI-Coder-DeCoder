@@ -3409,6 +3409,337 @@ describe('FilesTab active-tab-changed handler', () => {
       fireActiveTabChanged('agent-0');
     }).not.toThrow();
   });
+
+  it('pushes both selection and exclusion on tab switch', async () => {
+    // When the user switches tabs, the picker must see
+    // the new tab's selection AND exclusion state in a
+    // single coherent update. If only selection were
+    // pushed, the picker's exclusion badges would
+    // reflect a stale tab until the next exclusion
+    // event fired.
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+    });
+    const t = mountTab();
+    await settle(t);
+    // Seed main tab state.
+    t._selectedFilesByTab.set('main', new Set(['main-sel.py']));
+    t._excludedFilesByTab.set('main', new Set(['main-excl.py']));
+    // Seed agent tab state.
+    t._selectedFilesByTab.set('agent-0', new Set(['agent-sel.py']));
+    t._excludedFilesByTab.set('agent-0', new Set(['agent-excl.py']));
+    // Switch to agent.
+    fireActiveTabChanged('agent-0');
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.selectedFiles.has('agent-sel.py')).toBe(true);
+    expect(picker.selectedFiles.has('main-sel.py')).toBe(false);
+    expect(picker.excludedFiles.has('agent-excl.py')).toBe(true);
+    expect(picker.excludedFiles.has('main-excl.py')).toBe(false);
+  });
+
+  it('exclusion writes target the active tab only', async () => {
+    // Switch to agent-0, apply an exclusion, verify the
+    // agent's Map entry updates and main's stays empty.
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(fakeTreeResponse([])),
+      'LLMService.set_agent_excluded_index_files': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const t = mountTab();
+    await settle(t);
+    fireActiveTabChanged('agent-0');
+    await settle(t);
+    t._applyExclusion(new Set(['a.py']), false);
+    expect(
+      t._excludedFilesByTab.get('agent-0').has('a.py'),
+    ).toBe(true);
+    expect(t._excludedFilesByTab.get('main').size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent-aware selection routing (C2 per-tab backend dispatch)
+// ---------------------------------------------------------------------------
+//
+// When an agent tab is active, _sendSelectionToServer must
+// call LLMService.set_agent_selected_files(turn_id,
+// agent_idx, files) instead of the main-only
+// set_selected_files. parseAgentTabId from the chat panel
+// splits the active tab ID into [turn_id, agent_idx]; the
+// tab ID format {turn_id}/agent-{NN} is the load-bearing
+// contract. Symmetric rule for exclusion: agent tabs hit
+// set_agent_excluded_index_files, main hits
+// set_excluded_index_files.
+
+describe('FilesTab agent-aware RPC routing', () => {
+  /**
+   * Fire active-tab-changed to flip the orchestrator's
+   * _activeTabId. Same helper shape the A4 block uses.
+   */
+  function fireActiveTabChanged(tabId, previousTabId = 'main') {
+    window.dispatchEvent(
+      new CustomEvent('active-tab-changed', {
+        detail: { tabId, previousTabId },
+      }),
+    );
+  }
+
+  it('main tab calls set_selected_files', async () => {
+    const setMain = vi.fn().mockResolvedValue([]);
+    const setAgent = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_selected_files': setMain,
+      'LLMService.set_agent_selected_files': setAgent,
+    });
+    const t = mountTab();
+    await settle(t);
+    // Main is active by default. Trigger a selection
+    // change via the picker's event.
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('selection-changed', {
+        detail: { selectedFiles: ['a.py'] },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(setMain).toHaveBeenCalledOnce();
+    expect(setMain.mock.calls[0][0]).toEqual(['a.py']);
+    expect(setAgent).not.toHaveBeenCalled();
+  });
+
+  it('agent tab calls set_agent_selected_files with turn_id and idx', async () => {
+    const setMain = vi.fn().mockResolvedValue([]);
+    const setAgent = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_selected_files': setMain,
+      'LLMService.set_agent_selected_files': setAgent,
+    });
+    const t = mountTab();
+    await settle(t);
+    // Flip to an agent tab. parseAgentTabId splits
+    // "turn_abc/agent-03" into ["turn_abc", 3].
+    fireActiveTabChanged('turn_abc/agent-03');
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('selection-changed', {
+        detail: { selectedFiles: ['a.py'] },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(setAgent).toHaveBeenCalledOnce();
+    expect(setAgent.mock.calls[0][0]).toBe('turn_abc');
+    expect(setAgent.mock.calls[0][1]).toBe(3);
+    expect(setAgent.mock.calls[0][2]).toEqual(['a.py']);
+    expect(setMain).not.toHaveBeenCalled();
+  });
+
+  it('agent tab exclusion routes to set_agent_excluded_index_files', async () => {
+    const setMainExcl = vi.fn().mockResolvedValue([]);
+    const setAgentExcl = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_excluded_index_files': setMainExcl,
+      'LLMService.set_agent_excluded_index_files': setAgentExcl,
+    });
+    const t = mountTab();
+    await settle(t);
+    fireActiveTabChanged('turn_xyz/agent-07');
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('exclusion-changed', {
+        detail: { excludedFiles: ['a.py'] },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(setAgentExcl).toHaveBeenCalledOnce();
+    expect(setAgentExcl.mock.calls[0][0]).toBe('turn_xyz');
+    expect(setAgentExcl.mock.calls[0][1]).toBe(7);
+    expect(setAgentExcl.mock.calls[0][2]).toEqual(['a.py']);
+    expect(setMainExcl).not.toHaveBeenCalled();
+  });
+
+  it('main tab exclusion still calls set_excluded_index_files', async () => {
+    const setMainExcl = vi.fn().mockResolvedValue([]);
+    const setAgentExcl = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_excluded_index_files': setMainExcl,
+      'LLMService.set_agent_excluded_index_files': setAgentExcl,
+    });
+    const t = mountTab();
+    await settle(t);
+    // Stay on main.
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('exclusion-changed', {
+        detail: { excludedFiles: ['a.py'] },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(setMainExcl).toHaveBeenCalledOnce();
+    expect(setAgentExcl).not.toHaveBeenCalled();
+  });
+
+  it('agent-not-found response emits warning toast', async () => {
+    // C1c returns {error: "agent not found"} when the
+    // tab was closed server-side between switch and
+    // selection. Frontend surfaces this as a warning.
+    const setAgent = vi.fn().mockResolvedValue({
+      error: 'agent not found',
+    });
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_agent_selected_files': setAgent,
+    });
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      const t = mountTab();
+      await settle(t);
+      fireActiveTabChanged('turn_gone/agent-00');
+      await settle(t);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('selection-changed', {
+          detail: { selectedFiles: ['a.py'] },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message.toLowerCase()).toContain('agent');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('restricted error from agent RPC emits warning toast', async () => {
+    const setAgent = vi.fn().mockResolvedValue({
+      error: 'restricted',
+      reason: 'Participants cannot change agent selection',
+    });
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_agent_selected_files': setAgent,
+    });
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      const t = mountTab();
+      await settle(t);
+      fireActiveTabChanged('turn_abc/agent-00');
+      await settle(t);
+      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      picker.dispatchEvent(
+        new CustomEvent('selection-changed', {
+          detail: { selectedFiles: ['a.py'] },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(t);
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toContain('Participants');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('malformed agent tab ID falls back to main RPC', async () => {
+    // parseAgentTabId returns null for unparseable
+    // strings. The fallback is the main RPC — safer
+    // than throwing or silently dropping the selection.
+    const setMain = vi.fn().mockResolvedValue([]);
+    const setAgent = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'Repo.get_file_tree': vi
+        .fn()
+        .mockResolvedValue(
+          fakeTreeResponse([
+            { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
+          ]),
+        ),
+      'LLMService.set_selected_files': setMain,
+      'LLMService.set_agent_selected_files': setAgent,
+    });
+    const t = mountTab();
+    await settle(t);
+    // Malformed — no slash, no agent- prefix.
+    fireActiveTabChanged('something-weird');
+    await settle(t);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker.dispatchEvent(
+      new CustomEvent('selection-changed', {
+        detail: { selectedFiles: ['a.py'] },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(t);
+    expect(setMain).toHaveBeenCalledOnce();
+    expect(setAgent).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

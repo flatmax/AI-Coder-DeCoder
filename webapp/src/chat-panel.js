@@ -2250,6 +2250,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
       // URL chip detection
       urlDetectDebounceTimer: null,
       urlDetectGeneration: 0,
+      // URL chip state snapshot. Map<url, chipState>
+      // mirroring the shape ac-url-chips holds
+      // internally. The singleton ac-url-chips element
+      // in the DOM always shows the currently-active
+      // tab's state; on tab switch we snapshot the
+      // leaving tab's `_chips` into this slot and
+      // restore the entering tab's snapshot. Per
+      // specs4/5-webapp/agent-browser.md § Per-Tab
+      // State: "URL chip state (which URLs are
+      // detected/fetched/excluded for this
+      // conversation)" is per-tab.
+      urlChips: null,
       // Misc non-reactive flags / state
       autoScroll: true,
       suppressNextPaste: false,
@@ -2286,8 +2298,30 @@ export class ChatPanel extends RpcMixin(LitElement) {
   set _activeTabId(value) {
     const oldValue = this._activeTabIdValue;
     if (oldValue === value) return;
+    // Snapshot the leaving tab's URL chip state before
+    // flipping. The singleton ac-url-chips element
+    // currently shows oldValue's chips; once we flip,
+    // its `_chips` Map will belong to the new tab. If
+    // we don't snapshot first, the leaving tab's state
+    // is lost.
+    //
+    // Query via shadowRoot directly so this works even
+    // on the very first switch before any Lit render
+    // has bound the element. When the element doesn't
+    // exist yet (fresh mount, pre-first-render), the
+    // snapshot is skipped and the default `null` slot
+    // carries through — matches the "never activated
+    // URL chips yet" case naturally.
+    this._snapshotUrlChipsForTab(oldValue);
     this._activeTabIdValue = value;
     this.requestUpdate('_activeTabId', oldValue);
+    // Restore the entering tab's URL chip state. Runs
+    // after the property flip so the chip component
+    // (if it re-renders based on reactive state) sees
+    // the new tab's data, not a half-swapped mix. See
+    // _restoreUrlChipsForTab for why this defers via
+    // updateComplete.
+    this._restoreUrlChipsForTab(value);
     // Notify listeners of the transition. bubbles+composed
     // so the event crosses the shadow DOM boundary —
     // files-tab and the future tab strip component listen
@@ -2302,6 +2336,62 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+  }
+
+  /**
+   * Copy the ac-url-chips element's current _chips Map
+   * into the leaving tab's state slot. Runs synchronously
+   * before _activeTabIdValue flips so the Map read still
+   * reflects the departing tab.
+   *
+   * Defensive against early calls — before any render the
+   * element doesn't exist in shadowRoot, in which case
+   * there's nothing to snapshot.
+   *
+   * Stores a shallow copy (new Map wrapping the existing
+   * entries) so subsequent mutations to the element's
+   * live Map don't retroactively alter the snapshot. The
+   * chip-state values are themselves objects; we don't
+   * deep-clone them because chip-state mutation goes
+   * through _chips = new Map(...) reassignment in the
+   * component, not in-place edits of existing entries.
+   */
+  _snapshotUrlChipsForTab(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    const tab = this._tabs.get(tabId);
+    if (!tab) return;
+    const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chipsEl || !chipsEl._chips) return;
+    tab.urlChips = new Map(chipsEl._chips);
+  }
+
+  /**
+   * Install the entering tab's URL chip snapshot into the
+   * ac-url-chips element. Defers through updateComplete
+   * so the setter's requestUpdate cycle finishes first —
+   * reading shadowRoot synchronously after a property
+   * flip can return a stale reference in some edge cases
+   * (re-entrant render during setter).
+   *
+   * An entering tab with no snapshot (freshly spawned
+   * agent, or main tab in a new session) gets a fresh
+   * empty Map. The chip component's render path handles
+   * empty Maps by hiding the strip entirely, so agents
+   * without URL activity show no strip — correct.
+   */
+  _restoreUrlChipsForTab(tabId) {
+    this.updateComplete.then(() => {
+      const chipsEl =
+        this.shadowRoot?.querySelector('ac-url-chips');
+      if (!chipsEl) return;
+      const tab = this._tabs.get(tabId);
+      if (!tab) return;
+      // Reassign rather than mutate in place so Lit's
+      // reactive property observer fires and re-renders.
+      chipsEl._chips = tab.urlChips
+        ? new Map(tab.urlChips)
+        : new Map();
+    });
   }
 
   get messages() {
@@ -3965,9 +4055,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Clear URL chips — a new session starts fresh. The
     // backend's URL service session state is cleared
     // server-side on new_session via URLService.clear_fetched;
-    // we mirror that on the client.
+    // we mirror that on the client. Also wipe per-tab
+    // snapshots so switching back to a tab that had
+    // chips from a prior session doesn't resurrect
+    // them.
     const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
     if (chipsEl) chipsEl.reset();
+    for (const tab of this._tabs.values()) {
+      tab.urlChips = null;
+    }
   }
 
   /**
@@ -4965,6 +5061,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * we toast).
    */
   async _onUrlFetchRequested(event) {
+    // TODO(url-fetch-cross-tab): this closure captures
+    // the singleton chips element, not the originating
+    // tab. Mid-fetch tab switches land the result on
+    // the wrong tab. See IMPLEMENTATION_NOTES.md §
+    // "Known bugs — per-tab state".
     const url = event.detail?.url;
     if (typeof url !== 'string' || !url) return;
     if (!this.rpcConnected) {

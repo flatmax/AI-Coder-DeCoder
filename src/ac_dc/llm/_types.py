@@ -178,4 +178,5 @@ class ConversationScope:
     tracker: Any  # StabilityTracker
     session_id: str
     selected_files: list[str] = field(default_factory=list)
+    excluded_index_files: list[str] = field(default_factory=list)
     archival_append: ArchivalAppend | None = None

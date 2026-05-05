@@ -7716,6 +7716,227 @@ describe('ChatPanel URL chip lifecycle', () => {
 });
 
 // ---------------------------------------------------------------------------
+// URL chip per-tab snapshot / restore (D21 per-tab state)
+// ---------------------------------------------------------------------------
+//
+// The singleton <ac-url-chips> element in the chat panel's
+// shadow always shows the ACTIVE tab's chip state. When the
+// user flips tabs, the leaving tab's chips snapshot into its
+// `urlChips` state slot, and the entering tab's snapshot
+// restores into the element's live `_chips` Map. Tabs with
+// no prior URL activity get a fresh empty Map on entry.
+//
+// Per specs4/5-webapp/agent-browser.md § Per-Tab State —
+// "URL chip state (which URLs are detected/fetched/excluded
+// for this conversation)" is per-tab.
+
+describe('ChatPanel URL chip per-tab state', () => {
+  /**
+   * Helper to seed a tab state slot, used by tests that
+   * need multiple tabs populated before switching.
+   */
+  function seedTab(panel, tabId) {
+    panel._tabs.set(tabId, panel._makeTabState());
+  }
+
+  it('snapshots chips to leaving tab on switch', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Seed the singleton chip element with main-tab chips.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    expect(chipsEl._chips.size).toBe(1);
+    // Switch to agent-0 — snapshot should fire.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Main tab's slot now carries the snapshot.
+    const mainTab = p._tabs.get('main');
+    expect(mainTab.urlChips).toBeInstanceOf(Map);
+    expect(mainTab.urlChips.has('https://main.com')).toBe(true);
+  });
+
+  it('restores chips from entering tab snapshot', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Pre-populate agent-0's snapshot with chips (simulate
+    // a tab that had URL activity earlier).
+    const agentChips = new Map();
+    agentChips.set('https://agent.com', {
+      url: 'https://agent.com',
+      type: 'generic',
+      displayName: 'agent',
+      status: 'fetched',
+      content: { content: 'body' },
+      excluded: false,
+    });
+    p._tabs.get('agent-0').urlChips = agentChips;
+    // Switch to agent-0.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    expect(chipsEl._chips.size).toBe(1);
+    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
+  });
+
+  it('fresh tab with no snapshot gets empty Map', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Seed main with a chip so we can verify it doesn't
+    // leak into the agent tab.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    // Switch to fresh agent tab — urlChips slot is null.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Element's chip Map should be empty.
+    expect(chipsEl._chips.size).toBe(0);
+  });
+
+  it('round-trip switch preserves per-tab state', async () => {
+    // Seed main and agent with distinct chips, flip
+    // between them, verify each tab sees its own chips.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    // Main gets main.com.
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    // Switch to agent-0.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Now add agent.com to agent-0's element state.
+    chipsEl.updateDetected([
+      { url: 'https://agent.com', type: 'generic', display_name: 'agent' },
+    ]);
+    await settle(p);
+    // Switch back to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Main's chips restored — main.com present, agent.com absent.
+    expect(chipsEl._chips.has('https://main.com')).toBe(true);
+    expect(chipsEl._chips.has('https://agent.com')).toBe(false);
+    // Switch to agent-0 again.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Agent's chips restored — agent.com present, main.com absent.
+    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
+    expect(chipsEl._chips.has('https://main.com')).toBe(false);
+  });
+
+  it('snapshot is a copy, not a reference', async () => {
+    // The snapshot must be independent of the element's
+    // live Map so subsequent mutations to the element
+    // don't retroactively alter stored state.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://a.com', type: 'generic', display_name: 'a' },
+    ]);
+    await settle(p);
+    // Switch away — snapshot taken.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const snapshot = p._tabs.get('main').urlChips;
+    const snapshotSize = snapshot.size;
+    // Mutate the element's live Map (simulating new
+    // activity on agent-0 — though the element now holds
+    // agent-0's empty state).
+    chipsEl._chips = new Map();
+    chipsEl._chips.set('https://new.com', {
+      url: 'https://new.com',
+      type: 'generic',
+      displayName: 'new',
+      status: 'detected',
+      excluded: false,
+    });
+    // Main's snapshot unaffected.
+    expect(snapshot.size).toBe(snapshotSize);
+    expect(snapshot.has('https://new.com')).toBe(false);
+  });
+
+  it('session-changed clears all per-tab snapshots', async () => {
+    // specs4/5-webapp/chat.md § URL Chips UI — on session
+    // change, all chips including per-tab snapshots wipe.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Populate main's snapshot via a switch.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    expect(p._tabs.get('main').urlChips).not.toBeNull();
+    // Session change.
+    pushEvent('session-changed', {
+      session_id: 'sess_new',
+      messages: [],
+    });
+    await settle(p);
+    // Every tab's snapshot cleared.
+    for (const tab of p._tabs.values()) {
+      expect(tab.urlChips).toBeNull();
+    }
+  });
+
+  it('no-op when switching to same tab', async () => {
+    // Same-value writes should not snapshot or restore.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://a.com', type: 'generic', display_name: 'a' },
+    ]);
+    await settle(p);
+    // Snapshot should be null before the no-op.
+    expect(p._tabs.get('main').urlChips).toBeNull();
+    // Assign same value.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Still null — no snapshot ran.
+    expect(p._tabs.get('main').urlChips).toBeNull();
+  });
+
+  it('snapshot survives when element not yet rendered', async () => {
+    // Defensive — if the ac-url-chips element isn't in
+    // the shadow yet (pre-first-render), snapshot/restore
+    // must no-op without throwing.
+    publishFakeRpc({});
+    const p = mountPanel();
+    // Don't settle — switch tabs before first render
+    // commits. The setter path must tolerate a missing
+    // element gracefully.
+    p._tabs.set('agent-0', p._makeTabState());
+    expect(() => {
+      p._activeTabId = 'agent-0';
+    }).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Per-tab state structure (D21 Phase A1)
 // ---------------------------------------------------------------------------
 

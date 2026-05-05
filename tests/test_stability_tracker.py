@@ -1901,3 +1901,486 @@ class TestBackfillL0AfterMeasurement:
             "L1 → L0" in c and "backfill" in c and "a.py" in c
             for c in changes
         )
+
+
+# ---------------------------------------------------------------------------
+# Backfill — candidate_keys restriction (cross-ref seeding)
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillCandidateKeys:
+    """``candidate_keys`` filter restricts which items are promoted.
+
+    Added so :func:`seed_cross_reference_items` can tell the
+    backfill "only consider these newly-seeded keys, not
+    everything in L1/L2/L3". Without the filter, toggling
+    cross-ref on would promote unrelated content that users
+    carefully placed into cached tiers — confusing and
+    unrelated to the user's intent.
+
+    Governing contract: specs4/3-llm/modes.md § Cross-Reference
+    Activation — "Primary-index items already resident in L0
+    are never evicted — only L1/L2/L3 candidates are considered
+    for the backfill promotion".
+    """
+
+    def test_none_means_all_candidates_eligible(self) -> None:
+        """Default (None) → every L1/L2/L3 item is a candidate.
+
+        Preserves the pre-existing behaviour for primary init
+        paths that haven't been updated to pass the filter.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L2, n_value=6,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10, "b.py": 5})
+        # candidate_keys=None — default behaviour.
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # target × 1.5 = 750. Both promote (acc: 300, 600, 750+).
+        # Actually: acc=0 < 750 → promote a → acc=300,
+        # acc=300 < 750 → promote b → acc=600, no more
+        # candidates. Both end in L0.
+        assert promoted == 2
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:b.py"].tier == Tier.L0
+
+    def test_empty_set_promotes_nothing(self) -> None:
+        """Empty ``candidate_keys`` → no eligible items.
+
+        Distinct from None — empty set means "I have a
+        restriction but nothing matches". Every candidate gets
+        filtered out. L0 stays underfilled even with plenty of
+        L1/L2/L3 content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, candidate_keys=set(),
+        )
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_only_listed_keys_eligible(self) -> None:
+        """Items NOT in ``candidate_keys`` are skipped.
+
+        The core contract. Three L1 items, two listed as
+        candidates, one not. The un-listed item must NOT
+        promote regardless of its ref count.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:listed1.py"] = TrackedItem(
+            "symbol:listed1.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:listed2.py"] = TrackedItem(
+            "symbol:listed2.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:excluded.py"] = TrackedItem(
+            "symbol:excluded.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={
+                "listed1.py": 5,
+                "listed2.py": 3,
+                "excluded.py": 100,  # highest — would normally win
+            },
+        )
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={
+                "symbol:listed1.py", "symbol:listed2.py",
+            },
+        )
+        # Both listed items promote; excluded stays. Target ×
+        # 1.5 = 1500; acc=0 → 300 (listed1) → 600 (listed2) —
+        # no more candidates.
+        assert promoted == 2
+        assert (
+            tracker.get_all_items()["symbol:listed1.py"].tier
+            == Tier.L0
+        )
+        assert (
+            tracker.get_all_items()["symbol:listed2.py"].tier
+            == Tier.L0
+        )
+        # Highest ref count but not in the candidate set — stays.
+        assert (
+            tracker.get_all_items()["symbol:excluded.py"].tier
+            == Tier.L1
+        )
+
+    def test_preserves_pre_existing_l2_entry(self) -> None:
+        """The cross-ref idempotence invariant at the tracker level.
+
+        A user-placed L2 entry (simulating a prior cross-ref
+        session that earned tier state, or a primary-index
+        item) survives a backfill pass that doesn't include
+        it in the candidate set — even when the backfill
+        otherwise has room for it.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Pre-existing L2 entry — the "carefully placed" case.
+        tracker._items["doc:preserved.md"] = TrackedItem(
+            "doc:preserved.md", Tier.L2, n_value=5,
+            content_hash="earned-state", tokens=100,
+        )
+        # Newly-seeded L1 entry — cross-ref pass just added this.
+        tracker._items["doc:fresh.md"] = TrackedItem(
+            "doc:fresh.md", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"preserved.md": 100, "fresh.md": 5},
+        )
+        # Candidate set = only the newly-seeded key.
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, candidate_keys={"doc:fresh.md"},
+        )
+        # Fresh promotes to L0; preserved stays at L2 with
+        # earned state intact.
+        assert promoted == 1
+        assert tracker.get_all_items()["doc:fresh.md"].tier == Tier.L0
+        preserved = tracker.get_all_items()["doc:preserved.md"]
+        assert preserved.tier == Tier.L2
+        assert preserved.n_value == 5
+        assert preserved.content_hash == "earned-state"
+
+    def test_filter_respects_tier_exclusion_of_l0(self) -> None:
+        """candidate_keys filter runs on top of the L0 tier filter.
+
+        A key in ``candidate_keys`` that's already at L0 is
+        still excluded — the backfill's existing
+        L1/L2/L3-only rule wins. Belt and braces: the caller
+        can pass any keys they like without risking an
+        already-in-L0 item being re-promoted (which would
+        reset its n_value).
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Item already at L0 with earned N.
+        tracker._items["symbol:already.py"] = TrackedItem(
+            "symbol:already.py", Tier.L0, n_value=20,
+            content_hash="h1", tokens=300,
+        )
+        # Candidate also included.
+        tracker._items["symbol:candidate.py"] = TrackedItem(
+            "symbol:candidate.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=200,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"already.py": 100, "candidate.py": 5},
+        )
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={
+                "symbol:already.py", "symbol:candidate.py",
+            },
+        )
+        # Only candidate promotes — already stays with its
+        # earned N preserved, not re-entered at entry_n.
+        assert promoted == 1
+        already = tracker.get_all_items()["symbol:already.py"]
+        assert already.tier == Tier.L0
+        assert already.n_value == 20  # not reset to entry_n=12
+
+    def test_filter_respects_prefix_exclusion(self) -> None:
+        """candidate_keys filter runs on top of the prefix filter.
+
+        ``history:`` and ``url:`` keys are never eligible
+        regardless of candidate_keys membership. The filter
+        is a restriction, not an override.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["history:0"] = TrackedItem(
+            "history:0", Tier.L3, n_value=3,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={"history:0", "url:abc"},
+        )
+        assert promoted == 0
+        assert tracker.get_all_items()["history:0"].tier == Tier.L3
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+
+
+# ---------------------------------------------------------------------------
+# distribute_keys_by_clustering — append without disturbing existing state
+# ---------------------------------------------------------------------------
+
+
+class TestDistributeKeysByClustering:
+    """Append keys to the tracker across L1/L2/L3 via clustering.
+
+    Used by :func:`seed_cross_reference_items` for cross-ref
+    activation. Mirrors :meth:`initialize_with_keys`'s
+    clustering path but never places into L0 and never
+    overwrites existing tracker entries. Governing spec:
+    specs4/3-llm/modes.md § Cross-Reference Activation.
+    """
+
+    def test_empty_keys_is_noop(self) -> None:
+        """No keys → no side effects."""
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            _FakeRefIndex(),
+            keys=[],
+            files=[],
+        )
+        assert tracker.get_all_items() == {}
+
+    def test_keys_files_length_mismatch_raises(self) -> None:
+        """Defensive — mismatched input lengths fail loudly."""
+        tracker = StabilityTracker()
+        with pytest.raises(ValueError, match="length"):
+            tracker.distribute_keys_by_clustering(
+                _FakeRefIndex(),
+                keys=["doc:a.md", "doc:b.md"],
+                files=["a.md"],
+            )
+
+    def test_skips_keys_already_in_tracker(self) -> None:
+        """Pre-existing tracked keys are preserved verbatim.
+
+        The core idempotence contract — cross-ref enable
+        must not overwrite tier/N state on keys that a prior
+        pass already placed. Here we seed a key at L0 with
+        a distinctive N value, then call the method with
+        that key in the input. The item stays at L0 with its
+        N value untouched.
+        """
+        tracker = StabilityTracker()
+        # Pre-seed at L0 with earned state.
+        tracker._items["doc:existing.md"] = TrackedItem(
+            "doc:existing.md", Tier.L0, n_value=15,
+            content_hash="earned", tokens=500,
+        )
+        ref = _FakeRefIndex(ref_counts={"existing.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:existing.md"],
+            files=["existing.md"],
+        )
+        item = tracker.get_all_items()["doc:existing.md"]
+        assert item.tier == Tier.L0
+        assert item.n_value == 15
+        assert item.content_hash == "earned"
+        assert item.tokens == 500
+
+    def test_new_keys_land_in_cached_tiers(self) -> None:
+        """Fresh keys distribute across L1/L2/L3 — never L0, never ACTIVE.
+
+        L0 is reserved for primary index content; cross-ref
+        distribution targets L1/L2/L3 explicitly. ACTIVE is
+        never a distribution target — items go to ACTIVE only
+        via the Phase 1 demotion path.
+        """
+        ref = _FakeRefIndex(ref_counts={"a.md": 5, "b.md": 3, "c.md": 1})
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        for item in tracker.get_all_items().values():
+            assert item.tier not in (Tier.L0, Tier.ACTIVE)
+            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+    def test_distributes_across_all_three_tiers(self) -> None:
+        """Three singleton components → one per tier.
+
+        Greedy bin-packer picks the smallest-sized tier for
+        each component. With three components of size 1 and
+        three empty tiers, they spread one-per-tier. Deterministic
+        tie-break means each tier gets exactly one.
+        """
+        ref = _FakeRefIndex()  # no components, all orphans
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        for tier in (Tier.L1, Tier.L2, Tier.L3):
+            assert len(tracker.get_tier_items(tier)) == 1, (
+                f"{tier} should have exactly 1 item, "
+                f"got {len(tracker.get_tier_items(tier))}"
+            )
+
+    def test_placeholder_hash_and_tokens(self) -> None:
+        """Seeded items get placeholder state, not real counts.
+
+        Caller (seed_cross_reference_items) calls
+        measure_tracker_tokens afterward to replace
+        placeholders with real counts. Phase 1's first-
+        measurement acceptance handles the placeholder-to-real
+        hash transition without a spurious demotion.
+        """
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md"],
+            files=["a.md"],
+        )
+        item = tracker.get_all_items()["doc:a.md"]
+        assert item.content_hash == ""
+        assert item.tokens == 400  # _PLACEHOLDER_TOKENS
+
+    def test_placed_at_tier_entry_n(self) -> None:
+        """Each seeded item lands with its tier's entry_n.
+
+        Matches the primary init path — items enter at the
+        tier's documented entry_n so they don't get
+        mistakenly anchored or capped differently than
+        primary content.
+        """
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # Each tier's entry_n — L1=9, L2=6, L3=3.
+        for tier, expected_n in [
+            (Tier.L1, 9),
+            (Tier.L2, 6),
+            (Tier.L3, 3),
+        ]:
+            items = tracker.get_tier_items(tier)
+            assert items, f"{tier} empty"
+            for item in items.values():
+                assert item.n_value == expected_n, (
+                    f"{item.key} at {tier} has n_value "
+                    f"{item.n_value}, expected {expected_n}"
+                )
+
+    def test_marks_destination_tiers_broken(self) -> None:
+        """Every tier that receives content is marked broken.
+
+        Without this the next request's cache breakpoints
+        would be computed against stale tier state — the
+        newly-seeded content wouldn't be included in the
+        cache block rebuild.
+        """
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # Three singletons → distributed across L1/L2/L3 →
+        # all three tiers broken.
+        assert Tier.L1 in tracker._broken_tiers
+        assert Tier.L2 in tracker._broken_tiers
+        assert Tier.L3 in tracker._broken_tiers
+
+    def test_mixed_pre_existing_and_new(self) -> None:
+        """One pre-existing key, one new — only the new one lands.
+
+        End-to-end check of the preservation + distribution
+        interaction. Pre-existing key stays at its L0 seat;
+        new key lands in a cached tier.
+        """
+        tracker = StabilityTracker()
+        tracker._items["doc:old.md"] = TrackedItem(
+            "doc:old.md", Tier.L0, n_value=12,
+            content_hash="old-hash", tokens=200,
+        )
+        ref = _FakeRefIndex(ref_counts={"old.md": 10, "new.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:old.md", "doc:new.md"],
+            files=["old.md", "new.md"],
+        )
+        # Old unchanged.
+        old = tracker.get_all_items()["doc:old.md"]
+        assert old.tier == Tier.L0
+        assert old.content_hash == "old-hash"
+        # New placed in a cached tier (not L0, not ACTIVE).
+        new = tracker.get_all_items()["doc:new.md"]
+        assert new.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+    def test_all_keys_pre_existing_is_noop(self) -> None:
+        """Every input key already tracked → no tier changes.
+
+        After filtering out already-tracked pairs, nothing
+        remains to distribute. The method returns without
+        marking any tiers broken.
+        """
+        tracker = StabilityTracker()
+        tracker._items["doc:a.md"] = TrackedItem(
+            "doc:a.md", Tier.L2, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+        tracker._broken_tiers.clear()
+        ref = _FakeRefIndex(ref_counts={"a.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md"],
+            files=["a.md"],
+        )
+        # No new items added.
+        assert len(tracker.get_all_items()) == 1
+        # No tiers marked broken — nothing changed.
+        assert tracker._broken_tiers == set()
+
+    def test_orphans_spread_via_singletons(self) -> None:
+        """Files not in any component still get distributed.
+
+        The real cross-ref case has many files with no doc-
+        to-doc links; they'd be absent from the ref index's
+        components. The method must still place them
+        (matching the primary init path's orphan handling).
+        """
+        # No components; every file is an orphan.
+        ref = _FakeRefIndex(components=[], ref_counts={})
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md"],
+            files=["a.md", "b.md"],
+        )
+        assert tracker.has_item("doc:a.md")
+        assert tracker.has_item("doc:b.md")
+
+    def test_component_clusters_land_together(self) -> None:
+        """Files in the same component share a tier.
+
+        The bin-packer assigns each component to one tier,
+        so tightly-coupled files ride together through
+        cache cycles — they invalidate or promote as a
+        group, matching how users mentally group them.
+        """
+        ref = _FakeRefIndex(components=[{"a.md", "b.md", "c.md"}])
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # All three should be in the same tier (same
+        # component → same tier via bin-packer).
+        items = tracker.get_all_items()
+        tiers = {item.tier for item in items.values()}
+        assert len(tiers) == 1, (
+            f"clustered files should share a tier, got {tiers}"
+        )

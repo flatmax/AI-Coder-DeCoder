@@ -940,6 +940,259 @@ class TestSetAgentSelectedFilesLocalhostOnly:
         assert scope.selected_files == []
 
 
+class TestSetAgentExcludedIndexFiles:
+    """D23 — set_agent_excluded_index_files RPC.
+
+    Per-agent analogue of :meth:`LLMService.set_excluded_index_files`.
+    The frontend routes picker shift-click exclusion toggles
+    here when an agent tab is active; the main-tab path still
+    hits set_excluded_index_files.
+
+    Tests cover happy path, missing-agent error, per-agent
+    tracker entry removal (so stale rows don't linger in the
+    cache viewer), and the restricted-error path. The
+    ``excluded_index_files`` field on ConversationScope starts
+    empty; successful calls replace it.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_turn_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown turn_id → agent-not-found error."""
+        result = service.set_agent_excluded_index_files(
+            "turn_nonexistent", 0, ["file.py"],
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_unknown_agent_idx_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Known turn but unknown agent_idx → error."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_known",
+        )
+        result = service.set_agent_excluded_index_files(
+            "turn_known", 99, [],
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_replaces_excluded_files(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Exclusion replacement — new list becomes canonical."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Scope starts with empty exclusion list.
+        assert scope.excluded_index_files == []
+        result = service.set_agent_excluded_index_files(
+            "turn_t", 0, ["a.py", "b.py"],
+        )
+        assert result == ["a.py", "b.py"]
+        # Scope reflects the change.
+        assert scope.excluded_index_files == ["a.py", "b.py"]
+
+    def test_empty_list_clears_exclusion(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Passing [] clears the agent's exclusion set."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_clear",
+        )
+        service.set_agent_excluded_index_files(
+            "turn_clear", 0, ["a.py"],
+        )
+        assert scope.excluded_index_files == ["a.py"]
+        result = service.set_agent_excluded_index_files(
+            "turn_clear", 0, [],
+        )
+        assert result == []
+        assert scope.excluded_index_files == []
+
+    def test_returns_copy_not_internal_list(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Caller mutations of the return value don't affect scope."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_copy",
+        )
+        result = service.set_agent_excluded_index_files(
+            "turn_copy", 0, ["a.py"],
+        )
+        assert isinstance(result, list)
+        result.append("injected.py")
+        # Scope's list unaffected.
+        assert scope.excluded_index_files == ["a.py"]
+
+    def test_non_string_entries_filtered(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-string entries dropped — defensive against bad payloads."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_typed",
+        )
+        result = service.set_agent_excluded_index_files(
+            "turn_typed", 0, ["a.py", 42, None, ["nested"]],
+        )
+        # Only the string survives.
+        assert result == ["a.py"]
+
+    def test_removes_stale_tracker_entries(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Excluded paths are purged from the agent's tracker.
+
+        The Context tab's Cache sub-view reads per-agent
+        tracker state via the agent-tagged
+        ``get_context_breakdown``. Without this purge, a
+        previously-tracked ``symbol:foo.py`` entry would
+        linger after the user excludes foo.py — showing
+        a stale row the user just said they didn't want.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_purge",
+        )
+        # Seed symbol:, doc:, and file: entries for the
+        # path we're about to exclude. All three prefixes
+        # must be purged — that's the invariant.
+        tracker = scope.tracker
+        for prefix in ("symbol:", "doc:", "file:"):
+            tracker._items[prefix + "drop.py"] = TrackedItem(
+                key=prefix + "drop.py",
+                tier=Tier.L1,
+                n_value=3,
+                content_hash="h",
+                tokens=100,
+            )
+        # Also seed an entry for a different path — must
+        # survive the exclusion.
+        tracker._items["symbol:keep.py"] = TrackedItem(
+            key="symbol:keep.py",
+            tier=Tier.L1,
+            n_value=3,
+            content_hash="h",
+            tokens=100,
+        )
+
+        service.set_agent_excluded_index_files(
+            "turn_purge", 0, ["drop.py"],
+        )
+
+        # Every prefix for drop.py gone.
+        for prefix in ("symbol:", "doc:", "file:"):
+            assert not tracker.has_item(prefix + "drop.py")
+        # Unrelated entry untouched.
+        assert tracker.has_item("symbol:keep.py")
+
+    def test_multiple_agents_isolated(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Excluding on one agent doesn't affect sibling agents.
+
+        Per-tab state invariant — agent-0's exclusion
+        changes must not leak into agent-1's scope.
+        """
+        parent_scope = service._default_scope()
+        scope_a = service._build_agent_scope(
+            block=self._make_agent_block("a0"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_both",
+        )
+        scope_b = service._build_agent_scope(
+            block=self._make_agent_block("a1"),
+            agent_idx=1,
+            parent_scope=parent_scope,
+            turn_id="turn_both",
+        )
+        service.set_agent_excluded_index_files(
+            "turn_both", 0, ["a-only.py"],
+        )
+        assert scope_a.excluded_index_files == ["a-only.py"]
+        assert scope_b.excluded_index_files == []
+
+
+class TestSetAgentExcludedIndexFilesLocalhostOnly:
+    """D23 — set_agent_excluded_index_files restricts non-localhost."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block(),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_restricted",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.set_agent_excluded_index_files(
+            "turn_restricted", 0, ["a.py"],
+        )
+        assert result.get("error") == "restricted"
+        # Scope NOT mutated.
+        assert scope.excluded_index_files == []
+
+
 class TestParseAgentTag:
     """C1c — :meth:`LLMService._parse_agent_tag` input coercion.
 

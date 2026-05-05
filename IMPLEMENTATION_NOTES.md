@@ -397,6 +397,20 @@ Historical detail archived to [specs4/impl-history/layer-2.md](specs4/impl-histo
 
 ## Layer 5 — in progress
 
+## Known bugs — per-tab state
+
+### URL fetch result lands in wrong tab when user switches tabs mid-fetch
+
+**Symptom.** A URL fetch is initiated from agent tab A (user clicks "Fetch" on a chip). While the RPC is in flight (GitHub repo clone + symbol map generation can take 10+ seconds), the user switches to agent tab B. When the fetch resolves, `chipsEl.markFetched(url, result)` runs against whichever tab's chip state is currently installed on the singleton `ac-url-chips` element — which is B, not A. The user sees a chip for a URL they never fetched on B, and A's own chip stays in `fetching` state indefinitely.
+
+**Root cause.** Per-tab URL chip state (D23 Commit 4) is swapped in/out of the singleton `ac-url-chips` element on tab switch via `_snapshotUrlChipsForTab` / `_restoreUrlChipsForTab`. The fetch RPC closure in `_onUrlFetchRequested` captures the `chipsEl` reference, not the tab ID — so when the promise resolves, the mutation lands on whichever tab is currently showing.
+
+**Fix shape (when this becomes a real pain point).** Capture the originating tab ID at fetch-initiation time, look up that tab's state slot when the promise resolves, and mutate the state slot directly (rather than via the singleton element). If the originating tab is still active, also mutate the live element. If it's inactive, the snapshot carries the updated state and restoration on next tab switch surfaces it. Same pattern for `markErrored`.
+
+**Why deferred.** The bug only fires when the user actively switches tabs during a multi-second fetch — rare outside of GitHub repo clones. The common case (stay on the tab while URL fetches complete) works correctly. Fixing it requires threading the tab ID through three async paths (`markFetching`, `markFetched`/`markErrored`, and the chat-panel-level view-content dialog's fallback fetch) and adding a per-tab chip-mutation helper that operates on snapshots rather than the live element.
+
+**Grep for `TODO(url-fetch-cross-tab)` in `chat-panel.js` when attacking this.**
+
 ## Deferred cleanup
 
 Temporary scaffolding installed to keep a test/output path quiet, with the fix scheduled for a specific future phase. Grep `TODO(phase-` across the tree to find markers.

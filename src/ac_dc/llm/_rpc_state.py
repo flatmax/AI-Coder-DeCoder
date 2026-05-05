@@ -376,3 +376,50 @@ def set_agent_selected_files(
     scope.selected_files.clear()
     scope.selected_files.extend(valid)
     return list(scope.selected_files)
+
+
+def set_agent_excluded_index_files(
+    service: "LLMService",
+    turn_id: str,
+    agent_idx: int,
+    files: list[str],
+) -> list[str] | dict[str, Any]:
+    """Replace an agent's excluded-index-files list.
+
+    Per-agent analogue of :func:`set_excluded_index_files`.
+    Excluded files have no content, no index block, and no
+    tracker item in the agent's scope. Mirrors the selection
+    RPC shape: `{error: "agent not found"}` when the tab has
+    been closed, otherwise returns the canonical list.
+
+    Unlike the main-conversation version, this does NOT remove
+    stale tracker entries from every mode's tracker — agent
+    scopes carry a single StabilityTracker with no mode switch,
+    so there's nothing to purge beyond the active tracker.
+    No ``filesChanged`` broadcast — agent-tab state is not
+    shared across clients.
+    """
+    restricted = service._check_localhost_only()
+    if restricted is not None:
+        return restricted
+    turn_bucket = service._agent_contexts.get(turn_id)
+    if turn_bucket is None:
+        return {"error": "agent not found"}
+    scope = turn_bucket.get(agent_idx)
+    if scope is None:
+        return {"error": "agent not found"}
+    valid = [p for p in files if isinstance(p, str)]
+    scope.excluded_index_files = list(valid)
+    # Drop matching entries from the agent's tracker so stale
+    # rows don't linger in the cache viewer's per-agent view.
+    tracker = scope.tracker
+    for path in valid:
+        for prefix in ("symbol:", "doc:", "file:"):
+            key = prefix + path
+            if tracker.has_item(key):
+                all_items = tracker.get_all_items()
+                item = all_items.get(key)
+                if item is not None:
+                    tracker._items.pop(key, None)
+                    tracker._broken_tiers.add(item.tier)
+    return list(valid)

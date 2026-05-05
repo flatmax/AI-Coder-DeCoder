@@ -75,6 +75,7 @@ import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import './file-picker.js';
 import './chat-panel.js';
+import { parseAgentTabId } from './chat-panel.js';
 import './commit-graph.js';
 
 // ---------------------------------------------------------------
@@ -617,13 +618,14 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._activeTabId = 'main';
     this._selectedFilesByTab = new Map();
     this._selectedFilesByTab.set('main', new Set());
-    // Authoritative exclusion state — the third position in
-    // the picker's three-state checkbox model. Parallel to
-    // `_selectedFiles`: orchestrator owns the Set, picker
-    // receives a copy via direct-update pattern, server is
-    // notified via `LLMService.set_excluded_index_files` on
-    // every change.
-    this._excludedFiles = new Set();
+    // Authoritative exclusion state — per-tab, parallel to
+    // selection. Per specs4/5-webapp/agent-browser.md §
+    // File Picker Scope: "Excluded-files state is also
+    // per-tab." The `_excludedFiles` getter/setter below
+    // routes through the active tab's entry, matching the
+    // selection pattern.
+    this._excludedFilesByTab = new Map();
+    this._excludedFilesByTab.set('main', new Set());
     // Path of the file currently active in a viewer, or
     // null. Updated from viewer `active-file-changed`
     // events (they bubble + compose out to the window),
@@ -844,6 +846,20 @@ export class FilesTab extends RpcMixin(LitElement) {
     // passes whatever it was given.
     const set = value instanceof Set ? value : new Set(value);
     this._selectedFilesByTab.set(this._activeTabId, set);
+  }
+
+  get _excludedFiles() {
+    let set = this._excludedFilesByTab.get(this._activeTabId);
+    if (set === undefined) {
+      set = new Set();
+      this._excludedFilesByTab.set(this._activeTabId, set);
+    }
+    return set;
+  }
+
+  set _excludedFiles(value) {
+    const set = value instanceof Set ? value : new Set(value);
+    this._excludedFilesByTab.set(this._activeTabId, set);
   }
 
   // ---------------------------------------------------------------
@@ -1446,20 +1462,26 @@ export class FilesTab extends RpcMixin(LitElement) {
     if (typeof tabId !== 'string' || !tabId) return;
     if (tabId === this._activeTabId) return;
     this._activeTabId = tabId;
-    // Ensure the Map has an entry — the getter does
+    // Ensure the Maps have entries — the getters do
     // this lazily too, but doing it up front keeps the
     // subsequent .get() deterministic.
     if (!this._selectedFilesByTab.has(tabId)) {
       this._selectedFilesByTab.set(tabId, new Set());
     }
+    if (!this._excludedFilesByTab.has(tabId)) {
+      this._excludedFilesByTab.set(tabId, new Set());
+    }
     const tabSelection = this._selectedFilesByTab.get(tabId);
+    const tabExclusion = this._excludedFilesByTab.get(tabId);
     // Push to the picker. Direct-update pattern, same as
-    // _applySelection — assign a fresh Set then
+    // _applySelection — assign fresh Sets then
     // requestUpdate so the picker's internal
-    // `selectedFiles` prop reflects the active tab.
+    // `selectedFiles` / `excludedFiles` props reflect
+    // the active tab.
     const picker = this._picker();
     if (picker) {
       picker.selectedFiles = new Set(tabSelection);
+      picker.excludedFiles = new Set(tabExclusion);
       picker.requestUpdate();
     }
     // Chat panel is already tracking the active tab
@@ -1651,28 +1673,61 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   async _sendSelectionToServer(files) {
+    // Route by active tab: main → set_selected_files,
+    // agent tab → set_agent_selected_files(turn_id,
+    // agent_idx, files). parseAgentTabId returns null
+    // for 'main' or malformed IDs, in which case we use
+    // the main RPC path (the tab-as-main case).
+    //
+    // Per specs4/5-webapp/agent-browser.md § File Picker
+    // Scope: "A user granting a file to agent 2 doesn't
+    // affect the main LLM's context on the next turn."
+    // Without this dispatch, every selection change on
+    // any tab clobbers the main tab's server-side
+    // selection.
+    const agentTag = parseAgentTabId(this._activeTabId);
     try {
-      const result = await this.rpcExtract(
-        'LLMService.set_selected_files',
-        files,
-      );
-      // The server returns either an array of paths (success)
-      // or `{error: "restricted", reason: ...}` for
-      // non-localhost callers in collab mode. Surface the
-      // restricted case via toast; the picker's optimistic
-      // state has already been applied. In collab mode the
-      // server will follow up with a `filesChanged` broadcast
-      // that restores the authoritative state.
+      let result;
+      if (agentTag) {
+        const [turnId, agentIdx] = agentTag;
+        result = await this.rpcExtract(
+          'LLMService.set_agent_selected_files',
+          turnId,
+          agentIdx,
+          files,
+        );
+      } else {
+        result = await this.rpcExtract(
+          'LLMService.set_selected_files',
+          files,
+        );
+      }
+      // The server returns either an array of paths
+      // (success) or an error dict. `{error:
+      // "restricted", ...}` is collab-mode localhost gate.
+      // `{error: "agent not found"}` happens when the
+      // tab was closed server-side between the last tab
+      // switch and this selection change — treat it as a
+      // warning; the tab's local state is stale but the
+      // chat panel's close-tab flow will clean up
+      // eventually.
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         if (result.error === 'restricted') {
           this._showToast(
             result.reason || 'Restricted operation',
             'warning',
           );
+        } else if (result.error === 'agent not found') {
+          this._showToast(
+            'Agent tab no longer available on server',
+            'warning',
+          );
         }
       }
     } catch (err) {
-      console.error('[files-tab] set_selected_files failed', err);
+      console.error(
+        '[files-tab] set_selected_files failed', err,
+      );
       this._showToast(
         `Failed to update selection: ${err?.message || err}`,
         'error',
@@ -1712,18 +1767,35 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   async _sendExclusionToServer(files) {
+    // Same dispatch rule as _sendSelectionToServer. Per
+    // specs4/5-webapp/agent-browser.md § File Picker
+    // Scope: "Excluded-files state is also per-tab."
+    const agentTag = parseAgentTabId(this._activeTabId);
     try {
-      const result = await this.rpcExtract(
-        'LLMService.set_excluded_index_files',
-        files,
-      );
-      // Same shape as set_selected_files — array on success,
-      // restricted-error dict for non-localhost callers in
-      // collab mode.
+      let result;
+      if (agentTag) {
+        const [turnId, agentIdx] = agentTag;
+        result = await this.rpcExtract(
+          'LLMService.set_agent_excluded_index_files',
+          turnId,
+          agentIdx,
+          files,
+        );
+      } else {
+        result = await this.rpcExtract(
+          'LLMService.set_excluded_index_files',
+          files,
+        );
+      }
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         if (result.error === 'restricted') {
           this._showToast(
             result.reason || 'Restricted operation',
+            'warning',
+          );
+        } else if (result.error === 'agent not found') {
+          this._showToast(
+            'Agent tab no longer available on server',
             'warning',
           );
         }

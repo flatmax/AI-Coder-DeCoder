@@ -425,71 +425,129 @@ def update_stability(
 
 
 def seed_cross_reference_items(service: "LLMService") -> None:
-    """Add opposite-index items to the active tracker.
+    """Distribute opposite-index items across L0/L1/L2/L3 on enable.
 
-    Iterates the non-primary index's files (doc outlines in
-    code mode, symbol files in doc mode) and creates tracker
-    entries at ACTIVE with N=0. The next ``update_stability``
-    cycle promotes them via the standard N-value machinery.
+    Runs the same reference-graph clustering the primary index
+    uses at startup, scoped to the opposite index. Cross-ref
+    items land across L1/L2/L3 via clustering, then the most-
+    connected ones promote into L0 via the post-measurement
+    backfill — so the provider cache absorbs them on the next
+    request rather than ingesting the whole opposite index as
+    a single uncached block.
+
+    L0 promotion follows the same "most-connected lives
+    longest" intent as primary-index seeding. Primary-index
+    items already in L0 are never evicted: the backfill
+    method only considers candidates currently in L1/L2/L3.
+
+    The earlier implementation seeded every cross-ref item at
+    ACTIVE with N=0, which meant turning cross-ref on produced
+    a single massive active-context block. That block would
+    only shrink as individual items cycled through many
+    update_stability calls (one N-increment per turn) before
+    graduating to L3 and slowly promoting upward — effectively
+    never reaching a stable distribution for a repo of any
+    size.
 
     Selected files are excluded — they carry content via
     ``file:`` entries and the cross-ref entry would be
     redundant. Missing blocks (outline not yet loaded, symbol
-    index empty) are skipped silently. Items already tracked
-    (from a prior enable or mode switch edge case) are left
-    alone to preserve their tier/N state.
-    """
-    from ac_dc.stability_tracker import Tier, TrackedItem
+    index empty) are skipped. Items already tracked
+    (``symbol:*`` in code mode, ``doc:*`` in doc mode, or
+    leftover cross-ref entries from a prior enable) are left
+    alone — the new
+    :meth:`StabilityTracker.distribute_keys_by_clustering`
+    method skips any key already in the tracker.
 
+    Real token counts replace placeholders immediately via
+    :meth:`measure_tracker_tokens` so the next cascade has
+    accurate numbers for the anchor / cap / underfill logic.
+    """
     tracker = service._stability_tracker
     selected_set = set(service._selected_files)
-    affected_tiers: set[Tier] = set()
+    excluded_set = set(
+        getattr(service, "_excluded_index_files", None) or ()
+    )
 
     if service._context.mode == Mode.CODE:
-        # Code mode primary → add doc: entries as secondary.
-        for path in list(service._doc_index._all_outlines.keys()):
-            if path in selected_set:
-                continue
-            block = service._doc_index.get_file_doc_block(path)
-            if not block:
-                continue
-            sig_hash = service._doc_index.get_signature_hash(path)
-            key = f"doc:{path}"
-            if key in tracker._items:
-                continue
-            tracker._items[key] = TrackedItem(
-                key=key,
-                tier=Tier.ACTIVE,
-                n_value=0,
-                content_hash=sig_hash or "",
-                tokens=service._counter.count(block),
-            )
-            affected_tiers.add(Tier.ACTIVE)
+        # Code mode primary → doc: entries as secondary.
+        ref_index = service._doc_index._ref_index
+        candidate_paths = [
+            path
+            for path in service._doc_index._all_outlines.keys()
+            if path not in selected_set
+            and path not in excluded_set
+            and service._doc_index.get_file_doc_block(path)
+        ]
+        keys = [f"doc:{path}" for path in candidate_paths]
     else:
-        # Doc mode primary → add symbol: entries as secondary.
+        # Doc mode primary → symbol: entries as secondary.
         if service._symbol_index is None:
             return
-        for path in list(service._symbol_index._all_symbols.keys()):
-            if path in selected_set:
-                continue
-            block = service._symbol_index.get_file_symbol_block(path)
-            if not block:
-                continue
-            sig_hash = service._symbol_index.get_signature_hash(path)
-            key = f"symbol:{path}"
-            if key in tracker._items:
-                continue
-            tracker._items[key] = TrackedItem(
-                key=key,
-                tier=Tier.ACTIVE,
-                n_value=0,
-                content_hash=sig_hash or "",
-                tokens=service._counter.count(block),
-            )
-            affected_tiers.add(Tier.ACTIVE)
+        ref_index = service._symbol_index._ref_index
+        candidate_paths = [
+            path
+            for path in service._symbol_index._all_symbols.keys()
+            if path not in selected_set
+            and path not in excluded_set
+            and service._symbol_index.get_file_symbol_block(path)
+        ]
+        keys = [f"symbol:{path}" for path in candidate_paths]
 
-    for tier in affected_tiers:
-        tracker._broken_tiers.add(tier)
+    if not candidate_paths:
+        return
+
+    # Snapshot the tracker's key set BEFORE distribution so we
+    # can determine which keys were actually newly added by
+    # this pass. distribute_keys_by_clustering skips keys that
+    # are already tracked — so the ``keys`` input list may be
+    # a superset of what actually got added. We need the
+    # strict subset (additions only) for the backfill's
+    # candidate restriction below.
+    keys_before = set(tracker._items.keys())
+
+    tracker.distribute_keys_by_clustering(
+        ref_index,
+        keys=keys,
+        files=candidate_paths,
+    )
+
+    # Replace placeholder tokens with real measured counts so
+    # the next cascade's anchor / cap / underfill decisions
+    # are based on accurate sizes.
+    measure_tracker_tokens(service)
+
+    # Promote the most-connected cross-ref items into L0
+    # until the L0 token total reaches the cache-target
+    # overshoot threshold. Mirrors what the primary index's
+    # init path does: post-measurement, real token counts
+    # almost always come in well under the placeholder
+    # estimate, which leaves L0 underfilled. The backfill
+    # pass brings L0 up to ~1.5x the cache target so the
+    # provider actually caches it. See
+    # :meth:`StabilityTracker.backfill_l0_after_measurement`.
+    #
+    # Restrict candidates to the keys actually added by the
+    # distribution pass above — NOT every key in the input
+    # list. An item in the input list that was already
+    # tracked (pre-existing cross-ref entry from a prior
+    # enable, or a primary-index item under the same key)
+    # was deliberately skipped by
+    # distribute_keys_by_clustering to preserve its state;
+    # including it here would let the backfill promote it to
+    # L0 as a side effect of toggling cross-ref on, undoing
+    # the preservation.
+    #
+    # L0 items from the primary index are safe regardless
+    # (the backfill's tier filter already excludes L0
+    # candidates), but L1/L2/L3 pre-existing items need the
+    # explicit "newly-added only" restriction to stay put.
+    newly_added_keys = set(tracker._items.keys()) - keys_before
+    if newly_added_keys:
+        tracker.backfill_l0_after_measurement(
+            ref_index,
+            candidate_keys=newly_added_keys,
+        )
 
 
 def remove_cross_reference_items(service: "LLMService") -> None:

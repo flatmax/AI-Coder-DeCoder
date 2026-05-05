@@ -21,11 +21,39 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.context_manager import Mode
-from ac_dc.llm._types import _TIER_CONFIG_LOOKUP
+from ac_dc.llm._types import ConversationScope, _TIER_CONFIG_LOOKUP
 from ac_dc.stability_tracker import Tier
 
 if TYPE_CHECKING:
     from ac_dc.llm_service import LLMService
+
+
+def _resolve_scope(
+    service: "LLMService",
+    agent_tag: tuple[str, int] | None,
+) -> ConversationScope | None:
+    """Return the ConversationScope for an agent tag, or None for main.
+
+    None means "use the main conversation" — the caller reads
+    state directly from the service. A non-None return identifies
+    an existing agent scope in ``service._agent_contexts``. When
+    the tag points to a non-existent agent (closed between UI
+    event and RPC), returns the sentinel ``False`` so the caller
+    can distinguish "main" from "stale agent".
+
+    Three-way return (None / ConversationScope / False) keeps
+    the caller's dispatch clean without an extra exception path.
+    """
+    if agent_tag is None:
+        return None
+    turn_id, agent_idx = agent_tag
+    turn_bucket = service._agent_contexts.get(turn_id)
+    if turn_bucket is None:
+        return False  # type: ignore[return-value]
+    scope = turn_bucket.get(agent_idx)
+    if scope is None:
+        return False  # type: ignore[return-value]
+    return scope
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +61,10 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def wide_map_exclude_set(service: "LLMService") -> set[str]:
+def wide_map_exclude_set(
+    service: "LLMService",
+    scope: ConversationScope | None = None,
+) -> set[str]:
     """Compute the wide exclusion set for aggregate map bodies.
 
     The aggregate symbol-map or doc-map body (rendered in L0's
@@ -65,13 +96,27 @@ def wide_map_exclude_set(service: "LLMService") -> set[str]:
     ``get_context_breakdown`` (token counts for cache viewer
     rows). A divergence between any two surfaces the same-row/
     different-count bug documented in the spec.
+
+    When ``scope`` is None (default, main conversation),
+    reads selected/excluded/tracker from ``service`` directly.
+    When ``scope`` is provided (agent-tab breakdown), reads
+    those fields from the scope so each agent gets its own
+    exclusion set and cached-tier view.
     """
-    exclude: set[str] = set(service._selected_files)
-    exclude.update(
-        getattr(service, "_excluded_index_files", None) or ()
-    )
+    if scope is None:
+        selected = service._selected_files
+        excluded = getattr(
+            service, "_excluded_index_files", None
+        ) or ()
+        tracker = service._stability_tracker
+    else:
+        selected = scope.selected_files
+        excluded = scope.excluded_index_files
+        tracker = scope.tracker
+    exclude: set[str] = set(selected)
+    exclude.update(excluded)
     for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-        for item_key in service._stability_tracker.get_tier_items(tier):
+        for item_key in tracker.get_tier_items(tier):
             for prefix in ("file:", "symbol:", "doc:"):
                 if item_key.startswith(prefix):
                     exclude.add(item_key[len(prefix):])
@@ -333,6 +378,7 @@ def get_meta_block(
 
 def get_context_breakdown(
     service: "LLMService",
+    agent_tag: tuple[str, int] | None = None,
 ) -> dict[str, Any]:
     """Return the full context/token/tier breakdown for the UI.
 
@@ -341,23 +387,64 @@ def get_context_breakdown(
     the current selected-files list before computing so the
     breakdown reflects what the next LLM request would look like.
 
-    Shape matches specs-reference/5-webapp/viewers-hud.md.
+    When ``agent_tag`` is None (default), returns the main
+    conversation's breakdown. When it identifies an existing
+    agent scope ``(turn_id, agent_idx)``, returns that agent's
+    breakdown — its own ContextManager, StabilityTracker,
+    FileContext, selected/excluded files. Unknown tags return
+    ``{error: "agent not found"}`` so the frontend can
+    distinguish "stale tab" from other errors.
+
+    Shape matches specs-reference/5-webapp/viewers-hud.md. The
+    response adds a top-level ``scope`` field identifying which
+    conversation the data represents — ``"main"`` or the tab ID
+    ``{turn_id}/agent-{NN}`` — so the Context tab can detect
+    when it receives stale data for a tab the user switched
+    away from.
     """
     import logging
     logger = logging.getLogger("ac_dc.llm_service")
 
+    scope = _resolve_scope(service, agent_tag)
+    if scope is False:
+        return {"error": "agent not found"}
+
+    if scope is None:
+        # Main conversation — reads fall through to service.
+        context = service._context
+        tracker = service._stability_tracker
+        file_context = service._file_context
+        selected_files = service._selected_files
+        excluded_set = set(
+            getattr(service, "_excluded_index_files", None)
+            or ()
+        )
+        scope_label = "main"
+    else:
+        context = scope.context
+        tracker = scope.tracker
+        file_context = context.file_context
+        selected_files = scope.selected_files
+        excluded_set = set(scope.excluded_index_files)
+        turn_id, agent_idx = agent_tag  # type: ignore[misc]
+        scope_label = f"{turn_id}/agent-{agent_idx:02d}"
+
     # Sync file context with current selection so the breakdown
     # reflects the next request's state, not a stale snapshot.
-    service._sync_file_context()
+    # Only fires for the main conversation — agent scopes have
+    # their file_context driven by the agent's own streaming
+    # pipeline, and the breakdown is a read-only inspection.
+    if scope is None:
+        service._sync_file_context()
 
-    mode = service._context.mode.value
+    mode = context.mode.value
     model = service._config.model
 
-    # System prompt tokens — mode-aware.
-    if service._context.mode == Mode.DOC:
-        system_prompt = service._config.get_doc_system_prompt()
-    else:
-        system_prompt = service._config.get_system_prompt()
+    # System prompt tokens — mode-aware. Scopes use the
+    # context manager's live system prompt so agent scopes
+    # with their own prompt (set by build_agent_scope from
+    # config.get_agent_system_prompt) are counted correctly.
+    system_prompt = context.get_system_prompt()
     system_tokens = service._counter.count(system_prompt)
 
     # Legend tokens.
@@ -373,12 +460,9 @@ def get_context_breakdown(
     symbol_map = ""
     symbol_map_files = 0
     symbol_map_details: list[dict[str, Any]] = []
-    selected_set = set(service._selected_files)
-    excluded_set = set(
-        getattr(service, "_excluded_index_files", None) or ()
-    )
+    selected_set = set(selected_files)
     try:
-        if service._context.mode == Mode.DOC:
+        if context.mode == Mode.DOC:
             all_paths = list(
                 service._doc_index._all_outlines.keys()
             )
@@ -400,7 +484,7 @@ def get_context_breakdown(
                     "tokens": service._counter.count(block),
                 })
             symbol_map = service._doc_index.get_doc_map(
-                exclude_files=wide_map_exclude_set(service)
+                exclude_files=wide_map_exclude_set(service, scope)
             )
         else:
             if service._symbol_index is not None:
@@ -432,7 +516,7 @@ def get_context_breakdown(
                         "tokens": service._counter.count(block),
                     })
                 symbol_map = service._symbol_index.get_symbol_map(
-                    exclude_files=wide_map_exclude_set(service)
+                    exclude_files=wide_map_exclude_set(service, scope)
                 )
     except Exception as exc:
         logger.debug(
@@ -445,8 +529,8 @@ def get_context_breakdown(
     # File tokens — per-file detail.
     file_details: list[dict[str, Any]] = []
     files_tokens = 0
-    for path in service._file_context.get_files():
-        content = service._file_context.get_content(path)
+    for path in file_context.get_files():
+        content = file_context.get_content(path)
         if content:
             tokens = service._counter.count(content)
             files_tokens += tokens
@@ -482,7 +566,7 @@ def get_context_breakdown(
         )
     # Aggregate url_tokens — prefer the live URL context, fall
     # back to the sum across fetched URLs.
-    url_context = service._context.get_url_context()
+    url_context = context.get_url_context()
     if url_context:
         joined = "\n---\n".join(url_context)
         url_tokens = service._counter.count(joined)
@@ -490,8 +574,8 @@ def get_context_breakdown(
         url_tokens = sum(d.get("tokens", 0) for d in url_details)
 
     # History tokens.
-    history = service._context.get_history()
-    history_tokens = service._context.history_token_count()
+    history = context.get_history()
+    history_tokens = context.history_token_count()
 
     # Total.
     total_tokens = (
@@ -503,7 +587,7 @@ def get_context_breakdown(
     # Cache hit rate from tier data.
     cached_tokens = 0
     all_tier_tokens = 0
-    all_items = service._stability_tracker.get_all_items()
+    all_items = tracker.get_all_items()
     for item in all_items.values():
         all_tier_tokens += item.tokens
         if item.tier not in (Tier.ACTIVE,):
@@ -523,7 +607,7 @@ def get_context_breakdown(
     # Per-tier blocks with contents detail.
     blocks: list[dict[str, Any]] = []
     for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE):
-        tier_items = service._stability_tracker.get_tier_items(tier)
+        tier_items = tracker.get_tier_items(tier)
         if not tier_items:
             continue
         tier_tokens = sum(it.tokens for it in tier_items.values())
@@ -565,17 +649,17 @@ def get_context_breakdown(
             if map_token_count > 0:
                 contents.append({
                     "name": (
-                        "meta:doc_map" if service._context.mode == Mode.DOC
+                        "meta:doc_map" if context.mode == Mode.DOC
                         else "meta:repo_map"
                     ),
                     "path": (
                         "Document structure map"
-                        if service._context.mode == Mode.DOC
+                        if context.mode == Mode.DOC
                         else "Repository structure map"
                     ),
                     "tokens": map_token_count,
                     "type": (
-                        "doc_symbols" if service._context.mode == Mode.DOC
+                        "doc_symbols" if context.mode == Mode.DOC
                         else "symbols"
                     ),
                 })
@@ -619,7 +703,7 @@ def get_context_breakdown(
             "tokens": url_entry["tokens"],
             "type": "urls",
         })
-    review_ctx = service._context.get_review_context()
+    review_ctx = context.get_review_context()
     if review_ctx:
         rv_tokens = service._counter.count(review_ctx)
         if rv_tokens > 0:
@@ -658,7 +742,7 @@ def get_context_breakdown(
         })
 
     # Promotions and demotions from the most recent update.
-    changes = service._stability_tracker.get_changes()
+    changes = tracker.get_changes()
     promotions = [c for c in changes if "promoted" in c or "→ L" in c]
     demotions = [
         c for c in changes
@@ -666,6 +750,7 @@ def get_context_breakdown(
     ]
 
     return {
+        "scope": scope_label,
         "model": model,
         "mode": mode,
         "cross_ref_enabled": service._cross_ref_enabled,
@@ -756,8 +841,15 @@ def print_post_response_hud(service: "LLMService") -> None:
     if not all_items:
         return
 
-    # Section 1: Cache Blocks
-    tier_data: list[tuple[str, int, int, bool]] = []
+    # Section 1: Cache Blocks. We carry the per-tier item
+    # count through to the rendered HUD line so operators
+    # can see "12 items, 4.8K tokens [cached]" instead of
+    # just the aggregate. Silent state drift (an item's
+    # rendered tokens changing without a structural hash
+    # change) shows up as a tier-total shift with no
+    # change-log entry; having the count on-screen makes
+    # the ambiguity easier to diagnose.
+    tier_data: list[tuple[str, int, int, int, bool]] = []
     tier_order = [Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE]
     total_tokens = 0
     cached_tokens = 0
@@ -771,7 +863,9 @@ def print_post_response_hud(service: "LLMService") -> None:
         if is_cached:
             cached_tokens += tokens
         entry_n = _TIER_CONFIG_LOOKUP.get(tier, {}).get("entry_n", 0)
-        tier_data.append((tier.value, entry_n, tokens, is_cached))
+        tier_data.append(
+            (tier.value, entry_n, len(items), tokens, is_cached)
+        )
 
     if tier_data:
         cache_pct = (
@@ -780,15 +874,17 @@ def print_post_response_hud(service: "LLMService") -> None:
             else 0
         )
         content_lines: list[str] = []
-        for name, entry_n, tokens, cached in tier_data:
+        for name, entry_n, count, tokens, cached in tier_data:
             if cached:
                 line = (
                     f"│ {name:<10} ({entry_n}+) "
+                    f"{count:>4} items "
                     f"{tokens:>8,} tokens [cached] │"
                 )
             else:
                 line = (
                     f"│ {name:<10}       "
+                    f"{count:>4} items "
                     f"{tokens:>8,} tokens          │"
                 )
             content_lines.append(line)
