@@ -971,18 +971,21 @@ class TestInitialiseFromReferenceGraph:
         tracker.initialize_from_reference_graph(_FakeRefIndex(), [])
         assert tracker.get_all_items() == {}
 
-    def test_l0_seeding_by_ref_count(self) -> None:
-        """Most-referenced files seed L0 up to cache target.
+    def test_highest_ref_lands_in_l0(self) -> None:
+        """Most-referenced file lands in L0.
 
-        cache_target = 500, placeholder tokens = 400. One item
-        at 400 tokens reaches 400, next would exceed — so only
-        the top-ranked file seeds L0 (since 400 < 500 but
-        adding a second would push us past).
+        Under the four-tier even split, the highest-aggregate-
+        ref-count cluster is processed first by the bin-packer.
+        With all tiers at zero tokens and L0 tied with others
+        for ``min(tier_sizes)``, L0 wins the insertion-order
+        tie-break and receives the highest-rank cluster.
 
-        Actually the logic checks accumulated < target before
-        each add, so after the first item we have 400, then we
-        check 400 < 500 and add the second (reaching 800), then
-        the loop breaks because 800 >= 500. So we seed 2 items.
+        Three orphan files with ref counts 10/5/1 become three
+        singleton clusters. Walking in aggregate-descending
+        order: high.py (10) goes first → L0 (tied at 0,
+        insertion order picks L0). medium.py (5) next → L1
+        (L0 now has tokens, so L1 is the smallest). low.py (1)
+        → L2. L3 stays empty for this three-file case.
         """
         ref = _FakeRefIndex(
             ref_counts={
@@ -999,14 +1002,25 @@ class TestInitialiseFromReferenceGraph:
         # The highest-ref file must end up in L0.
         l0_items = tracker.get_tier_items(Tier.L0)
         assert "symbol:high.py" in l0_items
+        # The other two distribute across L1/L2 (four-tier split
+        # plus bin-packing — each tier gets a file until exhausted).
+        all_items = tracker.get_all_items()
+        medium_tier = all_items["symbol:medium.py"].tier
+        low_tier = all_items["symbol:low.py"].tier
+        assert medium_tier != Tier.L0  # L0 is high.py's
+        assert low_tier != Tier.L0
+        # All three in cached tiers — no file should end up in active.
+        for item in all_items.values():
+            assert item.tier != Tier.ACTIVE
 
-    def test_l0_keys_excluded_from_clustering(self) -> None:
-        """Files seeded into L0 don't appear in L1/L2/L3.
+    def test_clustered_files_share_a_tier(self) -> None:
+        """Files in the same connected component land in the same tier.
 
-        cache_target=300 with placeholder=400 means exactly one
-        item fits in L0 (after adding high.py, accumulated=400
-        ≥ 300, loop breaks). high.py seeds into L0; other.py
-        should land in one of L1/L2/L3 via clustering.
+        The four-tier even split processes clusters as units —
+        each component is assigned to one tier (whichever has
+        the smallest current token total). Two files in the same
+        component land in the same tier regardless of their
+        individual ref counts.
         """
         ref = _FakeRefIndex(
             components=[{"high.py", "other.py"}],
@@ -1017,16 +1031,13 @@ class TestInitialiseFromReferenceGraph:
             ref,
             files=["high.py", "other.py"],
         )
-        l0 = tracker.get_tier_items(Tier.L0)
-        assert "symbol:high.py" in l0
-        # other.py should be in L1/L2/L3, not L0 (since only
-        # high.py was seeded).
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
-            tier_items = tracker.get_tier_items(tier)
-            if "symbol:other.py" in tier_items:
-                break
-        else:
-            pytest.fail("other.py not placed in any cached tier")
+        all_items = tracker.get_all_items()
+        assert all_items["symbol:high.py"].tier == all_items["symbol:other.py"].tier
+        # And that shared tier should be L0 — this cluster's
+        # aggregate (100+2=102) is the highest available, and
+        # L0 wins the insertion-order tie-break when all tiers
+        # are at zero tokens.
+        assert all_items["symbol:high.py"].tier == Tier.L0
 
     def test_orphan_files_distributed(self) -> None:
         """Files with no mutual references become singletons.
@@ -1052,33 +1063,96 @@ class TestInitialiseFromReferenceGraph:
     def test_placeholder_hash_and_tokens(self) -> None:
         """Initialised items start with empty hash and placeholder tokens.
 
-        Phase 1's first-measurement acceptance depends on this.
+        Phase 1's first-measurement acceptance depends on the
+        empty hash — items with an empty hash accept their
+        first real hash without triggering demotion.
         """
+        from ac_dc.stability_tracker import _PLACEHOLDER_TOKENS
         ref = _FakeRefIndex(ref_counts={"a.py": 5})
         tracker = StabilityTracker(cache_target_tokens=0)
         tracker.initialize_from_reference_graph(ref, files=["a.py"])
         item = tracker.get_all_items()["symbol:a.py"]
         assert item.content_hash == ""
-        # Placeholder tokens is 400 per spec.
-        assert item.tokens == 400
+        assert item.tokens == _PLACEHOLDER_TOKENS
 
     def test_clustering_distributes_components_across_tiers(self) -> None:
-        """Multiple components → bin-packed across L1/L2/L3."""
+        """Multiple components → bin-packed across all four cached tiers.
+
+        Four components of size 2, 12 files total. The four-tier
+        even split lands each component in its own tier — L0
+        takes the first (highest aggregate), L1/L2/L3 take the
+        others by bin-pack order.
+        """
         ref = _FakeRefIndex(
             components=[
                 {"a.py", "b.py"},
                 {"c.py", "d.py"},
                 {"e.py", "f.py"},
+                {"g.py", "h.py"},
             ]
         )
         tracker = StabilityTracker(cache_target_tokens=0)
         tracker.initialize_from_reference_graph(
             ref,
-            files=["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"],
+            files=["a.py", "b.py", "c.py", "d.py",
+                   "e.py", "f.py", "g.py", "h.py"],
         )
-        # All three cached tiers should have at least one item.
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
+        # All four cached tiers should have at least one item.
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
             assert len(tracker.get_tier_items(tier)) > 0, f"{tier} empty"
+
+    def test_no_files_land_in_active(self) -> None:
+        """Four-tier split places every file in a cached tier.
+
+        The core invariant of the new algorithm — no indexed
+        file should land in ACTIVE on startup, regardless of
+        its ref count. Even fully-isolated files get placed.
+        """
+        ref = _FakeRefIndex()  # no components, no ref counts
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker.initialize_from_reference_graph(
+            ref,
+            files=["a.py", "b.py", "c.py", "d.py", "e.py"],
+        )
+        all_items = tracker.get_all_items()
+        for item in all_items.values():
+            assert item.tier != Tier.ACTIVE, (
+                f"{item.key} landed in ACTIVE; expected L0/L1/L2/L3"
+            )
+
+    def test_aggregate_ranking_places_biggest_cluster_in_l0(self) -> None:
+        """Clusters with higher aggregate ref counts sort earlier.
+
+        A small cluster with high per-member ref counts should
+        outrank a larger cluster of orphans. The high-aggregate
+        cluster lands in L0 (insertion-order tie-break with all
+        tiers at zero); the orphan cluster lands in L1.
+        """
+        ref = _FakeRefIndex(
+            components=[{"high1.py", "high2.py"}],
+            ref_counts={
+                "high1.py": 10,
+                "high2.py": 10,
+                "orphan1.py": 0,
+                "orphan2.py": 0,
+                "orphan3.py": 0,
+            },
+        )
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker.initialize_from_reference_graph(
+            ref,
+            files=["high1.py", "high2.py",
+                   "orphan1.py", "orphan2.py", "orphan3.py"],
+        )
+        all_items = tracker.get_all_items()
+        # Both high-ref files share a tier (same cluster).
+        assert (
+            all_items["symbol:high1.py"].tier
+            == all_items["symbol:high2.py"].tier
+        )
+        # And that tier is L0 — aggregate 20 outranks orphan
+        # singletons at 0.
+        assert all_items["symbol:high1.py"].tier == Tier.L0
 
     def test_initialize_with_keys_mismatch_raises(self) -> None:
         """keys/files length mismatch raises ValueError."""
@@ -1639,7 +1713,15 @@ class TestBackfillL0AfterMeasurement:
                 "f0.py": 10, "f1.py": 9, "f2.py": 8, "f3.py": 1,
             },
         )
-        promoted = tracker.backfill_l0_after_measurement(ref)
+        # Pass overshoot_multiplier=1.5 explicitly — this test
+        # is pinning the "stops at the target × overshoot"
+        # contract with math calibrated for 1.5, not the
+        # default value (which changed to 2.0 so cross-ref
+        # backfill gets comfortable headroom above the cache-
+        # min floor).
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.5,
+        )
         assert promoted == 3
         # f3 (lowest ref, lowest rank) stays in L1.
         assert tracker.get_all_items()["symbol:f3.py"].tier == Tier.L1
@@ -1671,7 +1753,15 @@ class TestBackfillL0AfterMeasurement:
         tracker._items["symbol:a.py"].tokens = 800
         # acc=0 < 750 → promote first → acc=800
         # acc=800 ≥ 750 → break
-        promoted = tracker.backfill_l0_after_measurement(ref)
+        # Pass overshoot_multiplier=1.5 explicitly — math
+        # here is calibrated for 1.5 (the old default). The
+        # new default is 2.0 which gives target=1000 and
+        # both items would promote, but this test is
+        # exercising the tie-break ordering, not the
+        # overshoot semantics.
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.5,
+        )
         assert promoted == 1
         # Tie-break: key ascending → a.py promotes first.
         assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L0
@@ -2232,6 +2322,7 @@ class TestDistributeKeysByClustering:
         measurement acceptance handles the placeholder-to-real
         hash transition without a spurious demotion.
         """
+        from ac_dc.stability_tracker import _PLACEHOLDER_TOKENS
         ref = _FakeRefIndex()
         tracker = StabilityTracker()
         tracker.distribute_keys_by_clustering(
@@ -2241,7 +2332,7 @@ class TestDistributeKeysByClustering:
         )
         item = tracker.get_all_items()["doc:a.md"]
         assert item.content_hash == ""
-        assert item.tokens == 400  # _PLACEHOLDER_TOKENS
+        assert item.tokens == _PLACEHOLDER_TOKENS
 
     def test_placed_at_tier_entry_n(self) -> None:
         """Each seeded item lands with its tier's entry_n.

@@ -155,24 +155,14 @@ def try_initialize_stability(service: "LLMService") -> None:
             prompt_hash, prompt_tokens
         )
 
-        # Step 4: Measure real token counts.
+        # Step 4: Measure real token counts. The four-tier
+        # even split in :meth:`initialize_with_keys` already
+        # placed the most-referenced clusters in L0, so no
+        # post-measurement backfill is needed on the init
+        # path — the cascade will rebalance as requests come
+        # in if placeholder estimates diverged from real
+        # token counts.
         measure_tracker_tokens(service)
-
-        # Step 4b: Post-measurement L0 backfill. Placeholder
-        # tokens overestimate real block sizes; backfill pulls
-        # high-ref-count candidates from L1-L3 into L0 until
-        # real tokens reach the target with overshoot headroom.
-        promoted = (
-            service._stability_tracker.backfill_l0_after_measurement(
-                ref_index,
-            )
-        )
-        if promoted > 0:
-            logger.info(
-                "L0 backfill: promoted %d items to meet "
-                "cache-min threshold",
-                promoted,
-            )
 
         service._stability_initialized[mode] = True
         logger.info(

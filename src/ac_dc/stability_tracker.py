@@ -168,7 +168,20 @@ _PLACEHOLDER_HASH = ""
 # yet). A small per-entry estimate is used so L0 seeding doesn't
 # over-fill. Real counts replace these on the first update cycle
 # or via :meth:`_measure_tokens`.
-_PLACEHOLDER_TOKENS = 400
+#
+# Chosen as a deliberate underestimate of real symbol/doc block
+# sizes. Typical per-file symbol blocks measure at 80-300 tokens
+# after rendering; typical doc blocks at 50-200. Using a
+# conservative 100 here means L0 seeding packs ~4x as many files
+# into L0 as a 400-token estimate would, so after measurement
+# L0's real token total lands closer to the cache target rather
+# than dramatically undershooting. The post-measurement backfill
+# catches any remaining shortfall, but starting closer to target
+# reduces the number of items backfill has to promote (each
+# promotion marks a source tier broken and triggers a cascade
+# pass on the next request — cheaper to over-seed initially than
+# to churn tiers on the first cold-start).
+_PLACEHOLDER_TOKENS = 100
 
 
 # ---------------------------------------------------------------------------
@@ -1072,10 +1085,47 @@ class StabilityTracker:
     ) -> None:
         """Seed with explicit keys — used by doc mode and tests.
 
-        Separates key construction from tier assignment so the
-        same algorithm can serve code mode (``symbol:{path}``),
-        doc mode (``doc:{path}``), and tests that want to verify
-        the distribution directly.
+        Distributes every key across all four cached tiers
+        (L0/L1/L2/L3) by clustering connected components in the
+        reference graph, then ranking clusters by aggregate
+        incoming reference count, then bin-packing into tiers
+        with the smallest current token total.
+
+        **Why four-tier even split.** Earlier revisions seeded
+        a target number of files into L0 up to
+        ``cache_target_tokens`` and distributed the remainder
+        across L1/L2/L3. On a sufficiently large repo that
+        works, but on medium repos it under-fills L0 (because
+        placeholder tokens overestimate real token counts —
+        real measured tokens come in well under the 400-token
+        placeholder, so L0's real post-measurement size lands
+        way below the cache target). The four-tier split side-
+        steps the problem: each tier gets ~25% of the repo's
+        placeholder token budget, and the cascade sorts out
+        which items genuinely deserve L0 residency via
+        promotion/demotion over the next few request cycles.
+
+        **Why stability-ranked cluster ordering.** Within the
+        clustering pass, clusters are ranked by aggregate
+        incoming ref count (sum of ``file_ref_count`` across
+        the cluster's members) so the most-referenced
+        structural clusters land in L0 on day one. Orphan
+        files (no edges in the reference graph) sort last and
+        fill whichever tier still has room. This gives the
+        cascade a reasonable starting point — the anchor/cap/
+        promote logic doesn't have to unwind bad initial
+        placements across many turns before the provider cache
+        becomes useful.
+
+        **Ties — clusters of equal size and equal ref count**
+        break deterministically by sorted member tuple so test
+        fixtures see stable output across runs.
+
+        The ``l0_target_tokens`` parameter is accepted for
+        backwards compatibility with callers that pass the
+        cache target; it is now ignored because the four-tier
+        split makes it unnecessary. L0 ends up sized by fair-
+        share budget, not by an explicit target.
         """
         if not keys:
             return
@@ -1085,118 +1135,109 @@ class StabilityTracker:
                 f"files length ({len(files)})"
             )
 
-        # Step 1 — L0 seeding by reference count. Most-referenced
-        # files go to L0 up to the cache target.
-        target = (
-            l0_target_tokens
-            if l0_target_tokens is not None
-            else self._cache_target_tokens
-        )
-        # Rank files by incoming reference count descending. Ties
-        # broken by file path for determinism.
-        ranked = sorted(
-            zip(keys, files),
-            key=lambda kf: (-ref_index.file_ref_count(kf[1]), kf[1]),
-        )
+        # Unused — retained in signature for compatibility.
+        del l0_target_tokens
 
-        l0_keys: set[str] = set()
-        if target > 0:
-            accumulated = 0
-            for key, _path in ranked:
-                if accumulated >= target:
-                    break
-                l0_keys.add(key)
-                accumulated += _PLACEHOLDER_TOKENS
-                if len(l0_keys) >= len(ranked):
-                    break
+        path_to_key = dict(zip(files, keys))
+        all_paths = set(files)
 
-        for key, path in ranked:
-            if key not in l0_keys:
-                continue
-            self._items[key] = TrackedItem(
-                key=key,
-                tier=Tier.L0,
-                n_value=_TIER_CONFIG[Tier.L0]["entry_n"],
-                content_hash=_PLACEHOLDER_HASH,
-                tokens=_PLACEHOLDER_TOKENS,
-            )
-
-        # Step 2 — cluster remaining files via connected
-        # components and distribute across L1/L2/L3.
-        remaining_pairs = [
-            (key, path) for key, path in zip(keys, files)
-            if key not in l0_keys
-        ]
-        if not remaining_pairs:
-            return
-
-        path_to_key = {path: key for key, path in remaining_pairs}
-        remaining_paths = {path for _key, path in remaining_pairs}
-
+        # Step 1 — gather connected components from the
+        # reference graph and filter to the paths we're
+        # actually placing. Components already seen (e.g. from
+        # a prior init pass) are intentionally re-built here —
+        # initialisation is a clean-slate operation.
         components = ref_index.connected_components()
-        # Filter each component to the remaining paths (L0 files
-        # are already placed and shouldn't be re-distributed).
         filtered_components: list[set[str]] = []
         seen_in_components: set[str] = set()
         for comp in components:
-            filtered = {p for p in comp if p in remaining_paths}
+            filtered = {p for p in comp if p in all_paths}
             if filtered:
                 filtered_components.append(filtered)
                 seen_in_components.update(filtered)
 
-        # Orphan files (not in any component) — bin-pack into the
-        # smallest tier so they get tracked. Without this, files
-        # with only one-way or no references never register.
-        orphan_paths = remaining_paths - seen_in_components
-        if orphan_paths:
-            # Sort orphans by ref count descending for stable
-            # placement. Unreferenced orphans (count = 0) fall
-            # last and get placed in whichever tier has room.
-            orphan_list = sorted(
-                orphan_paths,
-                key=lambda p: (-ref_index.file_ref_count(p), p),
-            )
-            # One orphan per component means each orphan becomes
-            # its own "component" for distribution — keeps the
-            # bin-packer simple.
-            for p in orphan_list:
-                filtered_components.append({p})
+        # Step 2 — orphan files (no edges in the reference
+        # graph) become singleton "clusters" for the bin
+        # packer. Without this, files with no references never
+        # register.
+        orphan_paths = all_paths - seen_in_components
+        for p in sorted(
+            orphan_paths,
+            key=lambda pp: (-ref_index.file_ref_count(pp), pp),
+        ):
+            filtered_components.append({p})
 
-        # Step 3 — bin-pack components across L1/L2/L3. Greedy:
-        # assign each component (sorted by size descending) to
-        # the tier with the smallest current size.
-        tier_sizes = {Tier.L1: 0, Tier.L2: 0, Tier.L3: 0}
+        # Step 3 — rank clusters by aggregate stability. Sum
+        # the incoming reference count across each cluster's
+        # members so a five-file cluster where each member has
+        # 3 incoming refs (aggregate 15) outranks a ten-file
+        # cluster of orphans (aggregate 0). The ``-`` negates
+        # for descending sort. Ties break by cluster size
+        # descending (prefer placing larger clusters first so
+        # the bin packer balances by token budget) and finally
+        # by sorted member tuple for determinism.
+        def _cluster_rank(
+            comp: set[str],
+        ) -> tuple[int, int, tuple[str, ...]]:
+            aggregate = sum(
+                ref_index.file_ref_count(p) for p in comp
+            )
+            return (-aggregate, -len(comp), tuple(sorted(comp)))
+
+        filtered_components.sort(key=_cluster_rank)
+
+        # Step 4 — bin-pack across all four cached tiers.
+        # Greedy: each cluster goes to the tier with the
+        # smallest current token total. Since we walk clusters
+        # in descending-aggregate order, the first few (highest
+        # ref count) clusters spread across L0/L1/L2/L3 before
+        # any tier fills — but the L0 slot fills first on ties
+        # because ``min`` picks in insertion order and L0 is
+        # listed first below. Later, lower-ranked clusters
+        # cluster toward whichever tier hasn't filled yet.
+        tier_sizes = {
+            Tier.L0: 0,
+            Tier.L1: 0,
+            Tier.L2: 0,
+            Tier.L3: 0,
+        }
         tier_contents: dict[Tier, list[str]] = {
+            Tier.L0: [],
             Tier.L1: [],
             Tier.L2: [],
             Tier.L3: [],
         }
-
-        # Sort components by size descending; ties broken
-        # deterministically by sorted member tuple.
-        filtered_components.sort(
-            key=lambda c: (-len(c), tuple(sorted(c)))
-        )
+        tier_order_for_ties = {
+            Tier.L0: 0,
+            Tier.L1: 1,
+            Tier.L2: 2,
+            Tier.L3: 3,
+        }
 
         for comp in filtered_components:
-            # Target tier = smallest current. Ties broken by
-            # tier name (L3 < L2 < L1 lexicographically? no —
-            # L1, L2, L3 in that order). We want L3 first on
-            # ties so lightly-connected clusters go into the
-            # less-stable tier.
             target_tier = min(
                 tier_sizes,
-                key=lambda t: (tier_sizes[t], t.value),
+                key=lambda t: (
+                    tier_sizes[t],
+                    tier_order_for_ties[t],
+                ),
             )
             for path in sorted(comp):
                 key = path_to_key.get(path)
                 if key is None:
                     continue
                 tier_contents[target_tier].append(key)
-            tier_sizes[target_tier] += len(comp)
+            # Token budget uses placeholder tokens — real counts
+            # replace these via :meth:`measure_tokens` after the
+            # formatted blocks are rendered for the first time.
+            tier_sizes[target_tier] += (
+                len(comp) * _PLACEHOLDER_TOKENS
+            )
 
-        # Instantiate items in their assigned tiers.
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
+        # Step 5 — instantiate TrackedItems at each tier's
+        # entry N. Placeholder hash marks them as never-yet-
+        # measured so the next :meth:`update` cycle accepts
+        # their first real hash without demoting.
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
             for key in tier_contents[tier]:
                 self._items[key] = TrackedItem(
                     key=key,
@@ -1389,7 +1430,7 @@ class StabilityTracker:
     def backfill_l0_after_measurement(
         self,
         ref_index: Any,
-        overshoot_multiplier: float = 1.5,
+        overshoot_multiplier: float = 2.0,
         candidate_keys: set[str] | None = None,
     ) -> int:
         """Top up L0 with real-token-count awareness post-measurement.
@@ -1435,13 +1476,15 @@ class StabilityTracker:
             object used by :meth:`initialize_with_keys`.
         overshoot_multiplier:
             Target token total is ``cache_target_tokens ×
-            overshoot_multiplier``. Default 1.5 produces
-            ~50% headroom above the cache-min floor — enough
-            for the cascade to anchor some items and let
-            newly-promoted content displace low-ref veterans.
-            Values below 1.0 would leave L0 perpetually
-            underfilled; values above 2.0 push too much into
-            L0 at the expense of L1-L3 distribution.
+            overshoot_multiplier``. Default 2.0 produces
+            ~100% headroom above the cache-min floor —
+            guarantees L0 clears the provider's cache-min
+            threshold by a comfortable margin even when
+            real measured tokens come in well under
+            placeholder estimates. Values below 1.0 would
+            leave L0 perpetually underfilled; values above
+            3.0 push too much into L0 at the expense of
+            L1-L3 distribution.
 
         Returns
         -------

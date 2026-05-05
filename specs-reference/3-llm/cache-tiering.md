@@ -57,34 +57,25 @@ When a caller has no model reference available (e.g., constructing a stability t
 
 This value is immediately overridden in production use; it exists only so standalone tracker construction has a sensible placeholder.
 
-### L0 seeding estimate
+### Placeholder tokens during initial placement
 
-Initial tier assignment from the reference graph seeds L0 with highest-ref-count files until the cache target is met. Since real token counts aren't available until after initialisation (the measurement pass runs after seeding), a per-entry estimate is used:
-
-| Value | Purpose |
-|---|---|
-| 400 tokens | Conservative per-entry estimate during L0 seeding |
-
-Chosen conservatively — the real post-measurement values are usually *lower* than the 400-token placeholder (real symbol/doc blocks are typically 50–300 tokens), so the placeholder under-seeds. The post-measurement backfill pass (below) corrects the under-seed.
-
-### L0 post-measurement backfill overshoot
-
-After the measurement pass replaces placeholder tokens with real counts, a backfill pass pulls high-ref-count candidates from L1/L2/L3 into L0 until the real token total meets a target with deliberate overshoot:
+The four-tier even split uses a per-entry placeholder token count while bin-packing, before the measurement pass runs:
 
 | Value | Purpose |
 |---|---|
-| 1.5 | `overshoot_multiplier` — multiplies `cache_target_tokens` to produce the backfill target |
+| 100 tokens | Conservative per-entry estimate for clustering bin-pack math |
 
-Target computation: `backfill_target = cache_target_tokens × overshoot_multiplier`. At the default 1.5, L0 is filled to ~150% of the cache-min threshold, providing ~50% headroom above the provider's floor. The overshoot is load-bearing:
+Deliberately below the common real-block range (50–300 tokens) — a slight underestimate means post-measurement tier totals end up a little smaller than the placeholder budget suggested, which is safe. Overestimating would pack too many files into each tier and trigger immediate demotion cascades on the first post-measurement request.
 
-- Below 1.0 — L0 sits at or below the cache-min floor; the provider refuses to cache it
-- Exactly 1.0 — any single-request content change drops L0 below the floor again
-- 1.5 (default) — enough headroom for the cascade's anchor-veterans-above-threshold path to trigger, so L1 items can promote upward as low-ref L0 content cycles out
-- Above 2.0 — too much pull from L1/L2/L3, starves the lower tiers
+### Post-measurement L0 backfill (cross-reference enable only)
 
-The backfill preserves each promoted item's real token count and content hash (measurement already populated them); only `tier` and `n_value` change, with `n_value` set to L0's entry N (12). Source tiers are marked broken so the next cascade rebalances their distribution.
+The `backfill_l0_after_measurement` method still exists but is NOT called from the init or rebuild paths — the four-tier even split obviates the need. It remains wired into `seed_cross_reference_items` so cross-reference activation can promote the most-connected opposite-index items into L0:
 
-Fires in both init paths — startup stability initialization and manual cache rebuild — immediately after the measurement pass. No-op when `cache_target_tokens == 0` (caching disabled) or when L0 already exceeds the overshoot target.
+| Value | Purpose |
+|---|---|
+| 2.0 | Default `overshoot_multiplier` |
+
+When called, the backfill ranks candidates by reference count descending and promotes until real token total reaches `cache_target_tokens × overshoot_multiplier`. Source tiers marked broken; L0 not marked broken (promoted items earn their slot). Scoped to `candidate_keys` when provided (cross-reference enable uses this to avoid promoting pre-existing tracker entries).
 
 ### Cascade iteration cap
 

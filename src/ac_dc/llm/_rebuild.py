@@ -164,17 +164,13 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
                 l0_target_tokens=0,
             )
 
-    # Step 6: measure real token counts.
+    # Step 6: measure real token counts. The four-tier even
+    # split in :meth:`initialize_with_keys` already placed the
+    # most-referenced clusters in L0; no post-measurement
+    # backfill is needed. If placeholder estimates diverged
+    # from real counts, the cascade rebalances as requests
+    # come in.
     service._measure_tracker_tokens()
-
-    # Step 6b: post-measurement L0 backfill.
-    promoted = tracker.backfill_l0_after_measurement(ref_index)
-    if promoted > 0:
-        logger.info(
-            "Rebuild L0 backfill: promoted %d items to meet "
-            "cache-min threshold",
-            promoted,
-        )
 
     # Step 7: swap selected files → file: entries at the
     # same tier; strip cross-reference secondary entries too.

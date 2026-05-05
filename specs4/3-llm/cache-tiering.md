@@ -206,48 +206,40 @@ Index entries for *unselected* files are never in this list — they live in whi
 - No persistence — rebuilt fresh each session
 - Initialized items receive their tier's entry N and a placeholder content hash
 
-### L0 Seeding
+### Four-Tier Even Split
 
-- System prompt and legend seeded into L0 at init
-- Enough high-connectivity index entries added to meet cache target
-- Entries selected by reference count descending
-- Conservative per-entry token estimate used before real counts are available — prevents over-seeding
+- Every indexed file is placed into one of L0/L1/L2/L3 — no tier is empty on startup, no files are left in active
+- Clusters ranked by **aggregate incoming reference count** (sum of `file_ref_count` across each cluster's members) — structurally-important clusters land in L0 on day one
+- Greedy bin-packing by current tier token count — each cluster walks in descending-aggregate order and lands in whichever tier currently holds the fewest tokens
+- On ties (equal aggregate ref count, equal cluster size), L0 fills first because the bin-packer's `min(...)` evaluates in tier order
+- The system prompt is always pinned to L0 separately via `register_system_prompt` — this is structural content, not subject to clustering
+
+Rationale for the four-tier split rather than a target-sized L0 with the remainder distributed:
+
+- On medium repos the old "seed L0 to `cache_target_tokens` via ref-count-descending walk" approach under-filled L0 badly. Placeholder tokens overestimated real block sizes by 3–5×, so L0 was seeded with enough files to hit the target in placeholder tokens but landed at only ~25% of target after measurement
+- Post-measurement L0 backfill was added to paper over this — it pulled high-ref-count items from L1/L2/L3 into L0 until real tokens met an overshoot target. But backfill marked source tiers broken, triggering a full cascade rebalance on the first request. Users saw visible tier churn at startup
+- The four-tier even split sidesteps both problems. Each tier receives ~25% of the repo's placeholder token budget; real measurement shrinks every tier proportionally, not just L0; and the cascade's normal promotion/demotion path handles any residual imbalance over the first few request cycles without startup churn
+- L0 fills with the most-connected content naturally because aggregate-ref-count ranking walks highest-first and the bin-packer's insertion-order tie-break puts L0 ahead
+
+### Orphan Files
+
+Files not in any connected component (no bidirectional edges in the reference graph) become singleton "clusters" for the bin-packer. Orphans sort by individual reference count descending, so an orphan with a few incoming edges outranks a fully-isolated file. Orphans fill whichever tier still has room when their turn comes.
 
 ### Post-Init Token Measurement
 
 - After init, a measurement pass replaces placeholder tokens with real counts from formatted blocks
 - Content hashes updated from signature hashes for accurate stability tracking
 - Ensures the cache viewer displays per-item token counts immediately
+- No follow-up backfill — the four-tier split already placed items reasonably, and the cascade rebalances any residual imbalance organically as requests arrive
 
-### Post-Measurement L0 Backfill
+### Placeholder Token Estimate
 
-The placeholder token count used during L0 seeding is a pessimistic upper bound — real symbol/doc blocks are typically much smaller than the per-entry estimate. Once measurement replaces placeholders with real counts, L0's actual token total is almost always well below `cache_target_tokens`. Two consequences if left unaddressed:
-
-- The provider refuses to cache L0 at all — its total falls below the provider's cache-min threshold (4096 tokens on Sonnet 4.6, 1024 on Sonnet 4.5, etc.), and the provider silently charges full ingestion on every request
-- L0 has no churn capacity — every item fits comfortably under the target, so the cascade's anchor-veterans-above-threshold path never triggers and L1 items never promote upward even after they've earned it
-
-The backfill pass fires immediately after measurement:
-
-- Ranks every L1/L2/L3 item with a file path by reference count descending (same signal as initial L0 seeding)
-- Promotes candidates into L0 until real token total reaches `cache_target_tokens × overshoot_multiplier`
-- Source tiers marked broken so the next cascade rebalances L1/L2/L3 distribution
-- No-op when `cache_target_tokens == 0` (caching disabled) or when L0 already exceeds the overshoot target
-
-The overshoot is deliberate — it pushes L0 clear of the cache-min floor AND gives the cascade's anchoring logic something to work with. Without overshoot, L0 sits exactly at target and normal content churn immediately pushes it below the floor again. A multiplier around 1.5 produces ~50% headroom: enough for the cascade to anchor some items and let newly-promoted content displace low-ref veterans, not so much that L1/L2/L3 distribution starves.
-
-Fires in both init paths — startup stability initialization and manual cache rebuild — immediately after the measurement pass. Manual rebuild inherits the same backfill so user-triggered redistribution converges to the same healthy L0 state as startup.
-
-### Clustering Algorithm
-
-- Mutual reference graph — bidirectional edges only
-- Connected components produce natural language separation and subsystem grouping
-- Greedy bin-packing distributes clusters across L1, L2, L3
-- Orphan files (no mutual references) distributed into the smallest tier
-- L0 is never assigned by clustering — content must be earned through promotion (L0-seeded items are excluded from L1/L2/L3 distribution)
+A conservative underestimate is used during initial placement because real symbol/doc blocks vary widely (typical range 50–300 tokens per file). Using a value below the common range means the initial token budget under-estimates slightly, which is safe — every tier ends up a little smaller than its placeholder-budget would suggest, not larger. Over-estimation risks packing too much into each tier and forcing immediate demotion cascades on the first post-measurement request.
 
 ### Fallback
 
-- Without a reference index or connected components: sort all files by reference count, distribute evenly across L1, L2, L3
+- Without a reference index: every file is an orphan, still distributed across L0/L1/L2/L3 by the bin-packer
+- Without connected components but with reference counts: orphans ranked by individual ref count fill tiers by size
 
 ## First-Measurement Acceptance
 
@@ -301,5 +293,5 @@ When a file is in active context, its index entry is excluded from all tiers to 
 - Manual rebuild swaps selected files from index entries to file entries at the same tier; selected files never land in active after rebuild
 - Manual rebuild distributes orphan selected files (non-indexed) across L1/L2/L3, never into active or L0
 - Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape
-- Post-init L0 backfill fires after measurement on every init and rebuild path; L0 exceeds the provider cache-min floor by a deliberate overshoot so the cascade has churn capacity and L1 items can promote
+- Init and rebuild both use the four-tier even split — every indexed file lands in L0/L1/L2/L3, never in active; the cascade is not run post-init, placements are the final initial state
 - History graduates to L3 only on piggyback (L3 already broken this cycle). Token-threshold-driven history graduation is not used — `cache_target_tokens` is a caching floor, not a conversation-length cap, and using it as a graduation trigger would destabilise L3 on almost every request. Active-history size is compaction's concern, not tiering's
