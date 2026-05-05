@@ -65,9 +65,10 @@ Each tier maps to a single cached message block in the LLM request.
 ## History Graduation
 
 - History is immutable, so waiting on N is unnecessary — graduation is controlled
-- **Piggyback on L3 invalidation** — if L3 is already being rebuilt, all eligible history graduates for free
-- **Token threshold met** — if eligible history tokens exceed cache target, the oldest messages graduate, keeping the most recent window in active
-- **Never** — if cache target is zero, history stays active permanently
+- **Piggyback on L3 invalidation** — if L3 is already being rebuilt, all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
+- **Never** — if cache target is zero, or if L3 is not already being rebuilt this cycle, history stays active
+
+Active history is not forced to graduate on its own. A long conversation that never happens to coincide with an L3 invalidation stays in the uncached active section until compaction deals with it. This is deliberate. `cache_target_tokens` is a per-tier caching floor (typically a few thousand tokens), not a conversation-length cap — comparing total active history against it would force graduation on almost every turn of any real conversation, tearing down the L3 cache block on every request. Compaction, which has its own much larger `trigger_tokens` budget and purges tracker history when it runs, is the correct owner of "active history is too big".
 
 ## Cache Target Tokens
 
@@ -301,4 +302,4 @@ When a file is in active context, its index entry is excluded from all tiers to 
 - Manual rebuild distributes orphan selected files (non-indexed) across L1/L2/L3, never into active or L0
 - Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape
 - Post-init L0 backfill fires after measurement on every init and rebuild path; L0 exceeds the provider cache-min floor by a deliberate overshoot so the cascade has churn capacity and L1 items can promote
-- Post-init L0 backfill fires after measurement on every init and rebuild path; L0 exceeds the provider cache-min floor by a deliberate overshoot so the cascade has churn capacity and L1 items can promote
+- History graduates to L3 only on piggyback (L3 already broken this cycle). Token-threshold-driven history graduation is not used — `cache_target_tokens` is a caching floor, not a conversation-length cap, and using it as a graduation trigger would destabilise L3 on almost every request. Active-history size is compaction's concern, not tiering's

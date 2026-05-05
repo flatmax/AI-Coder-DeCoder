@@ -648,31 +648,35 @@ class StabilityTracker:
     # ------------------------------------------------------------------
 
     def _graduate_history_if_eligible(self) -> None:
-        """Graduate history to L3 only when a gate condition holds.
+        """Graduate history to L3 on piggyback only.
 
         Per specs4/3-llm/cache-tiering.md § "History Graduation",
         history does not follow the standard N-based promotion
-        path. Two gates permit graduation:
+        path. The single gate that permits graduation is:
 
-        1. **Piggyback** — if L3 is already in ``_broken_tiers``
-           this cycle (because some file/symbol graduated into
-           it, or some L3 item demoted/promoted out), the cache
-           block is going to be rebuilt regardless. Graduating
-           history at the same time costs nothing extra in
-           cache churn — we get the history into a cached tier
-           "for free".
+        - **Piggyback** — if L3 is already in ``_broken_tiers``
+          this cycle (because some file/symbol graduated into
+          it, or some L3 item demoted/promoted out), the cache
+          block is going to be rebuilt regardless. Graduating
+          history at the same time costs nothing extra in
+          cache churn — we get the history into a cached tier
+          "for free".
 
-        2. **Token threshold** — if the active history's total
-           tokens exceed ``cache_target_tokens``, the oldest
-           messages are forced to graduate to keep the verbatim
-           window bounded. This fires independent of L3's state
-           because an unbounded active history would eventually
-           push the prompt past the provider's cache-min
-           threshold for the active block itself.
+        When the gate does not hold, history stays in active.
+        When ``cache_target_tokens == 0``, the entire mechanism
+        is disabled and history remains active permanently.
 
-        When neither gate holds, history stays in active. When
-        ``cache_target_tokens == 0``, the entire mechanism is
-        disabled and history remains active permanently.
+        Earlier revisions also graduated on a token-threshold
+        rule (active history tokens > cache_target_tokens).
+        That rule misfired — cache_target_tokens is a small
+        per-tier caching floor (~4 KB on Opus), not a
+        conversation-length cap. Active history routinely
+        blows past it after a handful of exchanges, and the
+        rule then fired every turn, tearing down L3's cache on
+        every request. Unbounded active history is a concern
+        for compaction (which has its own much larger
+        ``trigger_tokens`` budget and purges tracker history
+        when it runs), not for cache tiering.
 
         Graduation walks NEWEST → OLDEST, accumulating tokens
         into a verbatim window sized at ``cache_target_tokens``.
@@ -688,6 +692,11 @@ class StabilityTracker:
         if self._cache_target_tokens <= 0:
             # Never rule — history stays active when caching is
             # disabled.
+            return
+
+        # Piggyback gate — only fires when L3 is already being
+        # rebuilt this cycle. Nothing else.
+        if Tier.L3 not in self._broken_tiers:
             return
 
         # Collect active history items and sort newest → oldest
@@ -708,18 +717,6 @@ class StabilityTracker:
             return
         active_history.sort(key=lambda p: p[0], reverse=True)
 
-        total_active_tokens = sum(
-            item.tokens for _, item in active_history
-        )
-
-        # Gate check.
-        piggyback = Tier.L3 in self._broken_tiers
-        token_threshold_exceeded = (
-            total_active_tokens > self._cache_target_tokens
-        )
-        if not (piggyback or token_threshold_exceeded):
-            return
-
         # Walk newest → oldest, keeping the verbatim window. The
         # first message whose inclusion would overflow the window
         # becomes the boundary; it and every older message
@@ -733,8 +730,8 @@ class StabilityTracker:
             accumulated += item.tokens
         if graduation_boundary is None:
             # Whole history fits in the verbatim window. Nothing
-            # to graduate — even on piggyback, there's no item to
-            # promote. Leave everything in active.
+            # to graduate — the piggyback gate passed but there's
+            # no item to promote. Leave everything in active.
             return
 
         l3_entry_n = _TIER_CONFIG[Tier.L3]["entry_n"]
@@ -746,9 +743,8 @@ class StabilityTracker:
                 continue
             item.tier = Tier.L3
             item.n_value = l3_entry_n
-            reason = "piggyback" if piggyback else "token threshold"
             self._log_change(
-                f"active → L3: history:{idx} ({reason})"
+                f"active → L3: history:{idx} (piggyback)"
             )
             graduated_any = True
 

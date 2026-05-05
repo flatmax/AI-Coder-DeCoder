@@ -103,6 +103,8 @@ In practice the cascade stabilises within 2–3 iterations; the cap is defensive
 | Graduation N (active → L3) | 3 | Files, symbols, doc blocks |
 | URL direct-entry tier | L1 (entry N = 9) | URLs skip the graduation wait; static content enters directly cached |
 
+History does not use an N threshold and does not use a token-budget threshold. It graduates only on piggyback — when L3 is already marked broken for an unrelated reason, newest → oldest history fills a verbatim window sized at `cache_target_tokens` in active and everything older promotes to L3. See the behavioural spec for rationale (`cache_target_tokens` is a caching floor, not a conversation-length cap, and token-driven history graduation would destabilise L3 on almost every turn).
+
 ### Minimum verbatim exchange safeguard
 
 Not strictly a cache-tiering constant but co-resident in the same subsystem:
