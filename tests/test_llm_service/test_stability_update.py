@@ -160,13 +160,21 @@ class TestUpdateStabilityIndexDispatch:
         assert "doc:README.md" not in active
         assert "doc:guide.md" not in active
 
-    def test_code_mode_cross_ref_adds_both(
+    def test_code_mode_cross_ref_adds_only_primary(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode + cross-ref on → symbol: primary + doc: secondary."""
+        """Code mode + cross-ref on → still only ``symbol:`` (primary).
+
+        Under the L0-content-typed model (D27) cross-reference
+        is L0-only — no per-file ``doc:{path}`` entries get
+        created in active_items even when the toggle is on.
+        The secondary aggregate map is regenerated from the
+        opposite-mode index at assembly time, not held as
+        cascade-tracked items.
+        """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
@@ -177,11 +185,13 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Both primary (symbol) and secondary (doc) entries.
+        # Primary entries still present.
         assert "symbol:a.py" in active
         assert "symbol:b.py" in active
-        assert "doc:README.md" in active
-        assert "doc:guide.md" in active
+        # Secondary entries NOT created — under D27 cross-ref
+        # is an L0-only affair, not a per-file tracker concern.
+        assert "doc:README.md" not in active
+        assert "doc:guide.md" not in active
 
     def test_doc_mode_adds_doc_entries_only(
         self,
@@ -211,13 +221,18 @@ class TestUpdateStabilityIndexDispatch:
         assert "symbol:a.py" not in active
         assert "symbol:b.py" not in active
 
-    def test_doc_mode_cross_ref_adds_both(
+    def test_doc_mode_cross_ref_adds_only_primary(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc mode + cross-ref on → doc: primary + symbol: secondary."""
+        """Doc mode + cross-ref on → still only ``doc:`` (primary).
+
+        Symmetric to the code-mode case: cross-ref is L0-only
+        regardless of which mode is primary. No per-file
+        secondary tracker entries.
+        """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
@@ -230,11 +245,12 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Both primary (doc) and secondary (symbol) entries.
+        # Primary (doc) entries present.
         assert "doc:README.md" in active
         assert "doc:guide.md" in active
-        assert "symbol:a.py" in active
-        assert "symbol:b.py" in active
+        # Secondary (symbol) entries NOT created.
+        assert "symbol:a.py" not in active
+        assert "symbol:b.py" not in active
 
     def test_selected_files_excluded_from_symbol_entries(
         self,
@@ -307,10 +323,15 @@ class TestUpdateStabilityIndexDispatch:
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Cross-reference mode respects selected-files exclusion.
+        """Cross-reference mode still excludes selected files from primary.
 
-        A selected file shouldn't appear as either prefix even
-        when both indexes are active.
+        Under D27 cross-ref doesn't create secondary per-file
+        entries at all — the selected-files exclusion only
+        needs to cover the primary ``symbol:`` (in code mode)
+        prefix. Verified here: selected files appear as
+        ``file:`` only; unselected files appear as primary
+        ``symbol:``; nothing on the secondary ``doc:``
+        prefix appears regardless.
         """
         (repo_dir / "a.py").write_text("pycontent\n")
         (repo_dir / "README.md").write_text("# Doc\n\nbody.\n")
@@ -328,16 +349,20 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Selected files → file: only, no symbol:/doc:.
+        # Selected files → file: only.
         assert "file:a.py" in active
         assert "symbol:a.py" not in active
-        assert "doc:a.py" not in active
         assert "file:README.md" in active
-        assert "symbol:README.md" not in active
-        assert "doc:README.md" not in active
-        # Unselected files still present with the right prefix.
+        # README.md isn't in the symbol index so symbol:
+        # was never going to fire.
+        # Unselected non-selected, non-excluded source file
+        # appears with the primary prefix.
         assert "symbol:b.py" in active
-        assert "doc:guide.md" in active
+        # No secondary (doc:) entries — D27 cross-ref is
+        # L0-only.
+        assert not any(
+            k.startswith("doc:") for k in active
+        )
 
     def test_empty_doc_index_in_doc_mode_produces_no_entries(
         self,
@@ -660,24 +685,34 @@ class TestUpdateStabilityExcludedFiles:
         assert "doc:excluded.md" not in active
         assert "doc:normal.md" in active
 
-    def test_step_4_skips_excluded_cross_ref_paths(
+    def test_step_4_creates_no_secondary_entries_under_d27(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Cross-reference step 4 also honours the excluded set.
+        """Step 4 is gone — no secondary entries created at all.
 
-        Without this skip, an excluded file would survive step
-        0a's removal, skip step 3's primary-index registration,
-        but get re-registered via step 4's cross-ref pass.
+        Pre-D27 step 4 created per-file ``doc:{path}`` (in
+        code mode) or ``symbol:{path}`` (in doc mode)
+        entries when cross-reference was enabled, with an
+        excluded-set guard to skip user-excluded paths.
+        Under D27 the whole step is gone — cross-ref is
+        L0-only and the secondary map is regenerated from
+        the index at assembly time.
+
+        This test pins the new contract: regardless of the
+        excluded set, no secondary entries appear in
+        active_items when cross-ref is on. The primary
+        index path's exclusion handling is unchanged and
+        is covered by other tests in this class.
         """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=["a.py"],
             doc_paths=["excluded.md", "normal.md"],
         )
-        # Code mode primary; cross-ref adds doc: as secondary.
+        # Code mode primary; cross-ref enabled.
         svc._cross_ref_enabled = True
         svc._excluded_index_files = ["excluded.md"]
 
@@ -696,10 +731,11 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         active = capture["active_items"]
-        # Excluded doc file absent from cross-ref entries;
-        # normal doc file present.
+        # No secondary (doc:) entries — neither for the
+        # excluded file nor the normal one. The whole
+        # secondary-index pass is gone under D27.
         assert "doc:excluded.md" not in active
-        assert "doc:normal.md" in active
+        assert "doc:normal.md" not in active
         # Primary symbol entry unaffected.
         assert "symbol:a.py" in active
 

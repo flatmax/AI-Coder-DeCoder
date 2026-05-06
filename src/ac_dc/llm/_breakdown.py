@@ -249,15 +249,19 @@ def get_meta_block(
     # meta:repo_map / meta:doc_map — aggregate index map body.
     # Under D27 the aggregate map contains every indexed file's
     # block; only user-excluded files are filtered out.
+    # Dispatch on the KEY, not the current mode — cross-reference
+    # mode renders both maps in L0, and clicking either one
+    # should return that index's content regardless of which
+    # mode is currently primary.
     if key in ("meta:repo_map", "meta:doc_map"):
         exclude = user_excluded_paths(service)
-        if service._context.mode == Mode.DOC:
+        content = ""
+        if key == "meta:doc_map":
             content = service._doc_index.get_doc_map(
                 exclude_files=exclude
             )
             mode = "doc"
         else:
-            content = ""
             if service._symbol_index is not None:
                 try:
                     content = service._symbol_index.get_symbol_map(
@@ -508,6 +512,38 @@ def get_context_breakdown(
         service._counter.count(symbol_map) if symbol_map else 0
     )
 
+    # Secondary aggregate map (cross-reference only). Mirrors
+    # the primary fetch above but routed to the opposite
+    # index. Tokens computed for the L0 meta-row synthesis
+    # below; nothing else in the breakdown needs the body
+    # since cross-reference is L0-only under D27.
+    secondary_map = ""
+    secondary_map_tokens = 0
+    if service._cross_ref_enabled:
+        try:
+            if context.mode == Mode.DOC:
+                if service._symbol_index is not None:
+                    secondary_map = (
+                        service._symbol_index.get_symbol_map(
+                            exclude_files=(
+                                user_excluded_paths(service, scope)
+                            )
+                        )
+                    )
+            else:
+                secondary_map = service._doc_index.get_doc_map(
+                    exclude_files=user_excluded_paths(service, scope)
+                )
+            if secondary_map:
+                secondary_map_tokens = (
+                    service._counter.count(secondary_map)
+                )
+        except Exception as exc:
+            logger.debug(
+                "Secondary aggregate map fetch failed: %s",
+                exc,
+            )
+
     # File tokens — per-file detail.
     file_details: list[dict[str, Any]] = []
     files_tokens = 0
@@ -646,6 +682,34 @@ def get_context_breakdown(
                     ),
                 })
                 tier_tokens += map_token_count
+
+        # Secondary meta row — cross-reference mode only.
+        # The opposite-index aggregate map lives in L0's
+        # system message under the cross-reference header.
+        # See ``specs4/3-llm/modes.md`` § Cross-Reference
+        # Mode.
+        if (
+            tier == Tier.L0
+            and service._cross_ref_enabled
+            and secondary_map_tokens > 0
+        ):
+            contents.append({
+                "name": (
+                    "meta:repo_map" if context.mode == Mode.DOC
+                    else "meta:doc_map"
+                ),
+                "path": (
+                    "Repository structure map"
+                    if context.mode == Mode.DOC
+                    else "Document structure map"
+                ),
+                "tokens": secondary_map_tokens,
+                "type": (
+                    "symbols" if context.mode == Mode.DOC
+                    else "doc_symbols"
+                ),
+            })
+            tier_tokens += secondary_map_tokens
 
         blocks.append({
             "name": tier.value,

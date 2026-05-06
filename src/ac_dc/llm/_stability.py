@@ -353,45 +353,11 @@ def update_stability(
                     "tokens": service._counter.count(block),
                 }
 
-    # Step 4 — Cross-reference items when enabled.
-    if service._cross_ref_enabled:
-        if scope.context.mode == Mode.CODE:
-            # Add doc: entries as secondary.
-            for path in list(service._doc_index._all_outlines.keys()):
-                if path in selected_set or path in excluded_set:
-                    continue
-                block = service._doc_index.get_file_doc_block(path)
-                if not block:
-                    continue
-                sig_hash = service._doc_index.get_signature_hash(path)
-                active_items[f"doc:{path}"] = {
-                    "hash": sig_hash or hashlib.sha256(
-                        block.encode("utf-8")
-                    ).hexdigest(),
-                    "tokens": service._counter.count(block),
-                }
-        else:
-            # Doc mode + cross-ref: add symbol: as secondary.
-            if service._symbol_index is not None:
-                for path in list(
-                    service._symbol_index._all_symbols.keys()
-                ):
-                    if path in selected_set or path in excluded_set:
-                        continue
-                    block = service._symbol_index.get_file_symbol_block(
-                        path
-                    )
-                    if not block:
-                        continue
-                    sig_hash = service._symbol_index.get_signature_hash(
-                        path
-                    )
-                    active_items[f"symbol:{path}"] = {
-                        "hash": sig_hash or hashlib.sha256(
-                            block.encode("utf-8")
-                        ).hexdigest(),
-                        "tokens": service._counter.count(block),
-                    }
+    # Step 4 — Cross-reference is L0-only under D27. The
+    # secondary aggregate map is regenerated from the
+    # opposite-mode index at assembly time (see
+    # :func:`ac_dc.llm._assembly.assemble_tiered`) and does
+    # not produce per-file tracker entries.
 
     # Step 5 — History messages.
     history = scope.context.get_history()
@@ -429,146 +395,58 @@ def update_stability(
 
 
 def seed_cross_reference_items(service: "LLMService") -> None:
-    """Distribute opposite-index items across L0/L1/L2/L3 on enable.
+    """No-op under the L0-content-typed model.
 
-    Runs the same reference-graph clustering the primary index
-    uses at startup, scoped to the opposite index. Cross-ref
-    items land across L1/L2/L3 via clustering, then the most-
-    connected ones promote into L0 via the post-measurement
-    backfill — so the provider cache absorbs them on the next
-    request rather than ingesting the whole opposite index as
-    a single uncached block.
+    Earlier revisions of cross-reference seeded per-file
+    ``doc:{path}`` (or ``symbol:{path}``) tracker entries
+    into L1/L2/L3 via reference-graph clustering, then
+    backfilled the most-connected ones into L0. That
+    mechanism violates the L0-content-typed invariant
+    pinned by ``specs4/3-llm/cache-tiering.md``:
 
-    L0 promotion follows the same "most-connected lives
-    longest" intent as primary-index seeding. Primary-index
-    items already in L0 are never evicted: the backfill
-    method only considers candidates currently in L1/L2/L3.
+    > L1, L2, L3 hold promoted concrete content only —
+    > full file text, fetched URL content, graduated
+    > history. Symbol blocks and doc blocks never appear
+    > in L1–L3; the aggregate maps in L0 are their
+    > permanent home.
 
-    The earlier implementation seeded every cross-ref item at
-    ACTIVE with N=0, which meant turning cross-ref on produced
-    a single massive active-context block. That block would
-    only shrink as individual items cycled through many
-    update_stability calls (one N-increment per turn) before
-    graduating to L3 and slowly promoting upward — effectively
-    never reaching a stable distribution for a repo of any
-    size.
+    And from ``specs4/3-llm/modes.md`` § Cross-Reference
+    Mode:
 
-    Selected files are excluded — they carry content via
-    ``file:`` entries and the cross-ref entry would be
-    redundant. Missing blocks (outline not yet loaded, symbol
-    index empty) are skipped. Items already tracked
-    (``symbol:*`` in code mode, ``doc:*`` in doc mode, or
-    leftover cross-ref entries from a prior enable) are left
-    alone — the new
-    :meth:`StabilityTracker.distribute_keys_by_clustering`
-    method skips any key already in the tracker.
+    > Both legends included in the L0 cache block
 
-    Real token counts replace placeholders immediately via
-    :meth:`measure_tracker_tokens` so the next cascade has
-    accurate numbers for the anchor / cap / underfill logic.
+    Cross-reference is now an L0-only affair: the
+    secondary aggregate map is regenerated from the
+    opposite-mode index at assembly time and rendered
+    into L0's system message under the appropriate
+    secondary header. No per-file tracker entries are
+    created, so nothing distributes through L1/L2/L3.
+
+    The seed function remains as a no-op so call sites
+    in :mod:`ac_dc.llm._rebuild` and
+    :mod:`ac_dc.llm._rpc_state` keep working without
+    conditional dispatch. Toggling cross-ref on/off has
+    no effect on the tracker state at all; the next
+    prompt assembly observes the flag directly.
     """
-    tracker = service._stability_tracker
-    selected_set = set(service._selected_files)
-    excluded_set = set(
-        getattr(service, "_excluded_index_files", None) or ()
-    )
-
-    if service._context.mode == Mode.CODE:
-        # Code mode primary → doc: entries as secondary.
-        ref_index = service._doc_index._ref_index
-        candidate_paths = [
-            path
-            for path in service._doc_index._all_outlines.keys()
-            if path not in selected_set
-            and path not in excluded_set
-            and service._doc_index.get_file_doc_block(path)
-        ]
-        keys = [f"doc:{path}" for path in candidate_paths]
-    else:
-        # Doc mode primary → symbol: entries as secondary.
-        if service._symbol_index is None:
-            return
-        ref_index = service._symbol_index._ref_index
-        candidate_paths = [
-            path
-            for path in service._symbol_index._all_symbols.keys()
-            if path not in selected_set
-            and path not in excluded_set
-            and service._symbol_index.get_file_symbol_block(path)
-        ]
-        keys = [f"symbol:{path}" for path in candidate_paths]
-
-    if not candidate_paths:
-        return
-
-    # Snapshot the tracker's key set BEFORE distribution so we
-    # can determine which keys were actually newly added by
-    # this pass. distribute_keys_by_clustering skips keys that
-    # are already tracked — so the ``keys`` input list may be
-    # a superset of what actually got added. We need the
-    # strict subset (additions only) for the backfill's
-    # candidate restriction below.
-    keys_before = set(tracker._items.keys())
-
-    tracker.distribute_keys_by_clustering(
-        ref_index,
-        keys=keys,
-        files=candidate_paths,
-    )
-
-    # Replace placeholder tokens with real measured counts so
-    # the next cascade's anchor / cap / underfill decisions
-    # are based on accurate sizes.
-    measure_tracker_tokens(service)
-
-    # Promote the most-connected cross-ref items into L0
-    # until the L0 token total reaches the cache-target
-    # overshoot threshold. Mirrors what the primary index's
-    # init path does: post-measurement, real token counts
-    # almost always come in well under the placeholder
-    # estimate, which leaves L0 underfilled. The backfill
-    # pass brings L0 up to ~1.5x the cache target so the
-    # provider actually caches it. See
-    # :meth:`StabilityTracker.backfill_l0_after_measurement`.
-    #
-    # Restrict candidates to the keys actually added by the
-    # distribution pass above — NOT every key in the input
-    # list. An item in the input list that was already
-    # tracked (pre-existing cross-ref entry from a prior
-    # enable, or a primary-index item under the same key)
-    # was deliberately skipped by
-    # distribute_keys_by_clustering to preserve its state;
-    # including it here would let the backfill promote it to
-    # L0 as a side effect of toggling cross-ref on, undoing
-    # the preservation.
-    #
-    # L0 items from the primary index are safe regardless
-    # (the backfill's tier filter already excludes L0
-    # candidates), but L1/L2/L3 pre-existing items need the
-    # explicit "newly-added only" restriction to stay put.
-    newly_added_keys = set(tracker._items.keys()) - keys_before
-    if newly_added_keys:
-        tracker.backfill_l0_after_measurement(
-            ref_index,
-            candidate_keys=newly_added_keys,
-        )
+    del service  # unused — kept for signature stability
 
 
 def remove_cross_reference_items(service: "LLMService") -> None:
-    """Strip opposite-index items from the active tracker.
+    """No-op under the L0-content-typed model.
 
-    Called when cross-reference is disabled (explicitly or via
-    mode switch reset). Walks the tracker and removes every
-    entry whose prefix is the OPPOSITE of the current mode's
-    primary — ``doc:*`` in code mode, ``symbol:*`` in doc mode.
+    Companion to :func:`seed_cross_reference_items` — both
+    are stubs now. Cross-reference state is observed
+    directly at assembly time; there are no per-file
+    tracker entries to strip on disable.
 
-    Selected files' ``file:`` entries are always preserved
-    regardless of mode — they're primary content, not
-    cross-reference data. Same for ``system:``, ``url:``, and
-    ``history:`` entries.
-
-    Marks every tier that held removed items as broken so the
-    next cascade rebalances cleanly.
+    Defensive sweep: any pre-existing ``doc:{path}`` /
+    ``symbol:{path}`` entries left over from migration
+    (or from a previous build that DID seed them) are
+    cleaned up here so a session that started under the
+    old code and then toggled cross-ref off doesn't keep
+    stale entries scattered across L1/L2/L3. Once those
+    legacy entries are gone, this function does nothing.
     """
     from ac_dc.stability_tracker import Tier
 
@@ -590,4 +468,4 @@ def remove_cross_reference_items(service: "LLMService") -> None:
         tracker._items.pop(key, None)
 
     for tier in affected_tiers:
-        tracker.mark_broken(tier, "cross-ref disable")
+        tracker.mark_broken(tier, "cross-ref legacy sweep")

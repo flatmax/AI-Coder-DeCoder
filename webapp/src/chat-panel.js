@@ -4482,6 +4482,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._streaming = true;
     this._streamingContent = '';
     this._autoScroll = true;
+    // Reset the textarea's inline height after clearing.
+    // Programmatic value clears don't fire `input`, so the
+    // auto-resize logic in `_onInputChange` won't run —
+    // without this reset, the textarea keeps the height it
+    // grew to during composition and only snaps back when
+    // the user starts typing again.
+    {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (ta) ta.style.height = 'auto';
+    }
     // Auto-close the snippet drawer on send — users don't
     // want it consuming vertical space during streaming,
     // and the act of sending is a natural "I'm done

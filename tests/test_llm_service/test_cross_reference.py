@@ -1,12 +1,37 @@
-"""Cross-reference toggle lifecycle.
+"""Cross-reference toggle lifecycle (L0-content-typed model).
 
 Covers :class:`TestCrossReferenceLifecycle` —
-:meth:`LLMService.set_cross_reference` together with
-:func:`_seed_cross_reference_items` /
-:func:`_remove_cross_reference_items`. Verifies the readiness
-gate, seeding onto the active tracker, removal on disable or
-mode switch, selected-file exclusion, and the idempotence
-contract.
+:meth:`LLMService.set_cross_reference`. Under the
+L0-content-typed model (D27) cross-reference is an
+**L0-only affair**:
+
+- The toggle flips ``service._cross_ref_enabled`` and
+  broadcasts ``modeChanged``. It does NOT seed per-file
+  tracker entries.
+- :func:`_seed_cross_reference_items` is a no-op stub.
+- :func:`_remove_cross_reference_items` is a defensive
+  legacy-sweep no-op (clears any ``doc:{path}`` /
+  ``symbol:{path}`` entries that might exist from a
+  pre-D27 build, then does nothing).
+- The secondary aggregate map is regenerated from the
+  opposite-mode index at assembly time
+  (:func:`ac_dc.llm._assembly.assemble_tiered`) and
+  rendered into L0's system message under the secondary
+  header — see ``specs4/3-llm/modes.md`` § Cross-Reference
+  Mode: "Both legends included in the L0 cache block".
+- :func:`get_context_breakdown` synthesizes a secondary
+  ``meta:`` row in L0 alongside the primary so the cache
+  viewer shows both maps.
+
+Tests verify the new contract:
+
+- Toggle on/off flips the flag and broadcasts; no tracker
+  mutation.
+- Readiness gate still applies to enable; disable always
+  works.
+- Mode switch resets the toggle to off.
+- Assembly fetches the secondary map when the flag is on.
+- Breakdown includes the secondary ``meta:`` row when on.
 """
 
 from __future__ import annotations
@@ -23,25 +48,14 @@ from .conftest import _FakeLiteLLM, _RecordingEventCallback
 
 
 class TestCrossReferenceLifecycle:
-    """set_cross_reference + _seed/_remove_cross_reference_items.
+    """set_cross_reference under the L0-content-typed model.
 
-    Verifies the full lifecycle:
-
-    - Enable requires _doc_index_ready; rejected with error
-      when not ready. Disable always works.
-    - Enable seeds the tracker with opposite-index items
-      distributed across L0/L1/L2/L3 (never ACTIVE) so the
-      provider cache absorbs them on the next request.
-    - L0 backfill promotes the highest ref-count cross-ref
-      items into L0 without evicting primary-index items
-      already resident there.
-    - Disable removes those items and marks affected tiers
-      broken for clean rebalancing.
-    - Mode switch with cross-ref active removes items BEFORE
-      swapping trackers (so removal runs against the right
-      prefix).
-    - Selected files are never added as cross-ref items
-      (they carry their own file: entries).
+    Cross-reference is L0-only — the toggle flips a flag,
+    the assembly path observes that flag, and no per-file
+    tracker entries are created or destroyed by the
+    toggle. Tests verify the flag-flipping contract, the
+    readiness gate, the broadcast, and the assembly /
+    breakdown observation paths.
     """
 
     def _make_service_with_both_indexes(
@@ -52,33 +66,34 @@ class TestCrossReferenceLifecycle:
         symbol_paths: list[str] | None = None,
         doc_paths: list[str] | None = None,
     ) -> LLMService:
-        """Service with both indexes populated for cross-ref tests."""
+        """Service with both indexes populated for cross-ref tests.
+
+        The symbol index stub returns non-empty
+        ``get_legend()`` and ``get_symbol_map()`` outputs
+        (rather than empty strings) so the assembly /
+        breakdown observation tests can detect when the
+        secondary map fetch fired. Earlier revisions
+        returned empty strings, which made it impossible
+        to tell "the fetch ran but produced nothing" from
+        "the fetch was skipped entirely" in tests.
+        """
         symbol_paths = symbol_paths or []
         doc_paths = doc_paths or []
-
-        class _SymbolRefIndexStub:
-            """Minimal ref-index stub for cross-ref seeding.
-
-            seed_cross_reference_items reads
-            ``service._symbol_index._ref_index`` in doc mode
-            and hands it to ``distribute_keys_by_clustering``
-            + ``backfill_l0_after_measurement``. Both methods
-            only need ``connected_components()`` and
-            ``file_ref_count()``. Empty components + zero
-            ref counts produce singleton orphans for every
-            path — matches the real empty-graph state.
-            """
-
-            def connected_components(self) -> list[set[str]]:
-                return []
-
-            def file_ref_count(self, path: str) -> int:
-                return 0
 
         class _SymbolIndexStub:
             def __init__(self, paths: list[str]) -> None:
                 self._all_symbols = {p: None for p in paths}
-                self._ref_index = _SymbolRefIndexStub()
+
+            def index_repo(self, file_list: list[str]) -> None:
+                # No-op — the stub doesn't actually parse
+                # anything. Required because
+                # ``_try_initialize_stability`` calls this
+                # in code mode to refresh the index's
+                # mtime cache. Tests that need init to
+                # succeed (the breakdown observability
+                # tests) rely on this being a no-op rather
+                # than AttributeError-raising.
+                pass
 
             def get_file_symbol_block(
                 self, path: str
@@ -95,12 +110,24 @@ class TestCrossReferenceLifecycle:
                 return None
 
             def get_legend(self) -> str:
-                return ""
+                # Non-empty so secondary-fetch observability
+                # tests can distinguish "fired" from
+                # "skipped". Real legend output is multi-line
+                # column descriptions; one line is enough for
+                # tests.
+                return "# c=class m=method\n"
 
             def get_symbol_map(
                 self, exclude_files: set[str] | None = None
             ) -> str:
-                return ""
+                # Non-empty for the same reason as get_legend.
+                # Returns one line per path so tests can
+                # spot-check "this path appears in the map".
+                lines = [
+                    f"{p}: stub-symbol-block"
+                    for p in sorted(self._all_symbols)
+                ]
+                return "\n".join(lines) if lines else ""
 
         svc = LLMService(
             config=config,
@@ -191,13 +218,25 @@ class TestCrossReferenceLifecycle:
         assert result["cross_ref_enabled"] is False
         assert svc._cross_ref_enabled is False
 
-    def test_enable_seeds_doc_items_in_code_mode(
+    def test_enable_does_not_seed_per_file_tracker_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode + enable → doc: entries land in tracker."""
+        """Enabling cross-ref creates NO ``doc:`` tracker entries.
+
+        Under the L0-content-typed model, cross-reference
+        is L0-only. The secondary aggregate map is
+        regenerated from the doc index at assembly time;
+        no per-file ``doc:{path}`` entries are ever created
+        on the toggle path. This is the headline behaviour
+        change vs the legacy seeding path.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § L0
+        Stability Contract — "Symbol blocks and doc blocks
+        never appear in L1–L3".
+        """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=["a.py"],
@@ -208,280 +247,72 @@ class TestCrossReferenceLifecycle:
         assert svc._context.mode == Mode.CODE
         svc.set_cross_reference(True)
 
+        # No doc: entries created — the toggle is a flag-flip
+        # only.
         tracker_items = svc._stability_tracker.get_all_items()
-        assert "doc:guide.md" in tracker_items
-        assert "doc:README.md" in tracker_items
-        # Symbol entries NOT added by the seeding pass (those
-        # are primary; normal init/update handles them).
-        # The seeding pass only adds cross-ref entries.
+        assert not any(
+            k.startswith("doc:") for k in tracker_items
+        )
 
-    def test_enable_seeds_symbol_items_in_doc_mode(
+    def test_enable_in_doc_mode_does_not_seed_symbol_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc mode + enable → symbol: entries land in tracker."""
+        """Symmetric: doc mode + enable → no ``symbol:`` entries either.
+
+        The L0-only contract applies regardless of which
+        mode is primary.
+        """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
             doc_paths=["guide.md"],
         )
         svc._doc_index_ready = True
-        # Switch to doc mode via the context manager directly
-        # to avoid the switch_mode RPC's side effects.
         svc._context.set_mode(Mode.DOC)
         svc._trackers[Mode.DOC] = svc._stability_tracker
 
         svc.set_cross_reference(True)
 
         tracker_items = svc._stability_tracker.get_all_items()
-        assert "symbol:a.py" in tracker_items
-        assert "symbol:b.py" in tracker_items
+        assert not any(
+            k.startswith("symbol:") for k in tracker_items
+        )
 
-    def test_enable_excludes_selected_files(
+    def test_enable_flips_flag(
         self,
         config: ConfigManager,
         repo: Repo,
-        repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Selected files don't get cross-ref entries.
+        """The toggle flips ``_cross_ref_enabled`` and returns ok.
 
-        A selected doc file (in code mode + cross-ref) should
-        NOT become a doc: entry — its content flows via file:
-        in the primary path.
+        Replaces the legacy "seeding produced N items" tests.
+        The user-visible behaviour is the flag (which the
+        assembly path observes) and the success response.
         """
-        (repo_dir / "guide.md").write_text("# Guide\n")
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=[],
-            doc_paths=["guide.md", "README.md"],
-        )
-        svc._doc_index_ready = True
-        svc.set_selected_files(["guide.md"])
-
-        svc.set_cross_reference(True)
-
-        tracker_items = svc._stability_tracker.get_all_items()
-        # Unselected doc got a cross-ref entry.
-        assert "doc:README.md" in tracker_items
-        # Selected doc didn't.
-        assert "doc:guide.md" not in tracker_items
-
-    def test_seeded_items_never_land_in_active(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Seeded cross-ref items land in cached tiers, not ACTIVE.
-
-        The earlier implementation placed every cross-ref
-        item at ACTIVE with N=0, which produced one massive
-        uncached block on the next request. The rewrite runs
-        the reference-graph clustering algorithm and bin-packs
-        items across L0/L1/L2/L3 so the provider cache
-        absorbs them immediately. Pinned here so a regression
-        to the old behaviour fails loudly.
-        """
-        from ac_dc.stability_tracker import Tier
-
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            doc_paths=["guide.md", "README.md", "api.md"],
-        )
-        svc._doc_index_ready = True
-        svc.set_cross_reference(True)
-
-        items = svc._stability_tracker.get_all_items()
-        cross_ref_items = [
-            item for key, item in items.items()
-            if key.startswith("doc:")
-        ]
-        assert len(cross_ref_items) == 3
-        for item in cross_ref_items:
-            assert item.tier != Tier.ACTIVE, (
-                f"Cross-ref item {item.key} landed in "
-                f"ACTIVE — should be in a cached tier"
-            )
-
-    def test_seeded_items_distributed_across_cached_tiers(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Cross-ref items never land in ACTIVE.
-
-        The clustering algorithm bin-packs by component size
-        across L1/L2/L3; orphan files (no reference edges)
-        become singletons and get round-robined. Post-
-        measurement backfill may promote some into L0. The
-        exact distribution depends on cache target tokens
-        vs measured tokens — for small test repos with tiny
-        stub blocks, backfill can absorb everything into L0.
-        The user-facing invariant is "never ACTIVE"; that's
-        what we pin here.
-        """
-        from ac_dc.stability_tracker import Tier
-
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            doc_paths=["a.md", "b.md", "c.md"],
-        )
-        svc._doc_index_ready = True
-        svc.set_cross_reference(True)
-
-        items = svc._stability_tracker.get_all_items()
-        cross_ref_items = [
-            item for key, item in items.items()
-            if key.startswith("doc:")
-        ]
-        assert len(cross_ref_items) == 3
-        tiers_used = {item.tier for item in cross_ref_items}
-        # Never ACTIVE.
-        assert Tier.ACTIVE not in tiers_used
-        # Every item is in a cached tier.
-        cached = {Tier.L0, Tier.L1, Tier.L2, Tier.L3}
-        assert tiers_used.issubset(cached)
-
-    def test_l0_backfill_promotes_most_referenced(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """L0 backfill promotes the highest ref-count cross-ref item.
-
-        The post-measurement backfill pass walks L1/L2/L3
-        candidates sorted by ``file_ref_count`` descending
-        and promotes until L0 tokens reach the overshoot
-        threshold. Even with placeholder-token estimates
-        replaced by real counts, a small repo's L0 will
-        start underfilled, so at least one high-ref file
-        should be promoted.
-
-        We swap in a stub doc index whose reference graph
-        marks one file as heavily referenced; the backfill
-        should pick that file for L0.
-        """
-        from ac_dc.stability_tracker import Tier
-
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            doc_paths=["hub.md", "leaf1.md", "leaf2.md"],
-        )
-        # Replace the doc ref index with a stub that reports
-        # hub.md as the most-connected file. The real ref
-        # index would do this via actual cross-document
-        # links; we bypass that wiring because the backfill
-        # behaviour is what we're testing, not the graph
-        # construction.
-        class _StubRefIndex:
-            def connected_components(self) -> list[set[str]]:
-                return [{"hub.md", "leaf1.md", "leaf2.md"}]
-
-            def file_ref_count(self, path: str) -> int:
-                if path == "hub.md":
-                    return 10
-                return 0
-
-        svc._doc_index._ref_index = _StubRefIndex()
-        svc._doc_index_ready = True
-
-        svc.set_cross_reference(True)
-
-        item = svc._stability_tracker.get_all_items()["doc:hub.md"]
-        # The hub should win the L0 slot via ref-count
-        # ranking. Leaves may or may not reach L0 depending
-        # on the overshoot target vs real token sizes; what
-        # matters is that the hub specifically lands there.
-        assert item.tier == Tier.L0
-
-    def test_l0_backfill_preserves_primary_index_in_l0(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Primary-index L0 residents survive cross-ref enable.
-
-        A symbol: entry already in L0 (placed by the primary
-        init path) must NOT be evicted when cross-ref's L0
-        backfill runs. The backfill method only considers
-        L1/L2/L3 candidates, so primary L0 items are safe
-        regardless of how many cross-ref items want L0 slots.
-        """
-        from ac_dc.stability_tracker import Tier, TrackedItem
-
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=["core.py"],
             doc_paths=["guide.md"],
         )
-        # Pre-seed a primary-index L0 item, as if the primary
-        # init pass had already placed it there.
-        svc._stability_tracker._items["symbol:core.py"] = TrackedItem(
-            key="symbol:core.py",
-            tier=Tier.L0,
-            n_value=12,
-            content_hash="primary-hash",
-            tokens=500,
-        )
         svc._doc_index_ready = True
 
-        svc.set_cross_reference(True)
+        assert svc._cross_ref_enabled is False
+        result = svc.set_cross_reference(True)
+        assert result["status"] == "ok"
+        assert result["cross_ref_enabled"] is True
+        assert svc._cross_ref_enabled is True
 
-        # Primary L0 item survives.
-        symbol_item = svc._stability_tracker.get_all_items()[
-            "symbol:core.py"
-        ]
-        assert symbol_item.tier == Tier.L0
-        assert symbol_item.n_value == 12
-        assert symbol_item.content_hash == "primary-hash"
-
-    def test_disable_removes_cross_ref_items(
+    def test_disable_flips_flag(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Disable strips doc: items from the tracker (code mode)."""
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            doc_paths=["guide.md", "README.md"],
-        )
-        svc._doc_index_ready = True
-        svc.set_cross_reference(True)
-        # Confirm items present.
-        items = svc._stability_tracker.get_all_items()
-        assert "doc:guide.md" in items
-        assert "doc:README.md" in items
-
-        svc.set_cross_reference(False)
-
-        items_after = svc._stability_tracker.get_all_items()
-        assert "doc:guide.md" not in items_after
-        assert "doc:README.md" not in items_after
-
-    def test_disable_marks_tiers_broken(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Disable marks the tier of every removed item as broken.
-
-        So the next cascade can rebalance without being
-        blocked by a stable tier flag.
-        """
-        from ac_dc.stability_tracker import Tier
-
+        """Disable flips the flag back and returns ok."""
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=[],
@@ -489,143 +320,27 @@ class TestCrossReferenceLifecycle:
         )
         svc._doc_index_ready = True
         svc.set_cross_reference(True)
+        assert svc._cross_ref_enabled is True
 
-        # Manually relocate the item to L3 to exercise
-        # tier-broken tracking for a non-ACTIVE tier.
-        item = svc._stability_tracker._items["doc:guide.md"]
-        item.tier = Tier.L3
-        # Clear broken tiers so we can check the disable pass
-        # marks L3 specifically.
-        svc._stability_tracker._broken_tiers.clear()
-
-        svc.set_cross_reference(False)
-        assert Tier.L3 in svc._stability_tracker._broken_tiers
-
-    def test_disable_preserves_non_cross_ref_items(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        repo_dir: Path,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Disable leaves file:/history:/symbol: (primary) alone.
-
-        Only the OPPOSITE-mode prefix is stripped. In code
-        mode that's doc:; symbol: entries (primary) must
-        survive.
-        """
-        from ac_dc.stability_tracker import Tier, TrackedItem
-
-        (repo_dir / "a.py").write_text("content\n")
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=["a.py"],
-            doc_paths=["guide.md"],
-        )
-        svc._doc_index_ready = True
-        # Seed a file: entry and a history: entry manually.
-        svc._stability_tracker._items["file:a.py"] = TrackedItem(
-            key="file:a.py", tier=Tier.L1,
-            n_value=3, content_hash="h", tokens=50,
-        )
-        svc._stability_tracker._items["history:0"] = TrackedItem(
-            key="history:0", tier=Tier.L2,
-            n_value=5, content_hash="h", tokens=20,
-        )
-        # Also seed a symbol: entry (simulating normal primary
-        # index placement).
-        svc._stability_tracker._items["symbol:a.py"] = TrackedItem(
-            key="symbol:a.py", tier=Tier.L1,
-            n_value=3, content_hash="h", tokens=30,
-        )
-
-        svc.set_cross_reference(True)
-        svc.set_cross_reference(False)
-
-        items = svc._stability_tracker.get_all_items()
-        assert "file:a.py" in items
-        assert "history:0" in items
-        assert "symbol:a.py" in items
-        # doc: items (cross-ref) gone.
-        assert "doc:guide.md" not in items
-
-    def test_doc_mode_disable_strips_symbol_not_doc(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """In doc mode + disable, symbol: entries are cross-ref.
-
-        Doc mode's primary is doc:; symbol: is the secondary.
-        Disabling must remove symbol: and leave doc: alone.
-        """
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=["a.py"],
-            doc_paths=["guide.md"],
-        )
-        svc._doc_index_ready = True
-        svc._context.set_mode(Mode.DOC)
-        svc._trackers[Mode.DOC] = svc._stability_tracker
-
-        svc.set_cross_reference(True)
-        items_with = svc._stability_tracker.get_all_items()
-        assert "symbol:a.py" in items_with
-
-        svc.set_cross_reference(False)
-        items_without = svc._stability_tracker.get_all_items()
-        assert "symbol:a.py" not in items_without
-
-    def test_mode_switch_cleans_up_cross_ref_before_swap(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-    ) -> None:
-        """Mode switch with cross-ref on removes items from OLD tracker.
-
-        The removal must run BEFORE the tracker swap, so the
-        right prefix (matching the OLD mode) is stripped from
-        the OLD tracker. After the swap, the new mode's
-        tracker starts without stale cross-ref entries.
-        """
-        svc = self._make_service_with_both_indexes(
-            config, repo, fake_litellm,
-            symbol_paths=["a.py"],
-            doc_paths=["guide.md"],
-        )
-        svc._doc_index_ready = True
-
-        # Enable cross-ref in code mode → doc: entries seeded
-        # in the code-mode tracker.
-        svc.set_cross_reference(True)
-        code_tracker = svc._stability_tracker
-        assert "doc:guide.md" in code_tracker.get_all_items()
-
-        # Switch to doc mode. Cross-ref flag resets, doc: items
-        # removed from the code tracker (cleanup).
-        svc.switch_mode("doc")
-
-        # Code tracker's doc: entries cleaned up.
-        assert "doc:guide.md" not in code_tracker.get_all_items()
-        # New (doc) tracker is distinct and has no cross-ref
-        # entries either.
-        assert svc._stability_tracker is not code_tracker
+        result = svc.set_cross_reference(False)
+        assert result["status"] == "ok"
+        assert result["cross_ref_enabled"] is False
         assert svc._cross_ref_enabled is False
 
-    def test_enable_is_idempotent_for_already_tracked_items(
+    def test_disable_legacy_sweep_clears_stale_doc_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Seeding doesn't overwrite items already in the tracker.
+        """Defensive sweep clears any pre-D27 ``doc:`` entries.
 
-        If an item is already tracked (e.g., from a prior
-        update cycle that placed it in a higher tier), the
-        seeding pass leaves it alone. Prevents accidental
-        demotion of stable cross-ref content.
+        ``remove_cross_reference_items`` is a no-op stub
+        under D27, but it still runs the legacy-sweep pass
+        — any ``doc:{path}`` (or ``symbol:{path}``) entries
+        left over from a session that started under
+        pre-D27 code get cleaned up on the next disable.
+        Migration insurance, not part of normal operation.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -636,20 +351,229 @@ class TestCrossReferenceLifecycle:
         )
         svc._doc_index_ready = True
 
-        # Pre-place doc:guide.md at L2 with N=5 (stable state).
-        svc._stability_tracker._items["doc:guide.md"] = TrackedItem(
-            key="doc:guide.md", tier=Tier.L2,
-            n_value=5, content_hash="pre-existing",
-            tokens=100,
+        # Manually inject a stale doc: entry as if it had been
+        # left behind by a pre-D27 session.
+        svc._stability_tracker._items["doc:legacy.md"] = (
+            TrackedItem(
+                key="doc:legacy.md",
+                tier=Tier.L2,
+                n_value=4,
+                content_hash="legacy",
+                tokens=100,
+            )
         )
 
+        # Toggle on then off — the off path runs the sweep.
+        svc.set_cross_reference(True)
+        svc.set_cross_reference(False)
+
+        # Stale entry gone.
+        all_items = svc._stability_tracker.get_all_items()
+        assert "doc:legacy.md" not in all_items
+
+    def test_assembly_includes_secondary_map_when_enabled(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Code mode + cross-ref → secondary doc map in L0 system message.
+
+        Under D27 the cross-ref body lives in L0's system
+        message, not in lower-tier tracker entries. This is
+        the headline assembly-side observation.
+
+        Spec: ``specs4/3-llm/modes.md`` § Cross-Reference
+        Mode — "Both legends included in the L0 cache block".
+        """
+        from ac_dc.context_manager import DOC_MAP_HEADER
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["guide.md", "README.md"],
+        )
+        svc._doc_index_ready = True
         svc.set_cross_reference(True)
 
-        item = svc._stability_tracker.get_all_items()["doc:guide.md"]
-        # Original state preserved.
-        assert item.tier == Tier.L2
-        assert item.n_value == 5
-        assert item.content_hash == "pre-existing"
+        # Build a minimal tiered-content fixture and ask the
+        # assembler to render. We only need the system
+        # message — the rest is irrelevant here. Skipping
+        # ``_try_initialize_stability`` because the symbol
+        # index stub doesn't implement ``index_repo``; the
+        # assembler doesn't depend on init.
+        empty_tier = {
+            "symbols": "",
+            "files": "",
+            "history": [],
+            "graduated_files": [],
+            "graduated_history_indices": [],
+        }
+        tiered_content = {
+            t: dict(empty_tier) for t in ("L0", "L1", "L2", "L3")
+        }
+        messages = svc._assemble_tiered(
+            user_prompt="hi",
+            images=[],
+            tiered_content=tiered_content,
+        )
+        # System message is first.
+        sys_msg = messages[0]
+        # Content may be plain string or a list of blocks; pull
+        # text out either way.
+        content = sys_msg["content"]
+        if isinstance(content, list):
+            text = "\n".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict)
+            )
+        else:
+            text = content
+        # Secondary header present in code mode (means doc map
+        # was rendered into L0).
+        assert DOC_MAP_HEADER in text
+        # Doc map content present too (paths from the
+        # outline-seeded files).
+        assert "guide.md" in text
+        assert "README.md" in text
+
+    def test_assembly_omits_secondary_map_when_disabled(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Code mode + cross-ref off → no doc header in L0 system message."""
+        from ac_dc.context_manager import DOC_MAP_HEADER
+
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["guide.md"],
+        )
+        svc._doc_index_ready = True
+        # Cross-ref OFF (default).
+        assert svc._cross_ref_enabled is False
+
+        empty_tier = {
+            "symbols": "",
+            "files": "",
+            "history": [],
+            "graduated_files": [],
+            "graduated_history_indices": [],
+        }
+        tiered_content = {
+            t: dict(empty_tier) for t in ("L0", "L1", "L2", "L3")
+        }
+        messages = svc._assemble_tiered(
+            user_prompt="hi",
+            images=[],
+            tiered_content=tiered_content,
+        )
+        sys_msg = messages[0]
+        content = sys_msg["content"]
+        if isinstance(content, list):
+            text = "\n".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict)
+            )
+        else:
+            text = content
+        # Secondary header absent — only the primary appears.
+        assert DOC_MAP_HEADER not in text
+
+    def test_breakdown_includes_secondary_meta_row_when_enabled(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Breakdown synthesizes ``meta:doc_map`` in L0 alongside ``meta:repo_map``.
+
+        The cache viewer renders these synthetic rows so
+        users can see (and click) both maps. Under cross-ref
+        in code mode, both must appear together in L0's
+        contents list.
+        """
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["guide.md"],
+        )
+        svc._doc_index_ready = True
+        svc.set_cross_reference(True)
+        # Init seeds ``system:prompt`` into L0 so the
+        # tier-loop body runs and the meta-row synthesis
+        # fires. Without an L0 tracker item the breakdown's
+        # ``if not tier_items: continue`` skips L0
+        # entirely.
+        svc._try_initialize_stability()
+
+        breakdown = svc.get_context_breakdown()
+        l0_block = next(
+            (b for b in breakdown["blocks"] if b["name"] == "L0"),
+            None,
+        )
+        assert l0_block is not None
+        names = [c["name"] for c in l0_block["contents"]]
+        # Both meta rows present in L0 under cross-ref.
+        assert "meta:repo_map" in names
+        assert "meta:doc_map" in names
+
+    def test_breakdown_omits_secondary_meta_row_when_disabled(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Cross-ref off → only primary ``meta:repo_map`` in L0."""
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["guide.md"],
+        )
+        svc._doc_index_ready = True
+        # Cross-ref OFF (default).
+        svc._try_initialize_stability()
+
+        breakdown = svc.get_context_breakdown()
+        l0_block = next(
+            (b for b in breakdown["blocks"] if b["name"] == "L0"),
+            None,
+        )
+        assert l0_block is not None
+        names = [c["name"] for c in l0_block["contents"]]
+        # Primary meta row present, secondary absent.
+        assert "meta:repo_map" in names
+        assert "meta:doc_map" not in names
+
+    def test_mode_switch_resets_cross_ref_flag(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Mode switch always resets the toggle to off.
+
+        The toggle is mode-scoped UI state per
+        ``specs4/3-llm/modes.md`` §
+        "Cross-Reference Activation" — it's reset on every
+        mode switch, regardless of prior value.
+        """
+        svc = self._make_service_with_both_indexes(
+            config, repo, fake_litellm,
+            symbol_paths=["a.py"],
+            doc_paths=["guide.md"],
+        )
+        svc._doc_index_ready = True
+        svc.set_cross_reference(True)
+        assert svc._cross_ref_enabled is True
+
+        svc.switch_mode("doc")
+
+        assert svc._cross_ref_enabled is False
 
     def test_enable_broadcasts_mode_changed(
         self,

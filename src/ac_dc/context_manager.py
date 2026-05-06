@@ -952,6 +952,7 @@ class ContextManager:
         symbol_map: str = "",
         symbol_legend: str = "",
         doc_legend: str = "",
+        secondary_map: str = "",
         file_tree: str = "",
         tiered_content: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
@@ -983,6 +984,16 @@ class ContextManager:
             Optional secondary legend for cross-reference mode.
             When non-empty, appended to L0 under the *opposite*
             mode's header.
+        secondary_map:
+            Optional secondary aggregate map for cross-reference
+            mode. When non-empty, rendered after ``doc_legend``
+            in L0's system message — so the LLM sees both
+            structural maps. Per ``specs4/3-llm/modes.md`` §
+            Cross-Reference Mode: "Both legends included in
+            the L0 cache block". Cross-reference is L0-only
+            under the L0-content-typed model (D27); no
+            per-file tracker entries are created for the
+            secondary index.
         file_tree:
             The flat file-tree text produced by the streaming
             handler. Rendered as its own uncached user/assistant
@@ -1036,8 +1047,10 @@ class ContextManager:
                 system_parts.append(l0_symbols)
             if symbol_map:
                 system_parts.append(symbol_map)
-        if doc_legend:
+        if doc_legend or secondary_map:
             system_parts.append(cross_ref_header + doc_legend)
+            if secondary_map:
+                system_parts.append(secondary_map)
         if l0_files:
             system_parts.append(FILES_L0_HEADER + l0_files)
         system_content = "\n\n".join(p for p in system_parts if p)

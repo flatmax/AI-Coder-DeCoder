@@ -973,7 +973,7 @@ class TestRebuildCache:
         # entry survives alongside file:.
         assert "doc:shared.py" not in all_keys
 
-    def test_cross_ref_rebuild_preserves_unselected_secondary_entries(
+    def test_cross_ref_rebuild_creates_no_secondary_entries(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -983,19 +983,26 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The swap only strips the SELECTED file's secondary entry.
+        """Rebuild + cross-ref creates no ``doc:`` tracker entries.
 
-        Other files in the secondary index keep their entries —
-        we're not wiping cross-reference indiscriminately, just
-        enforcing uniqueness for selected paths.
+        Pre-D27 rebuild seeded ``doc:{path}`` entries for
+        every doc-index file when cross-ref was enabled,
+        and the test originally asserted that selected
+        files' secondary entries got swapped while
+        unselected ones survived.
 
-        The selected file must be present in the PRIMARY index so
-        step 7 runs the swap path that Fix 2 extends. An orphan
-        path (selected but not in the primary index) goes through
-        the step-8 orphan-distribution path instead, which is
-        outside Fix 2's scope. See
-        ``test_cross_ref_rebuild_swaps_both_prefixes_for_selected_file``
-        for the core regression.
+        Under the L0-content-typed model rebuild does not
+        create secondary entries at all — cross-reference is
+        L0-only and the secondary aggregate map is
+        regenerated from the doc index at assembly time.
+        This test pins the new contract: regardless of
+        which files are selected, no ``doc:`` entries appear
+        in the tracker after rebuild + cross-ref.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Manual
+        Cache Rebuild — rebuild's cross-ref step seeds the
+        secondary aggregate map into L0's structural
+        content, not as cascade-tracked items.
         """
         (repo_dir / "selected.py").write_text("def foo(): pass\n")
         fake_symbol_index = _FakeSymbolIndexWithRefs(
@@ -1013,9 +1020,9 @@ class TestRebuildCache:
             repo_files=["selected.py", "a.py"],
             monkeypatch=monkeypatch,
         )
-        # selected.py is in both indexes (cross-ref seeds
-        # doc:selected.py alongside the primary symbol entry);
-        # other.md is only in the doc index.
+        # Both selected.py and other.md are in the doc index;
+        # only selected.py is selected (so it becomes a
+        # file: entry).
         self._seed_doc_outlines(svc, ["selected.py", "other.md"])
         svc._doc_index_ready = True
         svc._cross_ref_enabled = True
@@ -1025,13 +1032,20 @@ class TestRebuildCache:
 
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        # Selected file → file: only; both index prefixes swapped.
+        # Selected file → file: entry as expected.
         assert "file:selected.py" in all_keys
-        assert "symbol:selected.py" not in all_keys
-        assert "doc:selected.py" not in all_keys
-        # Other doc file's entry preserved (scope check — the
-        # swap only affects the selected path).
-        assert "doc:other.md" in all_keys
+        # No doc: entries — neither for the selected file
+        # (no swap target to begin with) nor for the
+        # unselected one. Cross-ref is L0-only under D27.
+        assert not any(
+            k.startswith("doc:") for k in all_keys
+        )
+        # Primary symbol entries also absent — D27 doesn't
+        # seed those as tracker entries either; the
+        # aggregate map carries them.
+        assert not any(
+            k.startswith("symbol:") for k in all_keys
+        )
 
     def test_cross_ref_rebuild_marks_secondary_tier_broken(
         self,
