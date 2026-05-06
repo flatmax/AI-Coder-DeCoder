@@ -91,6 +91,35 @@ Both directory names are in `.gitignore` so a developer running both implementat
 
 Specs4 documents the per-repo directory abstractly ("the per-repo working directory") without pinning the name, which is the right altitude for a behavioral spec. Specs3 correctly documents `.ac-dc/` because it describes the previous implementation. Neither suite needs updating for this rename.
 
+### D27 — L0 is structural-only and never invalidated; edited files pin in lower tiers
+
+The cache-tiering design allowed any tracked item — including full file content — to be promoted into any tier including L0, as long as it earned the N-counter graduation. Combined with the wide-exclude rule (a selected file's symbol block is removed from the aggregate map when its full content lives in Active), this meant routine selection toggles and edits could rewrite L0's byte sequence. Every cache-busting event paid a full L0 miss — typically the largest single block in the prompt.
+
+The user's complaint surfaced the cost: "adding full context files invalidates the cache as symbol tables are dropped from the four tiers randomly, as they are added in full file to the context." Each turn that touched a file's selection or edit state risked invalidating the most expensive cached prefix.
+
+Resolution: separate the tier model into **content-typed** and **stability-typed** regions.
+
+**Content-typed region (L0).** Permanent. Holds:
+- System prompt (with new staleness-awareness clause — see below)
+- Aggregate symbol map for every indexed file
+- Aggregate doc map for every indexed file
+
+L0's byte sequence is fixed for the duration of the session. The aggregate maps reflect the index state captured at session start (or after explicit cache rebuild). L0 is invalidated *only* by application restart or explicit `rebuild_cache` RPC. Edits, selections, URL fetches, history compaction, session loads — none touch L0.
+
+**Stability-typed region (L1, L2, L3, Active).** Holds full file content, fetched URL content, and history. The existing N-counter cascade promotes content from Active through L3 → L2 → L1 as it stays stable. Symbol blocks and doc blocks never appear here — they live only in L0's aggregate maps.
+
+**Edit invariant.** When a file's content hash changes, `file:<path>` lands in Active with fresh content and is *pinned* — stale-cleanup and automatic eviction skip it. It rides the cascade upward normally as it stabilises but cannot be silently removed. Only application restart or cache rebuild clears pinned files. Unmodified files can still be deselected by the user as today.
+
+**Why this works.** The structural map L0 holds may drift during a session — a function signature in the symbol map can lag behind the actual edited file. The full edited text is always present in Active or a lower cached tier (the edit invariant guarantees this), and the new system prompt clause ("How Files Appear in This Prompt") tells the LLM that full-text in Current Working Files supersedes the structural map. Modern instruction-tuned models exhibit strong recency bias plus context-hierarchy awareness; the explicit authority rule plus the natural recency weighting handle the staleness gracefully.
+
+**Tradeoff acknowledged.** The structural map can be wrong about session-edited files between L0 rebuilds. Cost per incident: small — at worst, the LLM produces a comment or question based on a stale signature when the truth is right there in Working Files. Benefit: continuous — L0 cache survives every selection toggle, edit, URL fetch, and turn boundary in the session. Net is strongly positive: the structural map is for navigation, the full text is for truth.
+
+**Wide-exclude logic removed.** With L0 always containing the full aggregate maps and L1–L3 never containing symbol/doc blocks at all, there's no longer any "is this symbol block already rendered elsewhere?" decision. The three call sites that previously coordinated on `wide_map_exclude_set` (`_assemble_tiered`, `_get_meta_block`, `get_context_breakdown`) simplify to "L0 always shows everything; lower tiers never show symbols."
+
+**Cascade unchanged.** N-counter, ripple promotion, underfill demotion, hysteresis (when added) — all stay. The only new policy constraints are: nothing promotes into L0, nothing in L0 is rewritten by the cascade, and edited files are pinned against stale removal.
+
+Spec updates landing alongside this decision: `specs4/3-llm/cache-tiering.md`, `specs4/3-llm/prompt-assembly.md`, `specs-reference/3-llm/cache-tiering.md`, `specs-reference/3-llm/prompt-assembly.md`, `src/ac_dc/config/system.md`, `src/ac_dc/config/system_doc.md`. Sync from `system.md` / `system_doc.md` to `specs-reference/3-llm/prompts/` via `scripts/sync_prompts.py` after the prompt files land.
+
 ### D20 — Agent-spawn block shape: minimal `{id, task}` + distinct `🟩🟩🟩 AGEND` end marker
 
 Parallel agents (`specs4/7-future/parallel-agents.md`) are speculative future work — no implementation planned in the current scope — but the decomposition format had to be pinned concretely so edit-protocol parsers could reserve the marker bytes and so MCP integration (`specs4/7-future/mcp-integration.md`) had a shape to extend. Two decisions settled during design consolidation:

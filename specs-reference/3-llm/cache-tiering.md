@@ -6,17 +6,19 @@
 
 ### Tier parameters
 
-Each stability tier has an **entry N** (the N value assigned on arrival) and a **promotion N** (the threshold above which an item is eligible to promote to the next tier up).
+Each stability tier (L1, L2, L3, Active) has an **entry N** (the N value assigned on arrival) and a **promotion N** (the threshold above which an item is eligible to promote to the next tier up). L0 is content-typed (system prompt + aggregate maps) and not subject to the N-counter cascade.
 
 | Tier | Entry N | Promotion N | Notes |
 |---|---|---|---|
-| L0 | 12 | — (terminal) | Most stable; items here never promote further |
-| L1 | 9 | 12 | |
+| L0 | — | — | Content-typed; system prompt + aggregate symbol/doc maps; never invalidated by routine events |
+| L1 | 9 | — (terminal for cascade-mobile content) | Most stable promoted concrete content |
 | L2 | 6 | 9 | |
 | L3 | 3 | 6 | Entry tier for graduated content |
 | Active | 0 | 3 | Uncached; N ≥ 3 makes an item eligible to graduate to L3 |
 
 Promoted items enter their destination tier with the destination's entry N, **not** preserving their source-tier N. An item promoting from L3 → L2 arrives at L2 with N = 6, regardless of whether its L3 N was 6, 7, or 8.
+
+Cascade-mobile content (`file:`, `url:`, `history:`) never reaches L0 — the cascade respects the L0 content-type policy and stops promotion at L1.
 
 ### Cache target computation
 
@@ -69,13 +71,15 @@ Deliberately below the common real-block range (50–300 tokens) — a slight un
 
 ### Post-measurement L0 backfill (cross-reference enable only)
 
-The `backfill_l0_after_measurement` method still exists but is NOT called from the init or rebuild paths — the four-tier even split obviates the need. It remains wired into `seed_cross_reference_items` so cross-reference activation can promote the most-connected opposite-index items into L0:
+Under the L0-content-typed model, init and rebuild do not run L0 backfill — L0 is populated directly with the aggregate maps. `backfill_l0_after_measurement` remains wired into `seed_cross_reference_items` so cross-reference activation can promote the most-connected opposite-index items into L0 alongside the primary aggregate map. This is the only remaining caller.
 
 | Value | Purpose |
 |---|---|
 | 2.0 | Default `overshoot_multiplier` |
 
 When called, the backfill ranks candidates by reference count descending and promotes until real token total reaches `cache_target_tokens × overshoot_multiplier`. Source tiers marked broken; L0 not marked broken (promoted items earn their slot). Scoped to `candidate_keys` when provided (cross-reference enable uses this to avoid promoting pre-existing tracker entries).
+
+Cross-reference items are structural (symbol or doc blocks), so promoting them into L0 is consistent with L0's content-type policy. File and URL content is never a candidate for this backfill.
 
 ### Cascade iteration cap
 
@@ -91,8 +95,10 @@ In practice the cascade stabilises within 2–3 iterations; the cap is defensive
 
 | Threshold | Value | Used by |
 |---|---|---|
-| Graduation N (active → L3) | 3 | Files, symbols, doc blocks |
+| Graduation N (active → L3) | 3 | Files (including edit-pinned), URLs |
 | URL direct-entry tier | L1 (entry N = 9) | URLs skip the graduation wait; static content enters directly cached |
+
+Symbol blocks and doc blocks do not graduate — they live permanently in L0's aggregate maps from session start (or last `rebuild_cache`) and are not subject to the N-counter cascade.
 
 History does not use an N threshold and does not use a token-budget threshold. It graduates only on piggyback — when L3 is already marked broken for an unrelated reason, newest → oldest history fills a verbatim window sized at `cache_target_tokens` in active and everything older promotes to L3. See the behavioural spec for rationale (`cache_target_tokens` is a caching floor, not a conversation-length cap, and token-driven history graduation would destabilise L3 on almost every turn).
 
@@ -122,14 +128,16 @@ The `_anchored` flag is a transient per-cascade attribute set dynamically via `s
 
 ### Key prefixes
 
-| Prefix | Source | Stored value |
-|---|---|---|
-| `file:{path}` | Selected files | Full file content hash |
-| `symbol:{path}` | Symbol index entries | Signature hash (raw symbol data, not formatted output) |
-| `doc:{path}` | Document index entries | Signature hash (raw outline data) |
-| `history:{N}` | Conversation history | Hash of `role + content` string, where N is the integer index |
-| `url:{hash12}` | Fetched URL content | Hash of URL content; hash12 is the first 12 chars of SHA-256(url) |
-| `system:prompt` | System prompt + legend | Hash of prompt text only (excludes legend, so file-selection-driven legend changes don't destabilise the system entry) |
+| Prefix | Source | Stored value | Tier eligibility |
+|---|---|---|---|
+| `file:{path}` | Selected files | Full file content hash | Active, L3, L2, L1 (never L0) |
+| `symbol:{path}` | Symbol index entries | Signature hash (raw symbol data, not formatted output) | L0 only (aggregate map); cross-reference activation may seed additional `symbol:` entries into L0 |
+| `doc:{path}` | Document index entries | Signature hash (raw outline data) | L0 only (aggregate map); cross-reference activation may seed additional `doc:` entries into L0 |
+| `history:{N}` | Conversation history | Hash of `role + content` string, where N is the integer index | Active, L3, L2, L1 (never L0) |
+| `url:{hash12}` | Fetched URL content | Hash of URL content; hash12 is the first 12 chars of SHA-256(url) | Active, L3, L2, L1 (never L0) |
+| `system:prompt` | System prompt + legend | Hash of prompt text only (excludes legend, so file-selection-driven legend changes don't destabilise the system entry) | L0 only |
+
+`file:` entries acquire an additional transient `_pinned` flag when the file is edited during the session. Pinned entries are not subject to stale-cleanup eviction. Pin flags are cleared by application restart or explicit `rebuild_cache`.
 
 ## Dependency quirks
 

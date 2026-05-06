@@ -236,31 +236,25 @@ Format details:
 
 The absence of a language tag is deliberate. Language tags are useful for syntax highlighting in UIs, but for LLM context they add tokens without improving model behavior — the model infers language from path and content equally well without the hint.
 
-## Symbol map exclusions
+## No symbol-map exclusions
 
-The aggregate symbol-map or doc-map body (the `symbol_map` / `doc_map` text injected into L0's system message) must exclude every path whose full content or compact block already appears elsewhere in the assembled prompt. Without these exclusions the LLM sees the same file twice — once compactly in the aggregate map, once fully in its tier or active-files section — wasting tokens and confusing the model about which view is authoritative.
+Under the L0-content-typed model, the aggregate symbol-map and doc-map bodies in L0's system message contain **every indexed file's block**. The only filter applied is user-exclusion via the file picker's three-state checkbox, which removes the file from the index entirely.
 
-### The wide exclusion set
+The wide-exclude logic that previously coordinated three call sites is removed. The three call sites that previously had to agree on the exclusion set now all simply request "every indexed file":
 
-The correct exclusion set is the union of:
-
-1. **Selected files** — full content renders in the active "Working Files" section (if not graduated) or in a cached tier's `FILES_L{N}_HEADER` block (if graduated as `file:`)
-2. **User-excluded index files** — from the file picker's three-state checkbox; these have no representation in the prompt at all
-3. **Every path graduated into any cached tier** — iterate tiers `L0`, `L1`, `L2`, `L3`, and for each `TrackedItem` whose key starts with `file:`, `symbol:`, or `doc:`, strip the prefix and add the path to the set
-
-All three prefixes contribute because each represents content that already renders in a cached tier's `TIER_SYMBOLS_HEADER` or `FILES_L{N}_HEADER` section. A `symbol:` entry in L2 means that file's compact block is in L2's content body; rendering it again in the aggregate L0 map body would be duplicate prompt content.
-
-### Three call sites must agree
-
-The wide exclusion set is computed at three places in the implementation:
-
-| Call site | Purpose |
+| Call site | Behaviour |
 |---|---|
-| `_assemble_tiered` | Produces the actual prompt sent to the LLM |
-| `_get_meta_block` | Produces the modal content when a user clicks the `meta:repo_map` / `meta:doc_map` row in the Cache sub-view |
-| `get_context_breakdown` | Produces the token count displayed on the `meta:repo_map` / `meta:doc_map` row in the Cache sub-view |
+| `_assemble_tiered` | Renders the aggregate maps without per-file filtering |
+| `_get_meta_block` | Renders the same aggregate maps when the user clicks the `meta:repo_map` / `meta:doc_map` row |
+| `get_context_breakdown` | Reports the token count of the same aggregate maps |
 
-**All three must compute the same set.** A divergence between the breakdown and the assembler produces the symptom: cache viewer shows a row with non-zero token count, but clicking the row opens an empty modal (or vice versa). This was the bug that surfaced during specs-reference migration and is why this section exists.
+There is no longer any divergence-bug class involving these three sites — they all read from the same source (the index) with the same single filter (user-exclusion).
+
+### Why duplicates are acceptable
+
+A selected file appears twice in the prompt: as a structural summary in L0's aggregate map, and as full text in the file's appropriate lower-tier section. The duplication is small (symbol blocks are dense) and is resolved by the system prompt's authority rule ("if a file appears in Working Files, the full text is the absolute truth, superseding any structural outlines provided earlier"). Modern instruction-tuned models follow this rule reliably via recency bias plus the explicit instruction.
+
+The win from removing exclusions is that L0's byte sequence is invariant under selection toggles, edits, and tier graduation — L0 cache survives every routine event in a session.
 
 ## Synthetic meta rows
 
@@ -270,8 +264,8 @@ The cache viewer surfaces every distinct section of the assembled prompt as a ro
 
 | Key | Tier | Content |
 |---|---|---|
-| `meta:repo_map` | L0 (cached) | Aggregate symbol-map body, in code mode; excludes per the wide exclusion set above |
-| `meta:doc_map` | L0 (cached) | Aggregate doc-map body, in doc mode; same exclusion rules |
+| `meta:repo_map` | L0 (cached) | Aggregate symbol-map body, in code mode; full coverage of every indexed file (minus user-excluded files) |
+| `meta:doc_map` | L0 (cached) | Aggregate doc-map body, in doc mode; full coverage of every indexed file (minus user-excluded files) |
 | `meta:file_tree` | uncached tail | Flat repo file listing (`Repo.get_flat_file_list`) |
 | `meta:url:{url}` | uncached tail | One row per fetched URL; content is the URL service's formatted block |
 | `meta:review_context` | uncached tail | Review mode's injected block (review summary + commits + pre-change map + reverse diffs) |

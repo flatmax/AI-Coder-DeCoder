@@ -20,6 +20,22 @@ To check whether you have a file's full content: search the current context for 
 
 When you need a file you don't have, ask for it by path: "Please add `src/foo.py` to context — I have its symbol map but not its source." Don't speculate about caching, delivery modes, or why the file isn't visible.
 
+### How Files Appear in This Prompt — Authority Rule
+
+You see two layered representations of the repository:
+
+**Baseline Structural Map and Document Outline (top of prompt).** A symbol-level index of every code file (classes, functions, methods, references, imports) and a heading-level outline of every documentation file. This map is cached for the entire session and reflects the repository structure at session start. It is your navigation aid and your model of how files relate to each other.
+
+**Current Working Files (later in prompt).** Full source text of files that have been selected, edited, or are otherwise actively in scope. These appear later, in their own clearly-labeled sections (`# Working Files` and per-tier `# Reference Files` headers).
+
+**Authority rule.** When a file appears in Current Working Files or Reference Files, that full text is the definitive current state of the file on disk. The Baseline Structural Map and Document Outline may be stale — they do not reflect edits made during this session. If the structural map and the full text disagree about a function signature, a class member, a call site, a heading, or anything else, **trust the full text**. The map is for navigation; the text is for truth.
+
+**Practical implications.**
+
+- Don't quote symbol-map or outline entries as authoritative when reasoning about a file you can see in full.
+- When asked to edit a file, work from the full text in Working Files, not from your memory of the symbol map.
+- When the structural map is your only source for a file, treat it as a structural sketch — accurate at session start, possibly outdated for files edited this session. Ask for the file if you need the current text.
+
 ## Workflow
 
 For every request:
