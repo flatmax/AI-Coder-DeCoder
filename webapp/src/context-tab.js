@@ -827,35 +827,24 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   _onStreamComplete() {
-    if (this._isTabActive()) {
-      this._refresh();
-    } else {
-      this._stale = true;
-    }
+    // Refresh eagerly regardless of visibility — the Context
+    // tab should be current the moment the user switches to
+    // it, not after a deferred fetch resolves. The cost is
+    // one get_context_breakdown RPC per stream completion;
+    // cheap relative to the stream itself.
+    this._refresh();
   }
 
   _onFilesChanged() {
-    if (this._isTabActive()) {
-      this._refresh();
-    } else {
-      this._stale = true;
-    }
+    this._refresh();
   }
 
   _onModeChanged() {
-    if (this._isTabActive()) {
-      this._refresh();
-    } else {
-      this._stale = true;
-    }
+    this._refresh();
   }
 
   _onSessionChanged() {
-    if (this._isTabActive()) {
-      this._refresh();
-    } else {
-      this._stale = true;
-    }
+    this._refresh();
   }
 
   _onActiveTabChanged(event) {
@@ -863,11 +852,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     if (typeof tabId !== 'string' || !tabId) return;
     if (tabId === this._activeTabId) return;
     this._activeTabId = tabId;
-    if (this._isTabActive()) {
-      this._refresh();
-    } else {
-      this._stale = true;
-    }
+    this._refresh();
   }
 
   async _refresh() {

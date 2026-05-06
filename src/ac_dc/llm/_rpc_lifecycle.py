@@ -67,6 +67,15 @@ def complete_deferred_init(
     # Eager stability init; failure falls through to lazy path.
     service._try_initialize_stability()
 
+    # Initial L0 freeze now that the symbol index is
+    # attached. Construction skipped this under deferred
+    # init; running it here means the next chat request
+    # reads from a populated snapshot. Doc index may still
+    # be building — its content joins the snapshot at the
+    # next L0-invalidation event (mode switch, cross-ref
+    # toggle, etc.).
+    service._freeze_l0_snapshot()
+
     # Broadcast restored session now that the event loop is up
     # and frontend subscribers are mounted.
     if service._restored_on_startup:

@@ -433,20 +433,40 @@ def get_context_breakdown(
     system_prompt = context.get_system_prompt()
     system_tokens = service._counter.count(system_prompt)
 
-    # Legend tokens.
-    legend = ""
-    if service._symbol_index is not None:
-        try:
-            legend = service._symbol_index.get_legend()
-        except Exception:
-            pass
+    # Legend tokens — read from the L0 snapshot for the
+    # main scope so the displayed count matches what's
+    # actually in the cached prefix. Agent scopes fall back
+    # to a live read since they don't have their own L0
+    # snapshot under the current design.
+    if scope is None:
+        legend = service._l0_primary_legend
+    else:
+        legend = ""
+        if service._symbol_index is not None:
+            try:
+                legend = service._symbol_index.get_legend()
+            except Exception:
+                pass
     legend_tokens = service._counter.count(legend) if legend else 0
 
-    # Symbol map tokens + per-file details.
-    # Under D27 the aggregate map includes every indexed
-    # file regardless of selection state — duplication
-    # between L0 map and lower-tier full text is the
-    # design. Only user-excluded paths are filtered.
+    # Symbol/doc map tokens come from the frozen L0
+    # snapshot — the bytes the LLM actually receives — so
+    # the cache-viewer's displayed L0 size matches what's
+    # actually cached. Per-file details still iterate the
+    # live index because the cache viewer uses them for
+    # the expandable Budget sub-view's per-file breakdown
+    # (which doesn't have to match L0's snapshot exactly —
+    # it's a navigation aid showing what's IN the index,
+    # not what's currently cached). The aggregate-map
+    # token count for L0 displays uses the snapshot.
+    #
+    # Only main scope reads service._l0_*; agent scopes
+    # don't have their own L0 snapshot under the current
+    # design (agent ContextManagers share the orchestrator's
+    # L0 prefix per the agent-spawn design). The fallback
+    # for agent scopes still goes live for now —
+    # acceptable because agent breakdowns are diagnostic
+    # and not on a hot per-turn path.
     symbol_map = ""
     symbol_map_files = 0
     symbol_map_details: list[dict[str, Any]] = []
@@ -472,9 +492,6 @@ def get_context_breakdown(
                     "path": path,
                     "tokens": service._counter.count(block),
                 })
-            symbol_map = service._doc_index.get_doc_map(
-                exclude_files=user_excluded_paths(service, scope)
-            )
         else:
             if service._symbol_index is not None:
                 all_paths = list(
@@ -501,47 +518,78 @@ def get_context_breakdown(
                         "path": path,
                         "tokens": service._counter.count(block),
                     })
-                symbol_map = service._symbol_index.get_symbol_map(
-                    exclude_files=user_excluded_paths(service, scope)
-                )
     except Exception as exc:
         logger.debug(
             "Symbol map details enumeration failed: %s", exc
         )
-    symbol_map_tokens = (
-        service._counter.count(symbol_map) if symbol_map else 0
-    )
-
-    # Secondary aggregate map (cross-reference only). Mirrors
-    # the primary fetch above but routed to the opposite
-    # index. Tokens computed for the L0 meta-row synthesis
-    # below; nothing else in the breakdown needs the body
-    # since cross-reference is L0-only under D27.
-    secondary_map = ""
-    secondary_map_tokens = 0
-    if service._cross_ref_enabled:
+    # Aggregate-map body for the breakdown's UI-displayed
+    # L0 size: read from the snapshot for the main scope,
+    # fall back to live for agent scopes.
+    if scope is None:
+        symbol_map = service._l0_primary_map
+    else:
+        # Agent scope — fall back to a live read scoped to
+        # the agent's own exclusion list. This path is
+        # diagnostic-only.
         try:
             if context.mode == Mode.DOC:
+                symbol_map = service._doc_index.get_doc_map(
+                    exclude_files=user_excluded_paths(
+                        service, scope
+                    )
+                )
+            else:
                 if service._symbol_index is not None:
-                    secondary_map = (
+                    symbol_map = (
                         service._symbol_index.get_symbol_map(
                             exclude_files=(
                                 user_excluded_paths(service, scope)
                             )
                         )
                     )
-            else:
-                secondary_map = service._doc_index.get_doc_map(
-                    exclude_files=user_excluded_paths(service, scope)
-                )
-            if secondary_map:
-                secondary_map_tokens = (
-                    service._counter.count(secondary_map)
-                )
         except Exception as exc:
             logger.debug(
-                "Secondary aggregate map fetch failed: %s",
+                "Agent-scope aggregate map fetch failed: %s",
                 exc,
+            )
+    symbol_map_tokens = (
+        service._counter.count(symbol_map) if symbol_map else 0
+    )
+
+    # Secondary aggregate map (cross-reference only). Same
+    # snapshot-vs-live split as the primary above.
+    secondary_map = ""
+    secondary_map_tokens = 0
+    if service._cross_ref_enabled:
+        if scope is None:
+            secondary_map = service._l0_secondary_map
+        else:
+            try:
+                if context.mode == Mode.DOC:
+                    if service._symbol_index is not None:
+                        secondary_map = (
+                            service._symbol_index.get_symbol_map(
+                                exclude_files=(
+                                    user_excluded_paths(
+                                        service, scope
+                                    )
+                                )
+                            )
+                        )
+                else:
+                    secondary_map = service._doc_index.get_doc_map(
+                        exclude_files=(
+                            user_excluded_paths(service, scope)
+                        )
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Secondary aggregate map fetch failed: %s",
+                    exc,
+                )
+        if secondary_map:
+            secondary_map_tokens = (
+                service._counter.count(secondary_map)
             )
 
     # File tokens — per-file detail.
@@ -960,17 +1008,18 @@ def print_post_response_hud(service: "LLMService") -> None:
     system_tokens = service._counter.count(
         service._context.get_system_prompt()
     )
-    symbol_map_tokens = 0
-    if service._symbol_index is not None:
-        try:
-            smap = service._symbol_index.get_symbol_map(
-                exclude_files=set(service._selected_files)
-            )
-            symbol_map_tokens = (
-                service._counter.count(smap) if smap else 0
-            )
-        except Exception:
-            pass
+    # Symbol map tokens — read from the L0 snapshot so the
+    # terminal HUD shows the same number as what the LLM
+    # actually receives. Pre-D28 this was a live read with
+    # selected-files exclusion (a pre-D27 leftover that
+    # would have under-reported by excluding selected files
+    # from the displayed total — but the live read was also
+    # the source of the cache-busting drift).
+    symbol_map_tokens = (
+        service._counter.count(service._l0_primary_map)
+        if service._l0_primary_map
+        else 0
+    )
     files_tokens = service._file_context.count_tokens(service._counter)
     url_tokens = 0
     url_context_parts = service._context.get_url_context()

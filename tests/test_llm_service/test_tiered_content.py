@@ -738,6 +738,13 @@ class TestAssembleTieredLegendDispatch:
         # DocIndex has one; it returns "" on an empty index).
         # Override it to return the test sentinel.
         svc._doc_index.get_legend = lambda: doc_legend  # type: ignore[method-assign]
+        # Refreeze the L0 snapshot so the stubbed legends
+        # land in `_l0_primary_legend` / `_l0_secondary_legend`.
+        # The initial freeze in __init__ captured the
+        # pre-monkey-patch state (empty doc legend); without
+        # this refresh, _assemble_tiered reads the stale
+        # snapshot and the stubs are never observed.
+        svc._freeze_l0_snapshot()
 
         # Capture the kwargs passed to assemble_tiered_messages.
         capture: dict[str, Any] = {}
@@ -789,8 +796,12 @@ class TestAssembleTieredLegendDispatch:
             config, repo, fake_litellm
         )
         # Bypass the set_cross_reference RPC — it has a readiness
-        # gate we don't care about here. Set the flag directly.
+        # gate we don't care about here. Set the flag directly,
+        # then refreeze so the snapshot picks up the secondary
+        # slot. Production path goes through set_cross_reference
+        # which calls _freeze_l0_snapshot itself.
         svc._cross_ref_enabled = True
+        svc._freeze_l0_snapshot()
 
         tiered = svc._build_tiered_content()
         assert tiered is not None
@@ -820,11 +831,13 @@ class TestAssembleTieredLegendDispatch:
         )
         # Switch to doc mode. Use the Mode enum directly since
         # switch_mode has broadcast side effects not relevant
-        # here.
+        # here. Refreeze the snapshot so primary_legend reflects
+        # the doc index — production switch_mode does this.
         svc._context.set_mode(Mode.DOC)
         svc._stability_tracker = svc._trackers.setdefault(
             Mode.DOC, svc._stability_tracker
         )
+        svc._freeze_l0_snapshot()
         # Re-place an item in the new tracker so tiered content
         # is non-empty.
         _place_item(svc._stability_tracker, "symbol:a.py", "L1")
@@ -854,6 +867,10 @@ class TestAssembleTieredLegendDispatch:
         )
         _place_item(svc._stability_tracker, "symbol:a.py", "L1")
         svc._cross_ref_enabled = True
+        # Refreeze after both mutations — production paths
+        # (switch_mode, set_cross_reference) each refreeze;
+        # bypassing them means the test must do it.
+        svc._freeze_l0_snapshot()
 
         tiered = svc._build_tiered_content()
         assert tiered is not None

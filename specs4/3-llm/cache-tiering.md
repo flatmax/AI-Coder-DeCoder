@@ -49,28 +49,40 @@ L1, L2, L3 hold *promoted concrete content* — full file text, fetched URL cont
 
 ## L0 Stability Contract
 
-L0 is invalidated only by:
+L0's rendered byte sequence is captured at session start and refrozen only at explicit invalidation events. Routine session activity (file edits, selection toggles, URL fetches, history compaction, session loads, OS-level file changes) does NOT invalidate L0.
 
-- Application restart
-- Explicit cache rebuild (`rebuild_cache` RPC; ideally extended to fire automatically post-commit)
+### What invalidates L0
 
-Nothing else touches L0. Specifically, L0 is *not* invalidated by:
+The complete enumerated list:
 
-- File edits, creations, or deletions
-- Selection toggles (selecting or deselecting a file)
-- URL fetches
-- History compaction
-- Session loads
-- Mode switches
-- Any item entering or leaving L1, L2, L3, or Active
+1. **Application restart** — the snapshot is in-memory and is rebuilt fresh on each server start.
+2. **Explicit cache rebuild** (`rebuild_cache` RPC, localhost-only). Ideally extended to fire automatically post-commit; see the Manual Cache Rebuild section.
+3. **Mode switch** (code → doc or doc → code). The system prompt swaps and the primary aggregate map swaps from symbol-index to doc-index (or vice versa); L0's bytes change wholesale and must be refrozen.
+4. **Cross-reference enable**. Adds the secondary index's aggregate map and legend to L0 alongside the primary; L0's bytes grow.
+5. **Cross-reference disable**. Removes the secondary content from L0; L0's bytes shrink.
+6. **Settings reload that changes the system prompt text**. Settings reloads that leave the prompt bytes unchanged do NOT invalidate L0. The byte-comparison covers L0 as a whole (system prompt + primary legend + primary aggregate map + secondary legend and map when cross-ref is on); legend and alias-table content are part of the rendered L0 and refresh together with the prompt.
+7. **File inclusion** (a previously-excluded file is added back to the index via the file picker's three-state checkbox). The aggregate map gains the file's structural block; L0 must be refrozen.
+8. **File exclusion** (a file is removed from the index via the file picker's three-state checkbox), **subject to user confirmation**. Excluding files mid-session is not common, and invalidating L0 is expensive. The webapp prompts the user with a three-button dialog: **Apply now** (invalidate L0 immediately, full cache rewrite), **Defer** (leave the cache stale until the next L0-invalidating event), or **Cancel** (discard the pending exclusion entirely). A "Don't ask again" checkbox persists either Apply now or Defer as the default; Cancel never persists. The stored preference is keyed `ac-dc-l0-exclude-pref` in browser localStorage with values `ask` (default), `always`, or `never`. The Settings tab can reset the preference back to `ask` via a public `resetL0ExcludePref()` method on the files-tab component.
 
-The aggregate symbol/doc maps in L0 may therefore drift during a session — a file edited mid-session is reflected accurately in the lower tiers (where its full text lives) but its symbol-block summary in L0 may be stale until the next rebuild. This is acceptable because:
+### What does NOT invalidate L0
 
-1. The full edited text is always present in Active or a lower cached tier (see the edit invariant below) — the truthful current state is in the prompt.
-2. The system prompt's "How Files Appear in This Prompt" clause instructs the LLM to treat full-text in Working Files as authoritative when it disagrees with the structural map.
-3. Modern instruction-tuned models follow recency bias plus the explicit authority rule reliably.
+- File edits, creations, or deletions performed during the session — L0's aggregate map may show a stale signature for an edited file. The truthful full text of edited files is always present in Active or a lower cached tier (see the edit invariant below). The system prompt's "How Files Appear in This Prompt" clause instructs the LLM to treat full text in Working Files as authoritative when it disagrees with the structural map.
+- Selection toggles (selecting or deselecting an unmodified file). The aggregate map in L0 includes every indexed file regardless of selection state.
+- URL fetches.
+- History compaction.
+- Session loads.
+- OS-level file changes (a file removed by `git rm` or terminal). The deletion-marker mechanism (see the Deletion Markers section) bridges the gap until the next L0 refresh.
+- Any item entering or leaving L1, L2, L3, or Active. The cascade does not touch L0.
 
-The cost is a small risk that the LLM produces a comment or question based on a stale symbol-map signature. The benefit is that L0 — the largest single cached block in the prompt — survives every routine event in a session.
+### Why this matters
+
+L0 is typically the largest single cached block in the prompt — the system prompt plus aggregate maps for every indexed file can run to hundreds of thousands of tokens. Cache-write cost is paid every time L0's bytes change. Restricting invalidation to the enumerated events keeps the L0 cache stable across the long tail of routine session activity.
+
+The cost is a small risk that the LLM produces a comment or question based on a stale symbol-map signature for an edited file. The benefit is that L0 survives every selection toggle, edit, URL fetch, and turn boundary in the session — the cache hit rate stays high through normal use.
+
+### Implementation note
+
+L0's content is held in a frozen snapshot on the LLM service alongside the live indexes. Per-turn streaming reads from the snapshot for prompt assembly; the live indexes stay current (per-turn re-indexing remains in place) so per-file blocks rendered in L1–L3 reflect current edits, and so the next L0-invalidation event can refresh from accurate live data. See decision D28 for the snapshot-vs-live-index split.
 
 ## The N Value
 
@@ -324,7 +336,8 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 
 ## Invariants
 
-- **L0 is content-typed and never invalidated by routine events.** L0 holds the system prompt plus the aggregate symbol map plus the aggregate doc map. Selection toggles, edits, URL fetches, history compaction, session loads, and mode switches do not touch L0. Only application restart or explicit `rebuild_cache` invalidates L0.
+- **L0 is content-typed and invalidated only by enumerated events.** L0 holds the system prompt plus the aggregate symbol map plus the aggregate doc map (plus secondary aggregate map and legend when cross-reference is enabled). The full list of L0-invalidation events is: application restart, explicit `rebuild_cache`, mode switch, cross-reference enable, cross-reference disable, settings reload that changes prompt bytes, file inclusion, and file exclusion (user-confirmed). Routine session activity (selection toggles, edits, URL fetches, history compaction, session loads, OS-level file changes) does NOT invalidate L0.
+- **L0 is held as a frozen snapshot** distinct from the live indexes. The live symbol and doc indexes stay current across the session (per-turn re-indexing); the snapshot captures L0's rendered bytes at the last invalidation event and is read by prompt assembly until the next invalidation event. See decision D28.
 - **L1, L2, L3 hold promoted concrete content only** — full file text, fetched URL content, graduated history. Symbol blocks and doc blocks never appear in L1–L3; the aggregate maps in L0 are their permanent home.
 - **Files, URLs, and history are ineligible for L0.** The cascade respects this — nothing promotes into L0 from below.
 - **Edited files are pinned.** A file whose content hash changed during the session cannot be removed by stale cleanup or automatic eviction. Only application restart or explicit cache rebuild clears pin flags.

@@ -314,63 +314,27 @@ def assemble_tiered(
         descriptor_prefix + user_prompt + (reminder or "")
     )
 
-    # Under the L0-content-typed model (D27), the aggregate
-    # symbol/doc map in L0 contains every indexed file's
-    # block. Selected files appear both in the map AND as
-    # full text in a lower tier — the system prompt's
-    # authority rule resolves the apparent conflict
-    # ("trust full text over the map"). Only user-excluded
-    # files (file picker's three-state checkbox) are
-    # filtered, since they have no representation in the
-    # prompt at all.
-    exclude_files: set[str] = set(
-        getattr(service, "_excluded_index_files", None) or ()
-    )
-
-    # Primary index — whichever matches the current mode.
+    # L0 contents — read from the frozen snapshot, NOT live
+    # from the indexes. The snapshot was captured at the
+    # last L0-invalidation event (construction, mode switch,
+    # cross-ref toggle, settings prompt change, file
+    # inclusion/exclusion, manual rebuild). Reading live
+    # would let per-turn drift in the symbol index's
+    # internal state (call-site resolution, import
+    # resolution) leak into L0's bytes and force a fresh
+    # cache write every turn. See decision D28 in
+    # specs4/impl-history/decisions.md and § L0 Stability
+    # Contract in specs4/3-llm/cache-tiering.md.
+    #
     # Variables are named ``symbol_map`` and ``symbol_legend``
     # for backwards compatibility with the
     # :meth:`ContextManager.assemble_tiered_messages` kwargs;
-    # they hold the doc map / doc legend in doc mode.
-    symbol_map = ""
-    symbol_legend = ""
-    if scope.context.mode == Mode.DOC:
-        symbol_map = service._doc_index.get_doc_map(
-            exclude_files=exclude_files
-        )
-        symbol_legend = service._doc_index.get_legend()
-    else:
-        if service._symbol_index is not None:
-            symbol_map = service._symbol_index.get_symbol_map(
-                exclude_files=exclude_files
-            )
-            symbol_legend = service._symbol_index.get_legend()
-
-    # Secondary index — opposite-mode aggregate map and
-    # legend, only populated when cross-reference is on.
-    # Per ``specs4/3-llm/modes.md`` § Cross-Reference Mode:
-    # "Both legends included in the L0 cache block". The
-    # secondary aggregate map joins the legend in L0; under
-    # the L0-content-typed model (D27) cross-reference is an
-    # L0-only affair with no per-file tracker entries.
-    doc_legend = ""
-    secondary_map = ""
-    if service._cross_ref_enabled:
-        if scope.context.mode == Mode.DOC:
-            # Doc mode primary; symbol index is secondary.
-            if service._symbol_index is not None:
-                doc_legend = service._symbol_index.get_legend()
-                secondary_map = (
-                    service._symbol_index.get_symbol_map(
-                        exclude_files=exclude_files
-                    )
-                )
-        else:
-            # Code mode primary; doc index is secondary.
-            doc_legend = service._doc_index.get_legend()
-            secondary_map = service._doc_index.get_doc_map(
-                exclude_files=exclude_files
-            )
+    # they hold the doc map / doc legend in doc mode and
+    # match whatever was captured into the primary slot.
+    symbol_map = service._l0_primary_map
+    symbol_legend = service._l0_primary_legend
+    doc_legend = service._l0_secondary_legend
+    secondary_map = service._l0_secondary_map
 
     # File tree — the flat repo listing.
     file_tree = ""
@@ -440,87 +404,46 @@ def assemble_messages_flat(
         descriptor_prefix + user_prompt + (reminder or "")
     )
 
-    # Assemble a repo-context block.
+    # Assemble a repo-context block. L0 contents (primary
+    # and secondary aggregate maps + legends) come from the
+    # frozen snapshot, not live from the indexes — same
+    # contract as :func:`assemble_tiered`. See decision
+    # D28 in specs4/impl-history/decisions.md.
     system_parts: list[str] = [system_prompt]
 
-    # Primary aggregate map + legend (mode-aware). Under
-    # D27 the map contains every indexed file's block;
-    # only user-excluded files are filtered.
-    exclude_files: set[str] = set(
-        getattr(service, "_excluded_index_files", None) or ()
+    from ac_dc.context_manager import (
+        DOC_MAP_HEADER,
+        REPO_MAP_HEADER,
     )
-    try:
-        from ac_dc.context_manager import (
-            DOC_MAP_HEADER,
-            REPO_MAP_HEADER,
-        )
-        if scope.context.mode == Mode.DOC:
-            primary_legend = service._doc_index.get_legend()
-            primary_map = service._doc_index.get_doc_map(
-                exclude_files=exclude_files
-            )
-            primary_header = DOC_MAP_HEADER
-        else:
-            primary_legend = ""
-            primary_map = ""
-            if service._symbol_index is not None:
-                primary_legend = service._symbol_index.get_legend()
-                primary_map = service._symbol_index.get_symbol_map(
-                    exclude_files=exclude_files
-                )
-            primary_header = REPO_MAP_HEADER
-        if primary_legend or primary_map:
-            system_parts.append(primary_header + primary_legend)
-            if primary_map:
-                system_parts.append(primary_map)
-    except Exception as exc:
-        logger.warning(
-            "Flat assembly: primary map fetch failed: %s",
-            exc,
-        )
 
-    # Secondary aggregate map + legend (cross-reference
-    # mode only). Same shape as primary but routed to the
-    # opposite index. Per ``specs4/3-llm/modes.md`` —
-    # "Both legends included in the L0 cache block".
+    # Primary aggregate map + legend — mode-aware header
+    # selection on top of the snapshot's primary slot.
+    primary_legend = service._l0_primary_legend
+    primary_map = service._l0_primary_map
+    primary_header = (
+        DOC_MAP_HEADER if scope.context.mode == Mode.DOC
+        else REPO_MAP_HEADER
+    )
+    if primary_legend or primary_map:
+        system_parts.append(primary_header + primary_legend)
+        if primary_map:
+            system_parts.append(primary_map)
+
+    # Secondary aggregate map + legend — cross-reference
+    # only, opposite-mode header.
     if service._cross_ref_enabled:
-        try:
-            from ac_dc.context_manager import (
-                DOC_MAP_HEADER,
-                REPO_MAP_HEADER,
+        secondary_legend = service._l0_secondary_legend
+        secondary_map = service._l0_secondary_map
+        secondary_header = (
+            REPO_MAP_HEADER if scope.context.mode == Mode.DOC
+            else DOC_MAP_HEADER
+        )
+        if secondary_legend or secondary_map:
+            system_parts.append(
+                secondary_header + secondary_legend
             )
-            if scope.context.mode == Mode.DOC:
-                if service._symbol_index is not None:
-                    secondary_legend = (
-                        service._symbol_index.get_legend()
-                    )
-                    secondary_map = (
-                        service._symbol_index.get_symbol_map(
-                            exclude_files=exclude_files
-                        )
-                    )
-                    secondary_header = REPO_MAP_HEADER
-                else:
-                    secondary_legend = ""
-                    secondary_map = ""
-                    secondary_header = REPO_MAP_HEADER
-            else:
-                secondary_legend = service._doc_index.get_legend()
-                secondary_map = service._doc_index.get_doc_map(
-                    exclude_files=exclude_files
-                )
-                secondary_header = DOC_MAP_HEADER
-            if secondary_legend or secondary_map:
-                system_parts.append(
-                    secondary_header + secondary_legend
-                )
-                if secondary_map:
-                    system_parts.append(secondary_map)
-        except Exception as exc:
-            logger.warning(
-                "Flat assembly: secondary map fetch failed: %s",
-                exc,
-            )
+            if secondary_map:
+                system_parts.append(secondary_map)
 
     # File tree.
     if service._repo is not None:

@@ -97,6 +97,14 @@ Files have three context states controlled via the picker checkbox:
 ### Backend Coordination
 - Excluded files set stored server-side via the excluded-files RPC, persisted in session state
 - Removed from the stability tracker, excluded from map generation, skipped in active items, excluded from tier recomputation
+
+### L0 Invalidation Prompt
+- User-driven exclusion (shift+click on a file checkbox, or the context-menu Exclude / Exclude all action) opens a confirmation dialog asking whether to invalidate L0 immediately or defer until the next L0-invalidating event. Invalidation forces a full cache rewrite; deferring leaves the excluded file visible in the cached aggregate map until the next routine invalidation event (mode switch, cross-reference toggle, manual rebuild, application restart)
+- Three buttons: Apply now (invalidate immediately), Defer (leave cache stale), Cancel (discard the pending exclusion). A "Don't ask again" checkbox persists Apply now or Defer as the default for future exclusions. Cancel never persists a preference
+- Inclusion (un-excluding a previously-excluded file via shift+click on an excluded entry, or the Include / Include all context menu action) always invalidates L0 — no prompt. The user explicitly wants the file's structural block back in the aggregate map immediately
+- Preference stored in browser localStorage under `ac-dc-l0-exclude-pref` with values `ask` (default), `always`, or `never`. Resettable via the files-tab's public `resetL0ExcludePref()` method
+- Backend RPC carries the user's choice as the third argument to `LLMService.set_excluded_index_files(files, invalidate_l0)`. Agent-scoped RPC `set_agent_excluded_index_files(agent_id, files)` does not accept the flag — agent ContextManagers share the orchestrator's L0 prefix and can't independently invalidate it
+- Full L0-invalidation contract: see [cache-tiering.md § What invalidates L0](../3-llm/cache-tiering.md#what-invalidates-l0)
 ### Modified File Pinning
 - Files with working-tree or staged modifications cannot be deselected while modified — enforces the cache-tiering invariant that edited files stay resident in lower tiers (D27)
 - Untracked and deleted files do not pin: untracked auto-selection is a convenience the user remains free to drop, deleted files have no content to pin

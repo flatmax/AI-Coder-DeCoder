@@ -175,6 +175,29 @@ Consumers should use `SymbolIndex.get_signature_hash(path)` (authoritative) rath
 
 The system prompt hash covers prompt text only. The legend (path aliases, abbreviation reference) is concatenated at render time but NOT part of the hashed content. Rationale: the legend changes whenever file selections change (path aliases update), and hashing the combined string would cause the `system:prompt` entry to demote on every file-selection change — preventing it from ever stabilising into L0.
 
+### L0 snapshot is distinct from the live indexes
+
+L0's rendered content (system prompt + primary aggregate map + primary legend + optional secondary map and legend) is held in a snapshot on the LLM service. The snapshot is refrozen only at the enumerated L0-invalidation events documented in `specs4/3-llm/cache-tiering.md` § L0 Stability Contract. Prompt assembly reads from the snapshot, not from live `SymbolIndex.get_symbol_map()` / `DocIndex.get_doc_map()` calls.
+
+The live indexes are updated per-turn (the streaming pipeline calls `index_repo` once per request to pick up file mtime changes) so:
+
+- Per-file blocks rendered in L1, L2, L3 (via `get_file_symbol_block(path)` / `get_file_doc_block(path)`) reflect the current state of edited files. The cascade's signature-hash comparison still works correctly.
+- The next L0-invalidation event refreezes from accurate live data.
+
+The snapshot fields stored on the LLM service:
+
+| Field | Source | Populated when |
+|---|---|---|
+| `_l0_system_prompt` | `ContextManager.get_system_prompt()` | At session construction; refrozen at every L0-invalidation event |
+| `_l0_primary_legend` | `SymbolIndex.get_legend()` (code mode) or `DocIndex.get_legend()` (doc mode) | Same |
+| `_l0_primary_map` | `SymbolIndex.get_symbol_map(exclude_files=user_excluded)` (code mode) or `DocIndex.get_doc_map(...)` (doc mode) | Same |
+| `_l0_secondary_legend` | Opposite-mode index's `get_legend()`; empty string when cross-reference is off | Same |
+| `_l0_secondary_map` | Opposite-mode index's aggregate map; empty string when cross-reference is off | Same |
+
+The snapshot is a structural mirror of L0's rendered bytes. Token counts derived from snapshot fields (used by the cache breakdown UI and the post-response HUD) are computed from the snapshot strings, not from live calls — keeps the displayed numbers consistent with what the LLM actually receives.
+
+The `system:prompt` entry in the stability tracker continues to hash `_l0_system_prompt` (without legend, per the rule above). The tracker's notion of "system prompt has changed" stays decoupled from the snapshot mechanism.
+
 ## Cross-references
 
 - Behavioral cascade algorithm, promotion/demotion semantics, mode dispatch, rebuild semantics, invariants: `specs4/3-llm/cache-tiering.md`

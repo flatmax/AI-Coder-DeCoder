@@ -90,6 +90,7 @@ def get_selected_files(service: "LLMService") -> list[str]:
 def set_excluded_index_files(
     service: "LLMService",
     files: list[str],
+    invalidate_l0: bool = False,
 ) -> list[str] | dict[str, Any]:
     """Store the set of files excluded from the index.
 
@@ -98,10 +99,33 @@ def set_excluded_index_files(
     tracker — without this, excluding files in one mode
     leaves stale entries in the other mode's tracker,
     visible in the cache viewer after a mode switch.
+
+    L0 invalidation is asymmetric:
+
+    - **Inclusions** (a previously-excluded file removed
+      from the exclusion list): always refreeze. The
+      aggregate map gains the file's structural block; the
+      user expects to see it in context immediately.
+    - **Exclusions** (a file added to the exclusion list):
+      only refreeze when ``invalidate_l0=True``. Mid-session
+      exclusion is uncommon and an L0 refresh costs a full
+      cache write. The webapp prompts the user with
+      "Invalidate L0 cache to apply now, or leave the cache
+      stale until the next L0-invalidating event?" and
+      passes the user's choice via ``invalidate_l0``.
+
+    See specs4/3-llm/cache-tiering.md § What invalidates L0
+    (items 7 and 8) for the full semantics.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
+
+    old_excluded = set(service._excluded_index_files)
+    new_excluded = set(files)
+    has_inclusions = bool(old_excluded - new_excluded)
+    has_exclusions = bool(new_excluded - old_excluded)
+
     service._excluded_index_files = list(files)
     for tracker in service._trackers.values():
         for path in files:
@@ -115,6 +139,16 @@ def set_excluded_index_files(
                         tracker.mark_broken(
                             item.tier, "user excluded file"
                         )
+
+    # L0 invalidation policy. Inclusions always refreeze
+    # (file's block must appear in the map now); exclusions
+    # only refreeze when the caller opted in.
+    should_refreeze = has_inclusions or (
+        has_exclusions and bool(invalidate_l0)
+    )
+    if should_refreeze:
+        service._freeze_l0_snapshot()
+
     service._broadcast_event(
         "filesChanged", list(service._selected_files)
     )
@@ -184,6 +218,13 @@ def switch_mode(
     # Init target mode's tracker if this is the first entry.
     service._try_initialize_stability()
 
+    # Refreeze L0 — system prompt swapped, primary index
+    # swapped from symbol→doc (or vice versa). L0's bytes
+    # change wholesale; cache write is unavoidable here
+    # but bounded (one per mode switch, not one per turn).
+    # See specs4/3-llm/cache-tiering.md § What invalidates L0.
+    service._freeze_l0_snapshot()
+
     event_text = f"Switched to {target.value} mode."
     service._context.add_message(
         "user", event_text, system_event=True
@@ -235,6 +276,12 @@ def set_cross_reference(
     else:
         service._remove_cross_reference_items()
 
+    # Refreeze L0 — secondary aggregate map and legend
+    # added (enable) or removed (disable). L0's bytes
+    # change in either direction. See
+    # specs4/3-llm/cache-tiering.md § What invalidates L0.
+    service._freeze_l0_snapshot()
+
     service._broadcast_event(
         "modeChanged",
         {
@@ -284,6 +331,17 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
     else:
         prompt = service._config.get_system_prompt()
     has_appendix = "Agent-Spawn Capability" in prompt
+
+    # Capture old prompt BEFORE setting new one, so we can
+    # detect whether the bytes actually changed. Settings
+    # reloads that don't touch the system prompt (e.g., a
+    # save that only edits compaction config) must NOT
+    # invalidate L0 — that would force a 315K cache write
+    # for nothing. Per specs4/3-llm/cache-tiering.md § What
+    # invalidates L0: settings reloads that leave the
+    # prompt bytes unchanged do NOT invalidate L0.
+    old_prompt = service._context.get_system_prompt()
+    prompt_changed = (old_prompt != prompt)
     service._context.set_system_prompt(prompt)
 
     # Re-register with the tracker so the cache viewer's
@@ -315,11 +373,20 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
             exc,
         )
 
+    # Refreeze L0 only when the prompt bytes actually
+    # changed. A no-op refresh (Settings reload that didn't
+    # touch the prompt) must skip the freeze; otherwise
+    # every "Save" in the Settings tab would force a full
+    # L0 cache write.
+    if prompt_changed:
+        service._freeze_l0_snapshot()
+
     return {
         "status": "ok",
         "mode": service._context.mode.value,
         "prompt_len": len(prompt),
         "appendix_present": has_appendix,
+        "prompt_changed": prompt_changed,
     }
 
 

@@ -201,6 +201,14 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     # Step 9: mark initialized for the current mode.
     service._stability_initialized[mode] = True
 
+    # Step 10: refreeze L0 from the now-current live
+    # indexes. Rebuild is the canonical "fresh start" gesture
+    # — the user explicitly asked for everything to refresh,
+    # including the L0 cache. See
+    # specs4/3-llm/cache-tiering.md § What invalidates L0
+    # (item 2) and § Manual Cache Rebuild.
+    service._freeze_l0_snapshot()
+
     # Assemble the result dict.
     items_after = len(tracker.get_all_items())
     all_items = tracker.get_all_items()
