@@ -224,7 +224,7 @@ class TestRebuildCache:
         assert "file:gone.md" not in all_keys
         assert "url:abc123" not in all_keys
 
-    def test_places_indexed_files_across_tiers(
+    def test_indexed_files_not_seeded_as_tracker_entries(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -233,15 +233,19 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Indexed files appear as symbol: entries after rebuild.
+        """Under D27, indexed files are NOT tracker entries.
 
-        With a reference graph providing both L0 seed candidates
-        (by ref count) and connected components (for L1/L2/L3
-        distribution), rebuild produces symbol: entries in the
-        cached tiers.
+        Pre-D27 rebuild bin-packed every indexed file across
+        L0/L1/L2/L3 as ``symbol:{path}`` tracker entries. Under
+        the L0-content-typed model the aggregate symbol map is
+        regenerated from the index at assembly time, not held
+        as tracker entries. Rebuild therefore produces a
+        tracker that contains only ``system:prompt`` (and any
+        preserved history) when no files are selected.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
+        Contract and § Why no startup file distribution.
         """
-        # Build a small graph: three files, one well-connected
-        # (goes to L0 or a cached tier), two in a cluster.
         fake_index = _FakeSymbolIndexWithRefs(
             blocks={
                 "central.py": "block-central",
@@ -265,14 +269,18 @@ class TestRebuildCache:
         result = svc.rebuild_cache()
         assert result["status"] == "rebuilt"
 
-        # All three files appear as symbol: entries somewhere.
+        # No symbol: entries — those live in L0's aggregate
+        # map, not as cascade-tracked items.
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        assert "symbol:central.py" in all_keys
-        assert "symbol:mod_a.py" in all_keys
-        assert "symbol:mod_b.py" in all_keys
+        assert "symbol:central.py" not in all_keys
+        assert "symbol:mod_a.py" not in all_keys
+        assert "symbol:mod_b.py" not in all_keys
+        # Only system:prompt expected (no files selected, no
+        # history seeded).
+        assert all_keys == {"system:prompt"}
 
-    def test_swaps_selected_files_to_file_entries(
+    def test_selected_files_become_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -284,9 +292,11 @@ class TestRebuildCache:
     ) -> None:
         """Selected files end up as file: entries in cached tiers.
 
-        The "never appears twice" invariant — a selected file's
-        symbol: entry is replaced by a file: entry at the same
-        tier. Both don't coexist.
+        Under D27 there's no primary-index ``symbol:`` tracker
+        entry to swap from — selected files are placed directly
+        into L1/L2/L3 via :func:`distribute_orphan_files`. The
+        outcome is the same: the file appears as a ``file:``
+        entry in a cached tier (never L0, never Active).
         """
         # Create a real selected file so file_context.add_file
         # can load it.
@@ -308,14 +318,15 @@ class TestRebuildCache:
 
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        # symbol: entry swapped out.
+        # No symbol: entry — those don't exist as tracker
+        # entries under D27.
         assert "symbol:a.py" not in all_keys
-        # file: entry swapped in.
+        # file: entry placed by orphan distribution.
         assert "file:a.py" in all_keys
-        # Tier is preserved — it landed somewhere cached (L0-L3).
+        # Landed in a cached tier (L1/L2/L3 — never L0 or Active).
         file_item = tracker.get_all_items()["file:a.py"]
         from ac_dc.stability_tracker import Tier
-        assert file_item.tier != Tier.ACTIVE
+        assert file_item.tier in (Tier.L1, Tier.L2, Tier.L3)
 
     def test_distributes_orphan_selected_files(
         self,
@@ -638,7 +649,7 @@ class TestRebuildCache:
             )
             svc._doc_index._all_outlines[path] = outline
 
-    def test_doc_mode_places_doc_entries_across_tiers(
+    def test_doc_mode_rebuild_does_not_seed_doc_entries(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -647,17 +658,14 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doc mode rebuild iterates the doc index, not the symbol index.
+        """Doc mode rebuild does NOT create doc: tracker entries.
 
-        Before 2.8.2h the doc-mode branch produced an empty
-        indexed_files list with a TODO. Now it reads from
-        ``_doc_index._all_outlines`` and places ``doc:`` entries
-        in cached tiers via the same clustering algorithm used
-        for symbol entries in code mode.
+        Symmetric to the code-mode case — under D27, the
+        aggregate doc map is regenerated from the doc index
+        at assembly time, not held as tracker entries.
+        Rebuild only places ``system:prompt`` and (if any
+        files are selected) ``file:`` entries.
         """
-        # Symbol index has some files, but doc mode shouldn't
-        # care — rebuild in doc mode dispatches to the doc
-        # index's outlines, not the symbol index.
         fake_symbol_index = _FakeSymbolIndexWithRefs(
             blocks={"ignored.py": "block"},
             ref_counts={"ignored.py": 5},
@@ -670,12 +678,9 @@ class TestRebuildCache:
             repo_files=["ignored.py"],
             monkeypatch=monkeypatch,
         )
-        # Seed doc outlines.
         self._seed_doc_outlines(
             svc, ["README.md", "guide.md", "api.md"]
         )
-        # Switch to doc mode via the context manager (avoids
-        # switch_mode's side effects).
         svc._context.set_mode(Mode.DOC)
         svc._trackers[Mode.DOC] = svc._stability_tracker
 
@@ -683,18 +688,19 @@ class TestRebuildCache:
         assert result["status"] == "rebuilt"
         assert result["mode"] == "doc"
 
-        # All three doc files appear as doc: entries somewhere.
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        assert "doc:README.md" in all_keys
-        assert "doc:guide.md" in all_keys
-        assert "doc:api.md" in all_keys
-
-        # No symbol: entries — rebuild didn't iterate the symbol
-        # index in doc mode.
+        # No doc: entries — those live in L0's aggregate map
+        # at assembly time.
+        assert "doc:README.md" not in all_keys
+        assert "doc:guide.md" not in all_keys
+        assert "doc:api.md" not in all_keys
+        # No symbol: entries either.
         assert "symbol:ignored.py" not in all_keys
+        # Only system:prompt remains.
+        assert all_keys == {"system:prompt"}
 
-    def test_doc_mode_rebuild_swaps_selected_doc_files(
+    def test_doc_mode_selected_doc_file_becomes_file_entry(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -704,12 +710,13 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Selected doc file → file: entry, not doc: entry.
+        """Selected doc file → file: entry; no doc: entries seeded.
 
-        The "never appears twice" invariant applies in doc mode
-        the same way as code mode. A selected markdown file
-        becomes a file: entry with full content; its doc: entry
-        (if any was placed by clustering) gets swapped out.
+        Under D27 rebuild does not seed any ``doc:`` entries
+        for indexed-but-unselected files (those live in L0's
+        aggregate doc map at assembly time). The selected
+        markdown file goes through orphan distribution and
+        becomes a ``file:`` entry in a cached tier.
         """
         (repo_dir / "README.md").write_text(
             "# Readme\n\nbody.\n"
@@ -731,11 +738,12 @@ class TestRebuildCache:
 
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        # Selected doc swapped to file: entry.
+        # Selected doc became a file: entry.
         assert "file:README.md" in all_keys
+        # No doc: entries from rebuild (neither selected nor
+        # unselected files seed these under D27).
         assert "doc:README.md" not in all_keys
-        # Unselected doc retains its doc: entry.
-        assert "doc:guide.md" in all_keys
+        assert "doc:guide.md" not in all_keys
 
     def test_doc_mode_rebuild_distributes_orphan_non_markdown_files(
         self,
@@ -1157,3 +1165,113 @@ class TestRebuildCache:
         all_keys = set(svc._stability_tracker.get_all_items().keys())
         assert "file:shared.md" in all_keys
         assert "symbol:shared.md" not in all_keys
+
+    def test_rebuild_clears_pin_flags(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rebuild clears edit-invariant pins on file: entries.
+
+        D27's edit invariant pins ``file:`` entries when their
+        content hash changes during the session, so the
+        truthful current text stays cached. Pin lifecycle ends
+        on rebuild — the user's "fresh start" gesture
+        supersedes per-file edit history. After rebuild the
+        same file may be present (if still selected) but
+        without the pin.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Manual Cache
+        Rebuild — "Clear all edit-invariant pin flags" and
+        § Edit Invariant.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        (repo_dir / "edited.py").write_text("def foo(): pass\n")
+        fake_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_index,
+            repo_files=["edited.py"],
+            monkeypatch=monkeypatch,
+        )
+        # Pre-seed a pinned file: entry — simulates a file
+        # edited mid-session that the edit invariant has
+        # pinned.
+        tracker = svc._stability_tracker
+        tracker._items["file:edited.py"] = TrackedItem(
+            key="file:edited.py",
+            tier=Tier.L1,
+            n_value=9,
+            content_hash="prev-hash",
+            tokens=100,
+        )
+        tracker.pin_file("file:edited.py")
+        assert tracker.is_pinned("file:edited.py") is True
+
+        # Re-select so rebuild distributes it as an orphan.
+        svc.set_selected_files(["edited.py"])
+        svc.rebuild_cache()
+
+        # file: entry present (still selected) but pin cleared.
+        new_item = tracker.get_all_items().get("file:edited.py")
+        assert new_item is not None
+        assert tracker.is_pinned("file:edited.py") is False
+
+    def test_rebuild_clears_deletion_markers(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+        fake_litellm: _FakeLiteLLM,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rebuild removes deletion-marker entries.
+
+        Deletion markers exist to bridge the gap between a
+        file's deletion and the next ``rebuild_cache`` that
+        re-extracts L0's aggregate maps from the now-current
+        index. Once rebuild runs, the index already excludes
+        the deleted file, so the marker is no longer needed
+        and is cleared along with all other non-history
+        tracker entries.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Item
+        Removal and § Deletion Markers.
+        """
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        fake_index = _FakeSymbolIndexWithRefs()
+        svc = self._make_service(
+            config, repo, fake_litellm,
+            history_store, event_cb,
+            symbol_index=fake_index,
+            repo_files=[],
+            monkeypatch=monkeypatch,
+        )
+        tracker = svc._stability_tracker
+        # Pre-seed a deletion-marker file entry.
+        tracker._items["file:deleted.py"] = TrackedItem(
+            key="file:deleted.py",
+            tier=Tier.L2,
+            n_value=6,
+            content_hash="placeholder",
+            tokens=100,
+        )
+        tracker.mark_deleted("file:deleted.py")
+        assert tracker.is_deleted("file:deleted.py") is True
+
+        svc.rebuild_cache()
+
+        # Marker gone — the entry was wiped along with all
+        # other non-history items.
+        assert "file:deleted.py" not in (
+            tracker.get_all_items()
+        )

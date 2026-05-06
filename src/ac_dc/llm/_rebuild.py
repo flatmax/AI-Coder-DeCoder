@@ -69,12 +69,47 @@ def rebuild_cache(service: "LLMService") -> dict[str, Any]:
 def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     """The actual rebuild pipeline.
 
-    Twelve steps per specs-reference/3-llm/cache-tiering.md
-    § Manual Cache Rebuild. See :meth:`LLMService.rebuild_cache`
-    for step-by-step rationale — preserved there so the RPC
-    docstring remains authoritative.
+    Under the L0-content-typed model (D27) rebuild is much
+    simpler than the legacy 12-step sequence. The steps are:
+
+    1. Preserve history entries.
+    2. Wipe everything else from the tracker — including pin
+       flags and deletion markers. Rebuild is the explicit
+       reset point that supersedes per-file edit history.
+    3. Configure cache target (model-aware).
+    4. Register ``system:prompt`` into L0 with real token
+       counts. The aggregate symbol/doc maps that L0 also
+       presents to the LLM are NOT held as tracker entries —
+       they're regenerated from the index at assembly time.
+    5. Distribute selected files across L1/L2/L3 via bin-pack.
+       L0 is excluded (content-typed for structural maps);
+       Active is excluded (rebuild's purpose is to skip the
+       graduation wait).
+    6. Seed cross-reference items into L0 if cross-ref is
+       active. Cross-ref items are structural (symbol/doc
+       blocks) — they legitimately belong in L0 alongside the
+       primary aggregate map.
+    7. Graduate eligible history via piggyback.
+    8. Mark initialized for current mode.
+
+    What's removed from the legacy implementation:
+
+    - **No file-prefix placement** (``symbol:{path}`` /
+      ``doc:{path}`` entries from indexed files). Those map
+      blocks are part of L0's structural content and don't
+      need cascade tracking.
+    - **No selected-file primary→file swap dance.** Selected
+      files go directly into L1/L2/L3 via ``distribute_orphan_files``.
+    - **No post-measurement cross-tier backfill** of
+      indexed files. The cross-reference seeding path still
+      uses backfill for its own purpose (promoting
+      most-connected opposite-index items into L0).
+
+    Spec: ``specs4/3-llm/cache-tiering.md`` § Manual Cache
+    Rebuild and § L0 Stability Contract.
     """
-    from ac_dc.stability_tracker import Tier, TrackedItem
+    from ac_dc.llm._stability import seed_cross_reference_items
+    from ac_dc.stability_tracker import Tier
 
     assert service._symbol_index is not None
     assert service._repo is not None
@@ -85,23 +120,37 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     items_before = len(tracker.get_all_items())
 
     # Step 1-2: preserve history, wipe everything else.
+    # Wiping includes any pin flags and deletion markers —
+    # rebuild is the explicit "fresh start" gesture that
+    # supersedes per-file edit/delete state.
     history_items = {
         key: item
         for key, item in tracker.get_all_items().items()
         if key.startswith("history:")
     }
+    # Clear transient flags on preserved history entries too —
+    # history items don't carry pin/marker semantics, but a
+    # defensive reset keeps the post-rebuild state clean.
+    for item in history_items.values():
+        if hasattr(item, "_pinned"):
+            item._pinned = False
+        if hasattr(item, "_deleted"):
+            item._deleted = False
     tracker._items.clear()
     for key, item in history_items.items():
         tracker._items[key] = item
 
-    # Step 3: mark all tiers broken.
+    # Step 3: mark all tiers broken; configure cache target.
     tracker._broken_tiers = {
         Tier.L0, Tier.L1, Tier.L2, Tier.L3, Tier.ACTIVE,
     }
     tracker._changes = []
+    cache_target = service._config.cache_target_tokens_for_model()
+    tracker.set_cache_target_tokens(cache_target)
 
     # Step 4: load content for all selected files into
-    # the file context.
+    # the file context (so step 5's bin-pack can compute real
+    # token counts).
     for path in service._selected_files:
         if not service._file_context.has_file(path):
             try:
@@ -112,131 +161,44 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
                     path, exc,
                 )
 
-    # Step 5: re-initialize from the reference graph.
-    ref_index = service._symbol_index._ref_index
-    file_list_raw = service._repo.get_flat_file_list()
-    file_list = [f for f in file_list_raw.split("\n") if f]
-    cache_target = service._config.cache_target_tokens_for_model()
-    tracker.set_cache_target_tokens(cache_target)
-
-    if mode == Mode.DOC:
-        prefix = "doc:"
-        indexed_files: list[str] = list(
-            service._doc_index._all_outlines.keys()
-        )
-    else:
-        prefix = "symbol:"
-        indexed_files = [
-            path for path in file_list
-            if path in service._symbol_index._all_symbols
-        ]
-    keys = [f"{prefix}{path}" for path in indexed_files]
-    tracker.initialize_with_keys(
-        ref_index,
-        keys=keys,
-        files=indexed_files,
-        l0_target_tokens=cache_target,
-    )
-
-    # Step 5b: cross-reference secondary index.
-    if service._cross_ref_enabled:
-        if mode == Mode.DOC:
-            secondary_prefix = "symbol:"
-            secondary_files = [
-                p for p in file_list
-                if p in service._symbol_index._all_symbols
-            ]
-            secondary_ref = service._symbol_index._ref_index
-        else:
-            secondary_prefix = "doc:"
-            secondary_files = list(
-                service._doc_index._all_outlines.keys()
-            )
-            secondary_ref = service._doc_index._ref_index
-        secondary_keys = [
-            f"{secondary_prefix}{p}" for p in secondary_files
-        ]
-        if secondary_keys:
-            tracker.initialize_with_keys(
-                secondary_ref,
-                keys=secondary_keys,
-                files=secondary_files,
-                l0_target_tokens=0,
-            )
-
-    # Step 6: measure real token counts. The four-tier even
-    # split in :meth:`initialize_with_keys` already placed the
-    # most-referenced clusters in L0; no post-measurement
-    # backfill is needed. If placeholder estimates diverged
-    # from real counts, the cascade rebalances as requests
-    # come in.
-    service._measure_tracker_tokens()
-
-    # Step 7: swap selected files → file: entries at the
-    # same tier; strip cross-reference secondary entries too.
-    if prefix == "symbol:":
-        secondary_prefix = "doc:"
-    else:
-        secondary_prefix = "symbol:"
-    selected_set = set(service._selected_files)
-    swapped_paths: set[str] = set()
-    for path in list(selected_set):
-        index_key = f"{prefix}{path}"
-        existing = tracker._items.get(index_key)
-        if existing is None:
-            continue
-        content = service._file_context.get_content(path)
-        if content is None:
-            continue
-        file_hash = hashlib.sha256(
-            content.encode("utf-8")
-        ).hexdigest()
-        file_tokens = service._counter.count(content)
-        tracker._items.pop(index_key, None)
-        secondary_key = f"{secondary_prefix}{path}"
-        secondary_existing = tracker._items.pop(secondary_key, None)
-        if secondary_existing is not None:
-            tracker._broken_tiers.add(secondary_existing.tier)
-        tracker._items[f"file:{path}"] = TrackedItem(
-            key=f"file:{path}",
-            tier=existing.tier,
-            n_value=existing.n_value,
-            content_hash=file_hash,
-            tokens=file_tokens,
-        )
-        swapped_paths.add(path)
-
-    # Step 8: distribute orphan selected files.
-    orphan_paths = [
-        path for path in service._selected_files
-        if path not in swapped_paths
-        and service._file_context.has_file(path)
-    ]
-    if orphan_paths:
-        distribute_orphan_files(service, orphan_paths)
-
-    # Step 9: re-seed system prompt into L0.
+    # Step 5: re-seed system prompt into L0. Mode-aware —
+    # the prompt and legend differ between code and doc mode.
     if mode == Mode.DOC:
         system_prompt = service._config.get_doc_system_prompt()
+        legend = service._doc_index.get_legend()
     else:
         system_prompt = service._config.get_system_prompt()
-    if system_prompt:
         legend = service._symbol_index.get_legend()
+    if system_prompt:
         prompt_hash = hashlib.sha256(
             system_prompt.encode("utf-8")
         ).hexdigest()
         prompt_tokens = service._counter.count(system_prompt + legend)
         tracker.register_system_prompt(prompt_hash, prompt_tokens)
 
-    # Step 10: re-seed cross-reference items if active.
-    # No-op today; the flag is preserved so a future rebuild
-    # while cross-ref is on does the right thing once the
-    # full cross-reference placement story is wired.
+    # Step 6: distribute selected files across L1/L2/L3.
+    # Under D27 every selected file is treated as an
+    # "orphan" — there's no primary-index tracker entry to
+    # swap from — so distribute_orphan_files handles all of
+    # them uniformly.
+    selected_loaded = [
+        path for path in service._selected_files
+        if service._file_context.has_file(path)
+    ]
+    if selected_loaded:
+        distribute_orphan_files(service, selected_loaded)
 
-    # Step 11: graduate history via piggyback.
+    # Step 7: seed cross-reference items if enabled. Promotes
+    # most-connected opposite-index items into L0 alongside
+    # the primary aggregate map (the latter regenerated at
+    # assembly time, not held as tracker entries).
+    if service._cross_ref_enabled:
+        seed_cross_reference_items(service)
+
+    # Step 8: graduate eligible history via piggyback.
     rebuild_graduate_history(service, cache_target)
 
-    # Step 12: mark initialized for the current mode.
+    # Step 9: mark initialized for the current mode.
     service._stability_initialized[mode] = True
 
     # Assemble the result dict.
