@@ -584,6 +584,12 @@ describe('FilesTab first-load auto-select', () => {
     // session would see it pop back in otherwise —
     // exactly the "can't get rid of this" frustration
     // the flag prevents.
+    //
+    // b.md is untracked (not modified) so the user is
+    // free to deselect it — modified-file pinning
+    // (added in a later increment) would otherwise
+    // revert the deselect and mask the test's real
+    // intent.
     let callCount = 0;
     const getTree = vi.fn().mockImplementation(() => {
       callCount += 1;
@@ -598,9 +604,9 @@ describe('FilesTab first-load auto-select', () => {
             { name: 'b.md', path: 'b.md', type: 'file', lines: 1 },
           ],
         },
-        modified: ['a.md', 'b.md'],
+        modified: ['a.md'],
         staged: [],
-        untracked: [],
+        untracked: ['b.md'],
         deleted: [],
         diff_stats: {},
       });
