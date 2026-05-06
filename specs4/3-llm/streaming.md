@@ -35,8 +35,7 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Build and inject review context when review mode is active
 - Append system reminder to user prompt
 - Build tiered content from stability tracker
-- Recompute symbol map with full tier exclusions (two-pass)
-- Assemble tiered message array with cache-control markers
+- Assemble tiered message array with cache-control markers — the aggregate symbol/doc map in L0 contains every indexed file (only user-excluded files filtered)
 - Run LLM completion in a worker thread, streaming
 - Add assistant response to context after stream completes
 - Save symbol map to per-repo working directory
@@ -48,13 +47,12 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Launch deferred doc enrichment (if any)
 - Run post-response compaction
 
-## Two-Pass Symbol Map Regeneration
+## Aggregate Map Rendering
 
-- First pass (before building tiered content) — excludes selected files and user-excluded files
-- Second pass (after building tiered content) — adds all paths from cached tiers to the exclusion set
-- The second pass enforces the uniqueness invariant: files whose index blocks are already in a cached tier are excluded from the main map
+Under the L0-content-typed model, the symbol map (code mode) or doc map (document mode) in L0's system message contains every indexed file's block. Selected files appear in the map AND as full text in a lower tier — that's the design. The system prompt's authority rule instructs the LLM to treat full text in Working Files as canonical when it disagrees with the structural map. The only filter applied at map-render time is the user's index-exclusion set (file picker's three-state checkbox), since excluded files have no representation in the prompt at all.
 
 ## File Context Sync
+🟨🟨🟨 REPL
 
 - Compare current file context against incoming selected files list
 - Remove files present in context but absent from new selection
@@ -272,4 +270,4 @@ Three reports printed after each response:
 - User message is persisted before LLM call begins — mid-stream crashes preserve user intent
 - Assistant message is persisted after LLM call completes — no partial assistant messages in history
 - The captured event loop reference is always usable from the worker thread
-- The two-pass symbol map regeneration ensures no file appears in both the main map and a cached tier
+- The aggregate symbol/doc map in L0 contains every indexed file's block (minus user-excluded paths); duplication with full text in lower tiers is the intended design and is resolved at LLM read time by the system prompt's authority rule

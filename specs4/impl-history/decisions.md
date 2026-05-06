@@ -278,6 +278,40 @@ Ctrl+F independently confirms Pitfall 2: if it throws `actions.find not found`, 
 
 **Lesson.** Monaco's documented sample code isn't safe by default under modern bundlers. Reimplementations should treat the worker-loading pattern and module entry as build-tool-specific choices, not as copy-from-sample decisions. Both failure modes are silent; tests that only verify the editor mounts and accepts edits will pass with either bug in place.
 
+### D27 — L0 is content-typed; cascade no longer touches it
+
+The cache-tiering design originally allowed any tracked item — including full file content — to be promoted into any tier including L0, as long as it earned the N-counter graduation. Combined with the wide-exclude rule (a selected file's symbol block is removed from the aggregate map when its full content lives in Active), this meant routine selection toggles and edits could rewrite L0's byte sequence. Every cache-busting event paid a full L0 miss — typically the largest single block in the prompt.
+
+The user's complaint surfaced the cost: "adding full context files invalidates the cache as symbol tables are dropped from the four tiers randomly, as they are added in full file to the context." Each turn that touched a file's selection or edit state risked invalidating the most expensive cached prefix.
+
+**Resolution.** Separate the tier model into **content-typed** and **stability-typed** regions.
+
+- **L0 (content-typed).** Permanent. Holds the system prompt plus the aggregate symbol map plus the aggregate doc map. The aggregate maps reflect the index state captured at session start (or after explicit `rebuild_cache`). L0 is invalidated *only* by application restart or explicit `rebuild_cache`. Edits, selections, URL fetches, history compaction, session loads — none touch L0.
+- **L1, L2, L3, Active (stability-typed).** Hold full file content, fetched URL content, and history. The existing N-counter cascade promotes content from Active through L3 → L2 → L1 as it stays stable. Symbol blocks and doc blocks never appear here — they live only in L0's aggregate maps.
+
+**Edit invariant.** When a file's content hash changes, `file:<path>` lands in Active with fresh content and is *pinned* — stale-cleanup and automatic eviction skip it. It rides the cascade upward normally as it stabilises but cannot be silently removed. Only application restart or cache rebuild clears pinned files.
+
+**Deletion markers.** When a file is deleted during the session, its `file:<path>` entry transitions to a deletion-marker entry whose content is a fixed string (`[deleted in this session — see L0 symbol/doc map for last-known structure]`). The marker rides the cascade like any normal `file:` entry but its constant hash means subsequent cycles see no change. Survives until the next `rebuild_cache` re-extracts L0's aggregate maps from the now-current index. Bridges the gap between the file's deletion and L0's eventual refresh — the LLM sees a structural reference in L0 plus a confirmation in the marker that the file is gone, rather than a phantom reference with no full-text counterpart.
+
+**Why duplicates are acceptable.** A selected file appears twice in the prompt: as a structural summary in L0's aggregate map, and as full text in the file's appropriate lower-tier section. The duplication is small (symbol blocks are dense) and is resolved by the system prompt's authority rule ("if a file appears in Working Files, the full text is the absolute truth, superseding any structural outlines provided earlier"). Modern instruction-tuned models follow this rule reliably via recency bias plus the explicit instruction.
+
+**Tradeoff acknowledged.** The structural map L0 holds may drift during a session — a function signature in the symbol map can lag behind the actual edited file. The full edited text is always present in Active or a lower cached tier (the edit invariant guarantees this), and the new system prompt clause ("How Files Appear in This Prompt") tells the LLM that full-text in Current Working Files supersedes the structural map. Cost per incident: small — at worst, the LLM produces a comment or question based on a stale signature when the truth is right there in Working Files. Benefit: continuous — L0 cache survives every selection toggle, edit, URL fetch, and turn boundary in the session. Net is strongly positive: the structural map is for navigation, the full text is for truth.
+
+**Wide-exclude logic removed.** With L0 always containing the full aggregate maps and L1–L3 never containing symbol/doc blocks at all, there's no longer any "is this symbol block already rendered elsewhere?" decision. The three call sites that previously coordinated on `wide_map_exclude_set` (`_assemble_tiered`, `_get_meta_block`, `get_context_breakdown`) simplify to "L0 always shows everything; lower tiers never show symbols." The renamed helper `user_excluded_paths` returns only the user's index-exclusion set (file picker's three-state checkbox).
+
+**Cascade unchanged.** N-counter, ripple promotion, underfill demotion, hysteresis (when added) — all stay. The only new policy constraints are: nothing promotes into L0, nothing in L0 is rewritten by the cascade, and edited files are pinned against stale removal.
+
+**Six-commit delivery sequence.**
+
+1. `4cdc23a` — spec updates: `specs4/3-llm/cache-tiering.md`, `specs4/3-llm/prompt-assembly.md`, `specs-reference/3-llm/cache-tiering.md`, `specs-reference/3-llm/prompt-assembly.md`. Defines the contract before code changes.
+2. `f9e2d1c` — system prompt updates: `src/ac_dc/config/system.md`, `src/ac_dc/config/system_doc.md` add the "How Files Appear in This Prompt — Authority Rule" clause. Synced to `specs-reference/3-llm/prompts/` via `scripts/sync_prompts.py`.
+3. `8a7b4e9` — `StabilityTracker` changes: pin flag on `file:` entries with hash changes, deletion-marker transition in Phase 0, `mark_deleted` / `pin_file` / `is_pinned` / `is_deleted` helpers, cascade refuses to promote into L0, underfill demotion skips pinned and marker entries, removal protection in Phase 1 cleanup.
+4. `2c8d6f1` — `init` and `rebuild_cache` paths: don't seed `symbol:`/`doc:` entries into L1/L2/L3 anymore; only `system:prompt` lands as a tracker entry; `rebuild_cache` clears pin flags as part of the explicit reset; aggregate maps regenerated at assembly time from the index.
+5. `bba76ab` — `_breakdown.py` and `_assembly.py` changes: rename `wide_map_exclude_set` → `user_excluded_paths`; aggregate map rendering passes only user-exclusion set; per-file detail enumeration includes selected files; LLMService shim forwards to the new helper.
+6. (this commit) — `specs4/impl-history/decisions.md` records D27; `specs4/3-llm/streaming.md` updated to drop the two-pass symbol map regeneration language.
+
+**Test churn.** ~60 tests across `test_stability_tracker.py`, `test_llm_service/test_lazy_init.py`, `test_llm_service/test_rebuild_cache.py`, `test_llm_service/test_tiered_content.py`, `test_llm_service/test_breakdown_details.py` updated or rewritten. Roughly half are new tests covering the pin/marker contract; the other half are updates to assertions that previously expected wide-exclusion behaviour.
+
 ### D18 — Dropped svg-pan-zoom in favor of unified SvgEditor on both panes
 
 Layer 5.11–5.12 shipped the SVG viewer with `svg-pan-zoom` handling viewport navigation on both panes (pan, zoom, fit) while 5.13's `SvgEditor` ran on the right pane for visual editing. Two libraries, two coordinate systems, two viewBox authorities — the editor had to reach around pan-zoom's viewport transform to compute correct screen-to-SVG coordinates for handles.
