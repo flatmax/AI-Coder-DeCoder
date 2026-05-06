@@ -55,71 +55,52 @@ def _resolve_scope(
 
 
 # ---------------------------------------------------------------------------
-# Wide exclusion set — shared by aggregate map, modal content, and row counts
+# User-exclusion set — what the index must NOT return
 # ---------------------------------------------------------------------------
 
 
-def wide_map_exclude_set(
+def user_excluded_paths(
     service: "LLMService",
     scope: ConversationScope | None = None,
 ) -> set[str]:
-    """Compute the wide exclusion set for aggregate map bodies.
+    """Return the user's index-exclusion set as a set of paths.
 
-    The aggregate symbol-map or doc-map body (rendered in L0's
-    system message) must exclude every path whose full content
-    or compact block already appears elsewhere in the prompt.
-    Without this exclusion, files that have graduated into
-    cached tiers would render twice — once as a compact block
-    in the aggregate map, and once under their tier's
-    TIER_SYMBOLS_HEADER or FILES_L{N}_HEADER section — wasting
-    tokens and confusing the model about which view is
-    authoritative.
+    Under the L0-content-typed model (D27), the aggregate
+    symbol-map and doc-map bodies in L0 contain **every**
+    indexed file's block. Selected files appear in the map
+    *and* as full text in a lower tier — that's the
+    intended design. The system prompt's authority rule
+    instructs the LLM to treat full text in Working Files
+    as canonical when it disagrees with the structural map.
 
-    The exclusion set is the union of:
+    The only exclusion that still applies at the map level
+    is **user exclusion** via the file picker's three-state
+    checkbox. Excluded files have no representation in the
+    prompt at all (no full text, no symbol block, no doc
+    outline), so the aggregate map must also skip them.
 
-    1. Selected files — their full content renders in the
-       active "Working Files" section (if ungraduated) or in
-       a cached tier's FILES_L{N}_HEADER block (if graduated
-       as ``file:``)
-    2. User-excluded index files — no representation in the
-       prompt at all, so the aggregate map must also skip them
-    3. Every path graduated into any cached tier as ``file:``,
-       ``symbol:``, or ``doc:`` — all three prefixes represent
-       content that's already in a cached tier's section
-
-    Per specs-reference/3-llm/prompt-assembly.md § "Symbol map
-    exclusions". Three call sites must agree on this
-    computation: ``_assemble_tiered`` (what the LLM receives),
-    ``_get_meta_block`` (modal content for click-to-view), and
-    ``get_context_breakdown`` (token counts for cache viewer
-    rows). A divergence between any two surfaces the same-row/
-    different-count bug documented in the spec.
+    Pre-D27 callers used a much wider exclusion set
+    (``wide_map_exclude_set``) that also filtered selected
+    files and tier-graduated paths. That filtering is gone:
+    the duplication between L0 map and lower-tier full
+    text is the design, not a bug.
 
     When ``scope`` is None (default, main conversation),
-    reads selected/excluded/tracker from ``service`` directly.
-    When ``scope`` is provided (agent-tab breakdown), reads
-    those fields from the scope so each agent gets its own
-    exclusion set and cached-tier view.
+    reads from ``service._excluded_index_files``. When
+    ``scope`` is provided (agent-tab breakdown), reads from
+    ``scope.excluded_index_files`` so each agent sees its
+    own exclusion list.
+
+    Spec: ``specs4/3-llm/prompt-assembly.md`` § No Symbol
+    Map Exclusions and § User-Excluded Files.
     """
     if scope is None:
-        selected = service._selected_files
         excluded = getattr(
             service, "_excluded_index_files", None
         ) or ()
-        tracker = service._stability_tracker
     else:
-        selected = scope.selected_files
         excluded = scope.excluded_index_files
-        tracker = scope.tracker
-    exclude: set[str] = set(selected)
-    exclude.update(excluded)
-    for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-        for item_key in tracker.get_tier_items(tier):
-            for prefix in ("file:", "symbol:", "doc:"):
-                if item_key.startswith(prefix):
-                    exclude.add(item_key[len(prefix):])
-                    break
-    return exclude
+    return set(excluded)
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +247,10 @@ def get_meta_block(
     logger = logging.getLogger("ac_dc.llm_service")
 
     # meta:repo_map / meta:doc_map — aggregate index map body.
+    # Under D27 the aggregate map contains every indexed file's
+    # block; only user-excluded files are filtered out.
     if key in ("meta:repo_map", "meta:doc_map"):
-        exclude = wide_map_exclude_set(service)
+        exclude = user_excluded_paths(service)
         if service._context.mode == Mode.DOC:
             content = service._doc_index.get_doc_map(
                 exclude_files=exclude
@@ -289,8 +272,8 @@ def get_meta_block(
         if not content:
             return {
                 "error": (
-                    "Aggregate map is empty — every indexed "
-                    "file has graduated to a cached tier."
+                    "Aggregate map is empty — no indexed "
+                    "files (or all are user-excluded)."
                 ),
                 "path": key,
             }
@@ -456,10 +439,13 @@ def get_context_breakdown(
     legend_tokens = service._counter.count(legend) if legend else 0
 
     # Symbol map tokens + per-file details.
+    # Under D27 the aggregate map includes every indexed
+    # file regardless of selection state — duplication
+    # between L0 map and lower-tier full text is the
+    # design. Only user-excluded paths are filtered.
     symbol_map = ""
     symbol_map_files = 0
     symbol_map_details: list[dict[str, Any]] = []
-    selected_set = set(selected_files)
     try:
         if context.mode == Mode.DOC:
             all_paths = list(
@@ -467,7 +453,7 @@ def get_context_breakdown(
             )
             symbol_map_files = len(all_paths)
             for path in all_paths:
-                if path in selected_set or path in excluded_set:
+                if path in excluded_set:
                     continue
                 block = service._doc_index.get_file_doc_block(path)
                 if not block:
@@ -483,7 +469,7 @@ def get_context_breakdown(
                     "tokens": service._counter.count(block),
                 })
             symbol_map = service._doc_index.get_doc_map(
-                exclude_files=wide_map_exclude_set(service, scope)
+                exclude_files=user_excluded_paths(service, scope)
             )
         else:
             if service._symbol_index is not None:
@@ -492,10 +478,7 @@ def get_context_breakdown(
                 )
                 symbol_map_files = len(all_paths)
                 for path in all_paths:
-                    if (
-                        path in selected_set
-                        or path in excluded_set
-                    ):
+                    if path in excluded_set:
                         continue
                     block = (
                         service._symbol_index.get_file_symbol_block(
@@ -515,7 +498,7 @@ def get_context_breakdown(
                         "tokens": service._counter.count(block),
                     })
                 symbol_map = service._symbol_index.get_symbol_map(
-                    exclude_files=wide_map_exclude_set(service, scope)
+                    exclude_files=user_excluded_paths(service, scope)
                 )
     except Exception as exc:
         logger.debug(

@@ -47,7 +47,7 @@ from ac_dc.llm._breakdown import (
     get_meta_block,
     print_init_hud,
     print_post_response_hud,
-    wide_map_exclude_set,
+    user_excluded_paths,
 )
 from ac_dc.llm._commit import (
     commit_all,
@@ -262,5 +262,5 @@ __all__ = [
     "sync_file_context",
     "try_initialize_stability",
     "update_stability",
-    "wide_map_exclude_set",
+    "user_excluded_paths",
 ]

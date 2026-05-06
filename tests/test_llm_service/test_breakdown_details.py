@@ -270,20 +270,27 @@ class TestBreakdownSymbolMapDetails:
             e["path"].endswith(".py") for e in details
         )
 
-    def test_selected_files_excluded_from_details(
+    def test_selected_files_appear_in_details(
         self,
         config: ConfigManager,
         repo: Repo,
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Selected files don't appear in symbol_map_details.
+        """Selected files DO appear in symbol_map_details under D27.
 
-        Same contract as the map itself — selected files'
-        content flows via ``file:`` entries in cached tiers
-        or the active Working Files section. Their symbol/doc
-        blocks would be redundant, so the details listing
-        omits them too.
+        Under the L0-content-typed model, the aggregate
+        symbol/doc map contains every indexed file —
+        including selected ones. The duplication between
+        the structural map (in L0) and the full text (in
+        a lower tier) is the design; the system prompt's
+        authority rule tells the LLM to trust the full
+        text when it disagrees with the map. The Budget
+        sub-view's details list reflects the map's actual
+        contents, so selected files appear there too.
+
+        Spec: ``specs4/3-llm/prompt-assembly.md`` § No
+        Symbol Map Exclusions.
         """
         (repo_dir / "src").mkdir()
         (repo_dir / "src" / "a.py").write_text("content\n")
@@ -297,7 +304,9 @@ class TestBreakdownSymbolMapDetails:
             "breakdown"
         ]["symbol_map_details"]
         paths = [e["path"] for e in details]
-        assert "src/a.py" not in paths
+        # Both files appear — the map covers everything
+        # indexed regardless of selection state.
+        assert "src/a.py" in paths
         assert "src/b.py" in paths
 
     def test_user_excluded_files_excluded_from_details(

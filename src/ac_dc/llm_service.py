@@ -1030,15 +1030,27 @@ class LLMService:
         return get_file_map_block(self, path)
 
     def _wide_map_exclude_set(self) -> set[str]:
-        """Delegate to :func:`ac_dc.llm._breakdown.wide_map_exclude_set`.
+        """Deprecated — returns the user-exclusion set only.
 
-        Kept as a thin method so internal callers
-        (``_get_meta_block``, ``get_context_breakdown``,
-        ``_assemble_tiered``) continue to use the familiar
-        ``self._wide_map_exclude_set()`` form.
+        Under the L0-content-typed model (D27) the
+        aggregate map in L0 contains every indexed file's
+        block. The wide exclusion logic that previously
+        filtered selected files and tier-graduated paths
+        is gone — that duplication is the design. This
+        shim now returns only the user's index-exclusion
+        set (file picker's three-state checkbox).
+
+        Kept for backwards compatibility with any external
+        caller that imports it via the service. New code
+        should use
+        :func:`ac_dc.llm._breakdown.user_excluded_paths`
+        directly.
+
+        Spec: ``specs4/3-llm/prompt-assembly.md`` § No
+        Symbol Map Exclusions.
         """
-        from ac_dc.llm._breakdown import wide_map_exclude_set
-        return wide_map_exclude_set(self)
+        from ac_dc.llm._breakdown import user_excluded_paths
+        return user_excluded_paths(self)
 
     def _get_meta_block(self, key: str) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._breakdown.get_meta_block`.

@@ -314,15 +314,18 @@ def assemble_tiered(
         descriptor_prefix + user_prompt + (reminder or "")
     )
 
-    # Build the exclusion set: selected files (full content
-    # in active Working Files) plus every path graduated into
-    # a cached tier as a file: item (full content in that
-    # tier, so main symbol map shouldn't render it).
-    exclude_files: set[str] = set(scope.selected_files)
-    for tier_name in ("L0", "L1", "L2", "L3"):
-        tier = tiered_content.get(tier_name) or {}
-        for path in tier.get("graduated_files", ()) or ():
-            exclude_files.add(path)
+    # Under the L0-content-typed model (D27), the aggregate
+    # symbol/doc map in L0 contains every indexed file's
+    # block. Selected files appear both in the map AND as
+    # full text in a lower tier — the system prompt's
+    # authority rule resolves the apparent conflict
+    # ("trust full text over the map"). Only user-excluded
+    # files (file picker's three-state checkbox) are
+    # filtered, since they have no representation in the
+    # prompt at all.
+    exclude_files: set[str] = set(
+        getattr(service, "_excluded_index_files", None) or ()
+    )
 
     symbol_map = ""
     symbol_legend = ""
@@ -422,12 +425,18 @@ def assemble_messages_flat(
     # Assemble a repo-context block.
     system_parts: list[str] = [system_prompt]
 
-    # Symbol map + legend (mode-aware header).
+    # Symbol map + legend (mode-aware header). Under D27
+    # the map contains every indexed file's block; only
+    # user-excluded files are filtered.
     if service._symbol_index is not None:
         try:
             legend = service._symbol_index.get_legend()
             symbol_map = service._symbol_index.get_symbol_map(
-                exclude_files=set(scope.selected_files)
+                exclude_files=set(
+                    getattr(
+                        service, "_excluded_index_files", None
+                    ) or ()
+                )
             )
             if legend or symbol_map:
                 from ac_dc.context_manager import (
