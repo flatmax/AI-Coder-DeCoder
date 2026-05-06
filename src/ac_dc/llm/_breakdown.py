@@ -1011,13 +1011,14 @@ def print_post_response_hud(service: "LLMService") -> None:
     output_tok = st.get("output_tokens", 0)
     if input_tok or output_tok:
         usage_lines.append(
-            f"Last request: {input_tok:,} in, {output_tok:,} out"
+            f"Session prompt: {input_tok:,} in, "
+            f"{output_tok:,} out"
         )
     cache_read = st.get("cache_read_tokens", 0)
     cache_write = st.get("cache_write_tokens", 0)
     if cache_read or cache_write:
         usage_lines.append(
-            f"Cache:     read: {cache_read:,}, "
+            f"Session cache: read: {cache_read:,}, "
             f"write: {cache_write:,}"
         )
     session_total = sum(
