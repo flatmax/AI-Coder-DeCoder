@@ -48,36 +48,65 @@ logger = logging.getLogger("ac_dc.llm_service")
 
 
 def try_initialize_stability(service: "LLMService") -> None:
-    """Seed the stability tracker from the reference graph.
+    """Initialize the stability tracker for the current mode.
 
     Called eagerly during deferred startup (Phase 2) or lazily
-    on the first chat request if eager init failed. Runs
-    index_repo on the full file list, builds the reference
-    graph, initializes tier assignments (including L0 seeding),
-    measures real token counts for all tier items, and seeds
-    the system prompt into L0.
+    on the first chat request if eager init failed. Under the
+    L0-content-typed model (D27) initialization is a thin
+    operation:
 
-    Mode-aware dispatch — in code mode the primary index is
-    the symbol index and entries use the ``symbol:`` prefix;
-    in doc mode the primary index is the doc index and entries
-    use the ``doc:`` prefix. The two paths share the same
-    clustering algorithm via ``initialize_with_keys``; the only
-    differences are which index contributes the file list and
-    which prefix the tracker keys get.
+    1. Re-run the symbol index's incremental pass (code mode
+       only — doc mode has already indexed in the background
+       build) so its mtime cache is current.
+    2. Configure the tracker's cache-target tokens (model-
+       aware).
+    3. Register the system prompt into L0 via
+       :meth:`register_system_prompt`. This is the only
+       cascade-tracked entry that lives in L0; the aggregate
+       symbol/doc maps that L0 also presents to the LLM are
+       regenerated from the index at assembly time, not held
+       as tracker entries.
 
-    In doc mode, if the doc index isn't ready yet
-    (``_doc_index_ready is False`` — the background build
-    hasn't completed), this function bails without setting
-    ``_stability_initialized = True``. The next chat request's
-    lazy-init retry will try again; once structural extraction
-    completes, initialization succeeds on the retry. Users who
-    switch to code mode in the interim get normal code-mode
-    init on the switch.
+    What init does NOT do under the new model:
+
+    - **No four-tier file distribution.** Earlier revisions
+      bin-packed every indexed file across L0/L1/L2/L3 via
+      reference-graph clustering. That optimised "every cached
+      tier is full from turn one" but interacted badly with
+      routine churn — every selection toggle and every edit
+      shifted bytes in cached tiers and triggered demotion
+      cascades. Under the new model L1/L2/L3/Active start
+      empty; files enter Active when selected and graduate
+      upward through the cascade as they stabilise. The user
+      can trigger immediate redistribution via
+      ``rebuild_cache`` if they prefer warm caches over the
+      natural graduation path.
+    - **No post-measurement L0 backfill on the init path.**
+      The legacy backfill compensated for placeholder-vs-real
+      token-count divergence after the four-tier seed — with
+      no seed there's nothing to backfill. The
+      :meth:`backfill_l0_after_measurement` call remains
+      wired into the cross-reference activation path, where
+      it serves a different role (promoting the most-
+      connected opposite-index items into L0 alongside the
+      primary aggregate map).
+
+    Mode-aware dispatch — code mode requires the symbol index
+    to be attached; doc mode requires the doc index's
+    background build to have completed. In doc mode, if the
+    doc index isn't ready yet (``_doc_index_ready is False``),
+    the function bails without setting the per-mode init flag.
+    The next chat request's lazy-init retry tries again; once
+    structural extraction completes, init succeeds on the
+    retry.
 
     Safe to call multiple times — sets the per-mode initialized
     flag on the first successful run. Subsequent calls for the
     same mode are no-ops; subsequent calls for a DIFFERENT mode
     (after a switch_mode) initialize that mode's tracker fresh.
+
+    Spec: ``specs4/3-llm/cache-tiering.md`` § Initialization
+    and § Why no startup file distribution.
     """
     mode = service._context.mode
     if service._stability_initialized.get(mode, False):
@@ -98,54 +127,34 @@ def try_initialize_stability(service: "LLMService") -> None:
             return
 
     try:
-        # Step 1: Index the repository. In code mode we re-run
-        # the symbol index's incremental pass (cheap thanks to
-        # mtime caching). In doc mode, the background build has
-        # already indexed every doc file; we don't re-walk.
-        file_list_raw = service._repo.get_flat_file_list()
-        file_list = [f for f in file_list_raw.split("\n") if f]
+        # Step 1: Refresh the symbol index in code mode. In doc
+        # mode the background build has already indexed every
+        # doc file; we don't re-walk.
         if mode == Mode.CODE:
             assert service._symbol_index is not None
+            file_list_raw = service._repo.get_flat_file_list()
+            file_list = [f for f in file_list_raw.split("\n") if f]
             service._symbol_index.index_repo(file_list)
 
-        # Step 2: Initialize tier assignments from reference
-        # graph. Prefix must match the content type.
+        # Step 2: Configure the tracker's cache target. The
+        # tracker uses this for anchoring and underfill
+        # demotion calculations during the cascade.
         cache_target = service._config.cache_target_tokens_for_model()
         service._stability_tracker.set_cache_target_tokens(
             cache_target
         )
-        if mode == Mode.DOC:
-            indexed_files = list(
-                service._doc_index._all_outlines.keys()
-            )
-            ref_index = service._doc_index._ref_index
-            prefix = "doc:"
-        else:
-            assert service._symbol_index is not None
-            indexed_files = [
-                path for path in file_list
-                if path in service._symbol_index._all_symbols
-            ]
-            ref_index = service._symbol_index._ref_index
-            prefix = "symbol:"
 
-        keys = [f"{prefix}{path}" for path in indexed_files]
-        service._stability_tracker.initialize_with_keys(
-            ref_index,
-            keys=keys,
-            files=indexed_files,
-            l0_target_tokens=cache_target,
-        )
-
-        # Step 3: Seed system prompt into L0.
+        # Step 3: Register the system prompt into L0. The
+        # aggregate symbol/doc maps that L0 also presents to
+        # the LLM are NOT tracker entries — they're rebuilt
+        # at assembly time from the index. Only system:prompt
+        # is cascade-tracked.
         if mode == Mode.DOC:
             system_prompt = service._config.get_doc_system_prompt()
-        else:
-            system_prompt = service._config.get_system_prompt()
-        if mode == Mode.DOC:
             legend = service._doc_index.get_legend()
         else:
             assert service._symbol_index is not None
+            system_prompt = service._config.get_system_prompt()
             legend = service._symbol_index.get_legend()
         prompt_hash = hashlib.sha256(
             system_prompt.encode("utf-8")
@@ -155,18 +164,10 @@ def try_initialize_stability(service: "LLMService") -> None:
             prompt_hash, prompt_tokens
         )
 
-        # Step 4: Measure real token counts. The four-tier
-        # even split in :meth:`initialize_with_keys` already
-        # placed the most-referenced clusters in L0, so no
-        # post-measurement backfill is needed on the init
-        # path — the cascade will rebalance as requests come
-        # in if placeholder estimates diverged from real
-        # token counts.
-        measure_tracker_tokens(service)
-
         service._stability_initialized[mode] = True
         logger.info(
-            "Stability tracker initialized (%s mode): %d items",
+            "Stability tracker initialized (%s mode): %d items "
+            "(L0-content-typed: only system:prompt held in tracker)",
             mode.value,
             len(service._stability_tracker.get_all_items()),
         )

@@ -84,14 +84,26 @@ class TestLazyInitModeAware:
             )
         return svc
 
-    def test_code_mode_init_uses_symbol_prefix(
+    def test_code_mode_init_registers_only_system_prompt(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Code mode init seeds tracker with symbol: entries."""
+        """Code mode init registers system:prompt and nothing else.
+
+        Under the L0-content-typed model (D27), init does NOT
+        seed ``symbol:{path}`` entries into cascade-tracked
+        tiers. The aggregate symbol map that L0 presents to
+        the LLM is regenerated from the symbol index at
+        assembly time, not held as tracker entries. The only
+        cascade-tracked L0 entry is ``system:prompt``.
+
+        Files enter Active when selected and graduate upward
+        through the cascade as they stabilise. Users who want
+        immediate redistribution use ``rebuild_cache``.
+        """
         svc = self._make_service(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
@@ -106,23 +118,24 @@ class TestLazyInitModeAware:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        assert "symbol:a.py" in all_keys
-        assert "symbol:b.py" in all_keys
-        # No doc: entries in code mode.
-        assert not any(k.startswith("doc:") for k in all_keys)
+        # Only system:prompt — no per-file symbol: or doc:
+        # entries from init under the L0-content-typed model.
+        assert all_keys == {"system:prompt"}
 
-    def test_doc_mode_init_uses_doc_prefix(
+    def test_doc_mode_init_registers_only_system_prompt(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doc mode init seeds tracker with doc: entries.
+        """Doc mode init registers system:prompt and nothing else.
 
-        Symbol paths exist but aren't used — the primary
-        index in doc mode is the doc index, not the symbol
-        index.
+        Symmetric to the code-mode case. Under D27, neither
+        ``doc:{path}`` nor ``symbol:{path}`` entries are
+        seeded into the tracker on init. The aggregate doc
+        map that L0 presents to the LLM is regenerated from
+        the doc index at assembly time.
         """
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -143,12 +156,9 @@ class TestLazyInitModeAware:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        assert "doc:guide.md" in all_keys
-        assert "doc:README.md" in all_keys
-        # No symbol: entries in doc mode.
-        assert not any(
-            k.startswith("symbol:") for k in all_keys
-        )
+        # Only system:prompt — no per-file doc: or symbol:
+        # entries from init.
+        assert all_keys == {"system:prompt"}
 
     def test_doc_mode_init_skipped_when_not_ready(
         self,
@@ -216,7 +226,9 @@ class TestLazyInitModeAware:
         svc._try_initialize_stability()
 
         assert svc._stability_initialized.get(Mode.DOC, False) is True
-        assert "doc:guide.md" in (
+        # Under D27 the tracker holds only system:prompt
+        # post-init; doc: entries are not cascade-tracked.
+        assert "system:prompt" in (
             svc._stability_tracker.get_all_items()
         )
 
@@ -339,19 +351,23 @@ class TestLazyInitModeAware:
         )
         assert first_items == second_items
 
-    def test_doc_mode_init_measures_tokens(
+    def test_doc_mode_init_seeds_real_system_prompt_tokens(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doc mode init replaces placeholder tokens with real counts.
+        """Doc mode init seeds system:prompt with a real token count.
 
-        ``initialize_with_keys`` uses a placeholder token count
-        (400) for every seeded item. The post-init
-        ``_measure_tracker_tokens`` pass should overwrite those
-        with real counts derived from the formatted doc blocks.
+        Under D27 init no longer seeds per-file ``doc:``
+        entries with placeholder tokens — there's nothing to
+        measure on the per-file side. The remaining
+        token-measurement contract is on ``system:prompt``:
+        :meth:`register_system_prompt` is called with the
+        result of ``counter.count(prompt + legend)``, so the
+        stored token count must reflect the actual content,
+        not a placeholder or zero.
         """
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -367,12 +383,10 @@ class TestLazyInitModeAware:
         svc._try_initialize_stability()
 
         item = svc._stability_tracker.get_all_items().get(
-            "doc:guide.md"
+            "system:prompt"
         )
         assert item is not None
-        # Tokens should reflect the real block, not the 400
-        # placeholder. The exact value depends on the counter
-        # model, but it'll be non-zero and different from 400.
-        # "# Heading for guide.md\n\nbody.\n" is ~6-10 tokens.
-        assert item.tokens > 0
-        assert item.tokens != 400
+        # Doc system prompt is non-trivially long; real token
+        # count is well above zero and well above the 100-token
+        # placeholder used by the legacy four-tier seed.
+        assert item.tokens > 100
