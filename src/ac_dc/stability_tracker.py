@@ -130,20 +130,42 @@ _TIER_CONFIG: dict[Tier, dict[str, int]] = {
 
 
 # Cascade processing order — bottom-up. L3 processes incoming
-# graduates from active first, then L2 handles L3's promotions,
-# and so on up to L0. Active is never in the cascade order — it's
-# processed separately in Phase 1.
-_CASCADE_ORDER: tuple[Tier, ...] = (Tier.L3, Tier.L2, Tier.L1, Tier.L0)
+# graduates from active, L2 handles L3's promotions, L1 handles
+# L2's. Active is processed separately in Phase 1; L0 is
+# DELIBERATELY EXCLUDED from the cascade.
+#
+# L0 is content-typed under the new model (D27): it holds the
+# system prompt and the aggregate symbol/doc map, both of which
+# are regenerated from the index at assembly time, not driven
+# by the N-counter cascade. The cascade does not place items
+# into L0, does not rewrite L0 entries, and does not consider
+# L0 for promotion targets. L0 invalidation happens only via
+# application restart or explicit ``rebuild_cache``.
+#
+# Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
+# Contract and § Tier Structure.
+_CASCADE_ORDER: tuple[Tier, ...] = (Tier.L3, Tier.L2, Tier.L1)
 
 # Adjacency map — the tier above each cached tier. Used for
-# promotion targeting. L0 has no tier above; the sentinel lets
-# cascade code check "is there anywhere to promote to" without
-# special-casing.
+# promotion targeting.
+#
+# L1's "tier above" is None under the L0-content-typed model
+# (D27): cascade-mobile content (file:, url:, history:) is
+# ineligible for L0. The cascade processes L3 → L2 → L1 and
+# stops there. L1 is the terminal tier for promoted concrete
+# content; L0 is reserved for the system prompt and aggregate
+# maps and is reached only via explicit init / rebuild paths,
+# not via the cascade.
+#
+# L0 itself stays in the map for consistency (it never tries
+# to promote upward — there's nothing above it — and the
+# cascade code paths that read this map for L0 entries simply
+# see None and short-circuit).
 _TIER_ABOVE: dict[Tier, Tier | None] = {
     Tier.ACTIVE: Tier.L3,
     Tier.L3: Tier.L2,
     Tier.L2: Tier.L1,
-    Tier.L1: Tier.L0,
+    Tier.L1: None,
     Tier.L0: None,
 }
 
@@ -788,23 +810,52 @@ class StabilityTracker:
     # ------------------------------------------------------------------
 
     def _remove_stale(self, existing_files: set[str]) -> None:
-        """Drop tracked items whose underlying file no longer exists.
+        """Handle tracked items whose underlying file no longer exists.
 
-        Only applies to prefixes that reference repo files:
-        ``file:``, ``symbol:``, ``doc:``. ``system:``, ``url:``,
-        ``history:`` are always left alone (they have no
-        filesystem dependency, or their lifecycle is managed
-        elsewhere).
+        Two paths under the L0-content-typed model:
 
-        Any tier that loses an item is marked broken so the
-        cascade pass reconsiders it.
+        - ``file:`` entries (pinned or not) transition to
+          deletion-marker entries via :meth:`mark_deleted`.
+          The entry stays in the tracker but its content and
+          hash become the constant marker representation.
+          The marker rides the cascade like a normal ``file:``
+          entry; its constant hash means subsequent cycles
+          see no change and N grows normally. Survives until
+          the next ``rebuild_cache`` re-extracts L0's
+          aggregate maps and removes the file from the
+          structural index entirely.
+        - ``symbol:`` and ``doc:`` entries are removed
+          normally. These are tracker entries that haven't
+          existed in the L0-content-typed model since
+          startup-distribution was dropped (commit 3
+          onward); the path is kept here for defensive
+          cleanup of any leftover entries from earlier
+          cycles or migrations.
+
+        ``system:``, ``url:``, ``history:`` keys have no
+        filesystem dependency and are left alone.
+
+        Any tier that loses an item (or transitions a marker)
+        is marked broken so the cascade pass reconsiders it.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Item
+        Removal and § Deletion Markers.
         """
         to_remove: list[str] = []
+        to_mark_deleted: list[str] = []
         for key, item in self._items.items():
             path = self._path_from_key(key)
             if path is None:
                 continue
-            if path not in existing_files:
+            if path in existing_files:
+                continue
+            if key.startswith("file:"):
+                # Transition to deletion marker — preserves
+                # the entry's tier and N, replaces content
+                # with the constant marker hash.
+                to_mark_deleted.append(key)
+            else:
+                # symbol: / doc: — remove as before.
                 to_remove.append(key)
 
         for key in to_remove:
@@ -812,6 +863,17 @@ class StabilityTracker:
             self._mark_broken(item.tier, "stale file removal")
             self._log_change(
                 f"{item.tier.value} → removed (stale): {key}"
+            )
+
+        for key in to_mark_deleted:
+            item = self._items.get(key)
+            if item is None:
+                continue
+            tier_label = item.tier.value
+            self.mark_deleted(key)
+            self._mark_broken(item.tier, "file deleted (marker)")
+            self._log_change(
+                f"{tier_label} → marker: {key} (file deleted)"
             )
 
     @staticmethod
@@ -918,6 +980,30 @@ class StabilityTracker:
                 old_tier = existing.tier
                 existing.content_hash = new_hash
                 existing.n_value = 0
+                # Edit invariant — when a ``file:`` entry's
+                # hash changes during the session, the file
+                # has been edited and its full text must
+                # remain cached until the next
+                # ``rebuild_cache`` or application restart.
+                # The pin flag prevents stale cleanup and
+                # underfill demotion from removing it. The
+                # transition out of a deletion marker
+                # (file recreated at the same path) does NOT
+                # pin — only edits to existing files do.
+                #
+                # Spec: ``specs4/3-llm/cache-tiering.md`` §
+                # Edit Invariant.
+                was_marker = bool(
+                    getattr(existing, "_deleted", False)
+                )
+                if key.startswith("file:") and not was_marker:
+                    existing._pinned = True  # type: ignore[attr-defined]
+                if was_marker:
+                    # Re-creation: clear the deletion-marker
+                    # flag. The file exists again; the entry
+                    # behaves as a normal active item from
+                    # here on.
+                    existing._deleted = False  # type: ignore[attr-defined]
                 if old_tier != Tier.ACTIVE:
                     existing.tier = Tier.ACTIVE
                     self._mark_broken(old_tier, "hash changed")
@@ -952,12 +1038,33 @@ class StabilityTracker:
         # and doc:* items are NOT cleaned up this way — they
         # represent repo structure and persist in their earned
         # tier even when not actively referenced this request.
+        #
+        # Pinned ``file:`` entries (the edit invariant — see
+        # above) and deletion-marker entries are also exempt:
+        # they must survive deselection until the next
+        # ``rebuild_cache`` or application restart. The
+        # truthful current text of an edited file, or the
+        # marker for a deleted-this-session file, stays in
+        # the prompt regardless of selection state.
         for key in list(self._items.keys()):
             if key in active_items:
                 continue
             if not (key.startswith("file:") or key.startswith("history:")):
                 continue
-            item = self._items.pop(key)
+            item = self._items[key]
+            if key.startswith("file:") and (
+                getattr(item, "_pinned", False)
+                or getattr(item, "_deleted", False)
+            ):
+                # Pinned or marker — protected from departure
+                # cleanup. Stays in its current tier. Active
+                # items list will see it again on subsequent
+                # cycles via the orchestrator's
+                # ``file_context.get_files()`` (selected files)
+                # OR via the deletion marker's path-keyed
+                # presence in the tracker.
+                continue
+            self._items.pop(key)
             self._mark_broken(item.tier, "item departed")
             self._log_change(
                 f"{item.tier.value} → removed: {key} (not in active)"
@@ -1187,38 +1294,23 @@ class StabilityTracker:
 
         # Up to 8 iterations — real cascades converge in 1–2,
         # cap is defensive against logic bugs creating a cycle.
+        #
+        # Note the L0-content-typed model: the cascade does NOT
+        # touch L0. There is no per-cycle L0-backfill probe
+        # because L0 is invariant under routine events
+        # (selection toggles, edits, URL fetches, history
+        # compaction). The legacy "L0 underfilled →
+        # piggyback-promote from L1" path is removed; L0
+        # population is the responsibility of init / rebuild
+        # paths and the optional cross-reference seed, never
+        # the cascade.
+        #
+        # Spec: ``specs4/3-llm/cache-tiering.md`` § L0
+        # Stability Contract.
+        del had_external_invalidation  # no longer drives gating
         processed: set[Tier] = set()
         for _ in range(8):
             made_progress = False
-            # L0 backfill probe — only fires when we're already
-            # rebuilding some cache block this cycle. See the
-            # ``had_external_invalidation`` comment above for
-            # why this is gated rather than unconditional.
-            #
-            # When permitted, the probe adds L0 to the
-            # promotion-gate snapshot so _try_promote_from
-            # treats it as "needs content" and promotes
-            # eligible L1 items upward. The probe legitimately
-            # opens an upward path so it's added to BOTH the
-            # live set (so external consumers see L0 as broken)
-            # and the snapshot (so promotion gating responds
-            # this cycle).
-            if (
-                self._cache_target_tokens > 0
-                and had_external_invalidation
-            ):
-                l0_tokens = sum(
-                    item.tokens
-                    for item in self._items.values()
-                    if item.tier == Tier.L0
-                )
-                if l0_tokens < self._cache_target_tokens:
-                    if Tier.L0 not in cascade_broken:
-                        cascade_broken.add(Tier.L0)
-                        self._mark_broken(
-                            Tier.L0, "L0 backfill probe"
-                        )
-                        made_progress = True
             for tier in _CASCADE_ORDER:
                 if tier in processed:
                     # Re-visit only to check promotion eligibility
@@ -1531,20 +1623,37 @@ class StabilityTracker:
             if not tier_items:
                 continue
 
-            # Demote every item — a tier below cache target
-            # isn't worth a breakpoint. Their N is preserved;
-            # they may re-promote on the next cycle if the tier
-            # above stabilises.
+            # Demote every item except pinned files and
+            # deletion markers — those are protected from
+            # automatic eviction by the L0-content-typed
+            # model's edit invariant. Their N is preserved
+            # for the items that do demote; they may
+            # re-promote on the next cycle if the tier above
+            # stabilises.
+            #
+            # Spec: ``specs4/3-llm/cache-tiering.md`` § Edit
+            # Invariant and § Item Removal.
+            demoted_any = False
             for item in tier_items:
+                if getattr(item, "_pinned", False) or getattr(
+                    item, "_deleted", False
+                ):
+                    # Pinned or marker — skip. The entry
+                    # stays at its current tier even though
+                    # the tier is below cache target.
+                    continue
                 item.tier = below
                 demoted_this_call.add(item.key)
+                demoted_any = True
                 self._log_change(
                     f"{tier.value} → {below.value}: {item.key} "
                     f"(underfill demotion)"
                 )
-            # Both tiers experience structural change.
-            self._mark_broken(tier, "underfill demotion (source)")
-            self._mark_broken(below, "underfill demotion (dest)")
+            if demoted_any:
+                # Both tiers experience structural change
+                # only when something actually demoted.
+                self._mark_broken(tier, "underfill demotion (source)")
+                self._mark_broken(below, "underfill demotion (dest)")
 
     # ------------------------------------------------------------------
     # Initialisation from reference graph (startup seeding)

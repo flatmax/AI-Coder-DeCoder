@@ -533,8 +533,20 @@ class TestDepartedItemCleanup:
 class TestStaleRemoval:
     """Items whose file no longer exists are dropped."""
 
-    def test_stale_file_removed(self) -> None:
-        """file:* for deleted path is dropped."""
+    def test_stale_file_becomes_marker(self) -> None:
+        """file:* for deleted path transitions to a deletion marker.
+
+        Under the L0-content-typed model (D27), ``file:``
+        entries don't disappear on disk-deletion — they
+        become deletion markers so the LLM continues to see
+        a representation of the file (the constant marker
+        text) until the next ``rebuild_cache`` re-extracts
+        L0's aggregate maps. Dedicated coverage of the
+        marker contract lives in
+        :class:`TestDeletionMarkerInPhase0`; this test pins
+        the membership half of the invariant — the entry
+        stays present after Phase 0 sees the deletion.
+        """
         tracker = StabilityTracker()
         tracker.update(
             {"file:a.py": _active_item()},
@@ -544,7 +556,8 @@ class TestStaleRemoval:
             {"file:a.py": _active_item()},
             existing_files=set(),  # a.py deleted
         )
-        assert tracker.has_item("file:a.py") is False
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
 
     def test_stale_symbol_removed(self) -> None:
         """symbol:* for deleted path is dropped."""
@@ -594,15 +607,26 @@ class TestStaleRemoval:
         assert tracker.has_item("history:0") is True
 
     def test_stale_removal_change_logged(self) -> None:
-        """Stale removal records a change log entry."""
+        """Stale-handling fires a change-log entry.
+
+        For ``symbol:`` / ``doc:`` entries the legacy
+        "removed (stale)" wording is preserved; ``file:``
+        entries log the marker transition instead. We assert
+        the symbol-removal wording here since this test sits
+        in the legacy-removal class. Marker-specific log
+        content is covered by
+        :class:`TestDeletionMarkerInPhase0`.
+        """
         tracker = StabilityTracker()
         tracker.update(
-            {"file:a.py": _active_item()},
+            {"symbol:a.py": _active_item()},
             existing_files={"a.py"},
         )
         tracker.update({}, existing_files=set())
         changes = tracker.get_changes()
-        assert any("a.py" in c and "stale" in c for c in changes)
+        assert any(
+            "a.py" in c and "stale" in c for c in changes
+        )
 
     def test_none_existing_files_skips_phase_0(self) -> None:
         """Passing None for existing_files skips stale removal.
@@ -707,15 +731,28 @@ class TestCascadePromotion:
         # L2's entry_n = 6.
         assert item.n_value == 6
 
-    def test_promotion_through_all_tiers(self) -> None:
-        """Item eventually reaches L0 via repeated promotions."""
+    def test_promotion_terminates_at_l1(self) -> None:
+        """Item reaches L1 and stops — L0 is content-typed.
+
+        Under the L0-content-typed model (D27), cascade-mobile
+        content (``file:``, ``url:``, ``history:``) is
+        ineligible for L0. The cascade processes L3 → L2 → L1
+        and stops. An item that stays unchanged across many
+        cycles graduates to L3, promotes to L2, promotes to
+        L1, and then sits at L1 with N growing — but never
+        promotes into L0.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Tier
+        Structure and § L0 Stability Contract.
+        """
         tracker = StabilityTracker()
-        # Enough cycles to promote all the way. Each tier needs
-        # 3 more cycles than the last; 12 cycles should suffice.
+        # Many cycles — far more than enough to reach L0 under
+        # the old model. Under the new model the item lands
+        # at L1 and stays.
         for _ in range(20):
             tracker.update({"file:a.py": _active_item("h1")})
         item = tracker.get_all_items()["file:a.py"]
-        assert item.tier == Tier.L0
+        assert item.tier == Tier.L1
 
     def test_blocked_by_stable_upper_tier(self) -> None:
         """Items do NOT promote past a stable upper tier.
@@ -739,6 +776,12 @@ class TestCascadePromotion:
         other tier mutations, letting a.py promote upward
         without any legitimate invalidation. Snapshot-based
         gating in _run_cascade prevents this.
+
+        Note: the L0 pin is irrelevant to the test mechanics
+        under the L0-content-typed model — the cascade can't
+        promote into L0 regardless. The pin is kept so the
+        test setup mirrors the original (and surfaces clearly
+        if the cascade ever tries to mutate L0).
         """
         tracker = StabilityTracker()
         tracker._items["file:l0_pin.py"] = TrackedItem(
@@ -933,16 +976,18 @@ class TestCascadePromotion:
           at promote_n → promotes.
         - L3→L2: L2 is now structurally broken (lost its
           resident), L3 item at promote_n → promotes.
-        - L0 stays put: L0 was never invalidated, and the
-          destination-mark contract prevents the chain from
-          propagating past L1 into L0.
+        - L0 stays put: under the L0-content-typed model the
+          cascade does not promote into L0 at all. The L0
+          resident is irrelevant to the chain — it's there
+          to verify the cascade leaves L0 untouched.
 
-        Regression guard against the original chain-cascade
-        bug: an external L1 invalidation must NOT drain L0.
-        The destination tier of a promotion (the originally-
-        invalidated tier) is not added to the cascade's
-        invalidation snapshot, so the tier below it never
-        sees it as a legitimate promotion target.
+        Regression guard for two invariants: (1) external L1
+        invalidation does NOT drain L0 (destination-mark
+        contract), and (2) the cascade respects the L0
+        content-type policy (no promotions into L0 from below).
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Tier
+        Structure and § Ripple Promotion.
         """
         tracker = StabilityTracker(cache_target_tokens=0)
         # L0 resident — stable, N maxed out.
@@ -1017,31 +1062,29 @@ class TestCascadePromotion:
 class TestStaticUnderfillDoesNotDrainL1:
     """Regression guard: static L0 underfill does not chain-drain.
 
-    The bug: the cascade's L0 backfill probe used to run
-    unconditionally — every turn it checked whether L0 was
-    below cache_target_tokens and, if so, marked L0 broken.
-    That opened a promotion path L1 → L0, which (via
-    structural-invalidation propagation) opened L2 → L1, which
-    opened L3 → L2. So a long-lived stable conversation that
-    happened to leave L0 sitting a bit below cache_target
-    would see mass promotions on every turn — exactly the
-    "70 items L1→L0, 70 items L2→L1" pattern users observed
-    in the terminal HUD.
+    The original bug: the cascade's L0 backfill probe used to
+    run unconditionally — every turn it checked whether L0
+    was below cache_target_tokens and, if so, marked L0
+    broken. That opened L1 → L0, which (via structural-
+    invalidation propagation) opened L2 → L1, which opened
+    L3 → L2. A long-lived stable conversation that happened
+    to leave L0 sitting a bit below cache_target would see
+    mass promotions on every turn.
 
-    The fix: the L0 backfill probe is gated on
-    ``had_external_invalidation`` — it only piggybacks on a
-    cascade entry that already had something broken. Static
-    underfill is a one-shot init/rebuild concern, repaired by
-    :meth:`backfill_l0_after_measurement`, not the per-turn
-    cascade.
+    The first fix gated the probe on
+    ``had_external_invalidation``. The second (D27, the
+    L0-content-typed model) removed the probe entirely:
+    the cascade no longer touches L0. L0 population is
+    handled exclusively by init / rebuild / cross-reference
+    seeding paths, and the per-turn cascade is concerned
+    only with L1/L2/L3 dynamics.
 
-    The full coverage of "is the probe still wired correctly
-    for legitimate piggyback?" is in
-    :class:`TestCascadePromotion`'s
-    ``test_l1_invalidation_ripples_up_through_structural_breaks``
-    and
-    ``test_primed_cache_l1_deselect_ripples_full_chain``,
-    which exercise external L1 invalidation.
+    These tests still pass under the stricter regime — they
+    asserted "L0 underfill must not chain-drain L1", and the
+    stricter answer is "L0 cannot drain L1 from any source,
+    underfill or otherwise". Kept as regression guards
+    against any future regression that would re-introduce
+    cascade → L0 paths.
     """
 
     def test_underfilled_l0_does_not_drain_l1_when_no_invalidation(self) -> None:
@@ -1099,41 +1142,43 @@ class TestStaticUnderfillDoesNotDrainL1:
                 f"backfill_l0_after_measurement's job."
             )
 
-    def test_underfilled_l0_with_external_invalidation_does_drain(self) -> None:
-        """Confirm the legitimate piggyback path still works.
+    def test_l1_invalidation_does_not_drain_to_l0(self) -> None:
+        """L1 invalidation never promotes into L0.
 
-        Same setup as the previous test but this time we mark
-        L1 broken before calling update (simulating a deselect
-        of an L1-resident file). Now the probe is permitted —
-        ``had_external_invalidation`` is True at cascade entry —
-        and L0 underfill should be opportunistically repaired.
+        Under the L0-content-typed model (D27), the cascade
+        does not promote ``file:`` (or ``url:`` or
+        ``history:``) entries into L0. L0 is reserved for
+        structural content (system prompt, aggregate maps)
+        plus optional cross-reference seeded items.
 
-        Expectation: L1 → L0 promotions fire (legitimate ripple
-        from the L1 break). The structural-invalidation chain
-        propagates upward as designed.
+        Same setup as the previous test (L1 invalidated, L1
+        residents at promote_n, L0 underfilled), but the
+        outcome inverts: nothing flows into L0. The L1
+        residents that are eligible for promotion stay at
+        L1, because L1's "tier above" is None under the
+        new ``_TIER_ABOVE`` map.
+
+        Regression guard against the legacy "L0 backfill
+        probe" path that previously fired during the
+        per-cycle cascade. That probe is removed; L0
+        population happens only through init / rebuild /
+        cross-reference seed.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
+        Contract.
         """
         tracker = StabilityTracker(cache_target_tokens=10_000)
         tracker._items["system:prompt"] = TrackedItem(
             "system:prompt", Tier.L0, n_value=12,
             content_hash="h_sys", tokens=100,
         )
-        # Seed L1 residents AT promote_n (12) so they're
-        # eligible for promotion if the gate opens. Anything
-        # below promote_n stays at L1 regardless of broken-tier
-        # state — the eligibility check is independent of the
-        # gate. Use 5000-token items so anchoring leaves at
-        # least one item unanchored: with cache_target=10_000
-        # the per-item check is ``accumulated < target``
-        # BEFORE adding this item's tokens, so the first two
-        # items end up anchored (acc=0 and acc=5000, both
-        # under 10_000) and items 3-5 sit above the line.
         for i in range(5):
             tracker._items[f"file:l1_{i}.py"] = TrackedItem(
                 f"file:l1_{i}.py", Tier.L1, n_value=12,
                 content_hash="h1", tokens=5000,
             )
-        # External invalidation: simulate deselect by removing
-        # one L1 resident and marking L1 broken.
+        # External L1 invalidation: simulate deselect by
+        # removing one L1 resident and marking L1 broken.
         tracker._items.pop("file:l1_0.py")
         tracker._broken_tiers.add(Tier.L1)
 
@@ -1145,17 +1190,25 @@ class TestStaticUnderfillDoesNotDrainL1:
         tracker.update(active)
 
         items = tracker.get_all_items()
-        # L1 was externally broken; the probe gate opens; L0 is
-        # underfilled so the probe marks it broken too; L1
-        # residents at promote_n flow into L0.
-        promoted_count = sum(
-            1 for i in range(1, 5)
-            if items[f"file:l1_{i}.py"].tier == Tier.L0
+        # L0 stays at exactly its original size — only the
+        # system prompt.
+        l0_keys = {
+            key for key, item in items.items()
+            if item.tier == Tier.L0
+        }
+        assert l0_keys == {"system:prompt"}, (
+            f"L0 should contain only system:prompt; got: {l0_keys}. "
+            "The cascade must not promote file: entries into L0 "
+            "under the L0-content-typed model."
         )
-        assert promoted_count > 0, (
-            "Legitimate L1 invalidation + L0 underfill should "
-            "trigger backfill piggyback. Got no promotions to L0."
-        )
+        # Every surviving L1 resident stays at L1 — promotion
+        # is unavailable because L1 has no destination tier.
+        for i in range(1, 5):
+            assert items[f"file:l1_{i}.py"].tier == Tier.L1, (
+                f"file:l1_{i}.py should stay at L1; "
+                "no promotion target exists under the "
+                "L0-content-typed model."
+            )
 
 
 class TestAnchoring:
@@ -1395,6 +1448,277 @@ class TestUnderfillDemotion:
         )
         tracker.update({"file:a.py": _active_item("h1", 1)})
         assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+
+# ---------------------------------------------------------------------------
+# L0-content-typed model invariants
+# ---------------------------------------------------------------------------
+
+
+class TestL0ContentTypedCascade:
+    """Cascade respects L0's content-type policy (D27).
+
+    Under the new model, the cascade never promotes items
+    into L0. L0 holds the system prompt and aggregate
+    structural maps; cascade-mobile content (file:, url:,
+    history:) is ineligible. Only init / rebuild / cross-
+    reference seeding can place items in L0.
+    """
+
+    def test_l1_item_at_promote_n_stays_at_l1(self) -> None:
+        """An L1 item with N way past promote_n does not promote.
+
+        Pre-seed an L1 entry with N=20 (well past promote_n
+        which is 12 for L1). Run an update where the entry is
+        unchanged. The item must stay at L1 — no L0 promotion
+        path exists for cascade-mobile content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=20,
+            content_hash="h1", tokens=100,
+        )
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+    def test_url_at_l1_promote_n_stays_at_l1(self) -> None:
+        """URL entries also cannot promote past L1."""
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=20,
+            content_hash="h1", tokens=100,
+        )
+        tracker.update({"url:abc": _active_item("h1", 100)})
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+
+    def test_l0_resident_unchanged_by_cascade(self) -> None:
+        """L0 entries do not move during cascade.
+
+        L0 is content-typed: its contents are governed by
+        init / rebuild paths, not the cascade. An update
+        cycle must not touch L0's tier assignments.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        # Drive an update with the system prompt active. Even
+        # though L0 is below cache_target (100 < 500), the
+        # cascade must not demote it — L0 is exempt from
+        # underfill demotion under the L0-content-typed model.
+        tracker.update({"system:prompt": _active_item("h_sys", 100)})
+        assert (
+            tracker.get_all_items()["system:prompt"].tier
+            == Tier.L0
+        )
+
+    def test_active_item_with_high_n_graduates_to_l3_only(self) -> None:
+        """Active item with high N reaches L1 over many cycles.
+
+        Drive an item from active for 20 cycles. It graduates
+        to L3 (cycle 4), promotes to L2 (cycle 7), promotes
+        to L1 (cycle 10), and from there N grows but tier is
+        terminal. Verifies the full cascade-mobile life cycle
+        respects the L1 ceiling.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        for _ in range(20):
+            tracker.update({"file:a.py": _active_item("h1", 100)})
+        item = tracker.get_all_items()["file:a.py"]
+        assert item.tier == Tier.L1
+        # N has grown well past L1's promote_n (12) since the
+        # item has nowhere else to go.
+        assert item.n_value >= 12
+
+
+class TestPinnedFileSurvivesEvents:
+    """Pinned ``file:`` entries are protected from cleanup.
+
+    The edit invariant: a file edited during the session must
+    keep its full text in cache until ``rebuild_cache`` or
+    application restart, regardless of selection state or
+    underfill conditions.
+    """
+
+    def test_hash_change_pins_file_entry(self) -> None:
+        """Phase 1 sets the pin flag on file: hash change."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.is_pinned("file:a.py") is False
+        tracker.update({"file:a.py": _active_item("h2", 100)})
+        assert tracker.is_pinned("file:a.py") is True
+
+    def test_hash_change_does_not_pin_non_file_entries(self) -> None:
+        """Pin only applies to ``file:`` keys.
+
+        A ``url:`` content change is hash-detected the same way
+        but doesn't trigger pinning — URL content isn't subject
+        to the edit invariant.
+        """
+        tracker = StabilityTracker()
+        tracker.update({"url:abc": _active_item("h1", 100)})
+        tracker.update({"url:abc": _active_item("h2", 100)})
+        assert tracker.is_pinned("url:abc") is False
+
+    def test_pinned_file_survives_deselection(self) -> None:
+        """A pinned file entry stays in the tracker after deselection.
+
+        Without the pin, departing files are removed by Phase
+        1 cleanup. With the pin, the entry stays at its
+        current tier so subsequent ``rebuild_cache`` or restart
+        is the only way to clear it.
+        """
+        tracker = StabilityTracker()
+        # Edit the file (hash change → pin set).
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.update({"file:a.py": _active_item("h2", 100)})
+        assert tracker.is_pinned("file:a.py") is True
+        # User deselects: file:a.py no longer in active items.
+        tracker.update({})
+        # Entry must still be present.
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is True
+
+    def test_unpinned_file_removed_on_deselection(self) -> None:
+        """An unedited file entry is removed normally on deselection."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        # No edit → no pin.
+        tracker.update({})
+        assert tracker.has_item("file:a.py") is False
+
+    def test_pinned_file_skips_underfill_demotion(self) -> None:
+        """A pinned file at an underfilled tier doesn't demote."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker.pin_file("file:a.py")
+        # L1 is well below cache_target (100 < 500). Without
+        # pinning, the item would demote to L2.
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+
+class TestDeletionMarkerInPhase0:
+    """Phase 0 transitions deleted file entries to markers.
+
+    When ``existing_files`` does not include a tracked
+    ``file:`` path, the entry's content is replaced by the
+    deletion marker (constant text + constant hash) instead
+    of being removed.
+    """
+
+    def test_deleted_file_becomes_marker(self) -> None:
+        """File path absent from existing_files → marker entry."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        # Next cycle: a.py no longer exists on disk.
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files=set(),
+        )
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
+        assert (
+            tracker.get_signature_hash("file:a.py")
+            == _DELETION_MARKER_HASH
+        )
+
+    def test_pinned_file_also_transitions_to_marker(self) -> None:
+        """Pinned files transition to markers on deletion.
+
+        Pin status and deletion status are mutually exclusive
+        (mark_deleted clears the pin); the deletion event
+        wins because the file's actual content is gone.
+        """
+        tracker = StabilityTracker()
+        # Edit the file → pinned.
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update(
+            {"file:a.py": _active_item("h2", 100)},
+            existing_files={"a.py"},
+        )
+        assert tracker.is_pinned("file:a.py") is True
+        # Deletion event:
+        tracker.update({}, existing_files=set())
+        assert tracker.is_deleted("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_marker_survives_deselection(self) -> None:
+        """Deletion-marker entries stay through deselection."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update({}, existing_files=set())
+        # File departed AND was deleted → marker. Stays.
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
+
+    def test_marker_skips_underfill_demotion(self) -> None:
+        """Markers are exempt from underfill demotion."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker.mark_deleted("file:a.py")
+        # L1 well below cache_target. Marker should stay.
+        tracker.update({}, existing_files=set())
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+    def test_recreated_file_clears_marker(self) -> None:
+        """Re-creating a file at the same path clears marker state.
+
+        The new content has a different hash from
+        DELETION_MARKER_HASH, so Phase 1 detects a hash change.
+        The transition out of marker state clears the
+        ``_deleted`` flag without setting the pin (re-creation
+        is not an edit of an existing file).
+        """
+        tracker = StabilityTracker()
+        # Existing file → tracked.
+        tracker.update(
+            {"file:a.py": _active_item("h_orig", 100)},
+            existing_files={"a.py"},
+        )
+        # File deleted.
+        tracker.update({}, existing_files=set())
+        assert tracker.is_deleted("file:a.py") is True
+        # File re-created (same path, new content). Phase 0
+        # sees the path back in existing_files and skips the
+        # transition; Phase 1 sees the hash differ from the
+        # marker hash and demotes to active with fresh content.
+        tracker.update(
+            {"file:a.py": _active_item("h_new", 100)},
+            existing_files={"a.py"},
+        )
+        assert tracker.is_deleted("file:a.py") is False
+        # Re-creation doesn't pin — pin is for edits, not for
+        # re-creation. Subsequent edits during this session
+        # would pin via the normal hash-change path.
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_symbol_entry_still_removed_on_deletion(self) -> None:
+        """Non-file entries continue to use the legacy removal path."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"symbol:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update({}, existing_files=set())
+        # Symbol entries are removed (not transitioned to markers).
+        assert tracker.has_item("symbol:a.py") is False
 
 
 # ---------------------------------------------------------------------------
