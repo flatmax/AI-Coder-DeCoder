@@ -981,16 +981,27 @@ def print_post_response_hud(service: "LLMService") -> None:
     print("\n".join(usage_lines), file=sys.stderr)
 
     # Section 3: Tier Changes
-    changes = service._stability_tracker.get_changes()
+    # Merge tier transitions (changes) and fresh tracker
+    # registrations into one combined view. Registrations
+    # arrive on a separate list because they're not tier
+    # transitions — see ``StabilityTracker.get_registrations``
+    # for why. The HUD treats them as a third axis alongside
+    # promotions/demotions: ➕ counter, distinct macro bucket,
+    # rendered with the ➕ icon in the per-line output.
+    raw_changes = service._stability_tracker.get_changes()
+    registrations = (
+        service._stability_tracker.get_registrations()
+    )
+    changes = list(raw_changes) + list(registrations)
     if changes:
-        # Drain the live change log immediately. We already
-        # have our snapshot in ``changes`` (a copy returned
-        # by :meth:`get_changes`); rendering below iterates
-        # the snapshot, never the live list. Draining FIRST
-        # — before any rendering — guarantees the next turn
-        # starts clean even if a downstream print raises.
-        # An end-of-block drain leaves the log populated on
-        # any exception, and the next turn's
+        # Drain the live change and registration logs
+        # immediately. We already have our snapshot in
+        # ``changes`` (the merged copy); rendering below
+        # iterates the snapshot, never the live lists.
+        # Draining FIRST — before any rendering — guarantees
+        # the next turn starts clean even if a downstream
+        # print raises. An end-of-block drain leaves the logs
+        # populated on any exception, and the next turn's
         # :meth:`StabilityTracker.update` then prepends the
         # leaked entries as ``pre_cycle_changes``, replaying
         # last turn's tier moves into this turn's HUD even
@@ -999,6 +1010,7 @@ def print_post_response_hud(service: "LLMService") -> None:
         # appearing turn after turn while tier sizes stay
         # constant.
         service._stability_tracker._changes = []
+        service._stability_tracker._registrations = []
         # Tier rank for direction detection. Higher rank =
         # more cached / more stable. 📈 means the item moved
         # to a higher rank (promotion / graduation). 📉 means

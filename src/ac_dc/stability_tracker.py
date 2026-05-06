@@ -271,6 +271,16 @@ class StabilityTracker:
         self._cache_target_tokens = cache_target_tokens
         self._items: dict[str, TrackedItem] = {}
         self._changes: list[str] = []
+        # Per-cycle registration log. Distinct from
+        # ``_changes`` because a fresh tracker registration is
+        # not a tier transition (the item didn't exist before)
+        # and including it in the change log would break tests
+        # that pin "no transitions → empty change log". The
+        # HUD reads this list separately so operators still see
+        # ➕ entries for newly-selected files, newly-fetched
+        # URLs, freshly-mentioned symbols. Cleared at the start
+        # of each :meth:`update`.
+        self._registrations: list[str] = []
         self._broken_tiers: set[Tier] = set()
         # Parallel diagnostic map — every entry in
         # ``_broken_tiers`` has matching reason strings here.
@@ -439,6 +449,22 @@ class StabilityTracker:
         """
         return list(self._changes)
 
+    def get_registrations(self) -> list[str]:
+        """Return registration-log entries for the most recent update.
+
+        Each entry is a human-readable string like
+        ``"new → active: file:src/foo.py (registered)"`` and
+        records a fresh tracker key that did not exist before
+        the most recent :meth:`update` cycle. Distinct from
+        :meth:`get_changes` because a registration is not a
+        tier transition and must not pollute the change-log
+        contract that downstream code (and tests) depend on.
+
+        Returns a fresh list — safe to iterate or filter without
+        affecting the tracker.
+        """
+        return list(self._registrations)
+
     def get_all_items(self) -> dict[str, TrackedItem]:
         """Return a snapshot of every tracked item.
 
@@ -525,6 +551,7 @@ class StabilityTracker:
         # reading order for an operator debugging a cascade.
         pre_cycle_changes = list(self._changes)
         self._changes = []
+        self._registrations = []
         # Snapshot broken-tier reasons at cycle entry so the
         # post-response HUD can surface *why* the cascade fired
         # — purely a diagnostic. Captured here, before any of
@@ -698,17 +725,16 @@ class StabilityTracker:
             existing = self._items.get(key)
             if existing is None:
                 # New item — register at active with N=0.
-                # Log so the HUD surfaces it. Without this
-                # entry, freshly-selected files (or any new
-                # tracker key — system, url, doc, symbol) appear
-                # silently in the active tier, and operators
-                # have no signal that the cascade picked them up.
-                # The arrow form ``→ active:`` keeps parsing
-                # consistent with promotion/demotion lines so
-                # the HUD's tier-rank parser sees a destination
-                # tier of "active" (rank 0) — neither
-                # promotion nor demotion, so it falls through
-                # to a third "new" bucket on the HUD side.
+                # The change log records *transitions* between
+                # tiers, and a fresh registration is not a
+                # transition (the item didn't exist before).
+                # Existing tests rely on the change log being
+                # empty when no transitions have occurred, so
+                # we route registrations into a separate
+                # ``_registrations`` list instead. The HUD
+                # reads both lists so operators still see ➕
+                # entries for newly-selected files, newly-
+                # fetched URLs, freshly-mentioned symbols.
                 self._items[key] = TrackedItem(
                     key=key,
                     tier=Tier.ACTIVE,
@@ -716,7 +742,7 @@ class StabilityTracker:
                     content_hash=new_hash,
                     tokens=new_tokens,
                 )
-                self._log_change(
+                self._registrations.append(
                     f"new → active: {key} (registered)"
                 )
                 continue
