@@ -224,27 +224,35 @@ def update_stability(
 ) -> None:
     """Build active items and run the tracker update.
 
-    Full implementation per specs4/3-llm/streaming.md —
-    _update_stability pseudocode. Builds the active-items dict
-    from all content categories (system prompt, selected files,
-    index entries for non-selected files, cross-reference
-    items, history messages), removes user-excluded items, and
-    runs the tracker update with the current repo file set for
-    stale-removal.
+    Builds the active-items dict from the content categories
+    that legitimately ride the cascade under the L0-content-
+    typed model (D27): the system prompt (stabilises into L0
+    once registered), selected files as full-content
+    ``file:{path}`` entries, and history messages. Per-file
+    ``symbol:{path}`` / ``doc:{path}`` entries are NOT
+    created — the aggregate symbol/doc map lives in L0 and is
+    regenerated from the index at assembly time, not held as
+    cascade-tracked items.
 
-    Order of operations per specs-reference/3-llm/streaming.md:
+    Order of operations:
 
     0a. Defensive excluded-files removal from the tracker.
-    0b. System prompt + legend — always present, stabilizes to
-        L0. Hash only the prompt text (not legend) for stability.
-    1. Selected files — full content hash.
-    2. Remove symbol/doc entries for selected files (full
-       content present → index block redundant).
-    3. Primary index entries for ALL indexed files NOT in
-       selected files AND NOT excluded.
-    4. Cross-reference items (opposite index) when cross-ref on.
+    0b. System prompt + legend — stabilises to L0.
+    1. Selected files — full content hash, ``file:{path}``.
+    2. Defensive sweep — remove any legacy ``symbol:{path}``
+       / ``doc:{path}`` entries left over from earlier code
+       paths or cross-ref migrations. Under D27 these per-
+       file entries must not exist.
+    3. (Removed under D27 — the aggregate symbol/doc map is
+       rendered into L0 at assembly time.)
+    4. (Removed under D27 — cross-reference is L0-only; the
+       secondary aggregate map is rendered into L0 at
+       assembly time.)
     5. History messages.
     6. Run tracker.update().
+
+    Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
+    Contract and § Index Inclusion.
     """
     if scope is None:
         scope = service._default_scope()
@@ -301,57 +309,37 @@ def update_stability(
                 "tokens": service._counter.count(content),
             }
 
-    # Step 2 — Remove symbol/doc entries for selected files.
-    for path in scope.selected_files:
-        for prefix in ("symbol:", "doc:"):
-            entry_key = prefix + path
-            if scope.tracker.has_item(entry_key):
-                all_items = scope.tracker.get_all_items()
-                item = all_items.get(entry_key)
-                if item is not None:
-                    tier = item.tier
-                    scope.tracker._items.pop(entry_key, None)
-                    scope.tracker.mark_broken(
-                        tier, "selected file (index→content swap)"
-                    )
-                    scope.tracker.log_change(
-                        f"{tier.value} → removed: {entry_key} "
-                        "(selected, swapped for full content)"
-                    )
+    # Step 2 — Defensive sweep: remove any legacy
+    # ``symbol:{path}`` / ``doc:{path}`` entries that may
+    # have leaked into the tracker from a previous code
+    # version or a cross-ref mode migration. Under the
+    # L0-content-typed model (D27) these per-file entries
+    # are never created — the aggregate symbol/doc map in
+    # L0 is the only place index content lives. Selected
+    # files are handled separately as ``file:{path}`` (full
+    # content) in Step 1.
+    for key in list(scope.tracker.get_all_items().keys()):
+        if not (key.startswith("symbol:") or key.startswith("doc:")):
+            continue
+        item = scope.tracker._items.get(key)
+        if item is None:
+            continue
+        tier = item.tier
+        scope.tracker._items.pop(key, None)
+        scope.tracker.mark_broken(
+            tier, "legacy per-file index entry (D27 sweep)"
+        )
+        scope.tracker.log_change(
+            f"{tier.value} → removed: {key} "
+            "(L0-content-typed: per-file index entries forbidden)"
+        )
 
-    # Step 3 — Primary index entries for non-selected,
-    # non-excluded files.
-    selected_set = set(scope.selected_files)
-    excluded_set = set(excluded)
-    if scope.context.mode == Mode.DOC:
-        for path in list(service._doc_index._all_outlines.keys()):
-            if path in selected_set or path in excluded_set:
-                continue
-            block = service._doc_index.get_file_doc_block(path)
-            if not block:
-                continue
-            sig_hash = service._doc_index.get_signature_hash(path)
-            active_items[f"doc:{path}"] = {
-                "hash": sig_hash or hashlib.sha256(
-                    block.encode("utf-8")
-                ).hexdigest(),
-                "tokens": service._counter.count(block),
-            }
-    else:
-        if service._symbol_index is not None:
-            for path in list(service._symbol_index._all_symbols.keys()):
-                if path in selected_set or path in excluded_set:
-                    continue
-                block = service._symbol_index.get_file_symbol_block(path)
-                if not block:
-                    continue
-                sig_hash = service._symbol_index.get_signature_hash(path)
-                active_items[f"symbol:{path}"] = {
-                    "hash": sig_hash or hashlib.sha256(
-                        block.encode("utf-8")
-                    ).hexdigest(),
-                    "tokens": service._counter.count(block),
-                }
+    # Step 3 — Removed under D27. The aggregate symbol/doc
+    # map is regenerated from the index at assembly time
+    # (see :func:`ac_dc.llm._assembly.assemble_tiered`) and
+    # rendered into L0's system message. No per-file
+    # ``symbol:`` / ``doc:`` tracker entries are created;
+    # the cascade does not place index content into L1/L2/L3.
 
     # Step 4 — Cross-reference is L0-only under D27. The
     # secondary aggregate map is regenerated from the

@@ -26,21 +26,21 @@ from .conftest import _FakeLiteLLM
 
 
 class TestUpdateStabilityIndexDispatch:
-    """_update_stability populates active_items with the right prefix
-    per mode × cross-reference state.
+    """_update_stability never creates per-file symbol/doc entries.
 
-    Four scenarios:
+    Under the L0-content-typed model (D27, see
+    ``specs4/3-llm/cache-tiering.md`` § Index Inclusion), the
+    aggregate symbol/doc map lives permanently in L0 and is
+    regenerated from the index at assembly time. No per-file
+    ``symbol:{path}`` or ``doc:{path}`` entries are placed into
+    ``active_items`` — those entries would be picked up by the
+    tracker, registered as Active items, and graduate through
+    L3 → L2 → L1 over subsequent turns, polluting cached tiers
+    that are reserved for promoted concrete content.
 
-    - Code mode, no cross-ref: only symbol: entries (no doc:).
-    - Code mode, cross-ref on: both symbol: (primary) and doc:
-      (secondary).
-    - Doc mode, no cross-ref: only doc: entries (no symbol:).
-    - Doc mode, cross-ref on: both doc: (primary) and symbol:
-      (secondary).
-
-    In every case, selected files are excluded from both
-    prefixes (the "never appears twice" invariant — selected
-    files carry their content directly via file: entries).
+    These tests pin the new contract across all four mode ×
+    cross-reference combinations. The selected-files /
+    excluded-files invariants are covered separately below.
 
     Tests capture the active_items dict by patching
     ``self._stability_tracker.update`` to record the first
@@ -135,13 +135,19 @@ class TestUpdateStabilityIndexDispatch:
 
         return svc, capture
 
-    def test_code_mode_adds_symbol_entries_only(
+    def test_code_mode_creates_no_per_file_index_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode + cross-ref off → symbol: only, no doc:."""
+        """Code mode + cross-ref off → no symbol: or doc: entries.
+
+        Under D27 the aggregate symbol map lives in L0 and is
+        rendered from the index at assembly time. Per-file
+        ``symbol:{path}`` entries would pollute cached tiers
+        and are forbidden.
+        """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
@@ -153,27 +159,21 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Symbol entries present.
-        assert "symbol:a.py" in active
-        assert "symbol:b.py" in active
-        # Doc entries absent.
-        assert "doc:README.md" not in active
-        assert "doc:guide.md" not in active
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_code_mode_cross_ref_adds_only_primary(
+    def test_code_mode_cross_ref_creates_no_per_file_index_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode + cross-ref on → still only ``symbol:`` (primary).
+        """Code mode + cross-ref on → still no per-file entries.
 
-        Under the L0-content-typed model (D27) cross-reference
-        is L0-only — no per-file ``doc:{path}`` entries get
-        created in active_items even when the toggle is on.
-        The secondary aggregate map is regenerated from the
-        opposite-mode index at assembly time, not held as
-        cascade-tracked items.
+        Cross-reference is L0-only under D27. Toggling it on
+        does not create per-file tracker entries of either
+        kind; the secondary aggregate map is regenerated
+        from the opposite-mode index at assembly time.
         """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
@@ -185,53 +185,41 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Primary entries still present.
-        assert "symbol:a.py" in active
-        assert "symbol:b.py" in active
-        # Secondary entries NOT created — under D27 cross-ref
-        # is an L0-only affair, not a per-file tracker concern.
-        assert "doc:README.md" not in active
-        assert "doc:guide.md" not in active
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_doc_mode_adds_doc_entries_only(
+    def test_doc_mode_creates_no_per_file_index_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc mode + cross-ref off → doc: only, no symbol:."""
+        """Doc mode + cross-ref off → no doc: or symbol: entries."""
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
             symbol_paths=["a.py", "b.py"],
             doc_paths=["README.md", "guide.md"],
         )
-        # Switch to doc mode via the context manager directly.
         svc._context.set_mode(Mode.DOC)
-        # Ensure doc tracker is in use.
         svc._trackers[Mode.DOC] = svc._stability_tracker
         assert svc._cross_ref_enabled is False
 
         svc._update_stability()
         active = capture["active_items"]
 
-        # Doc entries present.
-        assert "doc:README.md" in active
-        assert "doc:guide.md" in active
-        # Symbol entries absent in doc mode without cross-ref.
-        assert "symbol:a.py" not in active
-        assert "symbol:b.py" not in active
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_doc_mode_cross_ref_adds_only_primary(
+    def test_doc_mode_cross_ref_creates_no_per_file_index_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc mode + cross-ref on → still only ``doc:`` (primary).
+        """Doc mode + cross-ref on → still no per-file entries.
 
         Symmetric to the code-mode case: cross-ref is L0-only
-        regardless of which mode is primary. No per-file
-        secondary tracker entries.
+        regardless of primary mode.
         """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
@@ -245,24 +233,22 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # Primary (doc) entries present.
-        assert "doc:README.md" in active
-        assert "doc:guide.md" in active
-        # Secondary (symbol) entries NOT created.
-        assert "symbol:a.py" not in active
-        assert "symbol:b.py" not in active
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_selected_files_excluded_from_symbol_entries(
+    def test_selected_files_become_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Selected files don't appear as symbol: entries.
+        """Selected files appear as ``file:`` entries only.
 
-        Selected files carry their content via file: entries
-        (step 1); the symbol: entry would be redundant.
+        Under D27 there are no per-file ``symbol:`` entries
+        for any file (selected or not). Selected files carry
+        their full content via ``file:{path}`` entries
+        (Step 1 of ``update_stability``).
         """
         (repo_dir / "a.py").write_text("content\n")
         svc, capture = self._make_service_with_update_capture(
@@ -280,20 +266,19 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # a.py is selected — file: entry present, symbol: absent.
+        # Selected file → file: entry present.
         assert "file:a.py" in active
-        assert "symbol:a.py" not in active
-        # b.py unselected — symbol: present.
-        assert "symbol:b.py" in active
+        # No per-file symbol entries for any file.
+        assert not any(k.startswith("symbol:") for k in active)
 
-    def test_selected_files_excluded_from_doc_entries(
+    def test_selected_doc_files_become_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Selected doc files don't appear as doc: entries either."""
+        """Selected doc files appear as ``file:`` entries only."""
         (repo_dir / "README.md").write_text("# Doc\n\nbody.\n")
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
@@ -304,34 +289,30 @@ class TestUpdateStabilityIndexDispatch:
         svc._trackers[Mode.DOC] = svc._stability_tracker
         svc.set_selected_files(["README.md"])
         # Load selection content into the file context — see
-        # note in test_selected_files_excluded_from_symbol_entries.
+        # note in test_selected_files_become_file_entries.
         svc._sync_file_context()
 
         svc._update_stability()
         active = capture["active_items"]
 
-        # README.md selected — file: present, doc: absent.
+        # Selected file → file: entry present.
         assert "file:README.md" in active
-        assert "doc:README.md" not in active
-        # guide.md unselected — doc: present.
-        assert "doc:guide.md" in active
+        # No per-file doc entries for any file.
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_selected_files_excluded_in_cross_ref_mode(
+    def test_selected_files_in_cross_ref_mode_become_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Cross-reference mode still excludes selected files from primary.
+        """Cross-reference doesn't change the selected-file contract.
 
-        Under D27 cross-ref doesn't create secondary per-file
-        entries at all — the selected-files exclusion only
-        needs to cover the primary ``symbol:`` (in code mode)
-        prefix. Verified here: selected files appear as
-        ``file:`` only; unselected files appear as primary
-        ``symbol:``; nothing on the secondary ``doc:``
-        prefix appears regardless.
+        Under D27 cross-ref is L0-only: no per-file entries
+        of either kind, regardless of selection state. Selected
+        files appear as ``file:`` entries; everything else is
+        absent.
         """
         (repo_dir / "a.py").write_text("pycontent\n")
         (repo_dir / "README.md").write_text("# Doc\n\nbody.\n")
@@ -343,40 +324,31 @@ class TestUpdateStabilityIndexDispatch:
         svc._cross_ref_enabled = True
         svc.set_selected_files(["a.py", "README.md"])
         # Load selection content into the file context — see
-        # note in test_selected_files_excluded_from_symbol_entries.
+        # note in test_selected_files_become_file_entries.
         svc._sync_file_context()
 
         svc._update_stability()
         active = capture["active_items"]
 
-        # Selected files → file: only.
+        # Selected files → file: entries.
         assert "file:a.py" in active
-        assert "symbol:a.py" not in active
         assert "file:README.md" in active
-        # README.md isn't in the symbol index so symbol:
-        # was never going to fire.
-        # Unselected non-selected, non-excluded source file
-        # appears with the primary prefix.
-        assert "symbol:b.py" in active
-        # No secondary (doc:) entries — D27 cross-ref is
-        # L0-only.
-        assert not any(
-            k.startswith("doc:") for k in active
-        )
+        # No per-file index entries of any kind.
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_empty_doc_index_in_doc_mode_produces_no_entries(
+    def test_doc_mode_with_indexed_files_produces_no_per_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc mode with empty doc index → no doc: entries.
+        """Doc mode with a populated doc index still produces nothing.
 
-        The primary index being empty isn't an error — doc mode
-        with no outlines yet (pre-background-build) simply
-        produces no primary entries. Symbol mode would still
-        produce symbol: entries if cross-ref were on, but here
-        we're testing the primary-empty case only.
+        Companion to the empty-index case. Under D27 even a
+        fully-populated index does not produce per-file
+        ``doc:{path}`` entries — the aggregate map lives in
+        L0 only.
         """
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
@@ -389,18 +361,17 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # No doc: entries (empty index).
+        # No per-file index entries of any kind.
         assert not any(k.startswith("doc:") for k in active)
-        # No symbol: entries (cross-ref off).
         assert not any(k.startswith("symbol:") for k in active)
 
-    def test_empty_symbol_index_in_code_mode_produces_no_entries(
+    def test_code_mode_with_indexed_files_produces_no_per_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode with empty symbol index → no symbol: entries."""
+        """Code mode with a populated symbol index produces nothing."""
         svc, capture = self._make_service_with_update_capture(
             config, repo, fake_litellm,
             symbol_paths=[],
@@ -410,9 +381,8 @@ class TestUpdateStabilityIndexDispatch:
         svc._update_stability()
         active = capture["active_items"]
 
-        # No symbol: entries (empty index).
+        # No per-file index entries of any kind.
         assert not any(k.startswith("symbol:") for k in active)
-        # No doc: entries (cross-ref off in code mode).
         assert not any(k.startswith("doc:") for k in active)
 
 
@@ -608,23 +578,20 @@ class TestUpdateStabilityExcludedFiles:
         )
         assert "symbol:excluded.py" not in all_keys
 
-    def test_step_3_skips_excluded_paths(
+    def test_no_per_file_symbol_entries_regardless_of_exclusion(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Excluded paths don't get re-registered as active items.
+        """No per-file ``symbol:`` entries appear, exclusion or not.
 
-        Without the excluded_set guard in step 3, an excluded
-        file would be removed by step 0a and then immediately
-        re-added by step 3's iteration over the index. Step 3
-        must skip excluded paths.
-
-        Test approach: call _update_stability with a capture
-        on tracker.update. If step 3's skip works, the
-        active_items dict passed to update has no entry for
-        the excluded path.
+        Under D27 the primary aggregate symbol map is rendered
+        from the index at assembly time and never produces
+        per-file tracker entries. The exclusion machinery is
+        defensive — if it never fires (because no entries are
+        being created in the first place), we still expect a
+        clean active_items dict with no per-file index keys.
         """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
@@ -648,17 +615,16 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         active = capture["active_items"]
-        # Excluded path absent; normal path present.
-        assert "symbol:excluded.py" not in active
-        assert "symbol:normal.py" in active
+        # No per-file symbol entries at all.
+        assert not any(k.startswith("symbol:") for k in active)
 
-    def test_step_3_skips_excluded_doc_paths(
+    def test_no_per_file_doc_entries_regardless_of_exclusion(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Doc-mode step 3 also skips excluded paths."""
+        """No per-file ``doc:`` entries appear, exclusion or not."""
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             doc_paths=["excluded.md", "normal.md"],
@@ -682,30 +648,24 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         active = capture["active_items"]
-        assert "doc:excluded.md" not in active
-        assert "doc:normal.md" in active
+        # No per-file doc entries at all.
+        assert not any(k.startswith("doc:") for k in active)
 
-    def test_step_4_creates_no_secondary_entries_under_d27(
+    def test_cross_ref_creates_no_per_file_entries_either_kind(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Step 4 is gone — no secondary entries created at all.
+        """Cross-ref creates no per-file entries — primary or secondary.
 
-        Pre-D27 step 4 created per-file ``doc:{path}`` (in
-        code mode) or ``symbol:{path}`` (in doc mode)
-        entries when cross-reference was enabled, with an
-        excluded-set guard to skip user-excluded paths.
-        Under D27 the whole step is gone — cross-ref is
-        L0-only and the secondary map is regenerated from
-        the index at assembly time.
-
-        This test pins the new contract: regardless of the
-        excluded set, no secondary entries appear in
-        active_items when cross-ref is on. The primary
-        index path's exclusion handling is unchanged and
-        is covered by other tests in this class.
+        Pre-D27, Step 3 created per-file primary entries and
+        Step 4 created per-file secondary entries when cross-
+        ref was enabled. Both steps are gone under the L0-
+        content-typed model. Both aggregate maps are
+        regenerated from their indexes at assembly time and
+        rendered into L0; no per-file tracker entries are
+        created at any time.
         """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
@@ -731,30 +691,36 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         active = capture["active_items"]
-        # No secondary (doc:) entries — neither for the
-        # excluded file nor the normal one. The whole
-        # secondary-index pass is gone under D27.
-        assert "doc:excluded.md" not in active
-        assert "doc:normal.md" not in active
-        # Primary symbol entry unaffected.
-        assert "symbol:a.py" in active
+        # No per-file index entries of either kind, regardless
+        # of exclusion state.
+        assert not any(k.startswith("symbol:") for k in active)
+        assert not any(k.startswith("doc:") for k in active)
 
     def test_no_excluded_files_is_noop(
         self,
         config: ConfigManager,
         repo: Repo,
+        repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Empty exclusion list → step 0a does nothing.
 
         Regression guard: the removal pass must not corrupt
-        tracker state when there's nothing to exclude.
+        unrelated tracker state when there's nothing to
+        exclude.
 
-        ``get_flat_file_list`` is monkeypatched so the tracker's
-        Phase 0 stale-removal doesn't drop ``symbol:a.py`` for
-        not being on disk — the point of this test is to
-        exercise step 0a, not Phase 0.
+        Pre-D27 this test seeded a ``symbol:a.py`` entry. Under
+        D27 the defensive sweep (new Step 2) correctly removes
+        any per-file ``symbol:`` entry it finds — so we use a
+        ``file:a.py`` entry instead, which is legitimate under
+        the L0-content-typed model and which neither step 0a
+        nor step 2 touch.
+
+        ``get_flat_file_list`` is monkeypatched so Phase 0
+        stale-removal doesn't drop ``file:a.py`` for not being
+        on disk — the point of this test is to exercise step
+        0a, not Phase 0.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -762,34 +728,39 @@ class TestUpdateStabilityExcludedFiles:
             config, repo, fake_litellm,
             symbol_paths=["a.py"],
         )
+        # Make a.py a real file so _sync_file_context can
+        # load it; selecting it puts a file:a.py entry into
+        # active_items via Step 1.
+        (repo_dir / "a.py").write_text("content\n")
         monkeypatch.setattr(
             repo, "get_flat_file_list", lambda: "a.py"
         )
-        # Pre-populate a legitimate tracker entry. Use the
-        # real signature hash so Phase 1 doesn't demote it —
-        # we want to see that step 0a left the entry alone,
-        # not that Phase 1 demoted-but-preserved it.
-        sig_hash = (
-            svc._symbol_index.get_signature_hash("a.py")
-            or "h"
-        )
-        svc._stability_tracker._items["symbol:a.py"] = TrackedItem(
-            key="symbol:a.py",
+        svc.set_selected_files(["a.py"])
+        svc._sync_file_context()
+        # Pre-populate the tracker entry at L2 so we can
+        # confirm step 0a doesn't disturb it. Hash matches
+        # what Step 1 will produce so Phase 1 doesn't demote
+        # for a hash mismatch.
+        import hashlib
+        content = "content\n"
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        svc._stability_tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py",
             tier=Tier.L2,
             n_value=6,
-            content_hash=sig_hash,
+            content_hash=h,
             tokens=50,
         )
 
         svc._update_stability()
 
-        # Entry survives (the normal update flow may change its
-        # tier via cascade, but it shouldn't disappear because
-        # of step 0a).
+        # Entry survives (normal cascade may change its tier,
+        # but it shouldn't disappear because of step 0a or
+        # the legacy-sweep step 2).
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        assert "symbol:a.py" in all_keys
+        assert "file:a.py" in all_keys
 
     def test_exclusion_drift_scenario_end_to_end(
         self,

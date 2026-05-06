@@ -1203,6 +1203,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.statusData = this._latestStatusData;
     picker.branchInfo = this._latestBranchInfo;
     picker.excludedFiles = new Set(this._excludedFiles);
+    picker.pinnedFiles = this._computePinnedFiles();
     picker.activePath = this._activePath;
     picker.reviewState = this._reviewState;
     picker.requestUpdate();
@@ -1645,10 +1646,69 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   _applySelection(newSelection, notifyServer) {
+    // Modified-file pin (cache-tiering invariant): a file
+    // with working-tree or staged changes cannot be
+    // deselected. Edited files pin into lower cache tiers
+    // (D27) and the picker should reflect their residency
+    // — letting the user uncheck them while they're still
+    // pinned would create a confusing split between "what
+    // the picker shows" and "what's actually in the
+    // prompt." If the incoming set drops any modified
+    // file, re-add it and toast the user.
+    //
+    // Only working-tree-modified and staged files pin.
+    // Untracked files were auto-added as a convenience
+    // (Increment 4 / first-load auto-select) and the user
+    // remains free to drop them. Deleted files have no
+    // content to pin, and the delete-cleanup paths need
+    // to keep working.
+    const sd = this._latestStatusData;
+    let pinnedReverted = false;
+    if (sd) {
+      const pinned = [];
+      for (const path of this._selectedFiles) {
+        if (newSelection.has(path)) continue;
+        if (sd.modified?.has(path) || sd.staged?.has(path)) {
+          pinned.push(path);
+        }
+      }
+      if (pinned.length > 0) {
+        const next = new Set(newSelection);
+        for (const p of pinned) next.add(p);
+        newSelection = next;
+        pinnedReverted = true;
+        const label =
+          pinned.length === 1
+            ? pinned[0]
+            : `${pinned.length} modified files`;
+        this._showToast(
+          `${label} cannot be removed from context while modified — commit or discard changes first.`,
+          'warning',
+        );
+      }
+    }
     // Fast-path no-op when the set hasn't actually changed.
     // Prevents loopback from the server broadcast doing
     // another round-trip for our own update.
-    if (this._setsEqual(this._selectedFiles, newSelection)) return;
+    //
+    // Exception: when we just reverted a pinned-file
+    // removal, the corrected `newSelection` equals our
+    // current state — but the picker's optimistic local
+    // state still shows the unticked checkbox from the
+    // user's click. We must push the corrected selection
+    // to the picker (below) so the checkbox snaps back
+    // on. The server doesn't need notification because
+    // its state hasn't changed.
+    if (this._setsEqual(this._selectedFiles, newSelection)) {
+      if (pinnedReverted) {
+        const picker = this._picker();
+        if (picker) {
+          picker.selectedFiles = new Set(newSelection);
+          picker.requestUpdate();
+        }
+      }
+      return;
+    }
     this._selectedFiles = newSelection;
 
     // Direct-update pattern (load-bearing — see class
@@ -3290,6 +3350,28 @@ export class FilesTab extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------
+
+  /**
+   * Build the set of paths that should be pinned to
+   * selection — files with working-tree or staged
+   * modifications. The picker uses this to suppress the
+   * native checkbox toggle on attempted deselection so
+   * Lit's reactive binding stays the source of truth.
+   * Untracked and deleted files are excluded — see the
+   * comment in `_applySelection` for the rationale.
+   */
+  _computePinnedFiles() {
+    const pinned = new Set();
+    const sd = this._latestStatusData;
+    if (!sd) return pinned;
+    if (sd.modified instanceof Set) {
+      for (const p of sd.modified) pinned.add(p);
+    }
+    if (sd.staged instanceof Set) {
+      for (const p of sd.staged) pinned.add(p);
+    }
+    return pinned;
+  }
 
   _picker() {
     return this.shadowRoot?.querySelector('ac-file-picker') || null;

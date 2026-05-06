@@ -461,6 +461,17 @@ export class FilePicker extends LitElement {
      */
     excludedFiles: { type: Object },
     /**
+     * Pinned file paths — files that cannot be deselected
+     * because they have working-tree or staged
+     * modifications. The picker uses this to suppress
+     * native checkbox toggle on click (preventing a
+     * one-frame visual flip) and lets the click flow up
+     * to files-tab which surfaces a toast. Reassigned by
+     * files-tab whenever the file tree's status data
+     * changes.
+     */
+    pinnedFiles: { type: Object },
+    /**
      * Path of the file currently open in a viewer, or null
      * when no file is open. The row matching this path gets
      * a distinct background and left-border accent — an
@@ -1323,6 +1334,11 @@ export class FilePicker extends LitElement {
     // `Set.has()` during render works before the first server
     // response. Parent assigns via direct-update pattern.
     this.excludedFiles = new Set();
+    // Pinned files — Set of paths that cannot be removed
+    // from selection because they have working-tree or
+    // staged modifications. Default empty so `.has()`
+    // works pre-load.
+    this.pinnedFiles = new Set();
     // No file open in a viewer yet. Remains null until the
     // orchestrator pushes the first viewer event.
     this.activePath = null;
@@ -2916,17 +2932,41 @@ export class FilePicker extends LitElement {
     //   regular click from excluded → selected (un-exclude
     //     and tick)
     //
-    // Shift+click always calls preventDefault on the native
-    // checkbox event to suppress the browser's own toggle —
-    // otherwise the checkbox flips visually, then our state
-    // change flips it back, producing a one-frame glitch.
-    // Regular click lets the native toggle fire because the
-    // new state matches it (or else we override via the
-    // reactive .checked binding on the next render).
+    // We let the native checkbox toggle fire for normal
+    // toggles — Lit's reactive binding writes the same
+    // value on the next render, so there's no glitch.
+    // Two cases need preventDefault to suppress the
+    // native flip:
+    //   1. shift+click — we're not toggling selection at
+    //      all, we're toggling exclusion; the native flip
+    //      would visually mislead.
+    //   2. attempted deselection of a pinned (modified)
+    //      file — files-tab will revert the change, but
+    //      because the resulting bound value matches the
+    //      pre-click value, Lit skips the DOM write and
+    //      the native flip stands. preventDefault keeps
+    //      the checkbox visually checked from the start.
     event.stopPropagation();
     if (event.shiftKey) {
       event.preventDefault();
       this._toggleExclusion(node.path);
+      return;
+    }
+    const isCurrentlySelected = this.selectedFiles.has(node.path);
+    const isPinned =
+      this.pinnedFiles && this.pinnedFiles.has(node.path);
+    if (isCurrentlySelected && isPinned) {
+      event.preventDefault();
+      // Still emit the selection-changed event so
+      // files-tab fires the toast. The revert there
+      // produces the no-op set-equal case, which we now
+      // need to push back to the picker — but with
+      // preventDefault'd native flip, the visual is
+      // already correct. The push happens for safety in
+      // case some other code path mutates the checkbox.
+      const next = new Set(this.selectedFiles);
+      next.delete(node.path);
+      this._emitSelectionChanged(next);
       return;
     }
     // Regular click. If the file is currently excluded,
