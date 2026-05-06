@@ -163,6 +163,45 @@ _TIER_BELOW: dict[Tier, Tier | None] = {
 # measured" and accepts the first real hash without demotion.
 _PLACEHOLDER_HASH = ""
 
+
+# Deletion-marker text rendered into the prompt when a file is
+# deleted during the session. The marker preserves the file's
+# tracker entry (path-keyed) but replaces its content with this
+# fixed string. Constant text means a constant hash, so deletion
+# markers don't churn the cascade — they're stable from the
+# tracker's perspective and survive until the next
+# ``rebuild_cache`` (which re-extracts L0's aggregate maps from
+# the now-current index, dropping references to the deleted file).
+#
+# Byte-identity matters: keep this string verbatim. The cache
+# breakpoint hashes content directly and any wording variation
+# would produce a different hash, defeating the
+# stable-across-deletions invariant. Multiple deleted files
+# legitimately share the same marker representation — that's
+# the design.
+#
+# Spec: ``specs4/3-llm/cache-tiering.md`` § Deletion Markers.
+# Reference: ``specs-reference/3-llm/cache-tiering.md`` §
+# Deletion marker content.
+DELETION_MARKER_TEXT = (
+    "[deleted in this session — see L0 symbol/doc map for "
+    "last-known structure]"
+)
+
+
+# Pre-computed hash of :data:`DELETION_MARKER_TEXT`. Cached at
+# import time so the cascade doesn't re-hash the same constant
+# on every Phase 0 deletion check.
+def _compute_deletion_marker_hash() -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        DELETION_MARKER_TEXT.encode("utf-8")
+    ).hexdigest()
+
+
+_DELETION_MARKER_HASH = _compute_deletion_marker_hash()
+
 # Placeholder token count — during initialisation we don't have
 # real token counts (the formatted blocks haven't been rendered
 # yet). A small per-entry estimate is used so L0 seeding doesn't
@@ -436,6 +475,117 @@ class StabilityTracker:
         full item.
         """
         return key in self._items
+
+    # ------------------------------------------------------------------
+    # Pin flag and deletion marker helpers (L0-content-typed model)
+    # ------------------------------------------------------------------
+
+    def pin_file(self, key: str) -> bool:
+        """Mark a ``file:`` entry as edit-pinned.
+
+        Pinned entries are protected from automatic eviction
+        — stale-cleanup and underfill demotion skip them. The
+        edit invariant in the L0-content-typed model says: when
+        a file's content hash changes during the session, its
+        full text must remain present in some cached tier
+        until application restart or explicit ``rebuild_cache``,
+        even if the user deselects it. Pinning is the
+        mechanism.
+
+        Only ``file:`` keys can be pinned; calling on other
+        prefixes is a no-op (returns False). Calling on an
+        unknown key is also a no-op (returns False).
+
+        Returns True when the pin was applied (or was already
+        in place), False when the call had no effect.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Edit Invariant.
+        """
+        if not key.startswith("file:"):
+            return False
+        item = self._items.get(key)
+        if item is None:
+            return False
+        item._pinned = True  # type: ignore[attr-defined]
+        return True
+
+    def unpin_file(self, key: str) -> bool:
+        """Clear the edit-pin flag on a ``file:`` entry.
+
+        Used by ``rebuild_cache`` to clear all pins as part of
+        the explicit reset — the user's "fresh start" gesture
+        supersedes per-file edit history. Returns True when the
+        pin was cleared, False when the entry was unknown or
+        was not previously pinned.
+        """
+        if not key.startswith("file:"):
+            return False
+        item = self._items.get(key)
+        if item is None:
+            return False
+        had_pin = bool(getattr(item, "_pinned", False))
+        item._pinned = False  # type: ignore[attr-defined]
+        return had_pin
+
+    def is_pinned(self, key: str) -> bool:
+        """Return True when ``key`` is a pinned ``file:`` entry."""
+        item = self._items.get(key)
+        if item is None:
+            return False
+        return bool(getattr(item, "_pinned", False))
+
+    def mark_deleted(self, key: str) -> bool:
+        """Convert a ``file:`` entry to a deletion marker.
+
+        Replaces the item's content hash with the constant
+        :data:`_DELETION_MARKER_HASH` and updates its token
+        count to the marker text's measured length. Tier and
+        N value are preserved — the entry rides the cascade
+        from wherever it was (typically demoted to ACTIVE on
+        the next update because the hash changed, then
+        graduating upward as it stabilises).
+
+        Pin flag is cleared because deletion markers are
+        intrinsically stable (constant hash) and don't need
+        pin-protection — only ``rebuild_cache`` and
+        application restart clear them, and both already
+        clear pin flags as part of their reset semantics.
+
+        Returns True on success, False when the key is
+        unknown or doesn't have a ``file:`` prefix.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` §
+        Deletion Markers and § Item Removal.
+        """
+        if not key.startswith("file:"):
+            return False
+        item = self._items.get(key)
+        if item is None:
+            return False
+        item.content_hash = _DELETION_MARKER_HASH
+        # Token count for the marker text. We measure it once
+        # at module load if a counter is available; otherwise
+        # fall back to a coarse character count. The exact
+        # number doesn't matter much for cascade dynamics —
+        # the marker text is short — but rendering accuracy
+        # for the cache viewer expects a real-ish count.
+        item.tokens = len(DELETION_MARKER_TEXT)
+        item._pinned = False  # type: ignore[attr-defined]
+        item._deleted = True  # type: ignore[attr-defined]
+        return True
+
+    def is_deleted(self, key: str) -> bool:
+        """Return True when ``key`` is a deletion-marker entry.
+
+        Distinct from :meth:`is_pinned` — a deletion marker
+        is NOT pinned (the constant hash provides the
+        protection that pinning would). The two flags never
+        overlap; :meth:`mark_deleted` clears any prior pin.
+        """
+        item = self._items.get(key)
+        if item is None:
+            return False
+        return bool(getattr(item, "_deleted", False))
 
     def get_changes(self) -> list[str]:
         """Return change-log entries for the most recent update.
