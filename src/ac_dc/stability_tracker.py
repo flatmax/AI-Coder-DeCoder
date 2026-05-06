@@ -698,12 +698,26 @@ class StabilityTracker:
             existing = self._items.get(key)
             if existing is None:
                 # New item — register at active with N=0.
+                # Log so the HUD surfaces it. Without this
+                # entry, freshly-selected files (or any new
+                # tracker key — system, url, doc, symbol) appear
+                # silently in the active tier, and operators
+                # have no signal that the cascade picked them up.
+                # The arrow form ``→ active:`` keeps parsing
+                # consistent with promotion/demotion lines so
+                # the HUD's tier-rank parser sees a destination
+                # tier of "active" (rank 0) — neither
+                # promotion nor demotion, so it falls through
+                # to a third "new" bucket on the HUD side.
                 self._items[key] = TrackedItem(
                     key=key,
                     tier=Tier.ACTIVE,
                     n_value=0,
                     content_hash=new_hash,
                     tokens=new_tokens,
+                )
+                self._log_change(
+                    f"new → active: {key} (registered)"
                 )
                 continue
 

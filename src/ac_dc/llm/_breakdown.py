@@ -1024,6 +1024,7 @@ def print_post_response_hud(service: "LLMService") -> None:
         bucket_counts: dict[str, int] = {}
         promotions = 0
         demotions = 0
+        registrations = 0
         for change in changes:
             arrow_idx = change.find(" → ")
             colon_idx = (
@@ -1034,6 +1035,15 @@ def print_post_response_hud(service: "LLMService") -> None:
                 src = change[:arrow_idx].strip()
                 dst = change[arrow_idx + 3:colon_idx].strip()
                 src_rank = _tier_rank.get(src)
+                # "new" is the literal source for fresh
+                # tracker registrations (newly-selected file,
+                # newly-fetched URL, newly-tracked symbol).
+                # Neither promotion nor demotion — count
+                # separately so the HUD summary distinguishes
+                # "this turn brought in N new items" from
+                # "N items moved between tiers".
+                if src == "new":
+                    registrations += 1
                 # "removed" is not a tier — it's a tracker
                 # eviction (selected file index→content swap,
                 # excluded file sweep, stale file removal,
@@ -1043,7 +1053,7 @@ def print_post_response_hud(service: "LLMService") -> None:
                 # "79 promotions, 0 demotions" when in reality
                 # at least one item was evicted from a cached
                 # tier to set up those promotions.
-                if dst == "removed" and src_rank is not None:
+                elif dst == "removed" and src_rank is not None:
                     demotions += 1
                 else:
                     dst_rank = _tier_rank.get(dst)
@@ -1101,9 +1111,16 @@ def print_post_response_hud(service: "LLMService") -> None:
                     f"{tier_value.value}({', '.join(unique_reasons)})"
                 )
             trigger_str = f" | triggers: {'; '.join(tier_parts)}"
+        # Compose the counter face. Show ➕ only when
+        # there's at least one registration this turn —
+        # most turns have none, so unconditionally
+        # rendering it would just be visual noise.
+        counter_face = f"📈{promotions} 📉{demotions}"
+        if registrations:
+            counter_face = f"{counter_face} ➕{registrations}"
         print(
             f"🔁 Tier changes: {len(changes)} total "
-            f"(📈{promotions} 📉{demotions}) — "
+            f"({counter_face}) — "
             f"{', '.join(summary_parts)}{trigger_str}",
             file=sys.stderr,
         )
@@ -1116,11 +1133,18 @@ def print_post_response_hud(service: "LLMService") -> None:
                 src = change[:arrow_idx].strip()
                 dst = change[arrow_idx + 3:colon_idx].strip()
                 src_rank = _tier_rank.get(src)
+                # New tracker registrations use the literal
+                # source "new" — neither promotion nor
+                # demotion, so render with a distinct icon
+                # so operators can spot when a fresh key
+                # entered the system this turn.
+                if src == "new":
+                    icon = "➕"
                 # Removals are evictions from a cached tier;
                 # render with the demotion icon so they're
                 # visually distinct from promotions in the
                 # change log.
-                if dst == "removed" and src_rank is not None:
+                elif dst == "removed" and src_rank is not None:
                     icon = "🗑️"
                 else:
                     dst_rank = _tier_rank.get(dst)
