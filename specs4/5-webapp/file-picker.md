@@ -97,6 +97,14 @@ Files have three context states controlled via the picker checkbox:
 ### Backend Coordination
 - Excluded files set stored server-side via the excluded-files RPC, persisted in session state
 - Removed from the stability tracker, excluded from map generation, skipped in active items, excluded from tier recomputation
+### Modified File Pinning
+- Files with working-tree or staged modifications cannot be deselected while modified — enforces the cache-tiering invariant that edited files stay resident in lower tiers (D27)
+- Untracked and deleted files do not pin: untracked auto-selection is a convenience the user remains free to drop, deleted files have no content to pin
+- Files-tab computes the pinned set from status data and pushes it to the picker on every tree load
+- Picker suppresses the native checkbox toggle on attempted deselection of a pinned file (otherwise the visual flip stands even after files-tab reverts the state — the bound `.checked` value didn't change, so Lit skips the DOM write)
+- The deselection event still bubbles up so files-tab can surface a warning toast naming the pinned file(s) and prompting the user to commit or discard changes first
+- Files-tab pushes the corrected (unchanged) selection back to the picker for safety, even though the visual is already correct
+- Shift+click exclusion of a pinned file is not blocked — exclusion is a separate axis (removes from index entirely) and is the user's escape hatch when they truly want a modified file out of context
 ## Context Menu
 ### File Items
 - Stage, unstage, discard (confirm)

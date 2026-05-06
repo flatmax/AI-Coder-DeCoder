@@ -121,6 +121,19 @@ When a file is deleted via the context menu:
 
 Step 1 is local because the server does not broadcast excluded-set changes (only selection). Without this, re-creating a file at the same path would find it mysteriously pre-excluded.
 
+### Modified file pin — `preventDefault` on the click, not on the value
+
+When the user clicks the checkbox of a modified (pinned) file to deselect it, the picker calls `event.preventDefault()` on the native click. The deselection event still bubbles to files-tab, which reverts the change and emits a toast. The reverted selection set equals the pre-click set, so files-tab's reassignment of `picker.selectedFiles = new Set(currentSet)` produces a `.checked` binding value identical to the pre-click value (`true → true`).
+
+Lit's property-binding diff sees no change and skips the DOM write. Without `preventDefault`, the browser's native flip (which ran before the handler) leaves the checkbox visually unchecked, contradicting the underlying state.
+
+The fix lives in the picker's click handler rather than in files-tab because:
+- Files-tab doesn't have synchronous access to the input element to write `.checked` directly
+- Forcing `.checked` after the fact would fight Lit's reactive binding model
+- Adding `live()` directives just for this one binding would be a heavy-handed import for a localized problem
+
+Pinned status is computed by files-tab (`modified ∪ staged`) and pushed to the picker as `pinnedFiles`. Untracked and deleted files are deliberately excluded from the pinned set — see specs4 § Modified File Pinning for rationale.
+
 ## Cross-references
 
 - Behavioral specification: `specs4/5-webapp/file-picker.md`
