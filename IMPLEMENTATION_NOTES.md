@@ -305,6 +305,35 @@ None of this requires backend protocol changes beyond what Slices 1-3 of the par
 - The "User-Visible Agent Browsing" section in parallel-agents.md updates to reference tabs rather than regions.
 - The ASK-block / pause-resume thinking is NOT in any spec — it got rejected before it was written down. This decision log is the record that we considered it and chose differently.
 
+### D26 — Webapp test rewrite for flat agent-identity contract
+
+D21 originally specified agent tab IDs as the compound shape `{turn_id}/agent-{NN}`, with `parseAgentTabId` returning a `[turn_id, agent_idx]` tuple and the corresponding RPCs (`set_agent_selected_files`, `set_agent_excluded_index_files`, `close_agent_context`, `chat_streaming`'s `agent_tag`) taking three or four positional arguments to thread the tuple components through.
+
+Specs4/5-webapp/agent-browser.md and specs4/7-future/parallel-agents.md § "Agent Reuse by ID" subsequently revised this contract to **flat identity**: the agent's LLM-chosen `id` from its `🟧🟧🟧 AGENT` block IS the tab ID IS the backend registry key. `parseAgentTabId(tabId)` becomes the identity function for any non-"main" non-empty string, returning `null` only for `"main"` and malformed inputs (empty string, non-string types). The backend RPCs take a single `agent_id` string instead of a `(turn_id, agent_idx)` pair. The padded numeric index in child request IDs (`{parent}-agent-{NN}`) and archive file names (`.ac-dc4/agents/{turn_id}/agent-{NN}.jsonl`) is a routing/storage detail — it does not feed back into tab identity, and the frontend never reconstructs identity from it.
+
+Production code in `webapp/src/chat-panel.js` and `webapp/src/files-tab.js` was updated to match the flat-identity spec when the spec change landed, but 27 tests in `chat-panel.test.js` and `files-tab.test.js` still asserted the obsolete tuple-parsing contract. The failures broke into six buckets:
+
+| Bucket | Tests | Stale assertion shape | New shape |
+|---|---|---|---|
+| `parseAgentTabId` unit tests | 8 | Returned `[turn_id, agent_idx]` tuple | Returns the input string verbatim |
+| `agent_tag` routing | 4 | `args[5]` was `[turn_id, agent_idx]` | `args[5]` is the agent id string |
+| Agent tab spawning — tab creation | 5 | Tab ID was `{turn_id}/agent-{NN}` | Tab ID is the spawn block's `id` field |
+| Agent tab spawning — defensive | 4 | Same tab-ID expectations | Updated to flat ids (`agent-0`, etc.) |
+| Close-tab + stale-tag | 3 | RPC called with `[turn_id, agent_idx]` | RPC called with `[agent_id]` |
+| Files-tab routing | 3 | RPC took 3 positional args | RPC takes 2 (`agent_id`, `files`) |
+
+Total: 27 tests rewritten. The "malformed agent tab ID falls back to main RPC" test was also retired — under flat identity, any non-"main" non-empty string is a valid agent id, so the test's premise (malformed tab IDs that fall back to main routing) no longer exists. Replaced with a "main tab routes to main RPC" test that pins the only routing distinction the new contract makes ("main" → main RPCs, anything else → agent RPCs).
+
+The decision was tests-rewritten-not-code-reverted because:
+
+1. **Spec is authoritative.** Three independent spec sections (parallel-agents.md § Agent Reuse by ID, agent-browser.md § Per-Tab State, agent-browser.md § Tab Creation Ordering, agent-browser.md § Invariants) all explicitly call out flat identity. The production code matches; the tests don't.
+
+2. **Reverting would require coordinated changes across both layers.** Going back to the tuple shape means changing `chat-panel.js` (`parseAgentTabId`, tab creation in `_spawnAgentTabs`, `_onTabClose`'s RPC dispatch), `files-tab.js` (`_sendSelectionToServer`, `_sendExclusionToServer`), AND the four backend RPC method signatures in `LLMService`. Plus updating four spec files in two suites. Compared to rewriting 27 tests' expectations to match the spec the production code already implements: the test edit is mechanical and surgical.
+
+3. **Flat identity has clearer semantic.** "The id IS the tab IS the registry key" is one rule; "the tab id encodes turn-and-index, parsed back into a tuple at three RPC boundaries" is three rules with parsing failure modes at each boundary. The spec revision wasn't arbitrary — flat identity makes id-based reuse across turns natural (the user's "frontend-trivial" agent stays "frontend-trivial" regardless of which turn spawned it), and removes the disambiguation layer that the parsing required.
+
+The fix updated test fixtures and assertions only. No production code changed.
+
 ## Build order
 
 Per `specs4/0-overview/implementation-guide.md#build-order-suggestion`:

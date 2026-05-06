@@ -3522,7 +3522,10 @@ describe('FilesTab agent-aware RPC routing', () => {
     expect(setAgent).not.toHaveBeenCalled();
   });
 
-  it('agent tab calls set_agent_selected_files with turn_id and idx', async () => {
+  it('agent tab calls set_agent_selected_files with agent id and files', async () => {
+    // Per specs4/5-webapp/agent-browser.md, agent
+    // identity is flat — the tab id IS the agent id,
+    // and the RPC takes (agent_id, files).
     const setMain = vi.fn().mockResolvedValue([]);
     const setAgent = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
@@ -3538,9 +3541,9 @@ describe('FilesTab agent-aware RPC routing', () => {
     });
     const t = mountTab();
     await settle(t);
-    // Flip to an agent tab. parseAgentTabId splits
-    // "turn_abc/agent-03" into ["turn_abc", 3].
-    fireActiveTabChanged('turn_abc/agent-03');
+    // Flip to an agent tab — id is the LLM-chosen
+    // string passed verbatim to the backend.
+    fireActiveTabChanged('frontend-trivial');
     await settle(t);
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
@@ -3552,13 +3555,14 @@ describe('FilesTab agent-aware RPC routing', () => {
     );
     await settle(t);
     expect(setAgent).toHaveBeenCalledOnce();
-    expect(setAgent.mock.calls[0][0]).toBe('turn_abc');
-    expect(setAgent.mock.calls[0][1]).toBe(3);
-    expect(setAgent.mock.calls[0][2]).toEqual(['a.py']);
+    expect(setAgent.mock.calls[0][0]).toBe('frontend-trivial');
+    expect(setAgent.mock.calls[0][1]).toEqual(['a.py']);
     expect(setMain).not.toHaveBeenCalled();
   });
 
   it('agent tab exclusion routes to set_agent_excluded_index_files', async () => {
+    // Same flat-identity contract as selection — the
+    // exclusion RPC takes (agent_id, files).
     const setMainExcl = vi.fn().mockResolvedValue([]);
     const setAgentExcl = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
@@ -3574,7 +3578,7 @@ describe('FilesTab agent-aware RPC routing', () => {
     });
     const t = mountTab();
     await settle(t);
-    fireActiveTabChanged('turn_xyz/agent-07');
+    fireActiveTabChanged('backend-auth');
     await settle(t);
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
@@ -3586,9 +3590,8 @@ describe('FilesTab agent-aware RPC routing', () => {
     );
     await settle(t);
     expect(setAgentExcl).toHaveBeenCalledOnce();
-    expect(setAgentExcl.mock.calls[0][0]).toBe('turn_xyz');
-    expect(setAgentExcl.mock.calls[0][1]).toBe(7);
-    expect(setAgentExcl.mock.calls[0][2]).toEqual(['a.py']);
+    expect(setAgentExcl.mock.calls[0][0]).toBe('backend-auth');
+    expect(setAgentExcl.mock.calls[0][1]).toEqual(['a.py']);
     expect(setMainExcl).not.toHaveBeenCalled();
   });
 
@@ -3706,10 +3709,14 @@ describe('FilesTab agent-aware RPC routing', () => {
     }
   });
 
-  it('malformed agent tab ID falls back to main RPC', async () => {
-    // parseAgentTabId returns null for unparseable
-    // strings. The fallback is the main RPC — safer
-    // than throwing or silently dropping the selection.
+  it('main tab routes to main RPC, not agent RPC', async () => {
+    // Under flat identity, any non-"main" non-empty
+    // string is a valid agent id — there's no
+    // "malformed" tab id to fall back from. The only
+    // distinction is "main" → main RPCs vs. anything
+    // else → agent RPCs. This test pins the main path
+    // so a refactor that accidentally routes main
+    // through the agent RPC fails here.
     const setMain = vi.fn().mockResolvedValue([]);
     const setAgent = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
@@ -3725,9 +3732,8 @@ describe('FilesTab agent-aware RPC routing', () => {
     });
     const t = mountTab();
     await settle(t);
-    // Malformed — no slash, no agent- prefix.
-    fireActiveTabChanged('something-weird');
-    await settle(t);
+    // Active tab defaults to "main" — no need to
+    // switch.
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
       new CustomEvent('selection-changed', {

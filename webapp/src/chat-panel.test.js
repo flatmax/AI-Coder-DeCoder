@@ -124,44 +124,49 @@ describe('generateRequestId', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseAgentTabId', () => {
-  it('returns null for main tab', () => {
+  // Per specs4/5-webapp/agent-browser.md and
+  // specs4/7-future/parallel-agents.md § "Agent Reuse by
+  // ID", agent identity is flat — the agent's LLM-chosen
+  // id from its `🟧🟧🟧 AGENT` block IS the tab id IS the
+  // backend registry key. parseAgentTabId returns the id
+  // directly with no parsing. The literal "main" is
+  // reserved for the main conversation; everything else
+  // is treated as an agent id.
+
+  it('returns null for the main tab', () => {
     // Untagged path — the caller drops the agent_tag
     // argument so the backend uses the main conversation.
     expect(parseAgentTabId('main')).toBeNull();
   });
 
-  it('parses a single-digit agent tab ID', () => {
-    expect(parseAgentTabId('turn_abc/agent-00')).toEqual([
-      'turn_abc',
-      0,
-    ]);
-    expect(parseAgentTabId('turn_abc/agent-07')).toEqual([
-      'turn_abc',
-      7,
-    ]);
+  it('returns the id verbatim for descriptive agent ids', () => {
+    // Real LLM-chosen ids look like "frontend-trivial",
+    // "backend-auth-refactor", etc. The parser is the
+    // identity function for any non-"main" string.
+    expect(parseAgentTabId('frontend-trivial')).toBe(
+      'frontend-trivial',
+    );
+    expect(parseAgentTabId('backend-auth-refactor')).toBe(
+      'backend-auth-refactor',
+    );
   });
 
-  it('parses a multi-digit agent index', () => {
-    // Three-digit indexes grow naturally per the tab ID
-    // format — agent-100, agent-042 both parse.
-    expect(parseAgentTabId('turn_xyz/agent-42')).toEqual([
-      'turn_xyz',
-      42,
-    ]);
-    expect(parseAgentTabId('turn_xyz/agent-100')).toEqual([
-      'turn_xyz',
-      100,
-    ]);
+  it('returns the id verbatim for short ids', () => {
+    // The parser does not impose a minimum length or
+    // require any specific shape — any non-empty non-
+    // "main" string is a valid agent id.
+    expect(parseAgentTabId('a')).toBe('a');
+    expect(parseAgentTabId('agent-0')).toBe('agent-0');
   });
 
-  it('handles complex turn_id with underscores and digits', () => {
-    // Real turn IDs look like turn_1234567890_abcd.
-    // Parser must preserve the full turn_id verbatim.
-    const tabId = 'turn_1234567890_abcd/agent-03';
-    expect(parseAgentTabId(tabId)).toEqual([
-      'turn_1234567890_abcd',
-      3,
-    ]);
+  it('preserves arbitrary characters in the id', () => {
+    // The backend does not validate id shape beyond
+    // non-emptiness, so the frontend parser shouldn't
+    // either. Slashes, spaces, punctuation — all pass
+    // through unchanged.
+    expect(parseAgentTabId('a/b/c')).toBe('a/b/c');
+    expect(parseAgentTabId('with spaces')).toBe('with spaces');
+    expect(parseAgentTabId('punct!@#')).toBe('punct!@#');
   });
 
   it('returns null for empty string', () => {
@@ -176,43 +181,6 @@ describe('parseAgentTabId', () => {
     expect(parseAgentTabId(undefined)).toBeNull();
     expect(parseAgentTabId(42)).toBeNull();
     expect(parseAgentTabId({})).toBeNull();
-  });
-
-  it('returns null when no slash present', () => {
-    // "agent-0" without a turn_id prefix — missing
-    // the required format component.
-    expect(parseAgentTabId('agent-0')).toBeNull();
-    expect(parseAgentTabId('random-string')).toBeNull();
-  });
-
-  it('returns null when slash is at start (no turn_id)', () => {
-    expect(parseAgentTabId('/agent-0')).toBeNull();
-  });
-
-  it('returns null when agent part is malformed', () => {
-    // Missing "agent-" prefix.
-    expect(parseAgentTabId('turn_abc/foo-0')).toBeNull();
-    // Non-numeric suffix.
-    expect(parseAgentTabId('turn_abc/agent-abc')).toBeNull();
-    // Empty agent number.
-    expect(parseAgentTabId('turn_abc/agent-')).toBeNull();
-    // Negative number (regex rejects the minus).
-    expect(parseAgentTabId('turn_abc/agent--1')).toBeNull();
-  });
-
-  it('returns null when agent part has whitespace', () => {
-    // Defensive against accidental whitespace in tab IDs.
-    expect(parseAgentTabId('turn_abc/agent- 0')).toBeNull();
-    expect(parseAgentTabId('turn_abc/agent-0 ')).toBeNull();
-  });
-
-  it('handles turn_id containing slashes by taking last slash', () => {
-    // Edge case — turn IDs don't normally contain slashes
-    // but the parser uses lastIndexOf defensively so the
-    // turn_id portion can contain any characters except
-    // the final "/agent-NN" suffix.
-    const result = parseAgentTabId('a/b/agent-1');
-    expect(result).toEqual(['a/b', 1]);
   });
 });
 
@@ -1171,17 +1139,20 @@ describe('ChatPanel send flow', () => {
 // null for agent_tag.
 
 describe('ChatPanel agent_tag routing', () => {
+  // Per specs4/5-webapp/agent-browser.md, the agent_tag
+  // sent to chat_streaming is the agent's LLM-chosen id
+  // — the same string that keys the tab in `_tabs`. Main
+  // tab sends null; agent tabs send their id verbatim.
+
   async function setupWithAgentTab() {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'LLMService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    // Seed an agent tab manually — same pattern as B3
-    // tests. The tab ID follows the backend's archive
-    // path convention.
-    const agentTabId = 'turn_abc/agent-00';
+    // Tab id is the agent's id — flat identity.
+    const agentTabId = 'frontend-trivial';
     p._tabs.set(agentTabId, p._makeTabState());
-    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabLabels.set(agentTabId, 'frontend-trivial');
     return { panel: p, started, agentTabId };
   }
 
@@ -1203,7 +1174,7 @@ describe('ChatPanel agent_tag routing', () => {
     expect(args[5]).toBeNull();
   });
 
-  it('agent tab sends agent_tag=[turn_id, agent_idx]', async () => {
+  it('agent tab sends its id as agent_tag', async () => {
     const { panel, started, agentTabId } =
       await setupWithAgentTab();
     panel._activeTabId = agentTabId;
@@ -1213,74 +1184,58 @@ describe('ChatPanel agent_tag routing', () => {
     await settle(panel);
     expect(started).toHaveBeenCalledOnce();
     const args = started.mock.calls[0];
-    // agent_tag is the 6th positional arg.
-    expect(args[5]).toEqual(['turn_abc', 0]);
+    // agent_tag is the 6th positional arg — the agent's
+    // id verbatim (flat identity).
+    expect(args[5]).toBe('frontend-trivial');
   });
 
-  it('different agent tabs route to their own IDs', async () => {
-    // Two agent tabs in the same turn — each sends
-    // distinct agent_tag values so the backend routes
-    // to the right scope.
+  it('different agent tabs route to their own ids', async () => {
+    // Two agent tabs — each sends its own id so the
+    // backend routes to the right scope.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'LLMService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    // Seed two agents.
-    p._tabs.set('turn_abc/agent-00', p._makeTabState());
-    p._tabs.set('turn_abc/agent-01', p._makeTabState());
-    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
-    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
-    // Send from agent-00.
-    p._activeTabId = 'turn_abc/agent-00';
+    p._tabs.set('frontend-trivial', p._makeTabState());
+    p._tabs.set('backend-auth', p._makeTabState());
+    p._tabLabels.set('frontend-trivial', 'frontend-trivial');
+    p._tabLabels.set('backend-auth', 'backend-auth');
+    // Send from frontend-trivial.
+    p._activeTabId = 'frontend-trivial';
     await settle(p);
-    p._input = 'from zero';
+    p._input = 'from frontend';
     await p._send();
     await settle(p);
     // Reset streaming so the next send proceeds.
-    // Normally the stream-complete event clears this;
-    // we shortcut for the test.
-    p._tabs.get('turn_abc/agent-00').streaming = false;
-    p._tabs.get('turn_abc/agent-00').currentRequestId = null;
-    // Send from agent-01.
-    p._activeTabId = 'turn_abc/agent-01';
+    p._tabs.get('frontend-trivial').streaming = false;
+    p._tabs.get('frontend-trivial').currentRequestId = null;
+    // Send from backend-auth.
+    p._activeTabId = 'backend-auth';
     await settle(p);
-    p._input = 'from one';
+    p._input = 'from backend';
     await p._send();
     await settle(p);
     expect(started).toHaveBeenCalledTimes(2);
-    // First call routed to agent-00.
-    expect(started.mock.calls[0][5]).toEqual([
-      'turn_abc',
-      0,
-    ]);
-    // Second call routed to agent-01.
-    expect(started.mock.calls[1][5]).toEqual([
-      'turn_abc',
-      1,
-    ]);
+    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
+    expect(started.mock.calls[1][5]).toBe('backend-auth');
   });
 
-  it('agent tabs from different turns carry their turn_ids', async () => {
-    // Turn IDs are per-spawn; two agent tabs with the
-    // same agent_idx from different turns must stay
-    // distinct.
+  it('agent ids survive across turns (id-based reuse)', async () => {
+    // Per parallel-agents.md, agents linger across
+    // turns and are addressed by id. Tab id stays the
+    // same regardless of which turn spawned the agent.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'LLMService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    p._tabs.set('turn_first/agent-00', p._makeTabState());
-    p._tabs.set('turn_second/agent-00', p._makeTabState());
-    p._tabLabels.set('turn_first/agent-00', 'Agent 00');
-    p._tabLabels.set('turn_second/agent-00', 'Agent 00');
-    p._activeTabId = 'turn_second/agent-00';
+    p._tabs.set('persistent-agent', p._makeTabState());
+    p._tabLabels.set('persistent-agent', 'persistent-agent');
+    p._activeTabId = 'persistent-agent';
     await settle(p);
     p._input = 'hello';
     await p._send();
     await settle(p);
-    expect(started.mock.calls[0][5]).toEqual([
-      'turn_second',
-      0,
-    ]);
+    expect(started.mock.calls[0][5]).toBe('persistent-agent');
   });
 
   it('agent tab selection list comes from active tab', async () => {
@@ -1308,18 +1263,18 @@ describe('ChatPanel agent_tag routing', () => {
     publishFakeRpc({ 'LLMService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    p._tabs.set('turn_abc/agent-00', p._makeTabState());
-    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabs.set('frontend-trivial', p._makeTabState());
+    p._tabLabels.set('frontend-trivial', 'frontend-trivial');
     // Agent send first.
-    p._activeTabId = 'turn_abc/agent-00';
+    p._activeTabId = 'frontend-trivial';
     await settle(p);
     p._input = 'from agent';
     await p._send();
     await settle(p);
-    expect(started.mock.calls[0][5]).toEqual(['turn_abc', 0]);
+    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
     // Reset the agent tab's streaming state.
-    p._tabs.get('turn_abc/agent-00').streaming = false;
-    p._tabs.get('turn_abc/agent-00').currentRequestId = null;
+    p._tabs.get('frontend-trivial').streaming = false;
+    p._tabs.get('frontend-trivial').currentRequestId = null;
     // Switch back to main, send.
     p._activeTabId = 'main';
     await settle(p);
@@ -8462,6 +8417,15 @@ describe('ChatPanel agent tab spawning — gating', () => {
 });
 
 describe('ChatPanel agent tab spawning — tab creation', () => {
+  // Per specs4/5-webapp/agent-browser.md § "Tab Creation
+  // Ordering": "Tab identity — the key in the chat
+  // panel's `_tabs` Map — is the agent's LLM-chosen id
+  // from its `🟧🟧🟧 AGENT` block." The padded numeric
+  // index in child request IDs (`{parent}-agent-NN`) and
+  // archive file names (`{turn_id}/agent-NN.jsonl`) is a
+  // routing/storage detail — it does not feed back into
+  // tab identity.
+
   async function startMainStream(panel, message = 'hi') {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'LLMService.chat_streaming': started });
@@ -8472,7 +8436,7 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
     return started.mock.calls[0][0];
   }
 
-  it('creates one tab per valid block', async () => {
+  it('creates one tab per valid block, keyed by agent id', async () => {
     const p = mountPanel();
     const reqId = await startMainStream(p);
     pushEvent('stream-complete', {
@@ -8481,24 +8445,23 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'delegated',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 'first', agent_idx: 0 },
-          { id: 'agent-1', task: 'second', agent_idx: 1 },
-          { id: 'agent-2', task: 'third', agent_idx: 2 },
+          { id: 'frontend-trivial', task: 'first', agent_idx: 0 },
+          { id: 'backend-auth', task: 'second', agent_idx: 1 },
+          { id: 'docs-update', task: 'third', agent_idx: 2 },
         ],
       },
     });
     await settle(p);
     expect(p._tabs.size).toBe(4); // main + 3 agents
-    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
-    expect(p._tabs.has('turn_abc/agent-01')).toBe(true);
-    expect(p._tabs.has('turn_abc/agent-02')).toBe(true);
+    expect(p._tabs.has('frontend-trivial')).toBe(true);
+    expect(p._tabs.has('backend-auth')).toBe(true);
+    expect(p._tabs.has('docs-update')).toBe(true);
   });
 
-  it('tab ID format matches backend archive path convention', async () => {
-    // Pinned — the tab ID IS the key the frontend later
-    // parses back into (turn_id, agent_idx) for C2b's
-    // agent_tag and C2c's close_agent_context calls. A
-    // format drift would break both.
+  it('tab id matches the spawn block id verbatim', async () => {
+    // The id is the agent's choice; the frontend
+    // preserves whatever string the LLM emitted. No
+    // reconstruction from turn_id + agent_idx.
     const p = mountPanel();
     const reqId = await startMainStream(p);
     pushEvent('stream-complete', {
@@ -8507,18 +8470,16 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'ok',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 't', agent_idx: 0 },
-          { id: 'agent-7', task: 't', agent_idx: 7 },
-          { id: 'agent-42', task: 't', agent_idx: 42 },
+          { id: 'a', task: 't', agent_idx: 0 },
+          { id: 'streaming-pipeline', task: 't', agent_idx: 7 },
+          { id: 'with-suffix-42', task: 't', agent_idx: 42 },
         ],
       },
     });
     await settle(p);
-    // Zero-padded to 2 digits (agent-00, agent-07) for
-    // sort stability; three-digit indexes grow naturally.
-    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
-    expect(p._tabs.has('turn_abc/agent-07')).toBe(true);
-    expect(p._tabs.has('turn_abc/agent-42')).toBe(true);
+    expect(p._tabs.has('a')).toBe(true);
+    expect(p._tabs.has('streaming-pipeline')).toBe(true);
+    expect(p._tabs.has('with-suffix-42')).toBe(true);
   });
 
   it('seeds each tab with task as initial user message', async () => {
@@ -8531,7 +8492,7 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         turn_id: 'turn_abc',
         agent_blocks: [
           {
-            id: 'agent-0',
+            id: 'auth-refactor',
             task: 'refactor the auth module',
             agent_idx: 0,
           },
@@ -8539,7 +8500,7 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
       },
     });
     await settle(p);
-    const tab = p._tabs.get('turn_abc/agent-00');
+    const tab = p._tabs.get('auth-refactor');
     expect(tab).toBeTruthy();
     expect(tab.messages).toHaveLength(1);
     expect(tab.messages[0]).toEqual({
@@ -8564,14 +8525,14 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'ok',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 't', agent_idx: 0 },
-          { id: 'agent-1', task: 't', agent_idx: 1 },
+          { id: 'a0', task: 't', agent_idx: 0 },
+          { id: 'a1', task: 't', agent_idx: 1 },
         ],
       },
     });
     await settle(p);
-    const tab0 = p._tabs.get('turn_abc/agent-00');
-    const tab1 = p._tabs.get('turn_abc/agent-01');
+    const tab0 = p._tabs.get('a0');
+    const tab1 = p._tabs.get('a1');
     expect(tab0.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
     expect(tab1.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
     // Distinct arrays — mutations don't leak.
@@ -8588,16 +8549,16 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'ok',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 'refactor auth', agent_idx: 0 },
-          { id: 'agent-1', task: '', agent_idx: 1 },
+          { id: 'a0', task: 'refactor auth', agent_idx: 0 },
+          { id: 'a1', task: '', agent_idx: 1 },
         ],
       },
     });
     await settle(p);
-    expect(p._tabLabels.get('turn_abc/agent-00')).toBe(
+    expect(p._tabLabels.get('a0')).toBe(
       'Agent 00: refactor auth',
     );
-    expect(p._tabLabels.get('turn_abc/agent-01')).toBe('Agent 01');
+    expect(p._tabLabels.get('a1')).toBe('Agent 01');
   });
 
   it('does not switch to a newly spawned tab', async () => {
@@ -8614,7 +8575,7 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'ok',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 't', agent_idx: 0 },
+          { id: 'a0', task: 't', agent_idx: 0 },
         ],
       },
     });
@@ -8636,7 +8597,7 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
         response: 'ok',
         turn_id: 'turn_abc',
         agent_blocks: [
-          { id: 'agent-0', task: 't', agent_idx: 0 },
+          { id: 'a0', task: 't', agent_idx: 0 },
         ],
       },
     });
@@ -8679,13 +8640,13 @@ describe('ChatPanel agent tab spawning — defensive', () => {
     await settle(p);
     // Mutate the tab's state to simulate user-visible
     // content arriving between the two events.
-    const tab = p._tabs.get('turn_abc/agent-00');
+    const tab = p._tabs.get('agent-0');
     tab.messages.push({ role: 'assistant', content: 'agent reply' });
-    // Duplicate event — same turn_id, same agent_idx.
+    // Duplicate event — same id.
     pushEvent('stream-complete', { requestId: reqId, result });
     await settle(p);
     // Tab state preserved; assistant message survives.
-    const same = p._tabs.get('turn_abc/agent-00');
+    const same = p._tabs.get('agent-0');
     expect(same).toBe(tab);
     expect(same.messages).toHaveLength(2);
     expect(same.messages[1].content).toBe('agent reply');
@@ -8709,8 +8670,8 @@ describe('ChatPanel agent tab spawning — defensive', () => {
     await settle(p);
     // Only the two with valid indices spawn.
     expect(p._tabs.size).toBe(3); // main + 2
-    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
-    expect(p._tabs.has('turn_abc/agent-01')).toBe(true);
+    expect(p._tabs.has('agent-0')).toBe(true);
+    expect(p._tabs.has('agent-1')).toBe(true);
   });
 
   it('skips entries with negative agent_idx', async () => {
@@ -8762,7 +8723,7 @@ describe('ChatPanel agent tab spawning — defensive', () => {
     });
     await settle(p);
     expect(p._tabs.size).toBe(2);
-    expect(p._tabs.has('turn_abc/agent-00')).toBe(true);
+    expect(p._tabs.has('agent-0')).toBe(true);
   });
 
   it('non-string task falls back to empty string', async () => {
@@ -8782,11 +8743,11 @@ describe('ChatPanel agent tab spawning — defensive', () => {
       },
     });
     await settle(p);
-    const tab = p._tabs.get('turn_abc/agent-00');
+    const tab = p._tabs.get('agent-0');
     expect(tab).toBeTruthy();
     // Empty-string task → bare "Agent 00" label, no
     // colon.
-    expect(p._tabLabels.get('turn_abc/agent-00')).toBe('Agent 00');
+    expect(p._tabLabels.get('agent-0')).toBe('Agent 00');
     // First message content is the empty string.
     expect(tab.messages[0].content).toBe('');
   });
@@ -8820,7 +8781,10 @@ describe('ChatPanel agent tab spawning — defensive', () => {
 // for already-closed agents are safe.
 
 describe('ChatPanel close-tab backend wiring', () => {
-  it('fires close_agent_context with parsed (turn_id, agent_idx)', async () => {
+  it('fires close_agent_context with the agent id', async () => {
+    // Per parallel-agents.md, close_agent_context takes
+    // a single agent_id parameter — the same string
+    // that keys the tab.
     const close = vi
       .fn()
       .mockResolvedValue({ status: 'ok', closed: true });
@@ -8830,9 +8794,9 @@ describe('ChatPanel close-tab backend wiring', () => {
     const p = mountPanel();
     await settle(p);
     // Seed an agent tab.
-    const agentTabId = 'turn_abc/agent-00';
+    const agentTabId = 'frontend-trivial';
     p._tabs.set(agentTabId, p._makeTabState());
-    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabLabels.set(agentTabId, 'frontend-trivial');
     p.requestUpdate();
     await settle(p);
     // Click the close button.
@@ -8841,12 +8805,15 @@ describe('ChatPanel close-tab backend wiring', () => {
     );
     closeBtn.click();
     await settle(p);
-    // RPC fired with turn_id and agent_idx.
+    // RPC fired with the agent id verbatim.
     expect(close).toHaveBeenCalledOnce();
-    expect(close.mock.calls[0]).toEqual(['turn_abc', 0]);
+    expect(close.mock.calls[0]).toEqual(['frontend-trivial']);
   });
 
-  it('parses multi-digit agent_idx correctly', async () => {
+  it('preserves arbitrary characters in the agent id', async () => {
+    // Agent ids are LLM-chosen strings; the frontend
+    // doesn't impose a shape. Hyphens, underscores,
+    // numbers — all flow through unchanged.
     const close = vi
       .fn()
       .mockResolvedValue({ status: 'ok', closed: true });
@@ -8855,9 +8822,9 @@ describe('ChatPanel close-tab backend wiring', () => {
     });
     const p = mountPanel();
     await settle(p);
-    const agentTabId = 'turn_xyz/agent-42';
+    const agentTabId = 'auth_v2-refactor';
     p._tabs.set(agentTabId, p._makeTabState());
-    p._tabLabels.set(agentTabId, 'Agent 42');
+    p._tabLabels.set(agentTabId, 'auth_v2-refactor');
     p.requestUpdate();
     await settle(p);
     p.shadowRoot
@@ -8866,7 +8833,7 @@ describe('ChatPanel close-tab backend wiring', () => {
       )
       .click();
     await settle(p);
-    expect(close.mock.calls[0]).toEqual(['turn_xyz', 42]);
+    expect(close.mock.calls[0]).toEqual(['auth_v2-refactor']);
   });
 
   it('tab is removed locally regardless of RPC outcome', async () => {
@@ -9827,9 +9794,9 @@ describe('ChatPanel D2 tab cycling shortcuts', () => {
 // accumulator so stray stream events are dropped.
 
 describe('ChatPanel stream-start error handling', () => {
-  async function setupAgentTab(panel, tabId = 'turn_abc/agent-00') {
+  async function setupAgentTab(panel, tabId = 'frontend-trivial') {
     panel._tabs.set(tabId, panel._makeTabState());
-    panel._tabLabels.set(tabId, 'Agent 00');
+    panel._tabLabels.set(tabId, tabId);
     panel._activeTabId = tabId;
     await settle(panel);
     return tabId;
@@ -10055,11 +10022,13 @@ describe('ChatPanel stream-start error handling', () => {
     });
     const p = mountPanel();
     await settle(p);
-    await setupAgentTab(p);
+    const tabId = await setupAgentTab(p);
     p._input = 'hi';
     await p._send();
     await settle(p);
     expect(closeAgent).toHaveBeenCalledOnce();
-    expect(closeAgent.mock.calls[0]).toEqual(['turn_abc', 0]);
+    // Per flat-identity contract, RPC takes the agent
+    // id directly.
+    expect(closeAgent.mock.calls[0]).toEqual([tabId]);
   });
 });
