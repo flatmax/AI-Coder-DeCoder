@@ -85,16 +85,20 @@ def _build_thinking_payload(
     Returns the model-appropriate shape:
 
     - Adaptive-thinking models: ``{"type": "adaptive"}``.
-      Effort defaults to whatever the provider chose; we
-      don't pass ``output_config.effort`` because LiteLLM's
-      kwarg surface for that field is unstable across
-      versions and "default effort" is a sensible
-      starting point. A future commit can add
-      ``reasoning_effort`` config wiring if users want
-      explicit control.
+      Effort is conveyed separately as a top-level
+      ``reasoning_effort`` kwarg (see
+      :func:`build_thinking_kwargs`) — LiteLLM's
+      standardised cross-provider param, translated to
+      ``output_config.effort`` for Anthropic backends.
+      Splitting the kwargs this way avoids fighting
+      LiteLLM's translation layer for the
+      ``output_config`` field, whose kwarg surface has
+      churned across releases.
     - Legacy-thinking models: ``{"type": "enabled",
       "budget_tokens": N}`` with N from
-      ``config.reasoning_budget_tokens``.
+      ``config.reasoning_budget_tokens``. These models
+      don't accept ``reasoning_effort`` and ignore it
+      when present, so the helper omits the kwarg below.
     """
     if _model_uses_adaptive_thinking(config.model):
         return {"type": "adaptive"}
@@ -108,14 +112,20 @@ def build_thinking_kwargs(
     config: "ConfigManager",
     request_override: bool | None,
 ) -> dict[str, Any]:
-    """Build the ``thinking`` kwarg dict for ``litellm.completion``.
+    """Build the reasoning kwargs for ``litellm.completion``.
 
-    Returns either an empty dict (no reasoning) or a
-    ``{"thinking": {...}}`` dict ready to splat into the
-    completion call. The inner shape varies by model family
-    — see :func:`_build_thinking_payload` for the dispatch.
-    LiteLLM translates to OpenAI's ``reasoning_effort``
-    automatically for providers that use that surface.
+    Returns one of:
+
+    - ``{}`` when reasoning is disabled.
+    - ``{"thinking": {...}, "reasoning_effort": "..."}`` for
+      adaptive-thinking models (Opus 4.5+/4.6+/4.7+, Haiku
+      4.5+, Sonnet 4.5+). The ``thinking`` block tells the
+      model to use adaptive mode; ``reasoning_effort`` is
+      LiteLLM's standardised param, translated to
+      ``output_config.effort`` for Anthropic backends.
+    - ``{"thinking": {"type": "enabled", "budget_tokens": N}}``
+      for legacy-thinking models. ``reasoning_effort`` is
+      omitted — those models don't accept it.
 
     Resolution chain (per ``specs4/7-future/reasoning.md``):
 
@@ -132,12 +142,18 @@ def build_thinking_kwargs(
     """
     if request_override is False:
         return {}
-    if request_override is True:
-        return {"thinking": _build_thinking_payload(config)}
-    # request_override is None — fall through to config.
-    if config.reasoning_enabled:
-        return {"thinking": _build_thinking_payload(config)}
-    return {}
+    enabled = (
+        request_override is True
+        or (request_override is None and config.reasoning_enabled)
+    )
+    if not enabled:
+        return {}
+    kwargs: dict[str, Any] = {
+        "thinking": _build_thinking_payload(config),
+    }
+    if _model_uses_adaptive_thinking(config.model):
+        kwargs["reasoning_effort"] = config.reasoning_effort
+    return kwargs
 
 
 # ---------------------------------------------------------------------------

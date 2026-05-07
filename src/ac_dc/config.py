@@ -743,9 +743,23 @@ class ConfigManager:
             budget = 10000
         if budget <= 0:
             budget = 10000
+        # Effort levels — LiteLLM's standardised cross-provider
+        # param. Anthropic's adaptive-thinking models (Opus 4.5+,
+        # Haiku 4.5+, Sonnet 4.5+) use this rather than a token
+        # budget; LiteLLM translates to ``output_config.effort``
+        # for those backends. Unknown values fall back to
+        # "medium" rather than raising — config typos shouldn't
+        # crash startup.
+        effort_raw = section.get("effort", "medium")
+        if not isinstance(effort_raw, str):
+            effort_raw = "medium"
+        effort = effort_raw.strip().lower()
+        if effort not in ("low", "medium", "high"):
+            effort = "medium"
         return {
             "enabled": bool(section.get("enabled", False)),
             "budget_tokens": budget,
+            "effort": effort,
         }
 
     @property
@@ -760,8 +774,20 @@ class ConfigManager:
 
     @property
     def reasoning_budget_tokens(self) -> int:
-        """Convenience — configured reasoning budget."""
+        """Convenience — configured reasoning budget (legacy models)."""
         return self.reasoning_config["budget_tokens"]
+
+    @property
+    def reasoning_effort(self) -> str:
+        """Convenience — configured reasoning effort (adaptive models).
+
+        One of ``"low"``, ``"medium"``, ``"high"``. Used by adaptive-
+        thinking models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) where
+        a token budget isn't accepted. LiteLLM translates this to
+        the per-provider field (``output_config.effort`` for
+        Anthropic).
+        """
+        return self.reasoning_config["effort"]
 
     @property
     def agents_config(self) -> dict[str, Any]:

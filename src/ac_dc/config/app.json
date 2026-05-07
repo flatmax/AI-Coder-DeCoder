@@ -31,6 +31,7 @@
   },
   "reasoning": {
     "enabled": false,
-    "budget_tokens": 10000
+    "budget_tokens": 10000,
+    "effort": "high"
   }
 }
