@@ -422,6 +422,9 @@ export class AppShell extends JRPCClient {
     .dialog-header .tab-button {
       cursor: pointer;
     }
+    .dialog-header .doc-convert-tab {
+      margin-left: auto;
+    }
     .dialog-header .minimize-button {
       background: transparent;
       border: 1px solid transparent;
@@ -431,80 +434,16 @@ export class AppShell extends JRPCClient {
       cursor: pointer;
       font-size: 0.875rem;
       opacity: 0.7;
+      margin-left: auto;
+    }
+    .dialog-header .doc-convert-tab ~ .minimize-button {
+      margin-left: 0;
     }
     .dialog-header .minimize-button:hover {
       opacity: 1;
       background: rgba(240, 246, 252, 0.05);
     }
 
-    /* Mode toggle — segmented code/doc buttons plus the
-     * cross-ref overlay toggle. Sits on the right side
-     * of the header, with auto-left margin pushing it
-     * away from the tab buttons. Git action buttons have
-     * moved to the file picker sort row, so this group
-     * anchors itself directly. */
-    .mode-toggle {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-left: auto;
-    }
-    .mode-segmented {
-      display: inline-flex;
-      border: 1px solid rgba(240, 246, 252, 0.15);
-      border-radius: 4px;
-      overflow: hidden;
-    }
-    .mode-segmented .mode-btn {
-      background: transparent;
-      border: none;
-      color: var(--text-primary, #c9d1d9);
-      padding: 0.35rem 0.6rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-      opacity: 0.65;
-      transition: opacity 120ms ease, background 120ms ease;
-    }
-    .mode-segmented .mode-btn:hover:not([disabled]) {
-      opacity: 1;
-      background: rgba(240, 246, 252, 0.05);
-    }
-    .mode-segmented .mode-btn.active {
-      opacity: 1;
-      background: rgba(88, 166, 255, 0.15);
-      color: var(--accent-primary, #58a6ff);
-    }
-    .mode-segmented .mode-btn[disabled] {
-      opacity: 0.3;
-      cursor: not-allowed;
-    }
-    .crossref-btn {
-      background: transparent;
-      border: 1px solid rgba(240, 246, 252, 0.15);
-      border-radius: 4px;
-      color: var(--text-primary, #c9d1d9);
-      padding: 0.35rem 0.5rem;
-      font-size: 0.9rem;
-      line-height: 1;
-      cursor: pointer;
-      opacity: 0.65;
-      white-space: nowrap;
-      transition: opacity 120ms ease, background 120ms ease;
-    }
-    .crossref-btn:hover:not([disabled]) {
-      opacity: 1;
-      background: rgba(240, 246, 252, 0.05);
-    }
-    .crossref-btn.active {
-      opacity: 1;
-      background: rgba(210, 153, 34, 0.15);
-      border-color: rgba(210, 153, 34, 0.4);
-      color: #d29922;
-    }
-    .crossref-btn[disabled] {
-      opacity: 0.3;
-      cursor: not-allowed;
-    }
 
     /* Resize handles — invisible hit zones at the edges.
      * Right and bottom handles take a single axis; the
@@ -3885,41 +3824,13 @@ export class AppShell extends JRPCClient {
             class="tab-button ${this.activeTab === 'settings' ? 'active' : ''}"
             @click=${() => this._switchTab('settings')}
           >⚙️ Settings</button>
-          <div class="mode-toggle">
-            <div class="mode-segmented" role="group"
-              aria-label="Context mode">
-              <button
-                class="mode-btn ${this._mode === 'code' ? 'active' : ''}"
-                ?disabled=${!this.call || !this._isLocalhost}
-                title="Code mode — symbol index feeds context"
-                aria-pressed=${this._mode === 'code'}
-                @click=${() => this._switchMode('code')}
-              >💻 Code</button>
-              <button
-                class="mode-btn ${this._mode === 'doc' ? 'active' : ''}"
-                ?disabled=${!this.call || !this._isLocalhost}
-                title="Document mode — doc index feeds context"
-                aria-pressed=${this._mode === 'doc'}
-                @click=${() => this._switchMode('doc')}
-              >📄 Doc</button>
-            </div>
+          ${this._docConvertAvailable ? html`
             <button
-              class="crossref-btn ${this._crossRefEnabled ? 'active' : ''}"
-              ?disabled=${!this.call || !this._isLocalhost}
-              title=${this._crossRefEnabled
-                ? 'Cross-reference ON — both indexes active (click to disable)'
-                : 'Cross-reference OFF — click to add the other index alongside'}
-              aria-pressed=${this._crossRefEnabled}
-              @click=${this._toggleCrossRef}
-            >🔀 ${this._crossRefEnabled ? 'Cross-ref ON' : 'Cross-ref'}</button>
-            ${this._docConvertAvailable ? html`
-              <button
-                class="tab-button ${this.activeTab === 'doc-convert' ? 'active' : ''}"
-                @click=${() => this._switchTab('doc-convert')}
-                title="Convert documents to markdown"
-              >📄 Convert</button>
-            ` : null}
-          </div>
+              class="tab-button doc-convert-tab ${this.activeTab === 'doc-convert' ? 'active' : ''}"
+              @click=${() => this._switchTab('doc-convert')}
+              title="Convert documents to markdown"
+            >📄 Convert</button>
+          ` : null}
           <button
             class="minimize-button"
             title=${this._minimized ? 'Expand' : 'Minimize'}

@@ -698,6 +698,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
       noAccessor: true,
     },
     /**
+     * Current primary mode — 'code' or 'doc'. Component-
+     * scoped (not per-tab) for now: the backend has one
+     * authoritative mode and every tab follows it. When
+     * backend gains per-agent mode, this and
+     * `_crossRefEnabled` move into `_makeTabState()` and
+     * the read/write paths thread through agent_tag.
+     * Defaults to 'code' to match the backend.
+     */
+    _mode: { type: String, state: true },
+    /**
+     * Cross-reference overlay toggle. Resets to false on
+     * every mode switch per specs4/3-llm/modes.md. Same
+     * scoping rationale as `_mode`.
+     */
+    _crossRefEnabled: { type: Boolean, state: true },
+    /**
      * Active tab within the URL view dialog. `'content'`
      * shows title + body (summary/readme/content); `'symbols'`
      * shows the symbol map. Only relevant when the fetched
@@ -1468,6 +1484,67 @@ export class ChatPanel extends RpcMixin(LitElement) {
       opacity: 0.35;
       cursor: not-allowed;
     }
+    /* Mode + cross-ref buttons — sit at the right end of
+     * the search bar. Compact icon-only presentation
+     * matches the search nav arrows. */
+    .mode-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      flex-shrink: 0;
+    }
+    .mode-segmented {
+      display: inline-flex;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .mode-segmented .mode-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.25rem 0.4rem;
+      font-size: 0.85rem;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .mode-segmented .mode-btn:hover:not([disabled]) {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .mode-segmented .mode-btn.active {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .mode-segmented .mode-btn[disabled] {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .crossref-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.25rem 0.4rem;
+      font-size: 0.85rem;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .crossref-btn:hover:not([disabled]) {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .crossref-btn.active {
+      background: rgba(210, 153, 34, 0.15);
+      border-color: rgba(210, 153, 34, 0.4);
+      color: #d29922;
+    }
+    .crossref-btn[disabled] {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
     .snippet-drawer {
       display: flex;
       flex-wrap: wrap;
@@ -2210,6 +2287,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // not per-tab.
     this._reasoningEnabled = _loadReasoningEnabled();
 
+    // Mode + cross-ref state. Hydrated from
+    // get_current_state on RPC ready and kept in sync via
+    // the `mode-changed` window event.
+    this._mode = 'code';
+    this._crossRefEnabled = false;
+
     // Repo files list — pushed by files-tab for file mention
     // detection. Global to the chat panel because the repo is
     // the same across all conversations.
@@ -2231,6 +2314,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
     this._onMessagesClick = this._onMessagesClick.bind(this);
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
     this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
     this._onCommitResult = this._onCommitResult.bind(this);
 
@@ -3308,6 +3392,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._onCompactionEvent,
     );
     window.addEventListener('mode-changed', this._onModeOrReviewChanged);
+    window.addEventListener('mode-changed', this._onModeChanged);
     window.addEventListener(
       'review-started',
       this._onModeOrReviewChanged,
@@ -3335,6 +3420,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
       'mode-changed',
       this._onModeOrReviewChanged,
     );
+    window.removeEventListener('mode-changed', this._onModeChanged);
     window.removeEventListener(
       'review-started',
       this._onModeOrReviewChanged,
@@ -3381,6 +3467,31 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // of them issues requests — we're safe to call straight
     // away.
     this._loadSnippets();
+    this._loadModeState();
+  }
+
+  /**
+   * Hydrate mode + cross-ref from the backend state
+   * snapshot. Subsequent updates flow through the
+   * `mode-changed` broadcast.
+   */
+  async _loadModeState() {
+    if (!this.rpcConnected) return;
+    try {
+      const state = await this.rpcExtract(
+        'LLMService.get_current_state',
+      );
+      if (state && typeof state === 'object') {
+        if (typeof state.mode === 'string') {
+          this._mode = state.mode;
+        }
+        if (typeof state.cross_ref_enabled === 'boolean') {
+          this._crossRefEnabled = state.cross_ref_enabled;
+        }
+      }
+    } catch (err) {
+      // Silent — mode-changed broadcasts will catch us up.
+    }
   }
 
   updated(changedProps) {
@@ -4336,6 +4447,76 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // idempotent and cheap; a stray event that doesn't
     // actually change the mode just re-sets the same list.
     this._loadSnippets();
+  }
+
+  /**
+   * Sync our mode/cross-ref state from the broadcast.
+   * Fires for our own switches and for collaborators'.
+   * Backend resets cross-ref on mode change; we mirror
+   * that locally so the UI doesn't lag the broadcast.
+   */
+  _onModeChanged(event) {
+    const detail = event.detail || {};
+    if (typeof detail.mode === 'string') {
+      if (detail.mode !== this._mode) {
+        this._mode = detail.mode;
+        this._crossRefEnabled = false;
+      }
+    }
+    if (typeof detail.cross_ref_enabled === 'boolean') {
+      this._crossRefEnabled = detail.cross_ref_enabled;
+    }
+  }
+
+  /**
+   * Switch primary mode via RPC. Backend broadcasts
+   * mode-changed which our handler picks up — don't
+   * mutate _mode optimistically.
+   */
+  async _switchMode(mode) {
+    if (mode !== 'code' && mode !== 'doc') return;
+    if (mode === this._mode) return;
+    if (!this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.switch_mode', mode,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        const reason = result.reason || result.error;
+        this._emitToast(`Mode switch failed: ${reason}`, 'warning');
+      }
+    } catch (err) {
+      this._emitToast(
+        `Mode switch failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Toggle cross-reference. Same backend-authoritative
+   * pattern as `_switchMode`.
+   */
+  async _toggleCrossRef() {
+    if (!this.rpcConnected) return;
+    const next = !this._crossRefEnabled;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.set_cross_reference', next,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        const reason = result.reason || result.error;
+        this._emitToast(
+          `Cross-reference toggle failed: ${reason}`,
+          'warning',
+        );
+      }
+    } catch (err) {
+      this._emitToast(
+        `Cross-reference toggle failed: ${err?.message || 'RPC error'}`,
+        'error',
+      );
+    }
   }
 
   /**
@@ -8079,6 +8260,35 @@ export class ChatPanel extends RpcMixin(LitElement) {
             ▼
           </button>
         </div>
+        ${this._activeTabId === 'main'
+          ? html`<div class="mode-toggle" role="group" aria-label="Context mode">
+              <div class="mode-segmented">
+                <button
+                  class="mode-btn ${this._mode === 'code' ? 'active' : ''}"
+                  ?disabled=${!this.rpcConnected}
+                  title="Code mode — symbol index feeds context"
+                  aria-pressed=${this._mode === 'code'}
+                  @click=${() => this._switchMode('code')}
+                >💻</button>
+                <button
+                  class="mode-btn ${this._mode === 'doc' ? 'active' : ''}"
+                  ?disabled=${!this.rpcConnected}
+                  title="Document mode — doc index feeds context"
+                  aria-pressed=${this._mode === 'doc'}
+                  @click=${() => this._switchMode('doc')}
+                >📄</button>
+              </div>
+              <button
+                class="crossref-btn ${this._crossRefEnabled ? 'active' : ''}"
+                ?disabled=${!this.rpcConnected}
+                title=${this._crossRefEnabled
+                  ? 'Cross-reference ON — both indexes active (click to disable)'
+                  : 'Cross-reference OFF — click to add the other index alongside'}
+                aria-pressed=${this._crossRefEnabled}
+                @click=${this._toggleCrossRef}
+              >🔀</button>
+            </div>`
+          : ''}
       </div>
     `;
   }

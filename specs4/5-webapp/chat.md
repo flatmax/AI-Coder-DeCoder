@@ -205,7 +205,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 
 Two visual groups separated by a thin vertical divider:
 
-- Search group — mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation
+- Search group — search-mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation, and the context-mode controls (primary mode + cross-reference) at the right end
 - Session group — new session, open history browser (hidden in file search mode)
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the dialog header, not the chat action bar. See [shell.md](shell.md).
@@ -215,6 +215,50 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
 - 💬 default — message search against raw message content
 - 📁 toggle — file search via repo grep
 - See [search.md](search.md) for the full search behavior
+
+## Mode Toggle
+
+The primary-mode segmented control and cross-reference overlay toggle sit at the right end of the search bar, after the match-navigation arrows. Three controls total — two for the primary mode, one for cross-reference.
+
+### Tab-Scoped Visibility
+
+- Rendered only when the active tab is `main` — agent tabs hide the controls entirely
+- Agents inherit the mode from their parent scope at spawn time and cannot switch independently in the current backend; hiding the UI on agent tabs avoids implying a capability that doesn't exist
+- When the backend gains per-agent mode (a future commit), the controls render on every tab and the read/write paths thread through `agent_tag`. The UI gate moves at that time; the controls themselves are unchanged
+
+### Primary Mode (Segmented)
+
+- Two mutually-exclusive icon buttons — `💻` (code mode) and `📄` (document mode)
+- Active button shows accent-coloured background and pressed-state border
+- Clicking the inactive button calls the mode-switch RPC
+- No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
+- Disabled when RPC isn't connected
+- Tooltips disclose the full mode name and what each mode does
+
+### Cross-Reference (Overlay Toggle)
+
+- Single icon button — `🔀`
+- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
+- Clicking calls the set-cross-reference RPC with the inverted current state
+- Disabled under the same conditions as the primary mode buttons
+- Tooltip switches between "Cross-reference ON — both indexes active (click to disable)" and "Cross-reference OFF — click to add the other index alongside" depending on state
+
+### State Synchronization
+
+- Initial state hydrated from the backend's `get_current_state` snapshot on RPC ready
+- Updated via `mode-changed` window events broadcast by the backend
+- When a `mode-changed` event reports a primary mode different from the current UI state, the cross-reference flag is reset to false locally — mirrors the backend's reset-on-switch behaviour per [modes.md](../3-llm/modes.md)
+- RPC call failures surface as toasts; restricted errors (non-localhost caller) use warning type rather than error
+
+### Feedback
+
+- The state flip happens via the `mode-changed` broadcast, not optimistically on RPC success — prevents the UI from racing the broadcast when multiple clients are connected
+- Failed RPCs (mode switch rejected, cross-reference toggle rejected) surface as toasts naming the reason
+
+### Non-Localhost Clients
+
+- Controls are rendered but disabled for non-localhost participants — they passively follow the server's authoritative mode
+- `mode-changed` broadcasts still update the UI state for these clients
 
 ### Review Status Bar
 

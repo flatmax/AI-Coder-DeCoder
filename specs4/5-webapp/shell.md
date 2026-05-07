@@ -184,42 +184,9 @@ Malformed values (non-JSON, wrong shape, width below minimum, finite-number chec
 
 ## Mode Toggle
 
-A segmented control plus overlay toggle lives inline in the dialog header, between the tab buttons and the minimize button. Three controls total — two for the primary mode, one for cross-reference.
+The primary-mode segmented control and cross-reference overlay toggle live in the chat panel's search bar — not the dialog header. Only the Main tab renders these controls; agent tabs hide them entirely. See [chat.md § Mode Toggle](chat.md#mode-toggle) for the full UI specification.
 
-### Primary Mode (Segmented)
-
-- Two mutually-exclusive buttons — `💻 Code` and `📄 Doc`
-- Active button shows accent-coloured background and pressed-state border
-- Clicking the inactive button calls the mode-switch RPC
-- No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
-- Disabled when RPC isn't connected or when the current client is non-localhost
-
-### Cross-Reference (Overlay Toggle)
-
-- Single toggle button — `🔀 Cross-ref` or `🔀 Cross-ref ON` when active
-- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
-- Clicking calls the set-cross-reference RPC with the inverted current state
-- Disabled under the same conditions as the primary mode buttons
-
-### State Synchronization
-
-- Initial state hydrated from the backend's `get_current_state` snapshot on connection
-- Updated via `mode-changed` window events broadcast by the backend
-- When a `mode-changed` event reports a primary mode different from the current UI state, the cross-reference flag is reset to false locally — mirrors the backend's reset-on-switch behaviour per [modes.md](../3-llm/modes.md)
-- RPC call failures surface as toasts; restricted errors (non-localhost caller) use warning type rather than error
-
-### Feedback
-
-- Successful primary-mode switch shows an info toast — "Switched to document mode" / "Switched to code mode"
-- Successful cross-reference enable shows "Cross-reference enabled — both indexes active"
-- Successful cross-reference disable shows "Cross-reference disabled"
-- The actual state flip happens via the `mode-changed` broadcast, not optimistically on RPC success — prevents the UI from racing the broadcast when multiple clients are connected
-
-### Non-Localhost Clients
-
-- Buttons are rendered but disabled for non-localhost participants
-- The disabled-state tooltip still shows the mode's description so participants can see what the current authoritative mode is even if they can't change it
-- `mode-changed` broadcasts still update the UI state — participants passively follow the server
+Rationale: mode is per-conversation in spirit (an agent could in principle inherit a different mode from its parent), and visually anchoring the controls to a specific chat tab makes the per-tab scope obvious. Today the backend has one authoritative mode for the whole service; agents inherit it via their parent scope. When the backend gains per-agent mode, the controls' read/write paths thread through `agent_tag` without a UI move.
 
 ## Global Keyboard Shortcuts
 
