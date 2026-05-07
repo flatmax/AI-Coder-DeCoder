@@ -3603,6 +3603,40 @@ export class AppShell extends JRPCClient {
       this._showToast('Commit not available', 'warning');
       return;
     }
+    // Preflight: short-circuit on a clean tree so we don't
+    // optimistically toast "Generating commit message…" and
+    // burn a smaller-model RPC call before the backend's
+    // own empty-diff guard fires. The backend's
+    // commit_all_background runs stage_all first (which
+    // stages untracked files too), so this check must use
+    // is_clean rather than just inspecting staged+unstaged
+    // diffs the way _onCopyDiff does — otherwise a repo
+    // with only untracked files would pass the frontend
+    // check, get staged by the backend, and produce a
+    // non-empty diff the LLM would then summarise.
+    // Repo.is_clean() matches the backend's view of "is
+    // there anything stage_all could pick up".
+    const isCleanFn = this.call['Repo.is_clean'];
+    if (typeof isCleanFn === 'function') {
+      try {
+        const cleanRaw = await isCleanFn();
+        let clean = cleanRaw;
+        if (
+          cleanRaw && typeof cleanRaw === 'object'
+          && !Array.isArray(cleanRaw)
+        ) {
+          const keys = Object.keys(cleanRaw);
+          if (keys.length === 1) clean = cleanRaw[keys[0]];
+        }
+        if (clean === true) {
+          this._showToast('Nothing to commit', 'info');
+          return;
+        }
+      } catch (_) {
+        // is_clean failure shouldn't block commit — fall
+        // through to the backend, which has its own guard.
+      }
+    }
     this._committing = true;
     try {
       const raw = await fn();
