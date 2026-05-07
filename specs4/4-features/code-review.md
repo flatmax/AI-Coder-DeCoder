@@ -74,11 +74,12 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 - Commit message (first line, truncated)
 - Author and relative date
 - Branch tip commits show the branch name as a label badge
+- Hover tooltip shows full SHA, parent SHAs, list of branches reaching the commit, author, ISO+relative date, and the full commit message
 ### Branch Legend
 - Fixed header above the scrollable graph — does not scroll
 - Branch chips colored to match their lanes
 - Ordered by most recent commit
-- Chips toggleable to filter branches in the graph
+- Chips toggleable to filter branches in the graph — clicking a chip hides every commit and edge reachable only through that branch. Commits also reachable from a still-visible branch remain rendered. The chip itself dims and strikes through to indicate the hidden state; clicking again restores. Lane assignments don't reflow on toggle so the graph layout stays stable.
 - Remote branches toggle button (default: local only)
 ### Disambiguation
 - A commit can be reachable from multiple branches
