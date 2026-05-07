@@ -3,7 +3,7 @@ import {
   HANDLE_CLASS,
   HANDLE_GROUP_ID,
   SvgEditor,
-} from '../svg-editor.js';
+} from './index.js';
 import {
   firePointer,
   installCleanup,

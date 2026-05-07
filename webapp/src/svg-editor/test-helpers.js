@@ -1,7 +1,7 @@
-// Shared test scaffolding for svg-editor.js tests.
+// Shared test scaffolding for svg-editor tests.
 //
-// Extracted verbatim from webapp/src/svg-editor.test.js so the
-// per-area test files (drag, resize, marquee, undo, etc.) can
+// Extracted verbatim from the legacy webapp/src/svg-editor.test.js
+// so the per-area test files (drag, resize, marquee, undo, etc.) can
 // share the same SVG/DOM stubs and pointer-event helpers
 // without duplication.
 //

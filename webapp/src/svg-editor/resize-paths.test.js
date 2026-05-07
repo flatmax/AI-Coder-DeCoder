@@ -9,7 +9,7 @@ import {
   HANDLE_CLASS,
   SvgEditor,
   _parsePathData,
-} from '../svg-editor.js';
+} from './index.js';
 import {
   firePointer,
   installCleanup,

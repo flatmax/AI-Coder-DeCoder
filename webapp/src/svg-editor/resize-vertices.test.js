@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SvgEditor } from '../svg-editor.js';
+import { SvgEditor } from './index.js';
 import {
   firePointer,
   installCleanup,

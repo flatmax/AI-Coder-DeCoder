@@ -3,7 +3,7 @@ import {
   SvgEditor,
   _PASTE_OFFSET,
   _UNDO_MAX,
-} from '../svg-editor.js';
+} from './index.js';
 import {
   firePointer,
   installCleanup,

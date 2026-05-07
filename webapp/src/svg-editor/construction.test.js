@@ -7,7 +7,7 @@ import {
   SvgEditor,
   _NON_SELECTABLE_TAGS,
   _SELECTABLE_TAGS,
-} from '../svg-editor.js';
+} from './index.js';
 import {
   SVG_NS,
   firePointer,

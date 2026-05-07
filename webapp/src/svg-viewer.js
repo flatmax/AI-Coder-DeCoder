@@ -59,7 +59,7 @@
 import { LitElement, css, html } from 'lit';
 
 import { SharedRpc } from './rpc.js';
-import { SvgEditor } from './svg-editor.js';
+import { SvgEditor } from './svg-editor/index.js';
 
 /**
  * Default empty SVG shown when a panel has no content

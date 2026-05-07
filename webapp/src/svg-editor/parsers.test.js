@@ -10,7 +10,7 @@ import {
   _parsePathData,
   _parsePoints,
   _serializePathData,
-} from '../svg-editor.js';
+} from './index.js';
 
 describe('_parseNum', () => {
   it('parses numeric string', () => {
