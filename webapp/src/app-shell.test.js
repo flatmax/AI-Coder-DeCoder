@@ -196,7 +196,7 @@ describe('AppShell', () => {
     // explicit import — they're already loaded
     // transitively via app-shell.js.
     const { FilesTab } =
-      await import('./files-tab.js');
+      await import('./files-tab/index.js');
     const { SettingsTab } =
       await import('./settings-tab.js');
     const { ContextTab } =
@@ -219,7 +219,7 @@ describe('AppShell', () => {
     SharedRpc.reset();
     AppShell.prototype._fetchHistoryStatus = _origFetchHistoryStatus;
     const { FilesTab } =
-      await import('./files-tab.js');
+      await import('./files-tab/index.js');
     const { SettingsTab } =
       await import('./settings-tab.js');
     const { ContextTab } =

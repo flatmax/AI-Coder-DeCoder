@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SharedRpc } from '../rpc.js';
-import '../files-tab.js';
+import './index.js';
 import {
   mountTab,
   publishFakeRpc,

@@ -16,7 +16,7 @@ import {
   installCleanup,
 } from './test-helpers.js';
 
-import '../files-tab.js';
+import './index.js';
 
 installCleanup();
 

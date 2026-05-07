@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import '../files-tab.js';
+import './index.js';
 import {
   mountTab,
   publishFakeRpc,

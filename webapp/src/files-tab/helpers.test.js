@@ -14,7 +14,7 @@ import {
   pushEvent,
   installCleanup,
 } from './test-helpers.js';
-import { flattenTreePaths } from '../files-tab.js';
+import { flattenTreePaths } from './index.js';
 
 installCleanup();
 
