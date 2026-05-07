@@ -151,6 +151,61 @@ def get_file_map_block(
     if path.startswith("meta:"):
         return get_meta_block(service, path)
 
+    # History entries — tracker keys of the form
+    # ``history:N`` where N is the zero-based index into
+    # ``ContextManager.get_history()``. The cache viewer
+    # surfaces these so the user can click an entry and
+    # read the actual message body that's occupying that
+    # tier slot.
+    if path.startswith("history:"):
+        idx_str = path[len("history:"):]
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return {
+                "error": f"Malformed history key: {path}",
+                "path": path,
+            }
+        history = service._context.get_history()
+        if idx < 0 or idx >= len(history):
+            return {
+                "error": (
+                    f"History index {idx} out of range "
+                    f"(have {len(history)} messages)"
+                ),
+                "path": path,
+            }
+        msg = history[idx]
+        role = msg.get("role", "?")
+        raw_content = msg.get("content", "")
+        # ``content`` may be a plain string or a list of
+        # multimodal blocks (text + image_url dicts). Render
+        # both shapes so multimodal turns show their text
+        # parts and a placeholder for images.
+        if isinstance(raw_content, str):
+            body = raw_content
+        elif isinstance(raw_content, list):
+            parts: list[str] = []
+            for block in raw_content:
+                if isinstance(block, dict):
+                    btype = block.get("type")
+                    if btype == "text":
+                        parts.append(block.get("text", ""))
+                    elif btype in ("image_url", "image"):
+                        parts.append("[image]")
+                    else:
+                        parts.append(str(block))
+                else:
+                    parts.append(str(block))
+            body = "\n".join(parts)
+        else:
+            body = str(raw_content)
+        return {
+            "path": path,
+            "content": f"[{role}]\n\n{body}",
+            "mode": service._context.mode.value,
+        }
+
     # Prefix dispatch.
     if path.startswith("file:"):
         file_path = path[len("file:"):]

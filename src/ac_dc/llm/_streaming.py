@@ -139,6 +139,29 @@ async def stream_chat(
 
         # Persist user message BEFORE the LLM call. Mid-
         # stream crash preserves user intent.
+        #
+        # Images are intentionally NOT threaded into
+        # `_history` — only the text part of the user
+        # message is stored. The current turn's images
+        # reach the LLM via prompt assembly's
+        # `_build_user_message`, which constructs a
+        # multimodal content block list fresh from the
+        # `images` parameter every request. Subsequent
+        # turns therefore replay only the text.
+        #
+        # This is deliberate: images are expensive
+        # (~1.6K tokens each on Claude) and the assistant's
+        # textual response from the turn the image was sent
+        # almost always carries forward whatever was
+        # relevant about it. Keeping images in replayed
+        # history would multiply token cost on every
+        # downstream turn for no proportional gain.
+        #
+        # The history store DOES persist image refs
+        # (filenames under `.ac-dc/images/`) so the history
+        # browser can reconstruct the original message for
+        # display — that's a separate concern from what the
+        # LLM sees on subsequent turns.
         if scope.archival_append is not None:
             scope.archival_append(
                 "user",
