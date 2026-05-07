@@ -57,6 +57,8 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { RpcMixin } from './rpc-mixin.js';
 import { renderMarkdown } from './markdown.js';
 import { normalizeMessageContent } from './image-utils.js';
+import { segmentResponse, matchSegmentsToResults } from './edit-blocks.js';
+import { renderEditCard } from './edit-block-render.js';
 
 /**
  * Debounce delay for search queries. 300ms matches the
@@ -413,6 +415,151 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       border-radius: 3px;
       border: 1px solid rgba(240, 246, 252, 0.15);
       display: block;
+    }
+    /* Edit-block cards — mirrored from chat-panel so
+     * historical assistant messages render edit blocks
+     * the same way the live chat does. Shadow-DOM
+     * scoping means we need a copy of every rule the
+     * card markup depends on; sharing a stylesheet
+     * between two custom elements would need adopted
+     * stylesheets, which is heavier than just
+     * duplicating ~90 lines of CSS. */
+    .preview-body .edit-block-card {
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      background: rgba(13, 17, 23, 0.4);
+      overflow: hidden;
+      font-size: 0.875rem;
+      margin: 0.5rem 0;
+    }
+    .preview-body .edit-block-card.edit-status-applied {
+      border-color: rgba(126, 231, 135, 0.4);
+    }
+    .preview-body .edit-block-card.edit-status-failed {
+      border-color: rgba(248, 81, 73, 0.45);
+    }
+    .preview-body .edit-block-card.edit-status-skipped,
+    .preview-body .edit-block-card.edit-status-not-in-context {
+      border-color: rgba(210, 153, 34, 0.4);
+    }
+    .preview-body .edit-block-card.edit-status-pending,
+    .preview-body .edit-block-card.edit-status-new {
+      border-color: rgba(88, 166, 255, 0.35);
+    }
+    .preview-body .edit-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.75rem;
+      background: rgba(22, 27, 34, 0.7);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .preview-body .edit-file-path {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      color: var(--accent-primary, #58a6ff);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 0.1rem 0.25rem;
+      margin: -0.1rem -0.25rem;
+      border-radius: 3px;
+    }
+    .preview-body .edit-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      flex-shrink: 0;
+      font-size: 0.75rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+      background: rgba(13, 17, 23, 0.6);
+    }
+    .preview-body .edit-status-icon {
+      font-size: 0.875rem;
+    }
+    .preview-body .edit-status-applied {
+      color: #7ee787;
+    }
+    .preview-body .edit-status-failed {
+      color: #f85149;
+    }
+    .preview-body .edit-status-skipped,
+    .preview-body .edit-status-not-in-context {
+      color: #d29922;
+    }
+    .preview-body .edit-status-pending,
+    .preview-body .edit-status-new {
+      color: var(--accent-primary, #58a6ff);
+    }
+    .preview-body .edit-status-unknown {
+      color: var(--text-secondary, #8b949e);
+    }
+    .preview-body .edit-body {
+      display: flex;
+      flex-direction: column;
+    }
+    .preview-body .edit-pane-content {
+      margin: 0;
+      padding: 0.5rem 0.75rem;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      overflow-x: auto;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .preview-body .diff-line {
+      display: block;
+      white-space: pre;
+      padding: 0 0.25rem;
+      margin: 0 -0.25rem;
+      border-left: 2px solid transparent;
+    }
+    .preview-body .diff-line.context {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .preview-body .diff-line.add {
+      background: rgba(126, 231, 135, 0.12);
+      border-left-color: rgba(126, 231, 135, 0.5);
+      color: #a6e3af;
+    }
+    .preview-body .diff-line.remove {
+      background: rgba(248, 81, 73, 0.12);
+      border-left-color: rgba(248, 81, 73, 0.5);
+      color: #ff9b93;
+    }
+    .preview-body .diff-prefix {
+      display: inline-block;
+      width: 1em;
+      user-select: none;
+      opacity: 0.55;
+      margin-right: 0.25rem;
+    }
+    .preview-body .diff-text {
+      display: inline;
+    }
+    .preview-body .diff-change {
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+    .preview-body .diff-line.add .diff-change {
+      background: rgba(126, 231, 135, 0.35);
+      color: #fff;
+    }
+    .preview-body .diff-line.remove .diff-change {
+      background: rgba(248, 81, 73, 0.35);
+      color: #fff;
+    }
+    .preview-body .edit-error-message {
+      padding: 0.4rem 0.75rem;
+      background: rgba(248, 81, 73, 0.08);
+      color: #f85149;
+      font-size: 0.8125rem;
+      border-top: 1px solid rgba(248, 81, 73, 0.15);
     }
     /* Context menu — fixed position at the click point.
      * Appears above the modal via z-index. Dismiss logic
@@ -1070,11 +1217,36 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     const images = Array.isArray(msg.images)
       ? msg.images
       : normalized.images;
-    // All roles go through the markdown renderer so user
-    // newlines and lists render the same way they do in the
-    // main chat panel. The renderer handles escaping
-    // internally, so this is safe against HTML injection.
-    const body = html`${unsafeHTML(renderMarkdown(textContent))}`;
+    // For assistant messages, segment the response so edit
+    // blocks render as visual cards rather than as a wall
+    // of marker-laden prose. Past sessions carry no live
+    // `edit_results` — segments resolve to `pending` (modify
+    // blocks) or `new` (create blocks) status, which is the
+    // honest signal: we can't tell what happened at the time.
+    //
+    // User and system messages have no edit blocks, so they
+    // skip the segmentation hop and render straight through
+    // markdown.
+    let body;
+    if (msg.role === 'assistant' && typeof textContent === 'string') {
+      const segments = segmentResponse(textContent);
+      const editResults = Array.isArray(msg.edit_results)
+        ? msg.edit_results
+        : [];
+      const matched = matchSegmentsToResults(segments, editResults);
+      body = html`${segments.map((seg, i) => {
+        if (seg.type === 'text') {
+          return html`${unsafeHTML(renderMarkdown(seg.content))}`;
+        }
+        return html`${unsafeHTML(renderEditCard(seg, matched[i]))}`;
+      })}`;
+    } else {
+      // All other roles go through the markdown renderer so
+      // user newlines and lists render the same way they do
+      // in the main chat panel. The renderer handles escaping
+      // internally, so this is safe against HTML injection.
+      body = html`${unsafeHTML(renderMarkdown(textContent))}`;
+    }
     return html`
       <div
         class="preview-message ${roleClass}"
