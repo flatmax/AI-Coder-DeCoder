@@ -43,16 +43,14 @@ import {
   AUTO_SCROLL_TOLERANCE_PX,
   _saveDrawerOpen,
   _saveReasoningEnabled,
+  buildAmbiguousRetryPrompt,
+  buildInContextMismatchRetryPrompt,
+  buildNotInContextRetryPrompt,
   generateRequestId,
   parseAgentTabId,
 } from './helpers.js';
 import { scheduleUrlDetection } from './urls.js';
-import {
-  buildAmbiguousRetryPrompt,
-  buildInContextMismatchRetryPrompt,
-  buildNotInContextRetryPrompt,
-  handleStreamStartError,
-} from './streaming.js';
+import { handleStreamStartError } from './streaming.js';
 import { setSearchMode } from './search.js';
 
 // ---------------------------------------------------------------
