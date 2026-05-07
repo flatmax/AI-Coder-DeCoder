@@ -13,6 +13,28 @@ import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 
 /**
+ * Read the `?experimental=1` URL parameter set by the
+ * Python launcher when started with `--experimental`.
+ * Cached at module load so every settings-tab instance
+ * sees the same value without re-parsing.
+ *
+ * Truthy values: '1', 'true', 'yes' (case-insensitive).
+ * Anything else — including the param being absent — is
+ * treated as false.
+ */
+const _EXPERIMENTAL_ENABLED = (() => {
+  try {
+    const raw = new URLSearchParams(window.location.search).get(
+      'experimental',
+    );
+    if (!raw) return false;
+    return ['1', 'true', 'yes'].includes(raw.toLowerCase());
+  } catch (_err) {
+    return false;
+  }
+})();
+
+/**
  * Config cards — one per whitelisted type. The `key` field
  * matches the backend's CONFIG_TYPES keys. `reloadable`
  * controls whether save auto-triggers a reload RPC.
@@ -491,7 +513,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   async _onToggleClick(card) {
     if (!card || card.renderer !== 'toggle') return;
-    if (card.locked) return;
+    if (card.locked && !_EXPERIMENTAL_ENABLED) return;
     if (!this._localhost) return;
     if (this._togglingKey) return;
     this._togglingKey = card.key;
@@ -764,17 +786,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const state = this._toggles[card.key];
     const isLoaded = state !== undefined;
     const value = isLoaded ? state : Boolean(card.toggleDefault);
+    const lockedActive = card.locked && !_EXPERIMENTAL_ENABLED;
     const isDisabled =
-      card.locked ||
+      lockedActive ||
       !this._localhost ||
       this._togglingKey === card.key;
     const ariaLabel = `${card.label}: ${value ? 'on' : 'off'}`;
     const baseTooltip = card.description
       ? `${card.label} — ${card.description}`
       : card.label;
-    const tooltip = card.locked && card.lockedNote
+    const tooltip = lockedActive && card.lockedNote
       ? `${baseTooltip} (${card.lockedNote})`
-      : baseTooltip;
+      : card.locked && _EXPERIMENTAL_ENABLED
+        ? `${baseTooltip} (Experimental — enabled by --experimental flag)`
+        : baseTooltip;
     return html`
       <div
         class="card toggle-card ${value ? 'toggle-on' : ''} ${
@@ -806,15 +831,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ${value ? 'ON' : 'OFF'}
           </span>
         </button>
-        ${card.locked
+        ${lockedActive
           ? html`<span class="toggle-readonly-note">
               ${card.lockedNote || 'Locked'}
             </span>`
-          : !this._localhost
-            ? html`<span class="toggle-readonly-note">
-                Host controls this setting
+          : card.locked && _EXPERIMENTAL_ENABLED
+            ? html`<span class="toggle-readonly-note experimental">
+                Experimental
               </span>`
-            : ''}
+            : !this._localhost
+              ? html`<span class="toggle-readonly-note">
+                  Host controls this setting
+                </span>`
+              : ''}
       </div>
     `;
   }

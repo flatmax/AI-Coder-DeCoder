@@ -288,6 +288,7 @@ async def run(
     preview: bool = False,
     verbose: bool = False,
     collab: bool = False,
+    experimental: bool = False,
 ) -> None:
     """Main entry point — runs the two-phase startup.
 
@@ -598,6 +599,12 @@ async def run(
 
     # Step 8: Open browser
     url = f"http://localhost:{webapp_port}/?port={server_port}"
+    if experimental:
+        # Enables UI affordances flagged `locked: true` — e.g.
+        # the agentic coding toggle in settings. The webapp
+        # reads ?experimental=1 from window.location and
+        # treats it as a session-scoped override.
+        url += "&experimental=1"
     if not no_browser:
         webbrowser.open(url)
         logger.info("Browser opened: %s", url)
