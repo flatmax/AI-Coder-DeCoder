@@ -113,16 +113,22 @@ import {
   parseAgentTabId,
 } from './helpers.js';
 import {
+  cancel,
   onHistoryCancel,
   onHistorySelect,
+  onNewSession,
+  onOpenHistory,
   onRecognitionError,
   onTranscript,
+  send,
 } from './input.js';
 import { PROPERTIES } from './properties.js';
 import { render as renderTemplate } from './rendering.js';
 import {
   activateFileSearch as activateFileSearchImpl,
   scrollFileSearchToFile as scrollFileSearchToFileImpl,
+  scrollToCurrentMatch,
+  setSearchMode,
 } from './search.js';
 import { installReactiveAccessors, makeTabState } from './state.js';
 import { STYLES } from './styles.js';
@@ -369,6 +375,54 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   scrollFileSearchToFile(filePath) {
     scrollFileSearchToFileImpl(this, filePath);
+  }
+
+  // ---------------------------------------------------------------
+  // Test-surface forwarders
+  // ---------------------------------------------------------------
+  //
+  // The old chat-panel.js exposed `_makeTabState`,
+  // `_send`, and `_cancel` as instance methods. The
+  // refactor moved their implementations to
+  // `./state.js` (factory) and `./input.js`
+  // (functional handlers taking `panel` as their
+  // first argument), neither of which lands on the
+  // instance.
+  //
+  // Existing test files seed agent tabs via
+  // `panel._tabs.set(id, panel._makeTabState())` and
+  // exercise the send path via `panel._send()` /
+  // `panel._cancel()`. Rather than rewrite every
+  // call site, expose thin forwarders here. Costs
+  // nothing in production (one extra function call)
+  // and keeps the test surface stable.
+
+  _makeTabState() {
+    return makeTabState();
+  }
+
+  _send() {
+    return send(this);
+  }
+
+  _cancel() {
+    return cancel(this);
+  }
+
+  _setSearchMode(mode) {
+    return setSearchMode(this, mode);
+  }
+
+  _onNewSession() {
+    return onNewSession(this);
+  }
+
+  _onOpenHistory() {
+    return onOpenHistory(this);
+  }
+
+  _scrollToCurrentMatch() {
+    return scrollToCurrentMatch(this);
   }
 
   // ---------------------------------------------------------------

@@ -1565,7 +1565,12 @@ describe('ChatPanel new-session button', () => {
     await settle(p);
     const btn = p.shadowRoot.querySelector('.new-session-button');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toContain('New session');
+    // Icon-only button — text affordance lives in
+    // `title` (hover) and `aria-label` (screen reader).
+    const newSessionLabel =
+      `${btn.getAttribute('title') || ''} `
+      + `${btn.getAttribute('aria-label') || ''}`;
+    expect(newSessionLabel).toContain('New session');
   });
 
   it('is disabled when RPC is not connected', async () => {
@@ -1717,7 +1722,12 @@ describe('ChatPanel history browser', () => {
     await settle(p);
     const btn = p.shadowRoot.querySelector('.history-button');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toContain('History');
+    // Icon-only button — text affordance lives in
+    // `title` (hover) and `aria-label` (screen reader).
+    const historyLabel =
+      `${btn.getAttribute('title') || ''} `
+      + `${btn.getAttribute('aria-label') || ''}`;
+    expect(historyLabel).toContain('history');
   });
 
   it('History button is disabled when RPC is disconnected', async () => {
@@ -2311,7 +2321,12 @@ describe('ChatPanel snippet drawer', () => {
     await settle(p);
     const btn = p.shadowRoot.querySelector('.snippet-drawer-button');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toContain('Snippets');
+    // Icon-only button — text affordance lives in
+    // `title` (hover) and `aria-label` (screen reader).
+    const snippetsLabel =
+      `${btn.getAttribute('title') || ''} `
+      + `${btn.getAttribute('aria-label') || ''}`;
+    expect(snippetsLabel).toContain('snippet');
   });
 
   it('drawer is closed by default', async () => {
