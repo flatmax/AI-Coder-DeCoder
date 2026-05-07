@@ -1168,10 +1168,15 @@ describe('ChatPanel agent_tag routing', () => {
     await settle(p);
     expect(started).toHaveBeenCalledOnce();
     // Args: requestId, message, files, images,
-    // excluded_urls, agent_tag. agent_tag is the 6th.
+    // excluded_urls, agent_tag, reasoning. agent_tag is
+    // the 6th, reasoning is the 7th.
     const args = started.mock.calls[0];
-    expect(args).toHaveLength(6);
+    expect(args).toHaveLength(7);
     expect(args[5]).toBeNull();
+    // reasoning defaults to false from localStorage
+    // (_loadReasoningEnabled returns false when the key
+    // is absent).
+    expect(args[6]).toBe(false);
   });
 
   it('agent tab sends its id as agent_tag', async () => {
