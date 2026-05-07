@@ -74,8 +74,8 @@ import { LitElement, css, html } from 'lit';
 
 import { RpcMixin } from './rpc-mixin.js';
 import './file-picker.js';
-import './chat-panel.js';
-import { parseAgentTabId } from './chat-panel.js';
+import './chat-panel/index.js';
+import { parseAgentTabId } from './chat-panel/index.js';
 import './commit-graph.js';
 
 // ---------------------------------------------------------------

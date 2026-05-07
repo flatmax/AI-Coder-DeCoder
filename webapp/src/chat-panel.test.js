@@ -21,7 +21,7 @@ import {
 } from 'vitest';
 
 import { SharedRpc } from './rpc.js';
-import './chat-panel.js';
+import './chat-panel/index.js';
 import {
   ChatPanel,
   generateRequestId,
@@ -37,7 +37,7 @@ import {
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,
-} from './chat-panel.js';
+} from './chat-panel/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

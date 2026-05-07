@@ -13,7 +13,7 @@
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import { fuzzyMatch } from './file-picker.js';
-import { parseAgentTabId } from './chat-panel.js';
+import { parseAgentTabId } from './chat-panel/index.js';
 
 /** localStorage key for the active sub-view. */
 const _SUBVIEW_KEY = 'ac-dc-context-subview';

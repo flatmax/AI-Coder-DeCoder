@@ -12,7 +12,7 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
-import { parseAgentTabId } from './chat-panel.js';
+import { parseAgentTabId } from './chat-panel/index.js';
 
 /** Auto-hide delay (ms). */
 const _AUTO_HIDE_MS = 8000;

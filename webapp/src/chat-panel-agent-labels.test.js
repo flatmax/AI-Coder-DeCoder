@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   _AGENT_LABEL_MAX_LENGTH,
   deriveAgentTabLabel,
-} from './chat-panel.js';
+} from './chat-panel/index.js';
 
 describe('deriveAgentTabLabel — bare prefix cases', () => {
   it('returns "Agent 00" for index 0 with no task', () => {
