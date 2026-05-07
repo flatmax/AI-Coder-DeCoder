@@ -339,13 +339,18 @@ def get_review_state(service: "LLMService") -> dict[str, Any]:
 def get_review_file_diff(
     service: "LLMService", path: str
 ) -> dict[str, Any]:
-    """Return the reverse diff for a single file during review."""
+    """Return the forward diff (base..tip) for a single file during review."""
     if not service._review_active:
         return {"error": "Review mode is not active."}
     if service._repo is None:
         return {"error": "No repository attached."}
     try:
-        return service._repo.get_review_file_diff(path)
+        state = service._review_state or {}
+        return service._repo.get_review_file_diff(
+            path,
+            base_commit=state.get("parent_commit"),
+            head_commit=state.get("branch_tip"),
+        )
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -458,11 +463,17 @@ def build_and_set_review_context(
         if f.get("path")
     }
     diff_blocks: list[str] = []
+    base_sha = state.get("parent_commit")
+    tip_sha = state.get("branch_tip")
     for path in scope.selected_files:
         if path not in changed_paths:
             continue
         try:
-            diff_result = service._repo.get_review_file_diff(path)
+            diff_result = service._repo.get_review_file_diff(
+                path,
+                base_commit=base_sha,
+                head_commit=tip_sha,
+            )
         except Exception as exc:
             logger.debug(
                 "Review diff fetch failed for %s: %s",
@@ -483,10 +494,10 @@ def build_and_set_review_context(
         )
     if diff_blocks:
         parts.append(
-            "## Reverse Diffs (selected files)\n"
-            "These diffs show what would revert each file "
-            "to the pre-review state. The full current "
-            "content is in the working files above.\n\n"
+            "## Diffs (selected files)\n"
+            "These diffs show what the branch added relative "
+            "to the review base. The full post-change content "
+            "is in the working files above.\n\n"
             + "\n\n".join(diff_blocks)
         )
 

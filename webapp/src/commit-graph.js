@@ -529,6 +529,18 @@ export class CommitGraph extends LitElement {
      * render as "off".
      */
     _hiddenBranches: { type: Object, state: true },
+    /**
+     * SHA of the most recently clicked commit. Drives
+     * a visible selection ring and row-background
+     * tint so the user can confirm what they picked
+     * — the disambiguation popover and the parent
+     * confirm button are easy to miss otherwise.
+     * Cleared when the popover is dismissed without
+     * a choice; persists after a successful click so
+     * the selection stays visible while the parent
+     * decides what to do.
+     */
+    _selectedSha: { type: String, state: true },
   };
 
   static styles = css`
@@ -636,6 +648,12 @@ export class CommitGraph extends LitElement {
     .row-hit:hover {
       fill: rgba(88, 166, 255, 0.08);
     }
+    .row-hit.selected {
+      fill: rgba(88, 166, 255, 0.18);
+    }
+    .row-hit.selected:hover {
+      fill: rgba(88, 166, 255, 0.22);
+    }
 
     .commit-node {
       cursor: pointer;
@@ -644,6 +662,16 @@ export class CommitGraph extends LitElement {
     }
     .commit-node:hover {
       filter: brightness(1.3);
+    }
+    .commit-node.selected {
+      stroke: #58a6ff;
+      stroke-width: 2.5;
+    }
+    .commit-selection-ring {
+      fill: none;
+      stroke: #58a6ff;
+      stroke-width: 2;
+      pointer-events: none;
     }
     /* Highlight rings — drawn as a separate circle
      * outside the commit node. Base (merge-base) is
@@ -780,6 +808,7 @@ export class CommitGraph extends LitElement {
     this._loading = false;
     this._popover = null;
     this._hiddenBranches = new Set();
+    this._selectedSha = null;
     this._onScroll = this._onScroll.bind(this);
     this._onDocumentClickForPopover =
       this._onDocumentClickForPopover.bind(this);
@@ -908,6 +937,13 @@ export class CommitGraph extends LitElement {
     event.stopPropagation();
     // Close any stale popover first.
     if (this._popover) this._closePopover();
+    // Mark this commit as the active selection so the
+    // user gets immediate visual confirmation —
+    // ring around the node plus a tinted row band.
+    // Applies to both readOnly (inspect) and
+    // selection flows.
+    this._selectedSha =
+      typeof commit?.sha === 'string' ? commit.sha : null;
     // Read-only mode (review history display) dispatches
     // commit-inspected with no branch-disambiguation
     // popover. The embedding context decides what to do
@@ -1232,6 +1268,10 @@ export class CommitGraph extends LitElement {
       candidates.length > 0 &&
       candidates.every((c) => this._hiddenBranches.has(c.branch.name));
     const hiddenClass = allCandidatesHidden ? 'hidden-branch' : '';
+    const isSelected =
+      typeof commit.sha === 'string' &&
+      this._selectedSha === commit.sha;
+    const selectedClass = isSelected ? 'selected' : '';
     const shortSha =
       typeof commit.short_sha === 'string' && commit.short_sha
         ? commit.short_sha
@@ -1253,7 +1293,7 @@ export class CommitGraph extends LitElement {
       <g>
         <title>${tooltipText}</title>
         <rect
-          class="row-hit"
+          class="row-hit ${selectedClass}"
           x="0"
           y=${row.y - _ROW_HEIGHT / 2}
           width="100%"
@@ -1277,13 +1317,21 @@ export class CommitGraph extends LitElement {
           `
           : ''}
         <circle
-          class="commit-node"
+          class="commit-node ${selectedClass}"
           cx=${nodeX}
           cy=${row.y}
           r=${_NODE_RADIUS}
           fill=${color}
           @click=${(e) => this._onCommitClick(e, commit, layout)}
         />
+        ${isSelected
+          ? svg`<circle
+              class="commit-selection-ring"
+              cx=${nodeX}
+              cy=${row.y}
+              r=${_NODE_RADIUS + 5}
+            />`
+          : ''}
         <text
           class="commit-sha ${hiddenClass}"
           x=${textX}

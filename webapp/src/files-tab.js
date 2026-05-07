@@ -1474,6 +1474,31 @@ export class FilesTab extends RpcMixin(LitElement) {
         /* notifyServer */ false,
       );
     }
+    // Restore review state so the picker's amber banner
+    // reappears after a browser refresh during an active
+    // review. Without this, the post-refresh UI looks
+    // identical to non-review mode even though git HEAD
+    // is detached at the merge-base — confusing, because
+    // the user has no affordance to exit review and
+    // recover their original branch.
+    //
+    // The backend's get_current_state includes the full
+    // review-state dict (matching get_review_state's
+    // shape); we mirror it into _reviewState and push to
+    // the picker via the same direct-update pattern the
+    // review-started handler uses.
+    const review =
+      state.review && typeof state.review === 'object'
+        ? state.review
+        : null;
+    if (review && review.active) {
+      this._reviewState = review;
+      const picker = this._picker();
+      if (picker) {
+        picker.reviewState = review;
+        picker.requestUpdate();
+      }
+    }
   }
 
   _onFilesModified(_event) {
