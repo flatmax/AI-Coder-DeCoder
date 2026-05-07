@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm_service import LLMService
+from ac_dc.url_service.models import URLContent
 
 from .conftest import _FakeLiteLLM, _RecordingEventCallback
 
@@ -114,3 +115,37 @@ class TestNewSession:
             "session_id"
         ]
         assert payload["messages"] == []
+
+    def test_clears_url_context(
+        self, service: LLMService
+    ) -> None:
+        """new_session wipes the prompt's URL context block.
+
+        Regression: prior to the fix, _url_context survived
+        new_session, so every turn in the new session still
+        carried the previous session's URL content.
+        """
+        service._context.set_url_context(
+            ["[example.com]\nhello world"]
+        )
+        assert service._context.get_url_context()
+        service.new_session()
+        assert service._context.get_url_context() == []
+
+    def test_clears_fetched_urls(
+        self, service: LLMService
+    ) -> None:
+        """new_session wipes URLService._fetched.
+
+        Regression: prior to the fix, the in-memory fetched
+        dict survived new_session, so the HUD chip list and
+        format_url_context() kept showing stale URLs.
+        Filesystem cache is intentionally preserved — only
+        the session-active dict is cleared.
+        """
+        service._url_service._fetched["https://example.com"] = (
+            URLContent(url="https://example.com", content="hi")
+        )
+        assert service._url_service.get_fetched_urls()
+        service.new_session()
+        assert service._url_service.get_fetched_urls() == []

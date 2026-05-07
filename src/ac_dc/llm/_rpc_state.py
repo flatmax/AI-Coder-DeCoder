@@ -424,13 +424,26 @@ def new_session(service: "LLMService") -> dict[str, Any]:
             f"sess_{int(time.time() * 1000)}_nostore"
         )
     service._context.clear_history()
+    # Wipe URL state alongside chat history. Without this,
+    # _fetched URLs and the prompt's url_context survive
+    # across sessions — the user starts a "fresh" session
+    # but every turn still carries the previous session's
+    # URL content (and the HUD chips still list them).
+    # Filesystem cache is preserved; only this session's
+    # active URL context is cleared.
+    service._context.clear_url_context()
+    if service._url_service is not None:
+        service._url_service.clear_fetched()
     # Clear each agent's chat history but preserve the
     # scope itself. The agent's ContextManager, file context,
     # and stability tracker survive — only the conversation
     # messages are wiped. Mirrors the orchestrator's own
-    # behaviour above (clear_history on _context).
+    # behaviour above (clear_history on _context). URL
+    # context lives on each agent's ContextManager too,
+    # so wipe it symmetrically.
     for scope in service._agent_contexts.values():
         scope.context.clear_history()
+        scope.context.clear_url_context()
     service._broadcast_event(
         "sessionChanged",
         {"session_id": service._session_id, "messages": []},
