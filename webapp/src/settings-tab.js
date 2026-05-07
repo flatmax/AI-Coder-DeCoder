@@ -39,6 +39,15 @@ const CONFIG_CARDS = [
     toggleConfigKey: 'app',
     togglePath: 'agents.enabled',
     toggleDefault: false,
+    // Locked off during early development. The switch
+    // renders read-only and clicks are ignored at the
+    // handler level — users can see the feature exists
+    // but cannot enable it from the UI. Remove this flag
+    // (and the corresponding guards in `_onToggleClick`
+    // and `_renderToggleCard`) when the feature is ready
+    // to ship.
+    locked: true,
+    lockedNote: 'Locked — feature in early development',
   },
   { key: 'litellm', icon: '🤖', label: 'LLM Config', format: 'json', reloadable: true },
   { key: 'app', icon: '⚙️', label: 'App Config', format: 'json', reloadable: true },
@@ -482,6 +491,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   async _onToggleClick(card) {
     if (!card || card.renderer !== 'toggle') return;
+    if (card.locked) return;
     if (!this._localhost) return;
     if (this._togglingKey) return;
     this._togglingKey = card.key;
@@ -755,11 +765,16 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const isLoaded = state !== undefined;
     const value = isLoaded ? state : Boolean(card.toggleDefault);
     const isDisabled =
-      !this._localhost || this._togglingKey === card.key;
+      card.locked ||
+      !this._localhost ||
+      this._togglingKey === card.key;
     const ariaLabel = `${card.label}: ${value ? 'on' : 'off'}`;
-    const tooltip = card.description
+    const baseTooltip = card.description
       ? `${card.label} — ${card.description}`
       : card.label;
+    const tooltip = card.locked && card.lockedNote
+      ? `${baseTooltip} (${card.lockedNote})`
+      : baseTooltip;
     return html`
       <div
         class="card toggle-card ${value ? 'toggle-on' : ''} ${
@@ -791,11 +806,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ${value ? 'ON' : 'OFF'}
           </span>
         </button>
-        ${!this._localhost
+        ${card.locked
           ? html`<span class="toggle-readonly-note">
-              Host controls this setting
+              ${card.lockedNote || 'Locked'}
             </span>`
-          : ''}
+          : !this._localhost
+            ? html`<span class="toggle-readonly-note">
+                Host controls this setting
+              </span>`
+            : ''}
       </div>
     `;
   }
