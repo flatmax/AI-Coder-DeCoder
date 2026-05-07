@@ -1559,6 +1559,7 @@ class LLMService:
         images: list[str] | None = None,
         excluded_urls: list[str] | None = None,
         agent_tag: str | None = None,
+        reasoning: bool | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_streaming.chat_streaming`."""
         from ac_dc.llm._rpc_streaming import chat_streaming
@@ -1570,6 +1571,7 @@ class LLMService:
             images,
             excluded_urls,
             agent_tag,
+            reasoning,
         )
 
     @staticmethod
@@ -1610,6 +1612,7 @@ class LLMService:
         *,
         scope: ConversationScope | None = None,
         agent_key: str | None = None,
+        reasoning: bool | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._streaming.stream_chat`.
 
@@ -1623,11 +1626,15 @@ class LLMService:
         — the main-conversation caller (``chat_streaming`` via
         ``ensure_future``) doesn't await the return value and
         ignores it.
+
+        ``reasoning`` is forwarded into the LiteLLM call —
+        per-request override for extended-thinking mode.
         """
         from ac_dc.llm._streaming import stream_chat
         return await stream_chat(
             self, request_id, message, files, images,
             excluded_urls, scope=scope, agent_key=agent_key,
+            reasoning=reasoning,
         )
 
     async def _detect_and_fetch_urls(
@@ -1684,10 +1691,13 @@ class LLMService:
         request_id: str,
         messages: list[dict[str, Any]],
         loop: asyncio.AbstractEventLoop,
+        reasoning: bool | None = None,
     ) -> tuple[str, bool, str | None, dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._streaming.run_completion_sync`."""
         from ac_dc.llm._streaming import run_completion_sync
-        return run_completion_sync(self, request_id, messages, loop)
+        return run_completion_sync(
+            self, request_id, messages, loop, reasoning=reasoning,
+        )
 
     def _accumulate_usage(self, usage: Any) -> None:
         """Delegate to :func:`ac_dc.llm._streaming.accumulate_usage`."""

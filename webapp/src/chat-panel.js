@@ -325,6 +325,35 @@ function buildNotInContextRetryPrompt(filesAutoAdded) {
 const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
 
 /**
+ * localStorage key for the reasoning / extended-thinking
+ * toggle. Persisted globally (not per-repo) — users who
+ * turn it on for a hard problem typically want it for the
+ * next hard problem too. Boolean stored as string for
+ * consistency with the other persisted toggles.
+ */
+const _REASONING_STORAGE_KEY = 'ac-dc-reasoning-enabled';
+
+function _loadReasoningEnabled() {
+  try {
+    return localStorage.getItem(_REASONING_STORAGE_KEY) === 'true';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _saveReasoningEnabled(enabled) {
+  try {
+    localStorage.setItem(
+      _REASONING_STORAGE_KEY,
+      enabled ? 'true' : 'false',
+    );
+  } catch (_) {
+    // Best-effort persistence — in-memory state wins for
+    // the session if localStorage is unavailable.
+  }
+}
+
+/**
  * Read the snippet drawer's persisted open state. Defaults to
  * closed. Catches any localStorage access errors (private
  * browsing, SecurityError on cross-origin iframes) so the chat
@@ -619,6 +648,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * Not per-tab — review is main-conversation-only.
      */
     reviewActive: { type: Boolean },
+    /**
+     * True when extended-thinking / reasoning mode is on.
+     * Component-scoped (not per-tab) — every tab and agent
+     * shares the same setting because the toggle is a
+     * cost/quality dial the user expresses globally. The
+     * value is forwarded into ``LLMService.chat_streaming``
+     * as the ``reasoning`` argument; backend layers
+     * per-request override on top of ``app.json`` config.
+     * Persisted to localStorage under
+     * ``ac-dc-reasoning-enabled``. Spec
+     * ``specs4/7-future/reasoning.md`` § Recommended Shape
+     * — Commit B.
+     */
+    _reasoningEnabled: { type: Boolean, state: true },
     /**
      * URL content dialog state. When non-null, the content
      * viewer overlay is open showing the URL's fetched
@@ -2119,6 +2162,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // review mode.
     this._committing = false;
     this.reviewActive = false;
+
+    // Reasoning toggle — restored from localStorage so the
+    // user's last choice survives reload. Component-scoped,
+    // not per-tab.
+    this._reasoningEnabled = _loadReasoningEnabled();
 
     // Repo files list — pushed by files-tab for file mention
     // detection. Global to the chat panel because the repo is
@@ -4538,18 +4586,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
         // Passed positionally as the 4th arg to match the
         // backend's `chat_streaming(request_id, message,
         // files=None, images=None, excluded_urls=None,
-        // agent_tag=None)` signature. Phase 2c's selected-
-        // files list lives on this component as
-        // `selectedFiles` (set by the files-tab
-        // orchestrator); the per-tab getter routes to the
-        // active tab's state so agent tabs send their own
-        // selection, not the main tab's.
+        // agent_tag=None, reasoning=None)` signature.
+        // Phase 2c's selected-files list lives on this
+        // component as `selectedFiles` (set by the
+        // files-tab orchestrator); the per-tab getter
+        // routes to the active tab's state so agent tabs
+        // send their own selection, not the main tab's.
         Array.isArray(this.selectedFiles)
           ? this.selectedFiles
           : [],
         images,
         excludedUrls,
         agentTag,
+        // 7th arg — reasoning override. Boolean (not None)
+        // because the user's toggle is a deliberate choice;
+        // the config-default fallthrough only applies when
+        // a caller doesn't pass the field at all (e.g. an
+        // older test fixture or a stripped-down client).
+        this._reasoningEnabled,
       );
       // Response is {status: "started"} on the happy path.
       // Chunks and completion arrive via server-push events.
@@ -4868,6 +4922,30 @@ export class ChatPanel extends RpcMixin(LitElement) {
   _toggleSnippetDrawer() {
     this._snippetDrawerOpen = !this._snippetDrawerOpen;
     _saveDrawerOpen(this._snippetDrawerOpen);
+  }
+
+  /**
+   * Toggle extended-thinking / reasoning mode. The flag is
+   * forwarded as the ``reasoning`` argument to
+   * ``LLMService.chat_streaming`` on every send while
+   * enabled; the backend resolves it through
+   * ``build_thinking_kwargs`` and passes the appropriate
+   * ``thinking`` parameter to LiteLLM. Persisted globally
+   * so the choice survives reload.
+   */
+  _toggleReasoning() {
+    this._reasoningEnabled = !this._reasoningEnabled;
+    _saveReasoningEnabled(this._reasoningEnabled);
+    // Surface a transient toast so users get positive
+    // confirmation. The button itself toggles its
+    // active class but it's near the send button where
+    // attention is split between composing and clicking.
+    this._emitToast(
+      this._reasoningEnabled
+        ? '🧠 Reasoning enabled — slower, deeper'
+        : 'Reasoning disabled',
+      'info',
+    );
   }
 
   /**
@@ -6893,6 +6971,22 @@ export class ChatPanel extends RpcMixin(LitElement) {
             >
               ✂️ Snippets
             </button>
+            <button
+              class="action-button reasoning-toggle ${this
+                ._reasoningEnabled
+                ? 'active'
+                : ''}"
+              @click=${this._toggleReasoning}
+              aria-label=${this._reasoningEnabled
+                ? 'Disable reasoning mode'
+                : 'Enable reasoning mode'}
+              aria-pressed=${this._reasoningEnabled}
+              title=${this._reasoningEnabled
+                ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
+                : 'Reasoning disabled. Click to enable extended thinking for harder problems.'}
+            >
+              🧠 ${this._reasoningEnabled ? 'Thinking' : 'Think'}
+            </button>
             <ac-speech-to-text
               @transcript=${this._onTranscript}
               @recognition-error=${this._onRecognitionError}
@@ -8246,6 +8340,9 @@ export {
   _SEARCH_WHOLE_WORD_KEY,
   _loadSearchToggle,
   _saveSearchToggle,
+  _REASONING_STORAGE_KEY,
+  _loadReasoningEnabled,
+  _saveReasoningEnabled,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,

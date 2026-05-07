@@ -706,6 +706,64 @@ class ConfigManager:
         }
 
     @property
+    def reasoning_config(self) -> dict[str, Any]:
+        """Reasoning / extended-thinking section with defaults.
+
+        Drives the ``thinking`` kwarg passed to
+        ``litellm.completion``. Two fields:
+
+        - ``enabled`` — config-level default for whether
+          reasoning is on. The frontend's per-request toggle
+          (``reasoning`` arg to ``chat_streaming``) layers on
+          top of this; when the request explicitly opts in
+          or out, the per-request value wins. When the
+          request leaves it unspecified, the config default
+          applies.
+        - ``budget_tokens`` — token budget for the model's
+          hidden deliberation. Anthropic's parameter shape;
+          LiteLLM translates to ``reasoning_effort`` for
+          OpenAI-shaped providers automatically. Default
+          10000 matches the rough "medium effort" mapping.
+
+        Aux LLM calls (commit message generation, topic
+        detection) read this config but explicitly opt out
+        — see :mod:`ac_dc.llm._helpers` § ``build_thinking_kwargs``.
+        Reasoning on a JSON-structured task wastes tokens
+        without improving output.
+
+        Spec: ``specs4/7-future/reasoning.md`` § Recommended
+        Shape — Commit A.
+        """
+        section = self.app_config.get("reasoning", {})
+        if not isinstance(section, dict):
+            section = {}
+        try:
+            budget = int(section.get("budget_tokens", 10000))
+        except (TypeError, ValueError):
+            budget = 10000
+        if budget <= 0:
+            budget = 10000
+        return {
+            "enabled": bool(section.get("enabled", False)),
+            "budget_tokens": budget,
+        }
+
+    @property
+    def reasoning_enabled(self) -> bool:
+        """Convenience — config-level reasoning default.
+
+        Hot path readers (the streaming pipeline) use this
+        rather than unpacking ``reasoning_config`` on every
+        turn. Defaults to False — reasoning is opt-in.
+        """
+        return self.reasoning_config["enabled"]
+
+    @property
+    def reasoning_budget_tokens(self) -> int:
+        """Convenience — configured reasoning budget."""
+        return self.reasoning_config["budget_tokens"]
+
+    @property
     def agents_config(self) -> dict[str, Any]:
         """Agent-mode section with defaults filled in.
 

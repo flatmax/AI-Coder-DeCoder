@@ -80,6 +80,7 @@ async def chat_streaming(
     images: list[str] | None = None,
     excluded_urls: list[str] | None = None,
     agent_tag: str | None = None,
+    reasoning: bool | None = None,
 ) -> dict[str, Any]:
     """Start a streaming chat request.
 
@@ -96,6 +97,13 @@ async def chat_streaming(
     ``{"error": "agent not found"}`` — distinct from
     malformed so the frontend can surface different toasts
     for "tab is stale" vs "frontend bug".
+
+    ``reasoning`` is the per-request override for extended-
+    thinking mode. ``True`` forces reasoning on; ``False``
+    forces it off; ``None`` falls through to the config
+    default in ``app.json``. Spec
+    ``specs4/7-future/reasoning.md`` § Recommended Shape —
+    Commit B.
 
     See :meth:`LLMService.chat_streaming` for the full prose
     on single-stream guard scoping and agent_tag semantics.
@@ -175,6 +183,7 @@ async def chat_streaming(
             excluded_urls or [],
             scope=scope,
             agent_key=agent_key,
+            reasoning=reasoning,
         )
     )
     return {"status": "started"}

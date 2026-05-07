@@ -39,6 +39,108 @@ from ac_dc.llm._types import (
 
 
 # ---------------------------------------------------------------------------
+# Reasoning / extended-thinking kwargs
+# ---------------------------------------------------------------------------
+
+
+def _model_uses_adaptive_thinking(model: str) -> bool:
+    """True when the model requires the ``adaptive`` thinking shape.
+
+    Newer Anthropic models (Opus 4.5+, Haiku 4.5+, and the
+    Sonnet 4.5+ family on some backends — notably Bedrock)
+    rejected the legacy ``{"type": "enabled", "budget_tokens": N}``
+    shape with::
+
+        "thinking.type.enabled" is not supported for this model.
+        Use "thinking.type.adaptive" and "output_config.effort"
+        to control thinking behavior.
+
+    For these models we emit the adaptive shape and let the
+    provider pick a default effort level. The legacy shape
+    still works for older Claude families (Sonnet 3.x, Opus 3,
+    earlier Haiku), so we keep it as the default rather than
+    flipping wholesale.
+
+    Match by lowercase substring against the configured model
+    name. Bedrock prefixes (``bedrock/anthropic.``), Anthropic-
+    direct prefixes (``anthropic/``), and bare model names all
+    pass through the same check.
+    """
+    lowered = model.lower()
+    adaptive_markers = (
+        "opus-4-5", "opus-4.5",
+        "opus-4-6", "opus-4.6",
+        "opus-4-7", "opus-4.7",
+        "haiku-4-5", "haiku-4.5",
+        "sonnet-4-5", "sonnet-4.5",
+    )
+    return any(marker in lowered for marker in adaptive_markers)
+
+
+def _build_thinking_payload(
+    config: "ConfigManager",
+) -> dict[str, Any]:
+    """Build the ``thinking`` value for the active model.
+
+    Returns the model-appropriate shape:
+
+    - Adaptive-thinking models: ``{"type": "adaptive"}``.
+      Effort defaults to whatever the provider chose; we
+      don't pass ``output_config.effort`` because LiteLLM's
+      kwarg surface for that field is unstable across
+      versions and "default effort" is a sensible
+      starting point. A future commit can add
+      ``reasoning_effort`` config wiring if users want
+      explicit control.
+    - Legacy-thinking models: ``{"type": "enabled",
+      "budget_tokens": N}`` with N from
+      ``config.reasoning_budget_tokens``.
+    """
+    if _model_uses_adaptive_thinking(config.model):
+        return {"type": "adaptive"}
+    return {
+        "type": "enabled",
+        "budget_tokens": config.reasoning_budget_tokens,
+    }
+
+
+def build_thinking_kwargs(
+    config: "ConfigManager",
+    request_override: bool | None,
+) -> dict[str, Any]:
+    """Build the ``thinking`` kwarg dict for ``litellm.completion``.
+
+    Returns either an empty dict (no reasoning) or a
+    ``{"thinking": {...}}`` dict ready to splat into the
+    completion call. The inner shape varies by model family
+    — see :func:`_build_thinking_payload` for the dispatch.
+    LiteLLM translates to OpenAI's ``reasoning_effort``
+    automatically for providers that use that surface.
+
+    Resolution chain (per ``specs4/7-future/reasoning.md``):
+
+    1. ``request_override`` — per-request flag from the
+       frontend's toggle. ``True`` / ``False`` override the
+       config default; ``None`` defers to config.
+    2. ``config.reasoning_enabled`` — config-level default.
+
+    Aux LLM calls (commit message generation, topic
+    detection) call this with ``request_override=False`` so
+    they're guaranteed not to reason regardless of config.
+    Spec § Aux call policy: aux calls should never reason
+    even when the primary is configured to.
+    """
+    if request_override is False:
+        return {}
+    if request_override is True:
+        return {"thinking": _build_thinking_payload(config)}
+    # request_override is None — fall through to config.
+    if config.reasoning_enabled:
+        return {"thinking": _build_thinking_payload(config)}
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Max-tokens resolution
 # ---------------------------------------------------------------------------
 

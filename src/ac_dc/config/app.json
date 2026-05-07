@@ -28,5 +28,9 @@
   },
   "agents": {
     "enabled": false
+  },
+  "reasoning": {
+    "enabled": false,
+    "budget_tokens": 10000
   }
 }

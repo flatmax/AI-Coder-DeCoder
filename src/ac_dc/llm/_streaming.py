@@ -53,6 +53,7 @@ from ac_dc.llm._helpers import (
     _extract_finish_reason,
     _extract_response_cost,
     _resolve_max_output_tokens,
+    build_thinking_kwargs,
 )
 from ac_dc.llm._types import _URL_PER_MESSAGE_LIMIT
 
@@ -78,6 +79,7 @@ async def stream_chat(
     *,
     scope: "ConversationScope | None" = None,
     agent_key: str | None = None,
+    reasoning: bool | None = None,
 ) -> dict[str, Any]:
     """Background task — the actual streaming logic.
 
@@ -88,6 +90,11 @@ async def stream_chat(
     ``service._active_agent_streams``. See
     :meth:`LLMService._stream_chat` for the full prose
     describing every step.
+
+    ``reasoning`` carries the per-request extended-thinking
+    override forwarded by the chat_streaming RPC. ``None``
+    defers to ``config.reasoning_enabled``; ``True`` /
+    ``False`` force the corresponding state.
     """
     if scope is None:
         scope = service._default_scope()
@@ -249,7 +256,7 @@ async def stream_chat(
         ) = await loop.run_in_executor(
             service._stream_executor,
             service._run_completion_sync,
-            request_id, messages, loop,
+            request_id, messages, loop, reasoning,
         )
 
         # Persist assistant response.
@@ -398,6 +405,7 @@ def run_completion_sync(
     request_id: str,
     messages: list[dict[str, Any]],
     loop: asyncio.AbstractEventLoop,
+    reasoning: bool | None = None,
 ) -> tuple[str, bool, str | None, dict[str, Any]]:
     """Blocking LLM call — runs in a worker thread.
 
@@ -406,6 +414,12 @@ def run_completion_sync(
     event loop via ``run_coroutine_threadsafe``. See
     :meth:`LLMService._run_completion_sync` for the full
     prose describing usage_dict's shape.
+
+    ``reasoning`` is the per-request extended-thinking
+    override. ``None`` falls through to the config default;
+    ``True`` / ``False`` force the corresponding state. The
+    resolved ``thinking`` kwarg is passed straight into
+    ``litellm.completion``.
     """
     empty_usage: dict[str, Any] = {
         "prompt_tokens": 0,
@@ -426,6 +440,23 @@ def run_completion_sync(
             None,
             dict(empty_usage),
         )
+
+    # LiteLLM's recommended setting for the
+    # Anthropic-thinking + tool-calls compatibility path:
+    # when prior assistant turns lack ``thinking_blocks``
+    # and the new turn enables ``thinking``, this flag lets
+    # LiteLLM gracefully drop the param rather than 400ing.
+    # See https://docs.litellm.ai/docs/reasoning_content §
+    # "Tool Calling with Reasoning". Set on every call so a
+    # fresh worker thread sees it; cheap and idempotent.
+    try:
+        litellm.modify_params = True
+    except AttributeError:
+        # Older LiteLLM versions may not expose the flag.
+        # The code path that needs it is the same one that
+        # produces 400s; users on those versions get the
+        # same behaviour they had before this feature.
+        pass
 
     full_content = ""
     was_cancelled = False
@@ -491,6 +522,22 @@ def run_completion_sync(
             file=_sys.stderr,
         )
 
+    thinking_kwargs = build_thinking_kwargs(
+        service._config, reasoning,
+    )
+    if thinking_kwargs:
+        # Log shape varies by model family — adaptive
+        # payloads carry no budget field, legacy ones do.
+        # See _build_thinking_payload for the dispatch.
+        payload = thinking_kwargs["thinking"]
+        if payload.get("type") == "adaptive":
+            logger.info("Reasoning enabled — adaptive effort")
+        else:
+            logger.info(
+                "Reasoning enabled — budget=%d tokens",
+                payload.get("budget_tokens", 0),
+            )
+
     try:
         stream = litellm.completion(
             model=service._config.model,
@@ -498,6 +545,7 @@ def run_completion_sync(
             stream=True,
             stream_options={"include_usage": True},
             max_tokens=max_output,
+            **thinking_kwargs,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")
