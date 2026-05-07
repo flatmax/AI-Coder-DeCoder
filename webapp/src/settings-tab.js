@@ -155,15 +155,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
     .card-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-      gap: 0.75rem;
-      margin-bottom: 1rem;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
     }
     .card {
       background: rgba(22, 27, 34, 0.6);
       border: 1px solid rgba(240, 246, 252, 0.1);
-      border-radius: 6px;
-      padding: 0.75rem;
+      border-radius: 5px;
+      padding: 0.4rem 0.5rem;
       cursor: pointer;
       text-align: center;
       transition: border-color 120ms ease, background 120ms ease;
@@ -177,13 +177,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.08);
     }
     .card-icon {
-      font-size: 1.5rem;
+      font-size: 1.1rem;
       display: block;
-      margin-bottom: 0.35rem;
+      margin-bottom: 0.2rem;
+      line-height: 1;
     }
     .card-label {
-      font-size: 0.8125rem;
+      font-size: 0.75rem;
       color: var(--text-secondary, #8b949e);
+      line-height: 1.2;
     }
 
     /* Toggle card — renders a switch inline rather than
@@ -195,7 +197,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.4rem;
+      gap: 0.25rem;
     }
     .card.toggle-card:hover {
       background: rgba(22, 27, 34, 0.6);
@@ -206,23 +208,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.04);
     }
     .card-description {
-      font-size: 0.6875rem;
-      color: var(--text-secondary, #8b949e);
-      line-height: 1.35;
-      text-align: center;
-      padding: 0 0.25rem;
+      display: none;
     }
     .toggle-switch {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.35rem;
       background: transparent;
       border: none;
       color: var(--text-primary, #c9d1d9);
       cursor: pointer;
-      padding: 0.25rem 0;
+      padding: 0.1rem 0;
       font-family: inherit;
-      font-size: 0.75rem;
+      font-size: 0.65rem;
       font-weight: 600;
       letter-spacing: 0.05em;
     }
@@ -232,10 +230,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
     .toggle-track {
       position: relative;
-      width: 2.2rem;
-      height: 1.1rem;
+      width: 1.6rem;
+      height: 0.85rem;
       background: rgba(240, 246, 252, 0.15);
-      border-radius: 0.55rem;
+      border-radius: 0.425rem;
       transition: background 120ms ease;
     }
     .toggle-switch.on .toggle-track {
@@ -243,16 +241,16 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
     .toggle-thumb {
       position: absolute;
-      top: 0.125rem;
-      left: 0.125rem;
-      width: 0.85rem;
-      height: 0.85rem;
+      top: 0.1rem;
+      left: 0.1rem;
+      width: 0.65rem;
+      height: 0.65rem;
       background: #ffffff;
       border-radius: 50%;
       transition: transform 120ms ease;
     }
     .toggle-switch.on .toggle-thumb {
-      transform: translateX(1.1rem);
+      transform: translateX(0.75rem);
     }
     .toggle-state-label {
       color: var(--text-secondary, #8b949e);
@@ -261,9 +259,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       color: var(--accent-primary, #58a6ff);
     }
     .toggle-readonly-note {
-      font-size: 0.6875rem;
-      color: var(--text-secondary, #8b949e);
-      font-style: italic;
+      display: none;
     }
 
     .editor-area {
