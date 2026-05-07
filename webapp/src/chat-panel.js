@@ -321,6 +321,30 @@ function buildNotInContextRetryPrompt(filesAutoAdded) {
   );
 }
 
+/**
+ * Read the `?experimental=1` URL parameter set by the
+ * Python launcher when started with `--experimental`.
+ * Cached at module load so every chat-panel instance
+ * sees the same value without re-parsing. Mirrors the
+ * pattern in settings-tab.js.
+ *
+ * Truthy values: '1', 'true', 'yes' (case-insensitive).
+ * Anything else — including the param being absent — is
+ * treated as false. Gates experimental UI affordances
+ * like the reasoning / extended-thinking toggle.
+ */
+const _EXPERIMENTAL_ENABLED = (() => {
+  try {
+    const raw = new URLSearchParams(window.location.search).get(
+      'experimental',
+    );
+    if (!raw) return false;
+    return ['1', 'true', 'yes'].includes(raw.toLowerCase());
+  } catch (_err) {
+    return false;
+  }
+})();
+
 /** localStorage key for the snippet drawer's open/closed state. */
 const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
 
@@ -1486,6 +1510,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
       display: flex;
       gap: 0.5rem;
       align-items: flex-end;
+    }
+    /* Stack a top row (snippets + microphone, side by
+     * side) above the send button at the right edge of
+     * the input row. align-items:stretch lets the top
+     * row's combined width drive the send button's
+     * width so the column sits on a clean vertical
+     * axis. */
+    .send-column {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      align-items: stretch;
+      flex-shrink: 0;
+    }
+    .send-column-top {
+      display: flex;
+      gap: 0;
+      align-items: stretch;
     }
     .input-textarea {
       flex: 1;
@@ -6957,40 +6999,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
       <div class="input-area">
         <div class="action-bar" role="toolbar">
           <div class="action-group">
-            <button
-              class="action-button snippet-drawer-button ${this
-                ._snippetDrawerOpen
-                ? 'active'
-                : ''}"
-              @click=${this._toggleSnippetDrawer}
-              aria-label=${this._snippetDrawerOpen
-                ? 'Close snippet drawer'
-                : 'Open snippet drawer'}
-              aria-expanded=${this._snippetDrawerOpen}
-              title="Quick-insert snippets"
-            >
-              ✂️ Snippets
-            </button>
-            <button
-              class="action-button reasoning-toggle ${this
-                ._reasoningEnabled
-                ? 'active'
-                : ''}"
-              @click=${this._toggleReasoning}
-              aria-label=${this._reasoningEnabled
-                ? 'Disable reasoning mode'
-                : 'Enable reasoning mode'}
-              aria-pressed=${this._reasoningEnabled}
-              title=${this._reasoningEnabled
-                ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
-                : 'Reasoning disabled. Click to enable extended thinking for harder problems.'}
-            >
-              🧠 ${this._reasoningEnabled ? 'Thinking' : 'Think'}
-            </button>
-            <ac-speech-to-text
-              @transcript=${this._onTranscript}
-              @recognition-error=${this._onRecognitionError}
-            ></ac-speech-to-text>
+            ${_EXPERIMENTAL_ENABLED
+              ? html`<button
+                  class="action-button reasoning-toggle ${this
+                    ._reasoningEnabled
+                    ? 'active'
+                    : ''}"
+                  @click=${this._toggleReasoning}
+                  aria-label=${this._reasoningEnabled
+                    ? 'Disable reasoning mode'
+                    : 'Enable reasoning mode'}
+                  aria-pressed=${this._reasoningEnabled}
+                  title=${this._reasoningEnabled
+                    ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
+                    : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
+                >
+                  🧠
+                </button>`
+              : ''}
           </div>
           <div class="action-divider" aria-hidden="true"></div>
           ${this._renderSearchBar()}
@@ -7006,7 +7032,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
                     aria-label="Start a new session"
                     title="New session (clears the conversation)"
                   >
-                    ✨ New session
+                    ✨
                   </button>
                   <button
                     class="action-button history-button"
@@ -7015,7 +7041,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
                     aria-label="Open history browser"
                     title="Browse past sessions"
                   >
-                    📜 History
+                    📜
                   </button>
                 </div>
               `}
@@ -7046,24 +7072,46 @@ export class ChatPanel extends RpcMixin(LitElement) {
             @paste=${this._onInputPaste}
             aria-label="Message input"
           ></textarea>
-          ${this._streaming
-            ? html`<button
-                class="send-button stop"
-                @click=${this._cancel}
-                aria-label="Stop streaming"
+          <div class="send-column">
+            <div class="send-column-top">
+              <button
+                class="action-button snippet-drawer-button ${this
+                  ._snippetDrawerOpen
+                  ? 'active'
+                  : ''}"
+                @click=${this._toggleSnippetDrawer}
+                aria-label=${this._snippetDrawerOpen
+                  ? 'Close snippet drawer'
+                  : 'Open snippet drawer'}
+                aria-expanded=${this._snippetDrawerOpen}
+                title="Quick-insert snippets"
               >
-                ⏹ Stop
-              </button>`
-            : html`<button
-                class="send-button"
-                ?disabled=${!this.rpcConnected ||
-                (!this._input.trim() &&
-                  this._pendingImages.length === 0)}
-                @click=${this._send}
-                aria-label="Send message"
-              >
-                Send
-              </button>`}
+                ✂️
+              </button>
+              <ac-speech-to-text
+                @transcript=${this._onTranscript}
+                @recognition-error=${this._onRecognitionError}
+              ></ac-speech-to-text>
+            </div>
+            ${this._streaming
+              ? html`<button
+                  class="send-button stop"
+                  @click=${this._cancel}
+                  aria-label="Stop streaming"
+                >
+                  ⏹ Stop
+                </button>`
+              : html`<button
+                  class="send-button"
+                  ?disabled=${!this.rpcConnected ||
+                  (!this._input.trim() &&
+                    this._pendingImages.length === 0)}
+                  @click=${this._send}
+                  aria-label="Send message"
+                >
+                  Send
+                </button>`}
+          </div>
         </div>
       </div>
       <ac-history-browser
