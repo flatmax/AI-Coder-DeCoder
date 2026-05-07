@@ -350,7 +350,8 @@ async def stream_chat(
     if error is None and not cancelled:
         try:
             await service._post_response(
-                request_id, turn_id, scope
+                request_id, turn_id, scope,
+                request_usage=request_usage,
             )
         except Exception as exc:
             logger.exception(

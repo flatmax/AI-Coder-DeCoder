@@ -1756,15 +1756,21 @@ class LLMService:
         from ac_dc.llm._breakdown import print_init_hud
         print_init_hud(self)
 
-    def _print_post_response_hud(self) -> None:
+    def _print_post_response_hud(
+        self,
+        request_usage: dict[str, Any] | None = None,
+    ) -> None:
         """Delegate to :func:`ac_dc.llm._breakdown.print_post_response_hud`.
 
         Internal-only method; called from ``_post_response``
         after every completed chat turn to print the
-        three-section terminal HUD to stderr.
+        five-section terminal HUD to stderr. ``request_usage``
+        is forwarded so the HUD can render a "Last Request"
+        section alongside cumulative "Session Totals". None
+        on cancelled/error paths suppresses that section.
         """
         from ac_dc.llm._breakdown import print_post_response_hud
-        print_post_response_hud(self)
+        print_post_response_hud(self, request_usage)
 
     # ------------------------------------------------------------------
     # Context breakdown (RPC)
@@ -1867,10 +1873,21 @@ class LLMService:
         request_id: str,
         turn_id: str,
         scope: ConversationScope | None = None,
+        request_usage: dict[str, Any] | None = None,
     ) -> None:
-        """Delegate to :func:`ac_dc.llm._lifecycle.post_response`."""
+        """Delegate to :func:`ac_dc.llm._lifecycle.post_response`.
+
+        ``request_usage`` carries the provider's normalised
+        token counts for the request that just completed, so
+        the terminal HUD can render a "Last Request" section
+        alongside session totals. None on cancelled / error
+        paths.
+        """
         from ac_dc.llm._lifecycle import post_response
-        await post_response(self, request_id, turn_id, scope)
+        await post_response(
+            self, request_id, turn_id, scope,
+            request_usage=request_usage,
+        )
 
     def _update_stability(
         self,

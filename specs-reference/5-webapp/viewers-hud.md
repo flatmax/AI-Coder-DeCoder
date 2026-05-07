@@ -106,6 +106,46 @@ The `cache_hit_rate` field in the breakdown response is computed locally (cached
 
 **Precedence rule:** Both HUD and Context tab prefer `provider_cache_rate` when non-null, falling back to the local `cache_hit_rate`. The fallback path is taken on the very first request (no cumulative session data yet).
 
+### Cache Hit % (per-request and Session Totals)
+
+The fraction of prompt input that was served from the provider's cache, expressed as a percentage. Computed at two scopes:
+
+- **Per-request** (rendered in This Request / Last Request): `(cache_read / prompt) × 100` for the request that just completed.
+- **Per-session** (rendered in Session Totals): `(cache_read_tokens / input_tokens) × 100` cumulative across all requests this session.
+
+Distinct from the [`cache_hit_rate`](#provider-cache-rate-precedence) badge in the HUD header — the badge shows whichever of `provider_cache_rate` or local `cache_hit_rate` is available; this metric is always cumulative provider data and is rendered explicitly in both HUD body sections (webapp Token HUD + terminal HUD).
+
+**Color thresholds:**
+
+| Hit % | Color |
+|---|---|
+| `>= 50%` | Green |
+| `>= 20%` | Amber |
+| `< 20%` | No color (default text) |
+| Suppressed (`—`) | No color — `prompt == 0` (no input on this request, or no requests yet this session) |
+
+The thresholds match the HUD header badge's [cache hit rate color thresholds](#cache-hit-rate-color-thresholds) for consistency — a green per-request row aligns with a green header badge.
+
+The metric is shown alongside the raw `Cache Read` / `Cache Written` token-count rows so an operator gets both the absolute and the relative view in one section.
+
+### Cache ROI (Session Totals)
+
+A separate metric from the cache hit rate above. The hit rate answers "what fraction of this request's input came from cache"; ROI answers "is the cache paying for itself across the session".
+
+**Formula:** `((cache_read_tokens / cache_write_tokens) − 1) × 100`, expressed as a signed percentage.
+
+| Reading | Meaning |
+|---|---|
+| `+0%` (zero) | Cache writes have been read back exactly once — the session broke even on cache-write cost. |
+| `+100%` | Each written token has been read back twice — strong amortisation. |
+| `+200%` and up | High-leverage caching; common in long-running sessions with stable system prompts. |
+| Negative | Writes haven't been fully read back yet. Normal at the start of a session before hits accumulate. |
+| Suppressed (`—`) | `cache_write_tokens == 0`. No write activity to amortise; the metric is undefined. |
+
+Rendered in the Session Totals section of both the Token HUD and the terminal HUD. Color: green when `>= 0`, amber when negative. Suppressed-row shows muted text and `—` rather than a number.
+
+Why ROI alongside the hit-rate percentage: the hit-rate badge in the HUD header reflects the current request's cache behavior (a snapshot), but a session that has issued one large cache-write and zero subsequent reads will show 0% hit rate AND a large negative ROI — the same underlying state expressed two different ways. ROI surfaces the "have we paid back the write?" question that the hit-rate doesn't capture.
+
 ### Reasoning row rendering
 
 The `reasoning_tokens` field (subset of `completion_tokens` representing hidden reasoning — Claude extended thinking, o1/o3) is rendered in two places:

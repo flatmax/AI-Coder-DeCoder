@@ -923,13 +923,24 @@ def print_init_hud(service: "LLMService") -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
-def print_post_response_hud(service: "LLMService") -> None:
-    """Print the three-section terminal HUD after each response.
+def print_post_response_hud(
+    service: "LLMService",
+    request_usage: dict[str, Any] | None = None,
+) -> None:
+    """Print the four-section terminal HUD after each response.
 
     Sections per specs-reference/5-webapp/viewers-hud.md:
     1. Cache blocks (boxed) — per-tier token counts + cache hit %
-    2. Token usage — model, per-category, total, last request, session
-    3. Tier changes — promotions and demotions
+    2. Token usage — model, per-category structural breakdown
+    3. Last Request — in/out/reasoning/cache for the request
+       just completed. ``request_usage`` carries the
+       provider's normalised counts (see
+       :func:`run_completion_sync`). When None, the section
+       is suppressed — happens on cancelled/error paths
+       where there's no meaningful per-request data.
+    4. Session Totals — cumulative across all requests in
+       this session.
+    5. Tier changes — promotions and demotions
     """
     all_items = service._stability_tracker.get_all_items()
     if not all_items:
@@ -1002,7 +1013,9 @@ def print_post_response_hud(service: "LLMService") -> None:
         ]
         print("\n".join(lines), file=sys.stderr)
 
-    # Section 2: Token Usage
+    # Section 2: Token Usage — structural breakdown of what
+    # the next request would carry. Independent of any
+    # individual call's actual token consumption.
     st = service._session_totals
     model = service._config.model
     system_tokens = service._counter.count(
@@ -1044,10 +1057,15 @@ def print_post_response_hud(service: "LLMService") -> None:
     )
     max_input = service._counter.max_input_tokens
 
+    # Mode-aware label so doc mode reads naturally.
+    map_label = (
+        "Doc Map:   " if service._context.mode.value == "doc"
+        else "Symbol Map:"
+    )
     usage_lines = [
         f"Model: {model}",
         f"System:    {system_tokens:>10,}",
-        f"Symbol Map:{symbol_map_tokens:>10,}",
+        f"{map_label}{symbol_map_tokens:>10,}",
         f"Files:     {files_tokens:>10,}",
     ]
     if url_tokens > 0:
@@ -1056,26 +1074,137 @@ def print_post_response_hud(service: "LLMService") -> None:
         f"History:   {history_tokens:>10,}",
         f"Total:     {total_est:>10,} / {max_input:,}",
     ])
+    print("\n".join(usage_lines), file=sys.stderr)
+
+    # Section 3: Last Request — actual provider counts for
+    # the request just completed. The structural totals
+    # above (Section 2) describe what the prompt CONTAINS;
+    # this section describes what the LLM actually billed,
+    # which differs because of cache hits, reasoning tokens,
+    # and tokenisation differences.
+    if request_usage is not None:
+        prompt_in = request_usage.get("prompt_tokens", 0) or 0
+        completion_out = (
+            request_usage.get("completion_tokens", 0) or 0
+        )
+        reasoning = (
+            request_usage.get("reasoning_tokens", 0) or 0
+        )
+        req_cache_read = (
+            request_usage.get("cache_read_tokens", 0) or 0
+        )
+        req_cache_write = (
+            request_usage.get("cache_write_tokens", 0) or 0
+        )
+        if prompt_in or completion_out:
+            req_lines = ["Last Request:"]
+            req_lines.append(f"  In:        {prompt_in:>10,}")
+            req_lines.append(
+                f"  Out:       {completion_out:>10,}"
+            )
+            if reasoning > 0:
+                req_lines.append(
+                    f"  Reasoning: {reasoning:>10,}"
+                )
+            if req_cache_read or req_cache_write:
+                req_lines.append(
+                    f"  Cache:     "
+                    f"read {req_cache_read:,}, "
+                    f"write {req_cache_write:,}"
+                )
+            # Cache hit ratio — what fraction of this
+            # request's prompt input came from cache.
+            # cache_read / prompt_in × 100. Distinct from
+            # ROI (which compares read against write); this
+            # answers "how much input did we save by
+            # caching". Suppressed when prompt_in is zero
+            # (avoid divide-by-zero) or when there were no
+            # reads (the row would just say 0.0%, no signal).
+            if prompt_in > 0 and req_cache_read > 0:
+                hit_pct = (
+                    req_cache_read / prompt_in
+                ) * 100
+                req_lines.append(
+                    f"  Cache hit: {hit_pct:>9.1f}%"
+                )
+            cost = request_usage.get("cost_usd")
+            if cost is not None:
+                try:
+                    req_lines.append(
+                        f"  Cost:      ${float(cost):.4f}"
+                    )
+                except (TypeError, ValueError):
+                    pass
+            print("\n".join(req_lines), file=sys.stderr)
+
+    # Section 4: Session Totals — cumulative across all
+    # requests since the session started.
     input_tok = st.get("input_tokens", 0)
     output_tok = st.get("output_tokens", 0)
-    if input_tok or output_tok:
-        usage_lines.append(
-            f"Session prompt: {input_tok:,} in, "
-            f"{output_tok:,} out"
-        )
     cache_read = st.get("cache_read_tokens", 0)
     cache_write = st.get("cache_write_tokens", 0)
-    if cache_read or cache_write:
-        usage_lines.append(
-            f"Session cache: read: {cache_read:,}, "
-            f"write: {cache_write:,}"
-        )
-    session_total = sum(
-        v for v in st.values() if isinstance(v, (int, float))
-    )
-    if session_total:
-        usage_lines.append(f"Session total: {session_total:,}")
-    print("\n".join(usage_lines), file=sys.stderr)
+    reasoning_tok = st.get("reasoning_tokens", 0)
+    if input_tok or output_tok:
+        sess_lines = ["Session Totals:"]
+        sess_lines.append(f"  In:        {input_tok:>10,}")
+        sess_lines.append(f"  Out:       {output_tok:>10,}")
+        if reasoning_tok > 0:
+            sess_lines.append(
+                f"  Reasoning: {reasoning_tok:>10,}"
+            )
+        if cache_read or cache_write:
+            sess_lines.append(
+                f"  Cache:     "
+                f"read {cache_read:,}, "
+                f"write {cache_write:,}"
+            )
+        # Cache hit ratio — cumulative cache_read /
+        # input_tokens × 100. What fraction of session
+        # input came from cache. Same as the HUD header
+        # badge's provider_cache_rate, surfaced explicitly
+        # here so the terminal output stands alone without
+        # the operator needing to look at the webapp.
+        # Suppressed when input_tok is zero or no reads.
+        if input_tok > 0 and cache_read > 0:
+            hit_pct = (cache_read / input_tok) * 100
+            sess_lines.append(
+                f"  Cache hit: {hit_pct:>9.1f}%"
+            )
+        # Cache ROI — return on cache-write investment.
+        # ((read / write) - 1) × 100 expresses "how many
+        # extra tokens has each written token paid back?".
+        # 0% = broke even, 100% = paid back twice, negative
+        # = haven't fully amortised the write cost yet.
+        # Only meaningful when cache_write > 0.
+        if cache_write > 0:
+            roi_pct = (
+                (cache_read / cache_write) - 1
+            ) * 100
+            sess_lines.append(
+                f"  Cache ROI: {roi_pct:>+9.1f}%"
+            )
+        sess_cost = st.get("cost_usd", 0.0)
+        priced = st.get("priced_request_count", 0)
+        unpriced = st.get("unpriced_request_count", 0)
+        if priced > 0 or unpriced > 0:
+            try:
+                cost_val = float(sess_cost)
+            except (TypeError, ValueError):
+                cost_val = 0.0
+            if priced > 0 and unpriced == 0:
+                sess_lines.append(
+                    f"  Cost:      ${cost_val:.4f}"
+                )
+            elif priced > 0 and unpriced > 0:
+                sess_lines.append(
+                    f"  Cost:      ${cost_val:.4f} "
+                    f"(partial, {unpriced} unpriced)"
+                )
+            else:
+                sess_lines.append(
+                    f"  Cost:      — ({unpriced} unpriced)"
+                )
+        print("\n".join(sess_lines), file=sys.stderr)
 
     # Section 3: Tier Changes
     # Merge tier transitions (changes) and fresh tracker

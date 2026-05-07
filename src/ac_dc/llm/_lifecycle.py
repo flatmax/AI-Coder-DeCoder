@@ -110,6 +110,7 @@ async def post_response(
     request_id: str,
     turn_id: str,
     scope: "ConversationScope | None" = None,
+    request_usage: dict[str, Any] | None = None,
 ) -> None:
     """Stability tracker update, compaction, terminal HUD.
 
@@ -118,7 +119,11 @@ async def post_response(
 
     1. ``_update_stability`` — builds the full active items
        list and runs the tracker update cycle.
-    2. Print terminal HUD — three sections per spec.
+    2. Print terminal HUD — five sections per spec.
+       ``request_usage`` is forwarded so the HUD can show a
+       "Last Request" section alongside session totals;
+       None on cancelled/error paths suppresses that
+       section.
     3. Compaction — gated on current history token count.
        Emits ``compactionEvent`` progress callbacks. On
        success, appends a system event in both the context
@@ -139,7 +144,7 @@ async def post_response(
     service._update_stability(scope)
 
     # Terminal HUD — diagnostic output, reads shared state.
-    service._print_post_response_hud()
+    service._print_post_response_hud(request_usage)
 
     # Compaction — gated on current history token count.
     tokens = scope.context.history_token_count()
