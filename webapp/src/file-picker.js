@@ -461,6 +461,17 @@ export class FilePicker extends LitElement {
      */
     excludedFiles: { type: Object },
     /**
+     * Pinned file paths — files that cannot be deselected
+     * because they have working-tree or staged
+     * modifications. The picker uses this to suppress
+     * native checkbox toggle on click (preventing a
+     * one-frame visual flip) and lets the click flow up
+     * to files-tab which surfaces a toast. Reassigned by
+     * files-tab whenever the file tree's status data
+     * changes.
+     */
+    pinnedFiles: { type: Object },
+    /**
      * Path of the file currently open in a viewer, or null
      * when no file is open. The row matching this path gets
      * a distinct background and left-border accent — an
@@ -541,6 +552,25 @@ export class FilePicker extends LitElement {
      * add a `type: 'dir'` discriminator when they ship.
      */
     _contextMenu: { type: Object, state: true },
+    /**
+     * Inline-input state — populated while a rename,
+     * duplicate, or create operation is in progress.
+     * Declared as reactive so the public `beginRename` /
+     * `beginDuplicate` / `beginCreate*` methods trigger a
+     * re-render (which mounts the input) and the `updated`
+     * hook sees the change and can focus it. Without these
+     * the inline input would only appear when some other
+     * reactive property happened to change in the same
+     * tick, and focus would never land because the
+     * `updated` guard keys on these fields changing.
+     *
+     * Mutually exclusive: at most one of the three is
+     * non-null at any time. The public API enforces this
+     * by clearing the other two when setting one.
+     */
+    _renaming: { type: String, state: true },
+    _duplicating: { type: String, state: true },
+    _creating: { type: Object, state: true },
     /**
      * Branch switcher popover state. Null when closed;
      * populated shape when open:
@@ -1304,6 +1334,11 @@ export class FilePicker extends LitElement {
     // `Set.has()` during render works before the first server
     // response. Parent assigns via direct-update pattern.
     this.excludedFiles = new Set();
+    // Pinned files — Set of paths that cannot be removed
+    // from selection because they have working-tree or
+    // staged modifications. Default empty so `.has()`
+    // works pre-load.
+    this.pinnedFiles = new Set();
     // No file open in a viewer yet. Remains null until the
     // orchestrator pushes the first viewer event.
     this.activePath = null;
@@ -2772,8 +2807,11 @@ export class FilePicker extends LitElement {
 
   _onDirClick(event, node) {
     // Clicking anywhere on a directory row (outside the checkbox)
-    // toggles its expansion.
+    // toggles its expansion. Also sets keyboard focus so
+    // subsequent keyboard navigation has a defined starting
+    // point — same reasoning as `_onFileClick`.
     if (event.target.classList.contains('checkbox')) return;
+    this._focusedPath = node.path;
     this._toggleExpanded(node.path);
   }
 
@@ -2866,6 +2904,13 @@ export class FilePicker extends LitElement {
     // context, not about preventing the user from reading
     // the file in the editor.
     if (event.target.classList.contains('checkbox')) return;
+    // Set keyboard focus as a side effect of the click so
+    // subsequent keyboard actions (F2 rename, arrow keys)
+    // have a defined "current" row. Without this, clicking
+    // a file gives the tree container focus (the blue
+    // outline) but `_focusedPath` stays null and F2 is a
+    // silent no-op.
+    this._focusedPath = node.path;
     this.dispatchEvent(
       new CustomEvent('file-clicked', {
         detail: { path: node.path },
@@ -2887,17 +2932,41 @@ export class FilePicker extends LitElement {
     //   regular click from excluded → selected (un-exclude
     //     and tick)
     //
-    // Shift+click always calls preventDefault on the native
-    // checkbox event to suppress the browser's own toggle —
-    // otherwise the checkbox flips visually, then our state
-    // change flips it back, producing a one-frame glitch.
-    // Regular click lets the native toggle fire because the
-    // new state matches it (or else we override via the
-    // reactive .checked binding on the next render).
+    // We let the native checkbox toggle fire for normal
+    // toggles — Lit's reactive binding writes the same
+    // value on the next render, so there's no glitch.
+    // Two cases need preventDefault to suppress the
+    // native flip:
+    //   1. shift+click — we're not toggling selection at
+    //      all, we're toggling exclusion; the native flip
+    //      would visually mislead.
+    //   2. attempted deselection of a pinned (modified)
+    //      file — files-tab will revert the change, but
+    //      because the resulting bound value matches the
+    //      pre-click value, Lit skips the DOM write and
+    //      the native flip stands. preventDefault keeps
+    //      the checkbox visually checked from the start.
     event.stopPropagation();
     if (event.shiftKey) {
       event.preventDefault();
       this._toggleExclusion(node.path);
+      return;
+    }
+    const isCurrentlySelected = this.selectedFiles.has(node.path);
+    const isPinned =
+      this.pinnedFiles && this.pinnedFiles.has(node.path);
+    if (isCurrentlySelected && isPinned) {
+      event.preventDefault();
+      // Still emit the selection-changed event so
+      // files-tab fires the toast. The revert there
+      // produces the no-op set-equal case, which we now
+      // need to push back to the picker — but with
+      // preventDefault'd native flip, the visual is
+      // already correct. The push happens for safety in
+      // case some other code path mutates the checkbox.
+      const next = new Set(this.selectedFiles);
+      next.delete(node.path);
+      this._emitSelectionChanged(next);
       return;
     }
     // Regular click. If the file is currently excluded,
@@ -3652,6 +3721,24 @@ export class FilePicker extends LitElement {
    * navigation order matches what the user sees.
    */
   _onTreeKeyDown(event) {
+    // Bail out when the user is typing in an inline
+    // rename / duplicate / new-file / new-directory
+    // input. The input lives inside `.tree-scroll`, so
+    // keystrokes bubble up to this handler; without the
+    // guard, Space toggles selection, arrow keys navigate
+    // the tree, Enter commits rename, etc. — all at the
+    // expense of the text the user is actually typing.
+    // Escape and Enter are the input's own commit/cancel
+    // shortcuts (handled by `_onInlineKeyDown`), so they
+    // don't need to reach the tree handler either.
+    const target = event.target;
+    if (
+      target &&
+      target.classList &&
+      target.classList.contains('inline-input')
+    ) {
+      return;
+    }
     const rows = this._collectVisibleRows();
     if (rows.length === 0) return;
     // Establish a focused row. First-ever key press with
@@ -3763,6 +3850,26 @@ export class FilePicker extends LitElement {
       case 'End': {
         event.preventDefault();
         this._setFocusedAndScroll(rows[rows.length - 1].path);
+        return;
+      }
+      case 'F2': {
+        // Rename the focused row. F2 is the de facto
+        // rename key on Windows and KDE; users reach
+        // for it reflexively. No-op when nothing is
+        // focused — picking arbitrarily would surprise
+        // users who hit the key before navigating.
+        if (!current) return;
+        event.preventDefault();
+        if (current.type === 'file') {
+          this.beginRename(current.path);
+        }
+        // Directories fall through silently for now —
+        // rename-dir exists as a context-menu action but
+        // uses the same beginRename path, so wiring it
+        // here would be a one-liner. Leaving it off
+        // until someone asks, to avoid accidentally
+        // renaming a large subtree from a stray
+        // keystroke.
         return;
       }
       default:

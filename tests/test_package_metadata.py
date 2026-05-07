@@ -43,7 +43,11 @@ def test_version_file_is_shipped() -> None:
     content = version_file.read_text(encoding="utf-8").strip()
     # Source tree ships 'dev'; release builds bake a timestamp+SHA string
     # matching YYYY.MM.DD-HH.MM-<sha>. Accept either shape.
-    is_dev = content == "dev"
+    # Source tree ships ``dev`` or a ``dev-{label}`` variant
+    # (e.g., ``dev-d27`` to identify a development branch);
+    # release builds bake a timestamp+SHA string matching
+    # ``YYYY.MM.DD-HH.MM-<sha>``. Accept any of the three.
+    is_dev = bool(re.fullmatch(r"dev(-[A-Za-z0-9_.-]+)?", content))
     is_release = bool(
         re.fullmatch(r"\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}-[0-9a-f]{7,40}", content)
     )

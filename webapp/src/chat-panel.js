@@ -96,6 +96,107 @@ function generateRequestId() {
   return `${epoch}-${suffix}`;
 }
 
+/** Maximum visible width of an agent tab label, in chars. */
+const _AGENT_LABEL_MAX_LENGTH = 40;
+
+/**
+ * Map a tab id to its backend agent identifier.
+ *
+ * Agent identity is the LLM-chosen id from the
+ * ``🟧🟧🟧 AGENT`` block (e.g., ``"frontend-trivial"``).
+ * Tab ids for agent tabs ARE that id directly; the
+ * literal string ``"main"`` denotes the main
+ * conversation.
+ *
+ * Returns the agent id (a non-empty string) for agent
+ * tabs, or ``null`` for the main tab and for malformed
+ * inputs. ``null`` tells the caller to omit the
+ * ``agent_tag`` argument entirely (untagged call =
+ * main conversation).
+ *
+ * Pre-flat-identity history: tab ids used to be
+ * ``{turn_id}/agent-{NN}`` and this returned a
+ * ``[turn_id, agent_idx]`` tuple. Both the tuple shape
+ * and the embedded turn id are gone — the backend
+ * registry is keyed flat by the agent's id and
+ * scopes survive across turns.
+ *
+ * @param {string} tabId — the tab's identifier
+ * @returns {string | null}
+ */
+function parseAgentTabId(tabId) {
+  if (typeof tabId !== 'string' || !tabId) return null;
+  if (tabId === 'main') return null;
+  return tabId;
+}
+
+/**
+ * Derive a tab-strip label for a spawned agent.
+ *
+ * Format: `Agent NN` for empty / whitespace tasks, or
+ * `Agent NN: {first line of task}` for a populated task
+ * — truncated to `_AGENT_LABEL_MAX_LENGTH` chars with a
+ * trailing `…` when the task text doesn't fit.
+ *
+ * The `Agent NN` prefix is zero-padded to two digits so
+ * tabs sort naturally in the strip (agent-02 before
+ * agent-10) and match the backend's `{turn_id}/agent-NN`
+ * archive path convention from D25. Large indexes
+ * (100+) outgrow the padding but still render; the
+ * numeric width just isn't fixed beyond two digits.
+ *
+ * Task handling:
+ *   - Non-string / null / undefined → `Agent NN`
+ *   - Empty or whitespace-only → `Agent NN`
+ *   - Multi-line → first non-blank line only. Tab labels
+ *     are single-line; later lines are context the user
+ *     will read in the agent's own conversation view.
+ *   - Long first line → truncated to fit the cap; the
+ *     `…` counts toward the total length so the label
+ *     never exceeds `_AGENT_LABEL_MAX_LENGTH`.
+ *
+ * Index handling:
+ *   - Non-integer or negative → coerced via
+ *     `Math.max(0, Math.floor(idx))`. NaN coerces to 0.
+ *     Defensive; the backend always sends a non-negative
+ *     integer, but a malformed spawn payload shouldn't
+ *     produce an ugly label like `Agent NaN`.
+ *
+ * @param {number} agentIdx — zero-based agent index
+ * @param {string | undefined | null} task — the agent's
+ *   task text from the spawn block
+ * @returns {string} — tab label, suitable for the
+ *   `_tabLabels` Map
+ */
+function deriveAgentTabLabel(agentIdx, task) {
+  // Coerce the index. Integer, non-negative, padded to
+  // two digits for strip sort order.
+  let idx = Number(agentIdx);
+  if (!Number.isFinite(idx)) idx = 0;
+  idx = Math.max(0, Math.floor(idx));
+  const paddedIdx = String(idx).padStart(2, '0');
+  const prefix = `Agent ${paddedIdx}`;
+
+  // Task handling — non-string / empty → bare prefix.
+  if (typeof task !== 'string') return prefix;
+  const firstLine = task
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return prefix;
+
+  const full = `${prefix}: ${firstLine}`;
+  if (full.length <= _AGENT_LABEL_MAX_LENGTH) return full;
+
+  // Truncate, reserving one char for the ellipsis.
+  // `prefix: ` is never itself long enough to overflow
+  // (prefix is at most ~9 chars for 2-digit indexes; the
+  // cap is 40), so there's always room for at least a
+  // few task chars plus the ellipsis.
+  const keep = _AGENT_LABEL_MAX_LENGTH - 1;
+  return `${full.slice(0, keep)}…`;
+}
+
 /**
  * Build a retry prompt for ambiguous-anchor edit failures.
  *
@@ -303,13 +404,49 @@ const AUTO_SCROLL_DISENGAGE_PX = 100;
 
 export class ChatPanel extends RpcMixin(LitElement) {
   static properties = {
+    // Per-tab reactive properties — every field marked
+    // `noAccessor: true` has a custom getter/setter on the
+    // class body that forwards to the active tab's state
+    // (D21 per-tab refactor). Lit honours `noAccessor` by
+    // skipping its descriptor installation and relying on
+    // our setter to call requestUpdate.
+    //
+    // Non-per-tab reactive properties (`repoFiles`,
+    // `reviewActive`) use the normal Lit accessor path.
+
+    /**
+     * Which tab is currently visible (D21 A3). Setter
+     * dispatches `active-tab-changed` on change so
+     * sibling components (files-tab picker, tab strip
+     * UI) can re-sync their per-tab state. Single-tab
+     * operation keeps this fixed at `"main"`; the
+     * reactive plumbing is wired now so Phase C's
+     * spawn path doesn't re-touch the switching
+     * logic.
+     */
+    _activeTabId: { type: String, state: true, noAccessor: true },
+
+    /**
+     * Whether the tab strip's overflow menu is open
+     * (D21 Phase B2). The menu is a dropdown anchored
+     * to the three-dots button at the right edge of
+     * the strip; it lists every tab by label for
+     * direct-jump navigation. Non-per-tab because
+     * it's a UI-level dropdown, not a conversation-
+     * level concern — every tab sees the same menu.
+     * Closed by default; toggled by button click or
+     * menu-item click; dismissed by outside-click or
+     * Escape.
+     */
+    _tabStripOverflowOpen: { type: Boolean, state: true },
+
     /**
      * Messages as `{role, content, system_event?}` dicts.
      * Replaced wholesale on session load; appended during
      * normal conversation. Always a new array on change so
      * Lit's default identity check triggers re-render.
      */
-    messages: { type: Array },
+    messages: { type: Array, noAccessor: true },
     /**
      * Flat list of repo-relative file paths. The files-tab
      * orchestrator pushes this down via direct assignment
@@ -323,40 +460,54 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * entirely — `findFileMentions` short-circuits on empty
      * lists so the cost is nil until the files-tab wires
      * up.
+     *
+     * Not per-tab — repo-level state, global across tabs.
      */
     repoFiles: { type: Array },
     /** Current textarea content. Cleared on send. */
-    _input: { type: String, state: true },
+    _input: { type: String, state: true, noAccessor: true },
     /**
      * True while a user-initiated stream is in flight. Drives
      * the Send/Stop toggle and disables the input.
      */
-    _streaming: { type: Boolean, state: true },
+    _streaming: { type: Boolean, state: true, noAccessor: true },
     /**
      * Rendered content of the active streaming assistant
      * message. Updated per animation frame, not per chunk, so
      * Lit re-render rate is capped at ~60Hz.
      */
-    _streamingContent: { type: String, state: true },
+    _streamingContent: {
+      type: String,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Whether the history browser modal is open. Toggled by
      * the "History" button and by the modal's close/load
      * events.
      */
-    _historyOpen: { type: Boolean, state: true },
+    _historyOpen: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Whether the snippet drawer is expanded. Persisted to
      * localStorage under `ac-dc-snippet-drawer` — the drawer
      * state survives browser refreshes.
      */
-    _snippetDrawerOpen: { type: Boolean, state: true },
+    _snippetDrawerOpen: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Snippets loaded from LLMService.get_snippets. Each is
      * `{icon, tooltip, message}`. Empty until RPC ready or on
      * fetch error. Reloaded on mode / review state changes
      * since the server returns mode-aware snippets.
      */
-    _snippets: { type: Array, state: true },
+    _snippets: { type: Array, state: true, noAccessor: true },
     /**
      * Images currently attached to the composition, as
      * data URIs. Accumulated from pastes and re-attaches;
@@ -364,27 +515,51 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * MAX_IMAGES_PER_MESSAGE; over-limit adds produce a
      * warning toast and are ignored.
      */
-    _pendingImages: { type: Array, state: true },
+    _pendingImages: {
+      type: Array,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * When non-null, the lightbox is open showing this data
      * URI. Set by clicking a message thumbnail or a pending
      * preview; cleared by Escape or backdrop click.
      */
-    _lightboxImage: { type: String, state: true },
+    _lightboxImage: {
+      type: String,
+      state: true,
+      noAccessor: true,
+    },
     /** Current search query text. Empty = no active search. */
-    _searchQuery: { type: String, state: true },
+    _searchQuery: { type: String, state: true, noAccessor: true },
     /** Ignore-case search toggle. Persisted to localStorage. */
-    _searchIgnoreCase: { type: Boolean, state: true },
+    _searchIgnoreCase: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /** Regex search toggle. Persisted to localStorage. */
-    _searchRegex: { type: Boolean, state: true },
+    _searchRegex: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /** Whole-word search toggle. Persisted to localStorage. */
-    _searchWholeWord: { type: Boolean, state: true },
+    _searchWholeWord: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Index into the matches array of the currently-highlighted
      * match. -1 when no matches or no active search. Wraps
      * on Enter/Shift+Enter navigation.
      */
-    _searchCurrentIndex: { type: Number, state: true },
+    _searchCurrentIndex: {
+      type: Number,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Search mode — 'message' (default) searches chat
      * messages; 'file' searches repository content via the
@@ -392,28 +567,42 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * the action bar and by the activateFileSearch() public
      * method (called from Ctrl+Shift+F at the shell level).
      */
-    _searchMode: { type: String, state: true },
+    _searchMode: { type: String, state: true, noAccessor: true },
     /**
      * Flat list of file search results, shape from the RPC:
      * [{file, matches: [{line_num, line, context_before,
      * context_after}]}]. Empty until the first debounced RPC
      * call completes.
      */
-    _fileSearchResults: { type: Array, state: true },
+    _fileSearchResults: {
+      type: Array,
+      state: true,
+      noAccessor: true,
+    },
     /** True while a file-search RPC call is in flight. */
-    _fileSearchLoading: { type: Boolean, state: true },
+    _fileSearchLoading: {
+      type: Boolean,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Flat index into the results' matches — each file's
      * matches contribute N slots, enumerated top-to-bottom.
      * A value of 0 means the first match of the first file.
      * -1 means no focus (empty results).
      */
-    _fileSearchFocusedIndex: { type: Number, state: true },
+    _fileSearchFocusedIndex: {
+      type: Number,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * True while a commit_all background task is in flight.
      * Drives the commit button's spinner state and disables
      * both commit and reset until the completion event fires.
      * Cleared by the `commit-result` window event handler.
+     *
+     * Not per-tab — commits are main-conversation-only.
      */
     _committing: { type: Boolean, state: true },
     /**
@@ -426,6 +615,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
      *
      * Defaults to false so component works standalone before
      * the files-tab wires up the push.
+     *
+     * Not per-tab — review is main-conversation-only.
      */
     reviewActive: { type: Boolean },
     /**
@@ -434,7 +625,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * content. Set by the `url-view-requested` handler,
      * cleared by Escape or backdrop click.
      */
-    _urlViewDialog: { type: Object, state: true },
+    _urlViewDialog: {
+      type: Object,
+      state: true,
+      noAccessor: true,
+    },
     /**
      * Active tab within the URL view dialog. `'content'`
      * shows title + body (summary/readme/content); `'symbols'`
@@ -442,7 +637,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
      * URL is a GitHub repo with a symbol map — generic URLs
      * hide the tab bar since there's only one panel to show.
      */
-    _urlViewTab: { type: String, state: true },
+    _urlViewTab: { type: String, state: true, noAccessor: true },
   };
 
   static styles = css`
@@ -455,6 +650,212 @@ export class ChatPanel extends RpcMixin(LitElement) {
       color: var(--text-primary, #c9d1d9);
       font-size: 0.9375rem;
       line-height: 1.5;
+    }
+
+    /* Tab strip — D21 Phase B1 + B2. Renders above the
+     * messages area when multiple tabs exist. Hidden
+     * entirely in single-tab operation (the common
+     * case) so it doesn't consume vertical space
+     * users will never benefit from. Appears the
+     * moment a second tab spawns.
+     *
+     * B2 adds horizontal overflow scrolling for when
+     * many agent tabs exceed the viewport width. The
+     * outer .tab-strip is a positioning context; the
+     * inner .tab-strip-scroll is the scrollable row
+     * of buttons, and .tab-strip-overflow is pinned
+     * at the right as an always-available direct-jump
+     * affordance. */
+    .tab-strip {
+      flex-shrink: 0;
+      display: flex;
+      align-items: stretch;
+      background: rgba(22, 27, 34, 0.6);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+      position: relative;
+    }
+    .tab-strip-scroll {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.125rem;
+      padding: 0.25rem 0.5rem;
+      overflow-x: auto;
+      overflow-y: hidden;
+      /* Thin scrollbar — macOS and most Linux themes
+       * auto-hide scrollbars; Firefox and Windows show
+       * them. A 4px track keeps the strip compact
+       * regardless of platform default. */
+      scrollbar-width: thin;
+    }
+    .tab-strip-scroll::-webkit-scrollbar {
+      height: 4px;
+    }
+    .tab-strip-scroll::-webkit-scrollbar-thumb {
+      background: rgba(240, 246, 252, 0.15);
+      border-radius: 2px;
+    }
+    .tab-strip-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .tab-strip-tab {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary, #8b949e);
+      padding: 0.3rem 0.75rem;
+      border-radius: 4px 4px 0 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      white-space: nowrap;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tab-strip-tab:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-tab.active {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      border-color: rgba(88, 166, 255, 0.3);
+      border-bottom-color: rgba(22, 27, 34, 0.6);
+    }
+
+    /* Streaming pulse indicator (D21 Phase D1). Small
+     * animated dot that appears on tab labels when the
+     * tab has an in-flight stream. Visible on ALL
+     * tabs regardless of active state — the point is
+     * to let users see work happening on tabs they
+     * aren't currently looking at. Positioned inline
+     * with the label text; the tab button's existing
+     * layout accommodates it without re-flow because
+     * the dot has fixed width. */
+    .tab-streaming-indicator {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-primary, #58a6ff);
+      margin-right: 0.35rem;
+      vertical-align: middle;
+      animation: tab-pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes tab-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+
+    /* Close button on agent tabs (D21 Phase B3). Small
+     * ✕ glyph inline with the label, visible only on
+     * hover / focus to avoid visual noise when many
+     * tabs are present. Nested inside the tab button
+     * so it shares the tab's layout, but uses its own
+     * click handler with stopPropagation so clicking
+     * the ✕ doesn't also flip activeTabId to the tab
+     * we're about to close. Main tab never renders
+     * this button. */
+    .tab-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      margin-left: 0.4rem;
+      border: none;
+      background: transparent;
+      color: inherit;
+      opacity: 0;
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 0.85rem;
+      line-height: 1;
+      padding: 0;
+      transition: opacity 100ms ease, background 100ms ease;
+    }
+    .tab-strip-tab:hover .tab-close,
+    .tab-strip-tab.active .tab-close,
+    .tab-close:focus-visible {
+      opacity: 0.7;
+    }
+    .tab-close:hover {
+      opacity: 1 !important;
+      background: rgba(240, 246, 252, 0.15);
+    }
+
+    /* Overflow menu — three-dots button at the right
+     * edge, always visible when the strip is visible
+     * (at least 2 tabs). Clicking opens a dropdown
+     * listing every tab by label for direct jumping.
+     *
+     * The button is outside the scroll region so it
+     * stays pinned regardless of scroll position —
+     * users with 15 agent tabs can always find the
+     * jump menu without scrolling to the end. */
+    .tab-strip-overflow {
+      flex-shrink: 0;
+      background: transparent;
+      border: none;
+      border-left: 1px solid rgba(240, 246, 252, 0.08);
+      color: var(--text-secondary, #8b949e);
+      padding: 0 0.6rem;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tab-strip-overflow:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-overflow[aria-expanded="true"] {
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .tab-strip-overflow-menu {
+      position: absolute;
+      top: 100%;
+      right: 0.25rem;
+      z-index: 20;
+      background: var(--bg-primary, #0d1117);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      padding: 0.25rem;
+      min-width: 12rem;
+      max-width: 20rem;
+      max-height: 24rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+    }
+    .tab-strip-overflow-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0.6rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tab-strip-overflow-item:hover {
+      background: rgba(240, 246, 252, 0.08);
+    }
+    .tab-strip-overflow-item.active {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
     }
 
     .messages-wrapper {
@@ -1647,150 +2048,94 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    // One-shot flag — when true, the next paste event
-    // into the chat textarea is swallowed via
-    // preventDefault(). Set by the files-tab's
-    // `_onInsertPath` handler immediately before
-    // focusing the textarea, which would otherwise
-    // trigger the browser's selection-buffer paste on
-    // Linux (middle-click → focus → autoplace selected
-    // text). Instance field, not a reactive property:
-    // reactive would cause a Lit re-render on every
-    // flag flip and the flag exists entirely in
-    // paste-handler event scope.
-    this._suppressNextPaste = false;
-    // Active @mention range in the textarea. When the
-    // cursor sits inside an @word sequence (e.g. typing
-    // `@foo|` where | is the cursor), this holds
-    // `{start, end}` — `start` is the index of the `@`,
-    // `end` is the cursor position. Null when no active
-    // mention. Used to detect edge transitions between
-    // input events so we emit `filter-from-chat` only
-    // when the mention state actually changes, and emit
-    // a clearing event when the user exits a mention
-    // (deletes the `@`, types whitespace after, etc.).
-    // Instance field, not reactive — changes per
-    // keystroke and doesn't affect rendering.
-    this._activeMention = null;
-    this.messages = [];
-    this.repoFiles = [];
-    this._input = '';
-    this._streaming = false;
-    this._streamingContent = '';
-    this._historyOpen = false;
-    // Read drawer state eagerly — avoids a closed→open flicker
-    // on mount when the user had it open previously.
-    this._snippetDrawerOpen = _loadDrawerOpen();
-    this._snippets = [];
-    this._pendingImages = [];
-    this._lightboxImage = null;
-    // Search state — query empty by default, toggles loaded
-    // from localStorage. Ignore-case defaults true (most
-    // users expect case-insensitive), regex and whole-word
-    // default false.
-    this._searchQuery = '';
-    this._searchIgnoreCase = _loadSearchToggle(
-      _SEARCH_IGNORE_CASE_KEY,
-      true,
-    );
-    this._searchRegex = _loadSearchToggle(
-      _SEARCH_REGEX_KEY,
-      false,
-    );
-    this._searchWholeWord = _loadSearchToggle(
-      _SEARCH_WHOLE_WORD_KEY,
-      false,
-    );
-    this._searchCurrentIndex = -1;
-    // File search state — starts in message mode; file mode
-    // activates on button click or via activateFileSearch().
-    this._searchMode = 'message';
-    this._fileSearchResults = [];
-    this._fileSearchLoading = false;
-    this._fileSearchFocusedIndex = -1;
-    // Generation counter for stale-response guard. RPC calls
-    // increment this; when a response arrives with a stale
-    // gen, we discard it rather than overwrite fresher
-    // results. Handles the race where the user types fast
-    // enough that an earlier call's response arrives after
-    // a later call's.
-    this._fileSearchGeneration = 0;
-    // Debounce handle for the file search RPC. Cleared on
-    // query change / mode change / unmount.
-    this._fileSearchDebounceTimer = null;
-    // Flag that temporarily suppresses scroll-sync dispatches
-    // when a scroll is externally driven (e.g., by the picker
-    // clicking a file to scroll the overlay). Prevents
-    // feedback loops. Cleared after a short timeout.
-    this._fileSearchScrollPaused = false;
+    // ---------------------------------------------------------
+    // Per-tab state (D21 — agent tab strip foundation)
+    // ---------------------------------------------------------
+    //
+    // Every field that used to live on `this` directly and
+    // changes per-conversation now lives inside a tab state
+    // object, keyed by tab ID. Single-agent operation has
+    // exactly one entry, `"main"`. Future parallel-agent
+    // spawning will add one entry per agent under the same
+    // Map.
+    //
+    // Lit reactive properties (`messages`, `_input`, etc.)
+    // are exposed via getters/setters defined on the class
+    // prototype; reads forward to the active tab's state,
+    // writes mutate the tab's state and call
+    // `this.requestUpdate(name, oldValue)` so Lit's dirty-
+    // check machinery observes the change.
+    //
+    // Non-reactive per-tab fields (`_streams`,
+    // `_pendingChunks`, `_autoScroll`, etc.) don't go through
+    // the Lit re-render path — they're still on the tab
+    // state object but the getters don't call requestUpdate.
+    //
+    // See `_makeTabState` below for the field list.
+    //
+    // `_activeTabIdValue` is the backing storage for the
+    // `_activeTabId` getter/setter defined on the
+    // prototype. The setter dispatches
+    // `active-tab-changed` on change (D21 A3); using a
+    // backing field avoids infinite recursion in the
+    // setter while preserving the Lit reactive-property
+    // contract via `noAccessor: true`.
+    this._activeTabIdValue = 'main';
+    this._tabs = new Map();
+    this._tabs.set('main', this._makeTabState());
 
-    // URL chip detection state. Debounce handle for the
-    // detect_urls RPC — fires ~300ms after the user stops
-    // typing. Per specs4/4-features/url-content.md the UI
-    // "chips" feature runs a detection scan independent of
-    // the backend's streaming-time detection; this is the
-    // frontend's half.
-    this._urlDetectDebounceTimer = null;
-    // Generation counter guards against stale responses. If
-    // the user types faster than the RPC returns, later
-    // responses arrive after earlier ones; comparing against
-    // the current gen discards the stale ones.
-    this._urlDetectGeneration = 0;
-    // Dialog state for the "view URL content" overlay. Null
-    // when closed; populated with `{url, content}` when open.
-    // Matches the lightbox pattern used for pending-image
-    // inspection.
-    this._urlViewDialog = null;
-    // Active tab when the dialog is open. Reset to 'content'
-    // each time the dialog opens so users always see the
-    // human-readable body first.
-    this._urlViewTab = 'content';
+    // Human-readable labels for the tab strip (D21
+    // Phase B1). Keyed by tab ID, stored separately
+    // from `_tabs` so agent tabs can have descriptive
+    // labels derived from their task text without
+    // renaming their state-storage key. Main's label is
+    // fixed; agent labels will be set by Phase C's
+    // spawn path.
+    this._tabLabels = new Map();
+    this._tabLabels.set('main', 'Main');
+
+    // Overflow menu open state (D21 Phase B2). The
+    // three-dots button in the strip opens a dropdown
+    // listing every tab by label; clicking an item
+    // jumps directly to that tab. The menu is a
+    // reactive property (declared in `static
+    // properties` above) rather than a per-tab field
+    // because it's a UI-level dropdown — all tabs see
+    // the same menu. Closed by default.
+    this._tabStripOverflowOpen = false;
+
+    // ---------------------------------------------------------
+    // Cross-tab / component-scoped state (unchanged)
+    // ---------------------------------------------------------
+    // These fields aren't per-conversation — they're global
+    // to the chat panel (main-only concerns, handler bindings,
+    // files-tab pushes).
+
     // Commit state. `_committing` flips true on click, false
     // when the `commit-result` window event fires. Review
     // state defaults false and is driven by the parent
-    // component via property push.
+    // component via property push. Both are main-conversation
+    // concerns — agents never commit, agents never enter
+    // review mode.
     this._committing = false;
     this.reviewActive = false;
 
-    // Per-request streaming state. Map<requestId, {content,
-    // sticky}> where sticky is true when scroll is engaged. We
-    // keep this as a Map even though single-agent operation
-    // has at most one entry at a time — parallel-agent mode
-    // (D10) produces N concurrent streams under a parent ID,
-    // and the transport layer routes chunks to the right state
-    // slot via the request ID.
-    this._streams = new Map();
-    // Which request ID is "ours" — the most recent user-initiated
-    // send. Chunks for other request IDs (e.g. from a
-    // collaborator's prompt) are ignored in Phase 2b; Phase 2d
-    // will adopt them as passive streams.
-    this._currentRequestId = null;
-    // The most recently completed request ID. Compaction events
-    // arrive asynchronously AFTER stream-complete, by which time
-    // `_currentRequestId` is already null. The compaction-event
-    // handler accepts events for either `_currentRequestId` (in
-    // the rare case compaction starts before stream-complete is
-    // fully processed) or `_lastRequestId` (the common case).
-    // Set inside `_onStreamComplete` for our own requests only;
-    // collaborator streams don't update this.
-    this._lastRequestId = null;
+    // Repo files list — pushed by files-tab for file mention
+    // detection. Global to the chat panel because the repo is
+    // the same across all conversations.
+    this.repoFiles = [];
 
-    // rAF coalescing state — `_pendingChunks` is
-    // Map<requestId, content>. The rAF callback reads and
-    // clears entries, and updates `_streamingContent` from the
-    // pending content for `_currentRequestId`.
-    this._pendingChunks = new Map();
+    // rAF handle for chunk coalescing. One rAF active at a
+    // time across all tabs — we pick the right tab's pending
+    // chunk from `_activeTabId` when the rAF fires.
     this._rafHandle = null;
-
-    // Auto-scroll state. Engaged by default; disengaged when
-    // the user scrolls up during streaming.
-    this._autoScroll = true;
 
     // Bound handlers so add/remove match and we can clean up.
     this._onStreamChunk = this._onStreamChunk.bind(this);
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onUserMessage = this._onUserMessage.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onAgentsSpawned = this._onAgentsSpawned.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
     this._onMessagesScroll = this._onMessagesScroll.bind(this);
@@ -1798,6 +2143,1036 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._onModeOrReviewChanged = this._onModeOrReviewChanged.bind(this);
     this._onLightboxKeyDown = this._onLightboxKeyDown.bind(this);
     this._onCommitResult = this._onCommitResult.bind(this);
+
+    // Overflow menu dismissal — bound so add/remove on
+    // document scope find the same reference. The
+    // listeners are attached only while the menu is
+    // open and removed on close to avoid polluting
+    // the document event loop when the menu is idle.
+    this._onOverflowOutsideClick =
+      this._onOverflowOutsideClick.bind(this);
+    this._onOverflowKeyDown =
+      this._onOverflowKeyDown.bind(this);
+    // D2 — document-level chat-tab shortcut handler.
+    // Bound so the listener survives add/remove cycles
+    // (connectedCallback / disconnectedCallback).
+    this._onChatTabShortcut = this._onChatTabShortcut.bind(this);
+  }
+
+  // ---------------------------------------------------------------
+  // Per-tab state factory
+  // ---------------------------------------------------------------
+
+  /**
+   * Build a fresh tab state object.
+   *
+   * Every field that a conversation owns lives in here. The
+   * main tab gets one of these at construction time; future
+   * agent spawning will add tab states keyed by `{turn_id}/
+   * agent-NN` identifiers.
+   *
+   * Field groupings (informational — the flat object is
+   * what the code uses):
+   *
+   *   Conversation — messages, input, pendingImages
+   *   Streaming    — streaming, streamingContent,
+   *                  currentRequestId, lastRequestId,
+   *                  streams, pendingChunks
+   *   Selection    — selectedFiles
+   *   Search       — searchQuery, searchIgnoreCase,
+   *                  searchRegex, searchWholeWord,
+   *                  searchCurrentIndex, searchMode,
+   *                  fileSearchResults, fileSearchLoading,
+   *                  fileSearchFocusedIndex,
+   *                  fileSearchGeneration,
+   *                  fileSearchDebounceTimer,
+   *                  fileSearchScrollPaused
+   *   UI           — historyOpen, snippetDrawerOpen,
+   *                  lightboxImage, urlViewDialog,
+   *                  urlViewTab, snippets
+   *   URL chips    — urlDetectDebounceTimer,
+   *                  urlDetectGeneration
+   *   Misc         — autoScroll, suppressNextPaste,
+   *                  activeMention
+   */
+  _makeTabState() {
+    return {
+      // Conversation
+      messages: [],
+      input: '',
+      pendingImages: [],
+      // Streaming
+      streaming: false,
+      streamingContent: '',
+      currentRequestId: null,
+      lastRequestId: null,
+      streams: new Map(),
+      pendingChunks: new Map(),
+      // Selection (pushed by files-tab for the main tab;
+      // agents will get their own per-tab selection in a
+      // later phase)
+      selectedFiles: [],
+      // Search — toggle defaults loaded from localStorage
+      // so the user's last chosen search mode survives
+      // reload.
+      searchQuery: '',
+      searchIgnoreCase: _loadSearchToggle(
+        _SEARCH_IGNORE_CASE_KEY,
+        true,
+      ),
+      searchRegex: _loadSearchToggle(_SEARCH_REGEX_KEY, false),
+      searchWholeWord: _loadSearchToggle(
+        _SEARCH_WHOLE_WORD_KEY,
+        false,
+      ),
+      searchCurrentIndex: -1,
+      searchMode: 'message',
+      fileSearchResults: [],
+      fileSearchLoading: false,
+      fileSearchFocusedIndex: -1,
+      fileSearchGeneration: 0,
+      fileSearchDebounceTimer: null,
+      fileSearchScrollPaused: false,
+      // UI
+      historyOpen: false,
+      snippetDrawerOpen: _loadDrawerOpen(),
+      lightboxImage: null,
+      urlViewDialog: null,
+      urlViewTab: 'content',
+      snippets: [],
+      // URL chip detection
+      urlDetectDebounceTimer: null,
+      urlDetectGeneration: 0,
+      // URL chip state snapshot. Map<url, chipState>
+      // mirroring the shape ac-url-chips holds
+      // internally. The singleton ac-url-chips element
+      // in the DOM always shows the currently-active
+      // tab's state; on tab switch we snapshot the
+      // leaving tab's `_chips` into this slot and
+      // restore the entering tab's snapshot. Per
+      // specs4/5-webapp/agent-browser.md § Per-Tab
+      // State: "URL chip state (which URLs are
+      // detected/fetched/excluded for this
+      // conversation)" is per-tab.
+      urlChips: null,
+      // Misc non-reactive flags / state
+      autoScroll: true,
+      suppressNextPaste: false,
+      activeMention: null,
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // Reactive property accessors (D21 per-tab forwarding)
+  // ---------------------------------------------------------------
+
+  // Every reactive property declared in `static properties`
+  // is re-exposed here as a getter/setter pair that forwards
+  // to the active tab's state. The setters call
+  // `requestUpdate(name, oldValue)` so Lit's internal dirty-
+  // check machinery fires re-renders on mutation — same
+  // behaviour as native reactive properties, just with the
+  // storage indirected through the Map.
+  //
+  // Non-reactive per-tab fields (streams, pendingChunks,
+  // autoScroll, etc.) get simple getters/setters without
+  // requestUpdate calls; see the block below the reactive
+  // accessors.
+
+  // `_activeTabId` is special — it's the KEY into `_tabs`,
+  // not a per-tab field itself. The getter reads a scalar
+  // backing field on `this`; the setter dispatches
+  // `active-tab-changed` on real transitions so sibling
+  // components can re-sync per-tab state. Same-value
+  // writes are no-ops to keep the event channel quiet.
+  get _activeTabId() {
+    return this._activeTabIdValue;
+  }
+  set _activeTabId(value) {
+    const oldValue = this._activeTabIdValue;
+    if (oldValue === value) return;
+    // Snapshot the leaving tab's URL chip state before
+    // flipping. The singleton ac-url-chips element
+    // currently shows oldValue's chips; once we flip,
+    // its `_chips` Map will belong to the new tab. If
+    // we don't snapshot first, the leaving tab's state
+    // is lost.
+    //
+    // Query via shadowRoot directly so this works even
+    // on the very first switch before any Lit render
+    // has bound the element. When the element doesn't
+    // exist yet (fresh mount, pre-first-render), the
+    // snapshot is skipped and the default `null` slot
+    // carries through — matches the "never activated
+    // URL chips yet" case naturally.
+    this._snapshotUrlChipsForTab(oldValue);
+    this._activeTabIdValue = value;
+    this.requestUpdate('_activeTabId', oldValue);
+    // Restore the entering tab's URL chip state. Runs
+    // after the property flip so the chip component
+    // (if it re-renders based on reactive state) sees
+    // the new tab's data, not a half-swapped mix. See
+    // _restoreUrlChipsForTab for why this defers via
+    // updateComplete.
+    this._restoreUrlChipsForTab(value);
+    // Notify listeners of the transition. bubbles+composed
+    // so the event crosses the shadow DOM boundary —
+    // files-tab and the future tab strip component listen
+    // at their own levels.
+    this.dispatchEvent(
+      new CustomEvent('active-tab-changed', {
+        detail: {
+          tabId: value,
+          previousTabId: oldValue,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Copy the ac-url-chips element's current _chips Map
+   * into the leaving tab's state slot. Runs synchronously
+   * before _activeTabIdValue flips so the Map read still
+   * reflects the departing tab.
+   *
+   * Defensive against early calls — before any render the
+   * element doesn't exist in shadowRoot, in which case
+   * there's nothing to snapshot.
+   *
+   * Stores a shallow copy (new Map wrapping the existing
+   * entries) so subsequent mutations to the element's
+   * live Map don't retroactively alter the snapshot. The
+   * chip-state values are themselves objects; we don't
+   * deep-clone them because chip-state mutation goes
+   * through _chips = new Map(...) reassignment in the
+   * component, not in-place edits of existing entries.
+   */
+  _snapshotUrlChipsForTab(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    const tab = this._tabs.get(tabId);
+    if (!tab) return;
+    const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
+    if (!chipsEl || !chipsEl._chips) return;
+    tab.urlChips = new Map(chipsEl._chips);
+  }
+
+  /**
+   * Install the entering tab's URL chip snapshot into the
+   * ac-url-chips element. Defers through updateComplete
+   * so the setter's requestUpdate cycle finishes first —
+   * reading shadowRoot synchronously after a property
+   * flip can return a stale reference in some edge cases
+   * (re-entrant render during setter).
+   *
+   * An entering tab with no snapshot (freshly spawned
+   * agent, or main tab in a new session) gets a fresh
+   * empty Map. The chip component's render path handles
+   * empty Maps by hiding the strip entirely, so agents
+   * without URL activity show no strip — correct.
+   */
+  _restoreUrlChipsForTab(tabId) {
+    this.updateComplete.then(() => {
+      const chipsEl =
+        this.shadowRoot?.querySelector('ac-url-chips');
+      if (!chipsEl) return;
+      const tab = this._tabs.get(tabId);
+      if (!tab) return;
+      // Reassign rather than mutate in place so Lit's
+      // reactive property observer fires and re-renders.
+      chipsEl._chips = tab.urlChips
+        ? new Map(tab.urlChips)
+        : new Map();
+    });
+  }
+
+  get messages() {
+    return this._tabs.get(this._activeTabId).messages;
+  }
+  set messages(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.messages;
+    tab.messages = value;
+    this.requestUpdate('messages', oldValue);
+  }
+
+  get _input() {
+    return this._tabs.get(this._activeTabId).input;
+  }
+  set _input(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.input;
+    tab.input = value;
+    this.requestUpdate('_input', oldValue);
+  }
+
+  get _streaming() {
+    return this._tabs.get(this._activeTabId).streaming;
+  }
+  set _streaming(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.streaming;
+    tab.streaming = value;
+    this.requestUpdate('_streaming', oldValue);
+  }
+
+  get _streamingContent() {
+    return this._tabs.get(this._activeTabId).streamingContent;
+  }
+  set _streamingContent(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.streamingContent;
+    tab.streamingContent = value;
+    this.requestUpdate('_streamingContent', oldValue);
+  }
+
+  get _historyOpen() {
+    return this._tabs.get(this._activeTabId).historyOpen;
+  }
+  set _historyOpen(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.historyOpen;
+    tab.historyOpen = value;
+    this.requestUpdate('_historyOpen', oldValue);
+  }
+
+  get _snippetDrawerOpen() {
+    return this._tabs.get(this._activeTabId).snippetDrawerOpen;
+  }
+  set _snippetDrawerOpen(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.snippetDrawerOpen;
+    tab.snippetDrawerOpen = value;
+    this.requestUpdate('_snippetDrawerOpen', oldValue);
+  }
+
+  get _snippets() {
+    return this._tabs.get(this._activeTabId).snippets;
+  }
+  set _snippets(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.snippets;
+    tab.snippets = value;
+    this.requestUpdate('_snippets', oldValue);
+  }
+
+  get _pendingImages() {
+    return this._tabs.get(this._activeTabId).pendingImages;
+  }
+  set _pendingImages(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.pendingImages;
+    tab.pendingImages = value;
+    this.requestUpdate('_pendingImages', oldValue);
+  }
+
+  get _lightboxImage() {
+    return this._tabs.get(this._activeTabId).lightboxImage;
+  }
+  set _lightboxImage(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.lightboxImage;
+    tab.lightboxImage = value;
+    this.requestUpdate('_lightboxImage', oldValue);
+  }
+
+  get _searchQuery() {
+    return this._tabs.get(this._activeTabId).searchQuery;
+  }
+  set _searchQuery(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchQuery;
+    tab.searchQuery = value;
+    this.requestUpdate('_searchQuery', oldValue);
+  }
+
+  get _searchIgnoreCase() {
+    return this._tabs.get(this._activeTabId).searchIgnoreCase;
+  }
+  set _searchIgnoreCase(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchIgnoreCase;
+    tab.searchIgnoreCase = value;
+    this.requestUpdate('_searchIgnoreCase', oldValue);
+  }
+
+  get _searchRegex() {
+    return this._tabs.get(this._activeTabId).searchRegex;
+  }
+  set _searchRegex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchRegex;
+    tab.searchRegex = value;
+    this.requestUpdate('_searchRegex', oldValue);
+  }
+
+  get _searchWholeWord() {
+    return this._tabs.get(this._activeTabId).searchWholeWord;
+  }
+  set _searchWholeWord(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchWholeWord;
+    tab.searchWholeWord = value;
+    this.requestUpdate('_searchWholeWord', oldValue);
+  }
+
+  get _searchCurrentIndex() {
+    return this._tabs.get(this._activeTabId).searchCurrentIndex;
+  }
+  set _searchCurrentIndex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchCurrentIndex;
+    tab.searchCurrentIndex = value;
+    this.requestUpdate('_searchCurrentIndex', oldValue);
+  }
+
+  get _searchMode() {
+    return this._tabs.get(this._activeTabId).searchMode;
+  }
+  set _searchMode(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.searchMode;
+    tab.searchMode = value;
+    this.requestUpdate('_searchMode', oldValue);
+  }
+
+  get _fileSearchResults() {
+    return this._tabs.get(this._activeTabId).fileSearchResults;
+  }
+  set _fileSearchResults(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchResults;
+    tab.fileSearchResults = value;
+    this.requestUpdate('_fileSearchResults', oldValue);
+  }
+
+  get _fileSearchLoading() {
+    return this._tabs.get(this._activeTabId).fileSearchLoading;
+  }
+  set _fileSearchLoading(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchLoading;
+    tab.fileSearchLoading = value;
+    this.requestUpdate('_fileSearchLoading', oldValue);
+  }
+
+  get _fileSearchFocusedIndex() {
+    return this._tabs.get(this._activeTabId).fileSearchFocusedIndex;
+  }
+  set _fileSearchFocusedIndex(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.fileSearchFocusedIndex;
+    tab.fileSearchFocusedIndex = value;
+    this.requestUpdate('_fileSearchFocusedIndex', oldValue);
+  }
+
+  get _urlViewDialog() {
+    return this._tabs.get(this._activeTabId).urlViewDialog;
+  }
+  set _urlViewDialog(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.urlViewDialog;
+    tab.urlViewDialog = value;
+    this.requestUpdate('_urlViewDialog', oldValue);
+  }
+
+  get _urlViewTab() {
+    return this._tabs.get(this._activeTabId).urlViewTab;
+  }
+  set _urlViewTab(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.urlViewTab;
+    tab.urlViewTab = value;
+    this.requestUpdate('_urlViewTab', oldValue);
+  }
+
+  // ---------------------------------------------------------------
+  // Non-reactive per-tab accessors
+  // ---------------------------------------------------------------
+  //
+  // These fields back code paths that should NOT trigger a
+  // Lit re-render on mutation — streaming internals
+  // (`_streams`, `_pendingChunks`), event-handler scoped
+  // flags (`_suppressNextPaste`, `_activeMention`), and
+  // transient timer handles. They need tab-scoped storage
+  // but no `requestUpdate` call.
+
+  get _streams() {
+    return this._tabs.get(this._activeTabId).streams;
+  }
+  set _streams(value) {
+    this._tabs.get(this._activeTabId).streams = value;
+  }
+
+  get _currentRequestId() {
+    return this._tabs.get(this._activeTabId).currentRequestId;
+  }
+  set _currentRequestId(value) {
+    this._tabs.get(this._activeTabId).currentRequestId = value;
+  }
+
+  get _lastRequestId() {
+    return this._tabs.get(this._activeTabId).lastRequestId;
+  }
+  set _lastRequestId(value) {
+    this._tabs.get(this._activeTabId).lastRequestId = value;
+  }
+
+  get _pendingChunks() {
+    return this._tabs.get(this._activeTabId).pendingChunks;
+  }
+  set _pendingChunks(value) {
+    this._tabs.get(this._activeTabId).pendingChunks = value;
+  }
+
+  get _autoScroll() {
+    return this._tabs.get(this._activeTabId).autoScroll;
+  }
+  set _autoScroll(value) {
+    this._tabs.get(this._activeTabId).autoScroll = value;
+  }
+
+  get _suppressNextPaste() {
+    return this._tabs.get(this._activeTabId).suppressNextPaste;
+  }
+  set _suppressNextPaste(value) {
+    this._tabs.get(this._activeTabId).suppressNextPaste = value;
+  }
+
+  get _activeMention() {
+    return this._tabs.get(this._activeTabId).activeMention;
+  }
+  set _activeMention(value) {
+    this._tabs.get(this._activeTabId).activeMention = value;
+  }
+
+  get _fileSearchGeneration() {
+    return this._tabs.get(this._activeTabId).fileSearchGeneration;
+  }
+  set _fileSearchGeneration(value) {
+    this._tabs.get(this._activeTabId).fileSearchGeneration = value;
+  }
+
+  get _fileSearchDebounceTimer() {
+    return this._tabs.get(this._activeTabId).fileSearchDebounceTimer;
+  }
+  set _fileSearchDebounceTimer(value) {
+    this._tabs.get(this._activeTabId).fileSearchDebounceTimer = value;
+  }
+
+  get _fileSearchScrollPaused() {
+    return this._tabs.get(this._activeTabId).fileSearchScrollPaused;
+  }
+  set _fileSearchScrollPaused(value) {
+    this._tabs.get(this._activeTabId).fileSearchScrollPaused = value;
+  }
+
+  get _urlDetectDebounceTimer() {
+    return this._tabs.get(this._activeTabId).urlDetectDebounceTimer;
+  }
+  set _urlDetectDebounceTimer(value) {
+    this._tabs.get(this._activeTabId).urlDetectDebounceTimer = value;
+  }
+
+  get _urlDetectGeneration() {
+    return this._tabs.get(this._activeTabId).urlDetectGeneration;
+  }
+  set _urlDetectGeneration(value) {
+    this._tabs.get(this._activeTabId).urlDetectGeneration = value;
+  }
+
+  // `selectedFiles` is declared in `static properties` via
+  // the files-tab orchestrator's direct-update path. It's
+  // per-tab because agents will get their own selection
+  // later. The getter/setter pair handles the reactive-
+  // property contract so files-tab's requestUpdate pattern
+  // keeps working.
+  get selectedFiles() {
+    return this._tabs.get(this._activeTabId).selectedFiles;
+  }
+  set selectedFiles(value) {
+    const tab = this._tabs.get(this._activeTabId);
+    const oldValue = tab.selectedFiles;
+    tab.selectedFiles = value;
+    this.requestUpdate('selectedFiles', oldValue);
+  }
+
+  // ---------------------------------------------------------------
+  // Request-ID → tab routing (D21 A2)
+  // ---------------------------------------------------------------
+
+  /**
+   * Find which tab owns `requestId`, or null.
+   *
+   * Matching rules:
+   *
+   *   1. Exact match against any tab's
+   *      `currentRequestId` — the tab that initiated the
+   *      request is the primary owner.
+   *   2. Prefix match against `{parentId}-` — future
+   *      parallel-agent mode spawns N child streams under
+   *      a parent turn; each child's request ID is
+   *      `{parent}-agent-NN`. The chat panel's tab
+   *      strip (when it lands in Phase B/C) will carry
+   *      one tab per agent, each with its own request ID,
+   *      so this prefix match is dead in practice — but
+   *      keeping it wired in now means Phase C's spawn
+   *      path doesn't have to re-touch streaming
+   *      routing.
+   *
+   * Returns the tab ID (`"main"` or `{turn_id}/agent-NN`)
+   * or null when no tab claims the request.
+   *
+   * Collaboration broadcasts (a remote user's stream
+   * reaching our panel) also return null — passive
+   * stream adoption is a separate feature (see the
+   * "passive stream" notes in the class docstring) and
+   * will hook in here when it lands.
+   */
+  _findTabForRequest(requestId) {
+    if (!requestId) return null;
+    // Fast path — exact match against the active tab.
+    // Skips the Map iteration in the common case.
+    const active = this._tabs.get(this._activeTabId);
+    if (active && active.currentRequestId === requestId) {
+      return this._activeTabId;
+    }
+    // General scan. Two passes so exact matches on any
+    // tab win over prefix matches — a request ID that
+    // exactly equals one tab's ID shouldn't be treated
+    // as a child of another tab whose ID happens to be
+    // a prefix.
+    for (const [tabId, tab] of this._tabs) {
+      if (tab.currentRequestId === requestId) {
+        return tabId;
+      }
+    }
+    for (const [tabId, tab] of this._tabs) {
+      const parentId = tab.currentRequestId;
+      if (parentId && requestId.startsWith(`${parentId}-`)) {
+        return tabId;
+      }
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------
+  // Tab strip rendering (D21 Phase B1)
+  // ---------------------------------------------------------------
+
+  /**
+   * Handle a tab button click. Flips `_activeTabId`,
+   * which fires the `active-tab-changed` event (see A3)
+   * so the files-tab picker swaps its selection state
+   * to match the newly-active tab.
+   *
+   * Same-tab clicks are no-ops because the setter
+   * short-circuits on equal values.
+   */
+  _onTabClick(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    this._activeTabId = tabId;
+  }
+
+  /**
+   * Toggle the overflow menu open/closed (D21 Phase
+   * B2). Attaches capture-phase document listeners
+   * for outside-click and Escape dismissal when
+   * opening; detaches them when closing. Capture
+   * phase matters because the menu's own button
+   * clicks are inside the shadow root, and the
+   * outside-click check walks `composedPath()` to
+   * distinguish inside vs outside.
+   */
+  _toggleOverflowMenu() {
+    if (this._tabStripOverflowOpen) {
+      this._closeOverflowMenu();
+    } else {
+      this._openOverflowMenu();
+    }
+  }
+
+  _openOverflowMenu() {
+    if (this._tabStripOverflowOpen) return;
+    this._tabStripOverflowOpen = true;
+    // Capture-phase so we see the event before any
+    // child handler stops propagation. Without
+    // capture, a click inside the menu's own
+    // shadow-rooted children could mask the
+    // outside-click check.
+    document.addEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
+  }
+
+  _closeOverflowMenu() {
+    if (!this._tabStripOverflowOpen) return;
+    this._tabStripOverflowOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
+  }
+
+  /**
+   * Document-level click listener (capture phase)
+   * installed while the overflow menu is open. Walks
+   * `composedPath()` to see if the click originated
+   * inside the menu or its toggle button — if yes,
+   * let it through (the item's own click handler
+   * will jump tabs and close). Otherwise close the
+   * menu. Matches the pattern used by the picker's
+   * context menu and the file picker's branch menu.
+   */
+  _onOverflowOutsideClick(event) {
+    const path = event.composedPath ? event.composedPath() : [];
+    const hit = path.some(
+      (el) =>
+        el instanceof Element &&
+        (el.classList?.contains('tab-strip-overflow') ||
+          el.classList?.contains('tab-strip-overflow-menu')),
+    );
+    if (!hit) this._closeOverflowMenu();
+  }
+
+  /**
+   * Document-level keydown listener (capture phase)
+   * installed while the overflow menu is open.
+   * Escape closes the menu and stops propagation so
+   * the textarea's own Escape handler doesn't also
+   * fire (it clears input text, which would be a
+   * surprise when the user just wanted to dismiss
+   * the menu).
+   */
+  _onOverflowKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeOverflowMenu();
+    }
+  }
+
+  /**
+   * Handle an overflow menu item click — jumps to
+   * the target tab and closes the menu. Same
+   * tab-switch path as `_onTabClick` (setter flips
+   * `_activeTabId`, which fires `active-tab-changed`
+   * for sibling components).
+   */
+  _onOverflowItemClick(tabId) {
+    this._closeOverflowMenu();
+    this._onTabClick(tabId);
+  }
+
+  /**
+   * D2 — document-level keyboard handler for chat-tab
+   * cycling. Alt+` moves to the next tab; Alt+Shift+`
+   * moves to the previous. Wraps at both ends.
+   *
+   * Gated on:
+   *   - `event.altKey` without Ctrl/Meta (Ctrl+Alt+`
+   *     is a window-manager binding on some Linux
+   *     distros; Cmd+Alt+` is used by macOS app
+   *     switchers)
+   *   - `event.key === '\`'` — backtick is the trigger
+   *     character. event.code would be 'Backquote'
+   *     but the char form is more robust across
+   *     layouts where backtick appears on a different
+   *     physical key
+   *   - `_tabs.size > 1` — single-tab mode has nothing
+   *     to cycle through, so we don't intercept the
+   *     keystroke and it passes through to any other
+   *     listeners (currently none, but defensive)
+   *
+   * preventDefault fires on every handled press so
+   * browser chrome doesn't interpret the key (some
+   * browsers bind Alt+` to "focus the next window").
+   *
+   * Does NOT fire on the Alt+1..9 number row — those
+   * belong to app-shell's dialog-tab shortcuts. The
+   * conflict with the original agent-browser spec
+   * (which asked for Alt+1..0) is documented in the
+   * connectedCallback comment.
+   */
+  _onChatTabShortcut(event) {
+    if (!event.altKey) return;
+    if (event.ctrlKey || event.metaKey) return;
+    if (event.key !== '`') return;
+    // Only active when multiple tabs exist. Avoids
+    // eating the keystroke when there's nowhere to
+    // cycle to.
+    if (this._tabs.size <= 1) return;
+    event.preventDefault();
+    const tabIds = Array.from(this._tabs.keys());
+    const currentIdx = tabIds.indexOf(this._activeTabId);
+    if (currentIdx < 0) return;
+    const delta = event.shiftKey ? -1 : 1;
+    // Modular arithmetic with positive modulo — JavaScript's
+    // `%` operator returns negative values for negative
+    // dividends, so we add the length before taking the
+    // modulo to force a positive result.
+    const nextIdx =
+      (currentIdx + delta + tabIds.length) % tabIds.length;
+    this._activeTabId = tabIds[nextIdx];
+  }
+
+
+  /**
+   * Close a tab (D21 Phase B3). Removes the tab from
+   * `_tabs` and `_tabLabels`; if the closed tab was
+   * active, switches to Main. Main tab can never be
+   * closed (the button isn't rendered for it) but a
+   * defensive guard here makes the intent explicit and
+   * protects against a future programmatic call that
+   * bypasses the UI.
+   *
+   * Dispatches `close-tab` with `{tabId}` so Phase C's
+   * backend integration can hook in: when
+   * `LLMService.close_agent_context` lands, wiring it
+   * becomes a handler on this event rather than
+   * modifying the close flow here. Letting the event
+   * fire even when nothing listens costs nothing and
+   * keeps the event surface stable for when it does.
+   */
+  _onTabClose(tabId) {
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === 'main') return;
+    if (!this._tabs.has(tabId)) return;
+    const wasActive = this._activeTabId === tabId;
+    this._tabs.delete(tabId);
+    this._tabLabels.delete(tabId);
+    // Switch to Main first (if the closed tab was
+    // active) so the active-tab-changed event fires
+    // with a valid target. Otherwise the render below
+    // would still see _activeTabId pointing at the
+    // deleted tab, and every per-tab getter would
+    // lazy-create a fresh empty state at the stale key,
+    // reviving the tab we just closed.
+    if (wasActive) {
+      this._activeTabId = 'main';
+    }
+    // Force a re-render so the strip reflects the
+    // deletion — _tabs mutations don't trigger Lit's
+    // dirty-check on their own.
+    this.requestUpdate();
+
+    this.dispatchEvent(
+      new CustomEvent('close-tab', {
+        detail: { tabId },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+
+    // C2c — fire the backend RPC to free the scope's
+    // ContextManager + tracker + file_context. The
+    // archive file on disk is preserved per C1b's
+    // contract. Agent-mode-only: the tab ID parses
+    // into (turn_id, agent_idx); main tab's "close"
+    // path is blocked by the early-return guard above,
+    // so we won't reach this branch for main.
+    //
+    // Fire-and-forget — the local state is already
+    // mutated (optimistic close), and the RPC is
+    // idempotent per C1b. A failure here means the
+    // backend scope lingers until session end or
+    // explicit cleanup; the user-visible tab is gone
+    // regardless. Surfacing an error toast would be
+    // confusing ("I closed the tab — why am I seeing
+    // an error?") and the frontend has no recovery
+    // action anyway.
+    //
+    // Restricted-caller errors for non-localhost
+    // participants DO surface as a toast because
+    // they're actionable: the user can ask the host
+    // to close the tab for them. The rpcConnected
+    // gate short-circuits when no RPC is available
+    // (tests, pre-connect).
+    const agentTag = parseAgentTabId(tabId);
+    if (agentTag && this.rpcConnected) {
+      // agentTag IS the agent's LLM-chosen id post-flat-
+      // identity refactor.
+      this.rpcExtract(
+        'LLMService.close_agent_context',
+        agentTag,
+      ).then((result) => {
+        // Restricted caller — surface as warning.
+        // C1b's non-localhost path returns the
+        // standard {error: "restricted", reason:
+        // ...} shape.
+        if (
+          result
+          && typeof result === 'object'
+          && result.error === 'restricted'
+        ) {
+          this._emitToast(
+            result.reason || 'Restricted operation',
+            'warning',
+          );
+        }
+      }).catch((err) => {
+        // Network failure, RPC rejection, or similar.
+        // Log at debug — the tab is already gone
+        // locally, so toasting would misrepresent
+        // the state. Operators debugging "why did
+        // the scope leak" can find the log entry.
+        console.debug(
+          '[chat] close_agent_context failed',
+          err,
+        );
+      });
+    }
+  }
+
+  /**
+   * Render the tab strip. Returns an empty template
+   * when only the main tab exists — the strip consumes
+   * vertical space, and users running single-agent
+   * operation (the common case) shouldn't pay that
+   * cost. The strip appears the moment a second tab
+   * materialises (Phase C's spawn path).
+   *
+   * Label source — `this._tabLabels` Map, keyed by tab
+   * ID. Missing labels fall back to the tab ID itself
+   * so a stale Map (future bug) produces visible but
+   * ugly output rather than empty buttons.
+   *
+   * B2 layout: the outer `.tab-strip` is a flex row
+   * containing a scrollable `.tab-strip-scroll` with
+   * the tab buttons and a pinned `.tab-strip-overflow`
+   * button that toggles a direct-jump dropdown. The
+   * overflow button is always present when the strip
+   * is visible (≥2 tabs) rather than gated on a
+   * "tabs exceed width" measurement — measuring overflow
+   * reliably in jsdom is fragile, and users with many
+   * agents benefit from direct access regardless of
+   * whether the strip is currently overflowing.
+   */
+  _renderTabStrip() {
+    // Hide in single-tab operation. The `_tabs` Map
+    // always has 'main'; any additional entry means
+    // we've got agent tabs.
+    if (this._tabs.size <= 1) {
+      return '';
+    }
+    // Iteration order of a Map is insertion order, so
+    // 'main' comes first (constructor) and agent tabs
+    // follow in spawn order. That matches the natural
+    // left-to-right reading order for the strip.
+    const tabs = Array.from(this._tabs.keys());
+    return html`
+      <div class="tab-strip">
+        <div class="tab-strip-scroll" role="tablist">
+          ${tabs.map((tabId) => {
+            const label = this._tabLabels.get(tabId) || tabId;
+            const active = tabId === this._activeTabId;
+            const closable = tabId !== 'main';
+            // Streaming indicator (D1) — read the tab's
+            // own streaming flag directly from the Map
+            // rather than through the active-tab
+            // getters. Shown regardless of active state
+            // so users see work happening on tabs they
+            // aren't currently looking at.
+            const tab = this._tabs.get(tabId);
+            const streaming = !!(tab && tab.streaming);
+            return html`
+              <button
+                class="tab-strip-tab ${active ? 'active' : ''}"
+                role="tab"
+                aria-selected=${active}
+                aria-busy=${streaming}
+                data-tab-id=${tabId}
+                @click=${() => this._onTabClick(tabId)}
+                title=${label}
+              >${streaming
+                ? html`<span
+                    class="tab-streaming-indicator"
+                    aria-hidden="true"
+                  ></span>`
+                : ''}${label}${closable
+                ? html`<span
+                    class="tab-close"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Close ${label}"
+                    title="Close tab"
+                    @click=${(e) => {
+                      e.stopPropagation();
+                      this._onTabClose(tabId);
+                    }}
+                    @keydown=${(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        this._onTabClose(tabId);
+                      }
+                    }}
+                  >✕</span>`
+                : ''}</button>
+            `;
+          })}
+        </div>
+        <button
+          class="tab-strip-overflow"
+          aria-label="Tab list"
+          aria-haspopup="menu"
+          aria-expanded=${this._tabStripOverflowOpen}
+          title="Jump to tab"
+          @click=${this._toggleOverflowMenu}
+        >⋯</button>
+        ${this._tabStripOverflowOpen
+          ? this._renderOverflowMenu(tabs)
+          : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Render the overflow dropdown menu contents. One
+   * item per tab, labelled the same way as the strip
+   * button (so users see the same text they'd see
+   * without scrolling). Clicking jumps directly.
+   */
+  _renderOverflowMenu(tabs) {
+    return html`
+      <div class="tab-strip-overflow-menu" role="menu">
+        ${tabs.map((tabId) => {
+          const label = this._tabLabels.get(tabId) || tabId;
+          const active = tabId === this._activeTabId;
+          const tab = this._tabs.get(tabId);
+          const streaming = !!(tab && tab.streaming);
+          return html`
+            <button
+              class="tab-strip-overflow-item ${active ? 'active' : ''}"
+              role="menuitem"
+              data-tab-id=${tabId}
+              title=${label}
+              aria-busy=${streaming}
+              @click=${() => this._onOverflowItemClick(tabId)}
+            >${streaming
+              ? html`<span
+                  class="tab-streaming-indicator"
+                  aria-hidden="true"
+                ></span>`
+              : ''}${label}</button>
+          `;
+        })}
+      </div>
+    `;
   }
 
   // ---------------------------------------------------------------
@@ -1810,6 +3185,24 @@ export class ChatPanel extends RpcMixin(LitElement) {
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('user-message', this._onUserMessage);
     window.addEventListener('session-changed', this._onSessionChanged);
+    window.addEventListener('agents-spawned', this._onAgentsSpawned);
+    // D2 — chat-tab keyboard shortcuts. Alt+` cycles to the
+    // next tab, Alt+Shift+` to the previous. Installed at
+    // the document level (bubble phase) so the shortcut
+    // works regardless of focus location within the chat
+    // panel, but does NOT intercept typing in the textarea
+    // — backtick is a normal character and the chat panel
+    // itself doesn't consume it. Alt+` is not claimed by
+    // the app shell's shortcuts (those own Alt+1..4 and
+    // Alt+M).
+    //
+    // The Alt+1..0 variant suggested in the original
+    // agent-browser spec was rejected because app-shell
+    // already owns Alt+1..4 for dialog tab switching;
+    // changing that is out of scope for D2. Backtick
+    // cycling matches the Ctrl+Tab convention used by
+    // browsers and IDEs for tab navigation.
+    document.addEventListener('keydown', this._onChatTabShortcut);
     // `state-loaded` fires once on connect carrying the
     // full backend state snapshot (from get_current_state).
     // Distinct from `session-changed`, which fires when the
@@ -1837,10 +3230,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   disconnectedCallback() {
+    document.removeEventListener('keydown', this._onChatTabShortcut);
     window.removeEventListener('stream-chunk', this._onStreamChunk);
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('user-message', this._onUserMessage);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener('agents-spawned', this._onAgentsSpawned);
     window.removeEventListener('state-loaded', this._onStateLoaded);
     window.removeEventListener(
       'compaction-event',
@@ -1859,6 +3254,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._onModeOrReviewChanged,
     );
     window.removeEventListener('commit-result', this._onCommitResult);
+    // If the overflow menu was open at unmount, release
+    // the document listeners so they don't keep a stale
+    // handler alive. Closing via the setter would be
+    // cleaner but also touches reactive state on an
+    // already-tearing-down component.
+    document.removeEventListener(
+      'click',
+      this._onOverflowOutsideClick,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onOverflowKeyDown,
+      true,
+    );
     if (this._rafHandle != null) {
       cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
@@ -1915,57 +3325,108 @@ export class ChatPanel extends RpcMixin(LitElement) {
   _onStreamChunk(event) {
     const { requestId, content } = event.detail || {};
     if (!requestId) return;
-    // Store the latest content for this request. Full-content
-    // semantics means we overwrite, not append — each chunk
-    // carries a superset of prior content. Dropped chunks are
-    // harmless.
+    // Route to the tab that owns this request (D21 A2).
+    // Drops unknown request IDs — collaboration broadcasts
+    // from other clients don't belong to any of our tabs
+    // yet (passive stream adoption is future work).
+    const ownerTabId = this._findTabForRequest(requestId);
+    if (!ownerTabId) return;
+    const ownerTab = this._tabs.get(ownerTabId);
+    if (!ownerTab) return;
+    // Full-content semantics — overwrite the pending slot,
+    // don't append. Each chunk carries a superset of prior
+    // content; dropped chunks are harmless.
     const normalizedContent = content ?? '';
-    this._pendingChunks.set(requestId, normalizedContent);
-    // Apply synchronously for our own active stream, in
-    // addition to scheduling the rAF coalesce. The rAF path
-    // is the fast path for rapid-fire chunks (it caps
-    // re-render rate at ~60Hz); the sync path is insurance
-    // against rAF starvation — if the browser throttles rAF
-    // because the tab was briefly backgrounded, because the
-    // chat panel's containing element is display:none at
-    // the moment the chunk arrives (tab-panel lazy
-    // visibility), or because of any other scheduling
-    // oddity, the user still sees text appear. The sync
-    // assignment is idempotent with the subsequent rAF
-    // update: both read from the same `_pendingChunks`
-    // entry, so the rAF either finds it drained (no-op) or
-    // re-applies the same value (harmless).
-    if (requestId === this._currentRequestId && this._streaming) {
-      this._streamingContent = normalizedContent;
+    ownerTab.pendingChunks.set(requestId, normalizedContent);
+    // Apply synchronously in addition to scheduling the
+    // rAF coalesce. The rAF path caps re-render rate at
+    // ~60Hz for rapid chunks; the sync path is insurance
+    // against rAF starvation (tab backgrounded, chat panel
+    // briefly display:none, etc.). Both paths read from
+    // the same pendingChunks entry so the rAF either finds
+    // it drained (no-op) or re-applies the same value
+    // (harmless).
+    //
+    // Only fire the sync render for chunks matching the
+    // tab's CURRENT request — the tab may be between
+    // streams and the pending slot should still queue
+    // for the rAF, but the `streaming` + `streamingContent`
+    // fields are for the currently-active stream only.
+    if (
+      requestId === ownerTab.currentRequestId
+      && ownerTab.streaming
+    ) {
+      // Writing through the tab object directly. We use
+      // requestUpdate only when the OWNER tab is the
+      // ACTIVE tab — writing to an inactive tab's state
+      // shouldn't force a re-render of the currently
+      // visible tab's template.
+      ownerTab.streamingContent = normalizedContent;
+      if (ownerTabId === this._activeTabId) {
+        this.requestUpdate('_streamingContent');
+      }
     }
     this._scheduleFlush();
+  }
+
+  _onAgentsSpawned(event) {
+    // Fired by the backend right after the main LLM's
+    // response is parsed and before child agent streams
+    // begin. Creates agent tabs immediately so chunks
+    // for the child request IDs route to their tabs as
+    // they arrive, rather than being dropped while the
+    // main stream is still finalizing.
+    //
+    // Payload: {turn_id, parent_request_id, agent_blocks}
+    // where agent_blocks is [{id, task, agent_idx}, ...].
+    const detail = event.detail || {};
+    const { turn_id, parent_request_id, agent_blocks } = detail;
+    if (typeof turn_id !== 'string' || !turn_id) return;
+    if (typeof parent_request_id !== 'string') return;
+    if (!Array.isArray(agent_blocks)) return;
+    if (agent_blocks.length === 0) return;
+    this._spawnAgentTabs(turn_id, agent_blocks, parent_request_id);
   }
 
   _onStreamComplete(event) {
     const { requestId, result } = event.detail || {};
     if (!requestId) return;
+    // Route to the owning tab (D21 A2). Unknown request
+    // IDs — collab broadcasts from other clients whose
+    // streams don't match any tab — are silently dropped.
+    const ownerTabId = this._findTabForRequest(requestId);
+    if (!ownerTabId) return;
+    const ownerTab = this._tabs.get(ownerTabId);
+    if (!ownerTab) return;
+    const ownerIsActive = ownerTabId === this._activeTabId;
 
     // Flush any pending chunk synchronously so the final
-    // content is reflected before we move it into messages.
-    const pending = this._pendingChunks.get(requestId);
+    // content is reflected before we move it into
+    // messages. Operates on the owning tab's
+    // pendingChunks.
+    const pending = ownerTab.pendingChunks.get(requestId);
     if (pending !== undefined) {
-      this._pendingChunks.delete(requestId);
-      if (requestId === this._currentRequestId) {
-        this._streamingContent = pending;
+      ownerTab.pendingChunks.delete(requestId);
+      if (requestId === ownerTab.currentRequestId) {
+        ownerTab.streamingContent = pending;
+        if (ownerIsActive) {
+          this.requestUpdate('_streamingContent');
+        }
       }
     }
 
-    // Move the streaming content into the message list as a
-    // finalised assistant message. Error responses surface as
-    // a dedicated error message rather than assistant content.
-    // Attach edit_results so the renderer can pair each edit
-    // segment with its backend result (applied / failed /
-    // skipped / not_in_context) via matchSegmentsToResults.
+    // Move the streaming content into the owning tab's
+    // message list as a finalised assistant message. Error
+    // responses surface as a dedicated error message rather
+    // than assistant content. Attach edit_results so the
+    // renderer can pair each edit segment with its backend
+    // result (applied / failed / skipped / not_in_context)
+    // via matchSegmentsToResults.
     let wasOwnRequest = false;
-    if (requestId === this._currentRequestId) {
+    if (requestId === ownerTab.currentRequestId) {
       wasOwnRequest = true;
       const finalContent =
-        result?.response ?? this._streamingContent ?? '';
+        result?.response ?? ownerTab.streamingContent ?? '';
       const error = result?.error;
       const errorInfo = result?.error_info;
       const editResults = Array.isArray(result?.edit_results)
@@ -1986,8 +3447,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
       const errorBody = error
         ? this._formatErrorBody(error, errorInfo)
         : null;
-      this.messages = [
-        ...this.messages,
+      // Append to the owning tab's messages. requestUpdate
+      // fires only when the owner is active — inactive tabs
+      // accumulate silently and render when the user
+      // switches.
+      ownerTab.messages = [
+        ...ownerTab.messages,
         error
           ? {
               role: 'assistant',
@@ -2011,11 +3476,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
               ...(finishReason ? { finishReason } : {}),
             },
       ];
+      if (ownerIsActive) {
+        this.requestUpdate('messages');
+      }
       // Surface the classified error as a toast with a
       // type-specific message. Unclassified errors fall
       // through to the generic path inside the toast
-      // helper. Runs only when `error` is set — success
-      // responses skip this branch entirely.
+      // helper. Toasts are global UI — fire regardless of
+      // whether the owning tab is active, so the user sees
+      // failures for background agent streams too.
       if (error) {
         this._emitTypedErrorToast(errorInfo, error);
       }
@@ -2030,19 +3499,73 @@ export class ChatPanel extends RpcMixin(LitElement) {
       if (!error && finishReason) {
         this._maybeShowFinishReasonToast(finishReason);
       }
-      this._streaming = false;
-      this._streamingContent = '';
-      this._currentRequestId = null;
+      // Reset streaming state on the owning tab.
+      ownerTab.streaming = false;
+      ownerTab.streamingContent = '';
+      ownerTab.currentRequestId = null;
+      if (ownerIsActive) {
+        this.requestUpdate('_streaming');
+      } else {
+        // Inactive tab — the active tab's reactive
+        // state didn't change, but the tab strip
+        // (which reads per-tab `streaming` directly
+        // from the Map) needs to re-render so the
+        // streaming indicator on this tab's button
+        // disappears. Request a plain update with no
+        // property name — Lit re-evaluates the whole
+        // template which picks up the indicator
+        // change.
+        this.requestUpdate();
+      }
       // Remember the completed request ID so post-completion
       // events (compaction, URL fetches whose callbacks arrived
       // late) can still be routed to this conversation. Kept
       // as a separate field so it outlives the current-request
       // reset above. Overwritten by each new stream-complete
-      // we own.
-      this._lastRequestId = requestId;
+      // the tab owns.
+      ownerTab.lastRequestId = requestId;
+
+      // C2a — spawn agent tabs for each valid agent block the
+      // backend surfaced in this turn. The backend's
+      // _build_completion_result populates result.agent_blocks
+      // with {id, task, agent_idx} entries (empty array for
+      // turns without agent blocks). Each spawned tab's state
+      // is seeded with the task as the initial user message
+      // so when the user switches to it they see why it
+      // exists.
+      //
+      // Only fires for MAIN-tab completions — agent tabs
+      // themselves can't spawn child agents (tree depth is
+      // 1 per specs4/7-future/parallel-agents.md § Execution
+      // Model), and the backend's _is_child_request gate
+      // already prevents their responses from producing
+      // actual spawns. Filter here too so a stale agent
+      // response carrying agent blocks doesn't produce
+      // ghost tabs on the frontend.
+      //
+      // Error and cancelled completions still carry
+      // agent_blocks (the backend's result builder populates
+      // the field regardless of the apply gate), but we
+      // skip spawn on those paths — the backend doesn't
+      // actually fan out agents for cancelled/errored
+      // turns, so opening tabs would be misleading.
+      if (
+        ownerTabId === 'main'
+        && !result.error
+        && !result.cancelled
+        && typeof result.turn_id === 'string'
+        && Array.isArray(result.agent_blocks)
+        && result.agent_blocks.length > 0
+      ) {
+        this._spawnAgentTabs(
+          result.turn_id,
+          result.agent_blocks,
+          requestId,
+        );
+      }
     }
 
-    this._streams.delete(requestId);
+    ownerTab.streams.delete(requestId);
 
     // After finalising, check whether the response warrants
     // a retry prompt. Only fires for our own requests —
@@ -2050,8 +3573,157 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // prompts in our textarea. If a prompt IS populated,
     // the textarea is focused so the user can review and
     // send immediately.
-    if (wasOwnRequest && result && !result.error) {
+    //
+    // _maybePopulateRetryPrompt writes through the active-
+    // tab accessors (`this._input`, etc.). In single-tab
+    // operation (A2 scope) the owning tab IS the active
+    // tab, so the behaviour is identical. A future commit
+    // when multiple tabs exist will thread the tab ID
+    // through so retry prompts land in the owning tab's
+    // input regardless of which tab is currently active.
+    if (wasOwnRequest && ownerIsActive && result && !result.error) {
       this._maybePopulateRetryPrompt(result);
+    }
+  }
+
+  /**
+   * C2a — create agent tab state for each valid block.
+   *
+   * Called from ``_onStreamComplete`` when the main-tab
+   * result carries ``turn_id`` + one or more agent blocks.
+   * Creates a ``_tabs`` entry and a ``_tabLabels`` entry
+   * per block. Does NOT switch to any of the new tabs —
+   * the user's focus stays on the main tab where the
+   * assistant message (including the spawn blocks rendered
+   * as prose) has just landed. They can click into any
+   * agent tab via the strip or the overflow menu.
+   *
+   * Tab ID shape: ``{turn_id}/agent-{NN:02d}`` — matches the
+   * backend's archive directory convention and the child
+   * request ID format. Parsing the tab ID back into
+   * ``[turn_id, agent_idx]`` produces the exact tuple the
+   * backend's ``agent_tag`` kwarg expects (C1c) and the
+   * exact ``(turn_id, agent_idx)`` pair
+   * ``close_agent_context`` takes (C1b).
+   *
+   * Label derivation: :func:`deriveAgentTabLabel` produces
+   * ``Agent {NN}`` for tasks without text and ``Agent {NN}:
+   * {first line}`` otherwise, truncated to fit the strip.
+   * Pre-C.0 code treated this as an ad-hoc string
+   * concatenation; pinning it to the helper means future
+   * label shape changes land in one place.
+   *
+   * Tab state seeding: the agent's initial user message is
+   * the task text. Users switching to an agent tab should
+   * see what the main LLM asked it to do without having to
+   * scroll through the archive — the task IS the prompt.
+   * The selection list starts as a copy of the main tab's
+   * selection so the agent inherits context per the
+   * parallel-agents spec's "selected_files is a deep copy
+   * of the parent's" invariant. Backend already deep-copies
+   * server-side; the frontend copy here is the per-tab
+   * picker state. Subsequent user actions in the agent tab
+   * drive both (server via
+   * :meth:`LLMService.set_agent_selected_files`, client via
+   * picker state swap on tab activation).
+   *
+   * Idempotent: if a tab for the same ``{turn_id, agent_idx}``
+   * already exists (duplicate stream-complete for the same
+   * turn — defensive, shouldn't happen in practice), the
+   * existing tab is preserved. Creating fresh state would
+   * wipe any messages the user had already seen in that
+   * tab.
+   *
+   * Request update so the strip renders. The tab strip's
+   * render gate (``_tabs.size > 1``) flips from hidden to
+   * visible on the first spawn, so this call is load-
+   * bearing.
+   *
+   * @param {string} turnId — the backend's turn_id, shared
+   *   across all agent tabs from this turn
+   * @param {Array<object>} agentBlocks — validated block
+   *   entries with {id, task, agent_idx}
+   * @param {string} [parentRequestId] — the main LLM's
+   *   request ID. The backend streams each agent on child
+   *   request IDs of the form `{parent}-agent-{NN:02d}`;
+   *   we seed each new tab's `currentRequestId` + flip
+   *   its `streaming` flag so `_findTabForRequest` routes
+   *   the child's chunks to the correct tab. Optional for
+   *   backwards compatibility; when absent, tabs spawn
+   *   without streaming state and chunk routing silently
+   *   drops every child chunk.
+   */
+  _spawnAgentTabs(turnId, agentBlocks, parentRequestId) {
+    if (typeof turnId !== 'string' || !turnId) return;
+    if (!Array.isArray(agentBlocks)) return;
+    let anySpawned = false;
+    // Snapshot of the main tab's selection. Each new agent
+    // tab gets its own copy so mutations on one don't leak
+    // into another. Reading from _tabs directly (not via
+    // the `selectedFiles` getter) because the getter would
+    // return the ACTIVE tab's list — which is main here,
+    // but being explicit about the read keeps the spawn
+    // path robust against future changes to the getter.
+    const mainTab = this._tabs.get('main');
+    const mainSelection = Array.isArray(mainTab?.selectedFiles)
+      ? [...mainTab.selectedFiles]
+      : [];
+    for (const block of agentBlocks) {
+      if (!block || typeof block !== 'object') continue;
+      const agentIdx = block.agent_idx;
+      if (typeof agentIdx !== 'number' || agentIdx < 0) continue;
+      const agentId = typeof block.id === 'string' ? block.id : '';
+      if (!agentId) continue;
+      const task = typeof block.task === 'string' ? block.task : '';
+      // Tab ID = the agent's LLM-chosen id. Identity is
+      // flat at the backend (registry keyed by id alone),
+      // and the tab id mirrors that so parseAgentTabId
+      // can return the id directly with no parsing. The
+      // padded numeric index is still used for the child
+      // stream's request id and for the on-disk archive
+      // file name (`{turn_id}/agent-NN.jsonl`), but
+      // those are routing details and not the agent's
+      // identity.
+      const paddedIdx = String(Math.floor(agentIdx)).padStart(2, '0');
+      const tabId = agentId;
+      // Idempotent — existing tab wins.
+      if (this._tabs.has(tabId)) continue;
+      // Fresh tab state with the task seeded as the initial
+      // user message. The agent's own conversation starts
+      // with this message server-side (the backend's spawn
+      // path calls `_agent_stream_impl` with the task as
+      // the message argument), so the tab's visible history
+      // matches what the backend archives.
+      const state = this._makeTabState();
+      state.messages = [
+        { role: 'user', content: task },
+      ];
+      state.selectedFiles = [...mainSelection];
+      // Route child stream chunks to this tab. The
+      // backend's child request ID format is
+      // `{parent}-agent-{NN:02d}`, matching the backend
+      // _spawn_agents_for_turn path. `_findTabForRequest`
+      // uses exact-match on currentRequestId, so we must
+      // install the FULL child ID (not just the parent).
+      if (typeof parentRequestId === 'string' && parentRequestId) {
+        const childId = (
+          `${parentRequestId}-agent-${paddedIdx}`
+        );
+        state.currentRequestId = childId;
+        state.streaming = true;
+      }
+      this._tabs.set(tabId, state);
+      this._tabLabels.set(
+        tabId, deriveAgentTabLabel(agentIdx, task),
+      );
+      anySpawned = true;
+    }
+    if (anySpawned) {
+      // Force a re-render so the tab strip appears.
+      // `_tabs` is a Map mutation (not a reactive property
+      // assignment) so Lit doesn't observe the change
+      // automatically.
+      this.requestUpdate();
     }
   }
 
@@ -2384,9 +4056,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Clear URL chips — a new session starts fresh. The
     // backend's URL service session state is cleared
     // server-side on new_session via URLService.clear_fetched;
-    // we mirror that on the client.
+    // we mirror that on the client. Also wipe per-tab
+    // snapshots so switching back to a tab that had
+    // chips from a prior session doesn't resurrect
+    // them.
     const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
     if (chipsEl) chipsEl.reset();
+    for (const tab of this._tabs.values()) {
+      tab.urlChips = null;
+    }
   }
 
   /**
@@ -2717,14 +4395,27 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (this._rafHandle != null) return;
     this._rafHandle = requestAnimationFrame(() => {
       this._rafHandle = null;
-      // Drain the latest pending content for our current
-      // request. Other request IDs (parallel agents, collab
-      // broadcasts) are held until they're needed — Phase 2b
-      // doesn't render them.
-      const pending = this._pendingChunks.get(this._currentRequestId);
-      if (pending !== undefined) {
-        this._pendingChunks.delete(this._currentRequestId);
-        this._streamingContent = pending;
+      // Drain pending chunks across every tab. Each
+      // entry in pendingChunks is keyed by request ID;
+      // we look up the owning tab and write the chunk
+      // to its streamingContent. Only the active tab's
+      // update triggers a Lit re-render — inactive tabs
+      // accumulate state silently and render when the
+      // user switches to them.
+      let activeChanged = false;
+      for (const tab of this._tabs.values()) {
+        if (tab.pendingChunks.size === 0) continue;
+        for (const [requestId, content] of tab.pendingChunks) {
+          if (requestId !== tab.currentRequestId) continue;
+          tab.pendingChunks.delete(requestId);
+          tab.streamingContent = content;
+          if (tab === this._tabs.get(this._activeTabId)) {
+            activeChanged = true;
+          }
+        }
+      }
+      if (activeChanged) {
+        this.requestUpdate('_streamingContent');
       }
     });
   }
@@ -2791,6 +4482,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._streaming = true;
     this._streamingContent = '';
     this._autoScroll = true;
+    // Reset the textarea's inline height after clearing.
+    // Programmatic value clears don't fire `input`, so the
+    // auto-resize logic in `_onInputChange` won't run —
+    // without this reset, the textarea keeps the height it
+    // grew to during composition and only snaps back when
+    // the user starts typing again.
+    {
+      const ta = this.shadowRoot?.querySelector('.input-textarea');
+      if (ta) ta.style.height = 'auto';
+    }
     // Auto-close the snippet drawer on send — users don't
     // want it consuming vertical space during streaming,
     // and the act of sending is a natural "I'm done
@@ -2821,25 +4522,63 @@ export class ChatPanel extends RpcMixin(LitElement) {
           }
         }
       }
-      await this.rpcExtract(
+      // agent_tag (6th positional arg) routes the call to
+      // the agent's ConversationScope when the active tab
+      // is an agent. Null for the main tab — the backend's
+      // C1c dispatcher treats null as "use the main
+      // conversation" and takes the untagged path through
+      // the single-stream guard. Parsed from the active
+      // tab ID so the turn_id + agent_idx exactly match
+      // the keys in the backend's _agent_contexts registry.
+      const agentTag = parseAgentTabId(this._activeTabId);
+      const result = await this.rpcExtract(
         'LLMService.chat_streaming',
         requestId,
         text,
         // Passed positionally as the 4th arg to match the
         // backend's `chat_streaming(request_id, message,
-        // files=None, images=None, excluded_urls=None)`
-        // signature. Phase 2c's selected-files list lives on
-        // this component as `selectedFiles` (set by the
-        // files-tab orchestrator); passing it through keeps
-        // the backend aware of the current context.
+        // files=None, images=None, excluded_urls=None,
+        // agent_tag=None)` signature. Phase 2c's selected-
+        // files list lives on this component as
+        // `selectedFiles` (set by the files-tab
+        // orchestrator); the per-tab getter routes to the
+        // active tab's state so agent tabs send their own
+        // selection, not the main tab's.
         Array.isArray(this.selectedFiles)
           ? this.selectedFiles
           : [],
         images,
         excludedUrls,
+        agentTag,
       );
-      // Response is {status: "started"}. Chunks and completion
-      // arrive via server-push events; nothing more to do here.
+      // Response is {status: "started"} on the happy path.
+      // Chunks and completion arrive via server-push events.
+      //
+      // Error responses (synchronous rejections from the
+      // backend's chat_streaming) don't become exceptions —
+      // they resolve the Promise with an error dict. Handle
+      // them here rather than waiting for stream events
+      // that will never arrive.
+      //
+      // Two error shapes we care about:
+      //
+      // 1. {error: "agent not found"} — C1c's stale-tag
+      //    case. The agent_tag pointed at a scope that no
+      //    longer exists (closed in a race, session
+      //    restarted). The frontend's tab is stale; close
+      //    it and switch to main.
+      //
+      // 2. Anything else — generic errors like "Another
+      //    stream is active", "Malformed agent_tag",
+      //    restricted-caller. Surface as an assistant-
+      //    slot error message so the user sees why the
+      //    stream didn't start, clear streaming state.
+      if (result && typeof result === 'object' && result.error) {
+        this._handleStreamStartError(
+          requestId, result.error, agentTag,
+        );
+        return;
+      }
     } catch (err) {
       console.error('[chat] chat_streaming failed', err);
       this.messages = [
@@ -2874,6 +4613,95 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._currentRequestId = null;
       this._streams.clear();
     }
+  }
+
+  /**
+   * Handle a synchronous error response from
+   * ``chat_streaming``. The backend resolves the
+   * Promise with an error dict (not a rejection) for
+   * gate failures — stale agent_tag, duplicate
+   * stream, restricted caller, malformed payload.
+   *
+   * Two distinct UX paths:
+   *
+   * 1. ``agent not found`` — stale agent tab. The
+   *    scope was closed server-side between tab
+   *    creation and send (close_agent_context raced
+   *    with send, or session restarted). Close the
+   *    tab locally, switch to main, toast the user.
+   *    The tab's message the user just typed is
+   *    lost — acceptable because the scope itself
+   *    is gone and typing into a ghost tab is the
+   *    real bug.
+   *
+   * 2. Everything else — append an error message to
+   *    the current tab's message list so the user
+   *    sees why the stream didn't start. Clear
+   *    streaming state, keep the tab open. User can
+   *    retry.
+   *
+   * Both paths clear request tracking (current/last
+   * IDs, streams map) so stream events that somehow
+   * arrive for the failed request are dropped.
+   *
+   * @param {string} requestId — the request ID
+   *   registered at send time
+   * @param {string} errorMsg — the `error` field
+   *   from the backend response
+   * @param {[string, number] | null} agentTag —
+   *   parsed agent tag, null for main-tab sends
+   */
+  _handleStreamStartError(requestId, errorMsg, agentTag) {
+    // Always clear request tracking first — the
+    // stream isn't happening, so don't leave the
+    // guard slot held or any stale request-ID refs.
+    this._streaming = false;
+    this._streamingContent = '';
+    this._currentRequestId = null;
+    this._streams.delete(requestId);
+
+    // Stale agent tab — C1c returns "agent not found"
+    // for this case. Close the tab, switch to main,
+    // toast. The tab ID we're closing is the ACTIVE
+    // one (we just used it to build agent_tag).
+    const isStaleAgent =
+      errorMsg === 'agent not found' && agentTag !== null;
+    if (isStaleAgent) {
+      const staleTabId = this._activeTabId;
+      // Remove the optimistic user message we added
+      // before sending — the scope is gone, so the
+      // message never landed anywhere useful.
+      if (
+        this.messages.length > 0
+        && this.messages[this.messages.length - 1].role === 'user'
+      ) {
+        this.messages = this.messages.slice(0, -1);
+      }
+      // _onTabClose handles the local removal,
+      // active-tab switch, close-tab event dispatch,
+      // AND the follow-up close_agent_context RPC.
+      // The latter is now idempotent-or-noop
+      // (backend returns closed:false for unknown
+      // agents), so firing it again for an already-
+      // closed agent is safe.
+      this._onTabClose(staleTabId);
+      this._emitToast(
+        'Agent tab closed — scope was no longer available',
+        'warning',
+      );
+      return;
+    }
+
+    // Generic error path. Append as an assistant
+    // message so it renders inline with the failed
+    // user message. Keeps the tab open for retry.
+    this.messages = [
+      ...this.messages,
+      {
+        role: 'assistant',
+        content: `**Error:** ${errorMsg}`,
+      },
+    ];
   }
 
   // ---------------------------------------------------------------
@@ -3244,6 +5072,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
    * we toast).
    */
   async _onUrlFetchRequested(event) {
+    // TODO(url-fetch-cross-tab): this closure captures
+    // the singleton chips element, not the originating
+    // tab. Mid-fetch tab switches land the result on
+    // the wrong tab. See IMPLEMENTATION_NOTES.md §
+    // "Known bugs — per-tab state".
     const url = event.detail?.url;
     if (typeof url !== 'string' || !url) return;
     if (!this.rpcConnected) {
@@ -5017,6 +6850,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
   render() {
     const fileMode = this._searchMode === 'file';
     return html`
+      ${this._renderTabStrip()}
       <div class="messages-wrapper">
         <div
           class="messages ${fileMode ? 'messages-hidden' : ''}"
@@ -6401,6 +8235,9 @@ customElements.define('ac-chat-panel', ChatPanel);
 
 export {
   generateRequestId,
+  deriveAgentTabLabel,
+  parseAgentTabId,
+  _AGENT_LABEL_MAX_LENGTH,
   _loadDrawerOpen,
   _saveDrawerOpen,
   _DRAWER_STORAGE_KEY,

@@ -235,10 +235,12 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
 
 Turns in which the main LLM spawned agents have an associated archive of per-agent conversations (see [history.md](../3-llm/history.md#agent-turn-archive) and [agent-browser.md](agent-browser.md) for the UI spec).
 
-- The chat panel surfaces these via a right-side agent region that fans out from the chat for the active turn
-- A collapse tab on the right edge of the chat toggles the agent region open or closed; state persists per session
-- The chat itself IS the spine of every turn — it shows the user message and the assistant response. In agent-mode turns, the assistant response's `content` naturally includes the main LLM's decomposition narration, any review-and-iterate decisions, and the final synthesis, because all of that came from the same LLM's output stream. The chat renders it exactly as any other assistant message; no special card layout is needed for agent-mode turns
-- Assistant messages are schema-identical between agent-mode and non-agent-mode turns; the only distinguishing signal is the collapse tab, which appears whenever the active turn has an archive directory on disk
+- The chat panel surfaces these via additional tabs in its own tab strip — one "Main" tab plus one tab per agent spawned in the active turn
+- Each agent tab is a full chat panel instance targeting the agent's `ContextManager`, not a read-only viewer — the user can reply to an agent in its tab to resume its work, grant files by ticking the picker while that tab is active, or close the tab to kill the agent
+- The chat itself IS the spine of every turn — the Main tab shows the user message and the assistant response. In agent-mode turns, the assistant response's `content` naturally includes the main LLM's decomposition narration, any review-and-iterate decisions, and the final synthesis, because all of that came from the same LLM's output stream. The Main tab renders it exactly as any other assistant message; no special card layout is needed for agent-mode turns
+- Assistant messages in the Main tab are schema-identical between agent-mode and non-agent-mode turns. The distinguishing signal is the tab strip — a turn that spawned agents surfaces its agent tabs for as long as they're live, and surfaces a "View agents" affordance in the Main tab's scrollback for historical turns whose archives still exist on disk
+- Per-tab state (selection, URL chips, input draft, scroll position, active request ID) is scoped to each tab; switching tabs swaps the visible state without discarding any tab's values
+- Historical agent tabs (populated from the archive when the user scrolls back to a previous turn) are read-only — input boxes disabled, ContextManager long gone, but the full conversation is browsable
 
 ## Commit and Reset Flows
 

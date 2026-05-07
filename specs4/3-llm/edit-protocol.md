@@ -23,6 +23,21 @@ Each delimiter appears on its own line with nothing else on that line:
 
 The emoji prefix varies by marker role (orange/yellow/green = start/middle/end) so a block is visually distinguishable from prose at any zoom and any theme. The color sequence also makes malformed blocks (missing separator, missing end) obvious during review.
 
+### Agent-Spawn Blocks (Reserved Marker)
+
+A second block type — **agent-spawn blocks** — uses a distinct marker pair with no middle separator:
+
+- Start: `🟧🟧🟧 AGENT` — three orange squares, space, literal `AGENT`
+- End: `🟩🟩🟩 AGEND` — three green squares, space, literal `AGEND`
+
+Body is a minimal YAML-ish payload of `key: value` pairs. See [parallel-agents.md — Agent-spawn block format](../7-future/parallel-agents.md#agent-spawn-block-format) for the full shape.
+
+This marker is **reserved for future use**. Parallel-agent mode is not part of the initial clean-room build (see [parallel-agents.md](../7-future/parallel-agents.md) — "not for implementation"). The current single-agent system's edit parser treats `🟧🟧🟧 AGENT` and `🟩🟩🟩 AGEND` lines as prose; a future agent-spawning implementation will add branches to the parser's state machine that recognise the `AGENT` keyword and route the block to the agent spawner instead of the edit pipeline.
+
+The end markers differ between block types on purpose. If agent blocks reused `🟩🟩🟩 END`, a parser scanning line-by-line would have to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input, and it forces the frontend display parser and the backend apply parser to stay in lockstep on state tracking. With distinct end markers, each parser dispatches on the literal line: `🟩🟩🟩 END` closes edits, `🟩🟩🟩 AGEND` closes agents, no state disambiguation needed. An LLM response that interleaves both block types, or a document quoting both in the same code fence, cannot cause one marker to accidentally terminate the other's block.
+
+The absence of a middle separator (no `🟨🟨🟨`-style line inside agent blocks) further distinguishes agent blocks from edit blocks at glance.
+
 ### Example
 
 ```

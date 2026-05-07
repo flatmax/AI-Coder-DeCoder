@@ -6,17 +6,19 @@
 
 ### Tier parameters
 
-Each stability tier has an **entry N** (the N value assigned on arrival) and a **promotion N** (the threshold above which an item is eligible to promote to the next tier up).
+Each stability tier (L1, L2, L3, Active) has an **entry N** (the N value assigned on arrival) and a **promotion N** (the threshold above which an item is eligible to promote to the next tier up). L0 is content-typed (system prompt + aggregate maps) and not subject to the N-counter cascade.
 
 | Tier | Entry N | Promotion N | Notes |
 |---|---|---|---|
-| L0 | 12 | — (terminal) | Most stable; items here never promote further |
-| L1 | 9 | 12 | |
+| L0 | — | — | Content-typed; system prompt + aggregate symbol/doc maps; never invalidated by routine events |
+| L1 | 9 | — (terminal for cascade-mobile content) | Most stable promoted concrete content |
 | L2 | 6 | 9 | |
 | L3 | 3 | 6 | Entry tier for graduated content |
 | Active | 0 | 3 | Uncached; N ≥ 3 makes an item eligible to graduate to L3 |
 
 Promoted items enter their destination tier with the destination's entry N, **not** preserving their source-tier N. An item promoting from L3 → L2 arrives at L2 with N = 6, regardless of whether its L3 N was 6, 7, or 8.
+
+Cascade-mobile content (`file:`, `url:`, `history:`) never reaches L0 — the cascade respects the L0 content-type policy and stops promotion at L1.
 
 ### Cache target computation
 
@@ -57,15 +59,27 @@ When a caller has no model reference available (e.g., constructing a stability t
 
 This value is immediately overridden in production use; it exists only so standalone tracker construction has a sensible placeholder.
 
-### L0 seeding estimate
+### Placeholder tokens during initial placement
 
-Initial tier assignment from the reference graph seeds L0 with highest-ref-count files until the cache target is met. Since real token counts aren't available until after initialisation (the measurement pass runs after seeding), a per-entry estimate is used:
+The four-tier even split uses a per-entry placeholder token count while bin-packing, before the measurement pass runs:
 
 | Value | Purpose |
 |---|---|
-| 400 tokens | Conservative per-entry estimate during L0 seeding |
+| 100 tokens | Conservative per-entry estimate for clustering bin-pack math |
 
-Chosen conservatively — the real post-measurement values are usually higher, so the placeholder under-seeds slightly rather than over-seeding. Post-measurement, anchored items below the real threshold get unanchored naturally via the next cascade.
+Deliberately below the common real-block range (50–300 tokens) — a slight underestimate means post-measurement tier totals end up a little smaller than the placeholder budget suggested, which is safe. Overestimating would pack too many files into each tier and trigger immediate demotion cascades on the first post-measurement request.
+
+### Post-measurement L0 backfill (cross-reference enable only)
+
+Under the L0-content-typed model, init and rebuild do not run L0 backfill — L0 is populated directly with the aggregate maps. `backfill_l0_after_measurement` remains wired into `seed_cross_reference_items` so cross-reference activation can promote the most-connected opposite-index items into L0 alongside the primary aggregate map. This is the only remaining caller.
+
+| Value | Purpose |
+|---|---|
+| 2.0 | Default `overshoot_multiplier` |
+
+When called, the backfill ranks candidates by reference count descending and promotes until real token total reaches `cache_target_tokens × overshoot_multiplier`. Source tiers marked broken; L0 not marked broken (promoted items earn their slot). Scoped to `candidate_keys` when provided (cross-reference enable uses this to avoid promoting pre-existing tracker entries).
+
+Cross-reference items are structural (symbol or doc blocks), so promoting them into L0 is consistent with L0's content-type policy. File and URL content is never a candidate for this backfill.
 
 ### Cascade iteration cap
 
@@ -81,8 +95,33 @@ In practice the cascade stabilises within 2–3 iterations; the cap is defensive
 
 | Threshold | Value | Used by |
 |---|---|---|
-| Graduation N (active → L3) | 3 | Files, symbols, doc blocks |
+| Graduation N (active → L3) | 3 | Files (including edit-pinned), URLs, deletion markers |
 | URL direct-entry tier | L1 (entry N = 9) | URLs skip the graduation wait; static content enters directly cached |
+
+Symbol blocks and doc blocks do not graduate — they live permanently in L0's aggregate maps from session start (or last `rebuild_cache`) and are not subject to the N-counter cascade.
+
+History does not use an N threshold and does not use a token-budget threshold. It graduates only on piggyback — when L3 is already marked broken for an unrelated reason, newest → oldest history fills a verbatim window sized at `cache_target_tokens` in active and everything older promotes to L3. See the behavioural spec for rationale (`cache_target_tokens` is a caching floor, not a conversation-length cap, and token-driven history graduation would destabilise L3 on almost every turn).
+
+### Deletion marker content
+
+When a `file:<path>` entry transitions to a deletion-marker entry (file deleted from disk during the session), its content is replaced by a fixed string:
+
+| Constant | Value |
+|---|---|
+| `DELETION_MARKER_TEXT` | `"[deleted in this session — see L0 symbol/doc map for last-known structure]"` |
+
+Byte-identical across all marker entries — the marker hash is `SHA-256(DELETION_MARKER_TEXT)` and is therefore the same for every deletion. This is intentional: identical hashes mean the cascade sees deletion markers as stable content (no spurious demotions across requests) and lets multiple deleted files share an indistinguishable marker representation.
+
+The marker text is rendered into the prompt verbatim wherever the deleted file would have appeared (Active working files section, or the appropriate L1/L2/L3 reference-files block). Path is shown above the marker via the standard fenced-block format documented in `specs-reference/3-llm/prompt-assembly.md` § File content formatting:
+
+```
+path/to/deleted_file.py
+```
+[deleted in this session — see L0 symbol/doc map for last-known structure]
+```
+```
+
+Reimplementer note: keep this string byte-identical. A regex or fuzzy match in the LLM's training data may key on the bracket-prefix shape; small variations (different bracket style, different wording) may produce subtly different model behaviour. The exact text was chosen for clarity to the LLM ("see L0 symbol/doc map" tells the model where to find structural information about what was deleted) and brevity (no wasted tokens when many files are deleted in a session).
 
 ### Minimum verbatim exchange safeguard
 
@@ -110,14 +149,19 @@ The `_anchored` flag is a transient per-cascade attribute set dynamically via `s
 
 ### Key prefixes
 
-| Prefix | Source | Stored value |
-|---|---|---|
-| `file:{path}` | Selected files | Full file content hash |
-| `symbol:{path}` | Symbol index entries | Signature hash (raw symbol data, not formatted output) |
-| `doc:{path}` | Document index entries | Signature hash (raw outline data) |
-| `history:{N}` | Conversation history | Hash of `role + content` string, where N is the integer index |
-| `url:{hash12}` | Fetched URL content | Hash of URL content; hash12 is the first 12 chars of SHA-256(url) |
-| `system:prompt` | System prompt + legend | Hash of prompt text only (excludes legend, so file-selection-driven legend changes don't destabilise the system entry) |
+| Prefix | Source | Stored value | Tier eligibility |
+|---|---|---|---|
+| `file:{path}` | Selected files | Full file content hash | Active, L3, L2, L1 (never L0) |
+| `file:{path}` (deletion marker) | File deleted from disk during session | Hash of `DELETION_MARKER_TEXT` (constant — see below) | Active, L3, L2, L1 (never L0) |
+| `symbol:{path}` | Symbol index entries | Signature hash (raw symbol data, not formatted output) | L0 only (aggregate map); cross-reference activation may seed additional `symbol:` entries into L0 |
+| `doc:{path}` | Document index entries | Signature hash (raw outline data) | L0 only (aggregate map); cross-reference activation may seed additional `doc:` entries into L0 |
+| `history:{N}` | Conversation history | Hash of `role + content` string, where N is the integer index | Active, L3, L2, L1 (never L0) |
+| `url:{hash12}` | Fetched URL content | Hash of URL content; hash12 is the first 12 chars of SHA-256(url) | Active, L3, L2, L1 (never L0) |
+| `system:prompt` | System prompt + legend | Hash of prompt text only (excludes legend, so file-selection-driven legend changes don't destabilise the system entry) | L0 only |
+
+`file:` entries acquire an additional transient `_pinned` flag when the file is edited during the session. Pinned entries are not subject to stale-cleanup eviction. Pin flags are cleared by application restart or explicit `rebuild_cache`.
+
+Deletion-marker entries reuse the `file:{path}` key prefix — they're the same key as the original file, with content and hash replaced. Path-keyed identity means re-creating a file at the same path during the session naturally promotes the marker back to a normal `file:` entry on the next hash-change cycle (the new content hashes differently from `DELETION_MARKER_TEXT`, demoting the entry to Active with fresh content). Deletion markers do NOT carry the `_pinned` flag; they are intrinsically stable (constant hash) and don't need pin-protection — only `rebuild_cache` and application restart clear them.
 
 ## Dependency quirks
 
@@ -130,6 +174,29 @@ Consumers should use `SymbolIndex.get_signature_hash(path)` (authoritative) rath
 ### System prompt hash excludes legend
 
 The system prompt hash covers prompt text only. The legend (path aliases, abbreviation reference) is concatenated at render time but NOT part of the hashed content. Rationale: the legend changes whenever file selections change (path aliases update), and hashing the combined string would cause the `system:prompt` entry to demote on every file-selection change — preventing it from ever stabilising into L0.
+
+### L0 snapshot is distinct from the live indexes
+
+L0's rendered content (system prompt + primary aggregate map + primary legend + optional secondary map and legend) is held in a snapshot on the LLM service. The snapshot is refrozen only at the enumerated L0-invalidation events documented in `specs4/3-llm/cache-tiering.md` § L0 Stability Contract. Prompt assembly reads from the snapshot, not from live `SymbolIndex.get_symbol_map()` / `DocIndex.get_doc_map()` calls.
+
+The live indexes are updated per-turn (the streaming pipeline calls `index_repo` once per request to pick up file mtime changes) so:
+
+- Per-file blocks rendered in L1, L2, L3 (via `get_file_symbol_block(path)` / `get_file_doc_block(path)`) reflect the current state of edited files. The cascade's signature-hash comparison still works correctly.
+- The next L0-invalidation event refreezes from accurate live data.
+
+The snapshot fields stored on the LLM service:
+
+| Field | Source | Populated when |
+|---|---|---|
+| `_l0_system_prompt` | `ContextManager.get_system_prompt()` | At session construction; refrozen at every L0-invalidation event |
+| `_l0_primary_legend` | `SymbolIndex.get_legend()` (code mode) or `DocIndex.get_legend()` (doc mode) | Same |
+| `_l0_primary_map` | `SymbolIndex.get_symbol_map(exclude_files=user_excluded)` (code mode) or `DocIndex.get_doc_map(...)` (doc mode) | Same |
+| `_l0_secondary_legend` | Opposite-mode index's `get_legend()`; empty string when cross-reference is off | Same |
+| `_l0_secondary_map` | Opposite-mode index's aggregate map; empty string when cross-reference is off | Same |
+
+The snapshot is a structural mirror of L0's rendered bytes. Token counts derived from snapshot fields (used by the cache breakdown UI and the post-response HUD) are computed from the snapshot strings, not from live calls — keeps the displayed numbers consistent with what the LLM actually receives.
+
+The `system:prompt` entry in the stability tracker continues to hash `_l0_system_prompt` (without legend, per the rule above). The tracker's notion of "system prompt has changed" stays decoupled from the snapshot mechanism.
 
 ## Cross-references
 

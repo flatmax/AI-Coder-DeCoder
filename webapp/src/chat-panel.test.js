@@ -25,6 +25,7 @@ import './chat-panel.js';
 import {
   ChatPanel,
   generateRequestId,
+  parseAgentTabId,
   _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
@@ -115,6 +116,71 @@ describe('generateRequestId', () => {
     const ids = new Set();
     for (let i = 0; i < 100; i += 1) ids.add(generateRequestId());
     expect(ids.size).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAgentTabId (C2b)
+// ---------------------------------------------------------------------------
+
+describe('parseAgentTabId', () => {
+  // Per specs4/5-webapp/agent-browser.md and
+  // specs4/7-future/parallel-agents.md § "Agent Reuse by
+  // ID", agent identity is flat — the agent's LLM-chosen
+  // id from its `🟧🟧🟧 AGENT` block IS the tab id IS the
+  // backend registry key. parseAgentTabId returns the id
+  // directly with no parsing. The literal "main" is
+  // reserved for the main conversation; everything else
+  // is treated as an agent id.
+
+  it('returns null for the main tab', () => {
+    // Untagged path — the caller drops the agent_tag
+    // argument so the backend uses the main conversation.
+    expect(parseAgentTabId('main')).toBeNull();
+  });
+
+  it('returns the id verbatim for descriptive agent ids', () => {
+    // Real LLM-chosen ids look like "frontend-trivial",
+    // "backend-auth-refactor", etc. The parser is the
+    // identity function for any non-"main" string.
+    expect(parseAgentTabId('frontend-trivial')).toBe(
+      'frontend-trivial',
+    );
+    expect(parseAgentTabId('backend-auth-refactor')).toBe(
+      'backend-auth-refactor',
+    );
+  });
+
+  it('returns the id verbatim for short ids', () => {
+    // The parser does not impose a minimum length or
+    // require any specific shape — any non-empty non-
+    // "main" string is a valid agent id.
+    expect(parseAgentTabId('a')).toBe('a');
+    expect(parseAgentTabId('agent-0')).toBe('agent-0');
+  });
+
+  it('preserves arbitrary characters in the id', () => {
+    // The backend does not validate id shape beyond
+    // non-emptiness, so the frontend parser shouldn't
+    // either. Slashes, spaces, punctuation — all pass
+    // through unchanged.
+    expect(parseAgentTabId('a/b/c')).toBe('a/b/c');
+    expect(parseAgentTabId('with spaces')).toBe('with spaces');
+    expect(parseAgentTabId('punct!@#')).toBe('punct!@#');
+  });
+
+  it('returns null for empty string', () => {
+    expect(parseAgentTabId('')).toBeNull();
+  });
+
+  it('returns null for non-string input', () => {
+    // Defensive — tab IDs come from Map keys so should
+    // always be strings, but malformed data shouldn't
+    // crash the send path.
+    expect(parseAgentTabId(null)).toBeNull();
+    expect(parseAgentTabId(undefined)).toBeNull();
+    expect(parseAgentTabId(42)).toBeNull();
+    expect(parseAgentTabId({})).toBeNull();
   });
 });
 
@@ -1058,6 +1124,164 @@ describe('ChatPanel send flow', () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2b — per-tab text routing via agent_tag
+// ---------------------------------------------------------------------------
+
+// When the active tab is an agent, _send must pass the
+// parsed [turn_id, agent_idx] as the agent_tag positional
+// argument to LLMService.chat_streaming. The backend's
+// C1c dispatcher routes the call to the agent's scope
+// rather than the main conversation. Main-tab sends pass
+// null for agent_tag.
+
+describe('ChatPanel agent_tag routing', () => {
+  // Per specs4/5-webapp/agent-browser.md, the agent_tag
+  // sent to chat_streaming is the agent's LLM-chosen id
+  // — the same string that keys the tab in `_tabs`. Main
+  // tab sends null; agent tabs send their id verbatim.
+
+  async function setupWithAgentTab() {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Tab id is the agent's id — flat identity.
+    const agentTabId = 'frontend-trivial';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'frontend-trivial');
+    return { panel: p, started, agentTabId };
+  }
+
+  it('main tab sends agent_tag=null', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Active tab defaults to "main" — the send path
+    // should pass null for agent_tag.
+    p._input = 'hello from main';
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledOnce();
+    // Args: requestId, message, files, images,
+    // excluded_urls, agent_tag. agent_tag is the 6th.
+    const args = started.mock.calls[0];
+    expect(args).toHaveLength(6);
+    expect(args[5]).toBeNull();
+  });
+
+  it('agent tab sends its id as agent_tag', async () => {
+    const { panel, started, agentTabId } =
+      await setupWithAgentTab();
+    panel._activeTabId = agentTabId;
+    await settle(panel);
+    panel._input = 'hello from agent';
+    await panel._send();
+    await settle(panel);
+    expect(started).toHaveBeenCalledOnce();
+    const args = started.mock.calls[0];
+    // agent_tag is the 6th positional arg — the agent's
+    // id verbatim (flat identity).
+    expect(args[5]).toBe('frontend-trivial');
+  });
+
+  it('different agent tabs route to their own ids', async () => {
+    // Two agent tabs — each sends its own id so the
+    // backend routes to the right scope.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('frontend-trivial', p._makeTabState());
+    p._tabs.set('backend-auth', p._makeTabState());
+    p._tabLabels.set('frontend-trivial', 'frontend-trivial');
+    p._tabLabels.set('backend-auth', 'backend-auth');
+    // Send from frontend-trivial.
+    p._activeTabId = 'frontend-trivial';
+    await settle(p);
+    p._input = 'from frontend';
+    await p._send();
+    await settle(p);
+    // Reset streaming so the next send proceeds.
+    p._tabs.get('frontend-trivial').streaming = false;
+    p._tabs.get('frontend-trivial').currentRequestId = null;
+    // Send from backend-auth.
+    p._activeTabId = 'backend-auth';
+    await settle(p);
+    p._input = 'from backend';
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledTimes(2);
+    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
+    expect(started.mock.calls[1][5]).toBe('backend-auth');
+  });
+
+  it('agent ids survive across turns (id-based reuse)', async () => {
+    // Per parallel-agents.md, agents linger across
+    // turns and are addressed by id. Tab id stays the
+    // same regardless of which turn spawned the agent.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('persistent-agent', p._makeTabState());
+    p._tabLabels.set('persistent-agent', 'persistent-agent');
+    p._activeTabId = 'persistent-agent';
+    await settle(p);
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[0][5]).toBe('persistent-agent');
+  });
+
+  it('agent tab selection list comes from active tab', async () => {
+    // When an agent tab is active, the files argument
+    // reads from THAT tab's selected_files, not main's.
+    // Pinned because the `selectedFiles` getter is
+    // per-tab (D21 A4) — regression guard.
+    const { panel, started, agentTabId } =
+      await setupWithAgentTab();
+    // Different selections per tab.
+    panel._tabs.get('main').selectedFiles = ['main.py'];
+    panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
+    panel._activeTabId = agentTabId;
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    const args = started.mock.calls[0];
+    // files is the 3rd positional arg.
+    expect(args[2]).toEqual(['agent.py']);
+  });
+
+  it('switching back to main after agent send routes correctly', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('frontend-trivial', p._makeTabState());
+    p._tabLabels.set('frontend-trivial', 'frontend-trivial');
+    // Agent send first.
+    p._activeTabId = 'frontend-trivial';
+    await settle(p);
+    p._input = 'from agent';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
+    // Reset the agent tab's streaming state.
+    p._tabs.get('frontend-trivial').streaming = false;
+    p._tabs.get('frontend-trivial').currentRequestId = null;
+    // Switch back to main, send.
+    p._activeTabId = 'main';
+    await settle(p);
+    p._input = 'from main';
+    await p._send();
+    await settle(p);
+    expect(started.mock.calls[1][5]).toBeNull();
   });
 });
 
@@ -5499,6 +5723,1195 @@ describe('ChatPanel message search — scroll behaviour', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tab strip rendering (D21 Phase B1)
+// ---------------------------------------------------------------------------
+
+// The tab strip is hidden in single-tab operation (the
+// common case) to preserve vertical space for users
+// running single-agent workflows. It appears the moment
+// a second tab is added. Clicking a tab button flips
+// `_activeTabId`, which fires the `active-tab-changed`
+// event wired in A3 — the files-tab picker then swaps
+// its selection state via A4's handler.
+//
+// Phase A never produces a second tab in practice, but
+// the tests seed the Map directly (same pattern as A3)
+// to pin the rendering and click contracts. When
+// Phase C's spawn path lands, it just adds entries to
+// `_tabs` and `_tabLabels`; the strip appears and works
+// without re-touching any of this.
+
+/**
+ * Seed a fresh tab in the chat panel's `_tabs` Map with
+ * a label. Mirrors the A3 helper but adds the label so
+ * the strip renders human-readable text. Caller must
+ * call `requestUpdate()` afterward; `settle()` picks up
+ * the re-render.
+ *
+ * Named `seedLabeledTab` to avoid colliding with the A3
+ * suite's own `seedTab` helper (same file, different
+ * describe blocks, same-name function declarations
+ * collide at parse time).
+ */
+function seedLabeledTab(panel, tabId, label) {
+  panel._tabs.set(tabId, panel._makeTabState());
+  if (typeof label === 'string' && label) {
+    panel._tabLabels.set(tabId, label);
+  }
+}
+
+describe('ChatPanel tab strip rendering', () => {
+  it('is hidden when only the main tab exists', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeNull();
+  });
+
+  it('appears when a second tab is added', async () => {
+    // Pinned behaviour: users running single-agent
+    // workflows never see the strip; the moment a
+    // second tab spawns, it materialises.
+    const p = mountPanel();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeTruthy();
+  });
+
+  it('renders one button per tab in insertion order', async () => {
+    // Map iteration order is insertion order — main
+    // first (constructor), then agents in spawn order.
+    // That matches the natural left-to-right reading.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    seedLabeledTab(p, 'agent-2', 'Agent 2');
+    p.requestUpdate();
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(buttons.length).toBe(4);
+    expect(buttons[0].getAttribute('data-tab-id')).toBe('main');
+    expect(buttons[1].getAttribute('data-tab-id')).toBe('agent-0');
+    expect(buttons[2].getAttribute('data-tab-id')).toBe('agent-1');
+    expect(buttons[3].getAttribute('data-tab-id')).toBe('agent-2');
+  });
+
+  it('renders the main tab label as "Main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.textContent.trim()).toBe('Main');
+  });
+
+  it('renders custom labels for agent tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    // Agent tabs include a trailing ✕ close button (B3),
+    // so assert on the label text portion rather than the
+    // full textContent. The query-root-text after stripping
+    // the close glyph should equal the label.
+    const labelText = agentBtn.textContent
+      .replace(/✕\s*$/, '')
+      .trim();
+    expect(labelText).toBe('Agent 0: refactor auth');
+  });
+
+  it('falls back to tab ID when label is missing', async () => {
+    // Defensive — a tab added to `_tabs` without a
+    // corresponding label entry renders its raw ID so
+    // the button is visible but ugly (rather than an
+    // empty button that's impossible to click).
+    const p = mountPanel();
+    await settle(p);
+    // Add tab to _tabs but NOT to _tabLabels.
+    p._tabs.set('orphan-tab', p._makeTabState());
+    p.requestUpdate();
+    await settle(p);
+    const orphanBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="orphan-tab"]',
+    );
+    // Strip the trailing close button glyph — B3 renders
+    // ✕ for all non-main tabs, orphan tabs included.
+    const labelText = orphanBtn.textContent
+      .replace(/✕\s*$/, '')
+      .trim();
+    expect(labelText).toBe('orphan-tab');
+  });
+
+  it('active tab gets the .active class', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Main is active initially.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(true);
+    expect(agentBtn.classList.contains('active')).toBe(false);
+  });
+
+  it('active class follows _activeTabId changes', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Switch to agent-0 via direct setter.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(false);
+    expect(agentBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('active button carries aria-selected="true"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.getAttribute('aria-selected')).toBe('true');
+    expect(agentBtn.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('button title attribute mirrors the label', async () => {
+    // Title gives a hover-tooltip with the full label
+    // when the text is ellipsis-truncated at 16rem
+    // max-width. Pinned so a refactor that drops the
+    // title attribute fails here.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth module');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(agentBtn.getAttribute('title')).toBe(
+      'Agent 0: refactor auth module',
+    );
+  });
+
+  it('tablist role on the inner scroll container', async () => {
+    // ARIA tablist role required for screen-reader
+    // users to recognise the strip as a tab widget.
+    // B2 moved `role="tablist"` from the outer
+    // `.tab-strip` (which became a pure layout flex
+    // row) to the inner `.tab-strip-scroll` that
+    // actually holds the tab buttons. The overflow
+    // button is a sibling of the tablist, not a
+    // member, so pinning the role on the scroll
+    // container matches the ARIA tablist contract
+    // (tablist contains tabs — nothing else).
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const scroll = p.shadowRoot.querySelector('.tab-strip-scroll');
+    expect(scroll.getAttribute('role')).toBe('tablist');
+  });
+
+  it('buttons carry role="tab"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    for (const btn of buttons) {
+      expect(btn.getAttribute('role')).toBe('tab');
+    }
+  });
+});
+
+describe('ChatPanel tab strip interaction', () => {
+  it('clicking a tab flips _activeTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-0');
+  });
+
+  it('click dispatches active-tab-changed event', async () => {
+    // The A3 setter fires the event on transition.
+    // B1's click handler uses the setter, so the event
+    // flows through the same path and sibling
+    // components (files-tab) see the change.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const agentBtn = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"]',
+      );
+      agentBtn.click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking the already-active tab is a no-op', async () => {
+    // The A3 setter short-circuits on same-value
+    // writes — no event, no re-render. Pinned
+    // alongside the strip click because a double-
+    // click on the main tab shouldn't spam the
+    // channel.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const mainBtn = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="main"]',
+      );
+      // Main is already active. Click should be silent.
+      mainBtn.click();
+      mainBtn.click();
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking updates the active class on the strip', async () => {
+    // End-to-end: user clicks a tab, the strip
+    // re-renders with the new active class on the
+    // clicked button. Proves the click → setter →
+    // requestUpdate → render chain works.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    const agentBtn2 = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(mainBtn.classList.contains('active')).toBe(false);
+    expect(agentBtn2.classList.contains('active')).toBe(true);
+  });
+
+  it('switching tabs swaps the visible message list', async () => {
+    // Real per-tab UX check. Seed different messages
+    // in each tab's slot, then click to switch — the
+    // messages in view should change because the
+    // `messages` getter reads from the active tab.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    // Write different messages into each tab's slot.
+    p._tabs.get('main').messages = [
+      { role: 'user', content: 'main tab message' },
+    ];
+    p._tabs.get('agent-0').messages = [
+      { role: 'user', content: 'agent tab message' },
+    ];
+    p.requestUpdate();
+    await settle(p);
+    // Starts on main.
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).toContain('main tab message');
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).not.toContain('agent tab message');
+    // Switch to agent-0.
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    agentBtn.click();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).toContain('agent tab message');
+    expect(
+      p.shadowRoot.querySelector('.messages').textContent,
+    ).not.toContain('main tab message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab strip overflow (D21 Phase B2)
+// ---------------------------------------------------------------------------
+
+// B2 adds horizontal scrolling to the strip (so many
+// agent tabs don't compress the buttons to uselessness)
+// and a three-dots overflow button that opens a direct-
+// jump dropdown menu. Tests pin:
+//
+//   - Scroll container exists with overflow-x: auto
+//   - Overflow button is always visible when the strip
+//     is visible (never gated on measured overflow)
+//   - Menu opens on button click, closes on click again
+//   - Menu items reflect all tabs in insertion order
+//   - Clicking a menu item jumps to that tab and closes
+//     the menu
+//   - Outside-click and Escape both dismiss the menu
+//   - Menu is suppressed in single-tab mode (strip
+//     hidden → no overflow button either)
+
+describe('ChatPanel tab strip overflow — structure', () => {
+  it('has a scroll container inside the strip', async () => {
+    // B2 moved the tab buttons into an inner
+    // `.tab-strip-scroll` flex child so the outer
+    // `.tab-strip` can hold both the scrollable
+    // row AND the pinned overflow button. Pinned
+    // so a future refactor that collapses the two
+    // back into one container fails here.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const scroll = p.shadowRoot.querySelector('.tab-strip-scroll');
+    expect(scroll).toBeTruthy();
+    // Tab buttons live inside it, not the outer
+    // `.tab-strip` directly.
+    const tabsInScroll = scroll.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(tabsInScroll.length).toBeGreaterThan(0);
+  });
+
+  it('overflow button is visible when strip is visible', async () => {
+    // Always-available per the B2 design — not gated
+    // on measured overflow. Users with 10+ agents
+    // benefit from direct access regardless of
+    // scroll position, and jsdom can't reliably
+    // measure overflow.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    expect(btn).toBeTruthy();
+  });
+
+  it('overflow button is absent in single-tab mode', async () => {
+    // The strip itself is hidden, so the overflow
+    // button is hidden with it.
+    const p = mountPanel();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow'),
+    ).toBeNull();
+  });
+
+  it('overflow button carries aria attributes', async () => {
+    // aria-haspopup="menu" + aria-expanded reflects
+    // open state. Pinned because screen-reader
+    // behaviour changes based on these.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    expect(btn.getAttribute('aria-haspopup')).toBe('menu');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('ChatPanel tab strip overflow — open/close', () => {
+  it('menu is closed by default', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeNull();
+  });
+
+  it('clicking the overflow button opens the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeTruthy();
+  });
+
+  it('aria-expanded reflects open state', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('clicking the button again closes the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector('.tab-strip-overflow');
+    btn.click();
+    await settle(p);
+    btn.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+    expect(
+      p.shadowRoot.querySelector('.tab-strip-overflow-menu'),
+    ).toBeNull();
+  });
+
+  it('outside click dismisses the menu', async () => {
+    // Document-level capture-phase listener dismisses
+    // when the click doesn't hit the overflow button
+    // or the menu itself. Simulate a click on
+    // document.body.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Click something outside the menu and button.
+    document.body.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+
+  it('click inside the menu does not dismiss', async () => {
+    // The outside-click check walks composedPath —
+    // a click on the menu container itself (not on
+    // an item) should not close. The item handler
+    // closes explicitly.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    // Click the menu's own container (not any item).
+    const menu = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-menu',
+    );
+    menu.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+  });
+
+  it('Escape dismisses the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Fire Escape on the document — capture-phase
+    // listener catches it.
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+});
+
+describe('ChatPanel tab strip overflow — menu items', () => {
+  it('renders one item per tab in insertion order', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    seedLabeledTab(p, 'agent-2', 'Agent 2');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const items = p.shadowRoot.querySelectorAll(
+      '.tab-strip-overflow-item',
+    );
+    expect(items.length).toBe(4);
+    expect(items[0].getAttribute('data-tab-id')).toBe('main');
+    expect(items[1].getAttribute('data-tab-id')).toBe('agent-0');
+    expect(items[2].getAttribute('data-tab-id')).toBe('agent-1');
+    expect(items[3].getAttribute('data-tab-id')).toBe('agent-2');
+  });
+
+  it('item labels match the strip button labels', async () => {
+    // Users should see the same text in the menu as
+    // on the strip, so jumping is unsurprising.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor auth');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(item.textContent.trim()).toBe(
+      'Agent 0: refactor auth',
+    );
+  });
+
+  it('main item renders as "Main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const mainItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="main"]',
+    );
+    expect(mainItem.textContent.trim()).toBe('Main');
+  });
+
+  it('active item gets the .active class', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const mainItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="main"]',
+    );
+    const agentItem = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(mainItem.classList.contains('active')).toBe(false);
+    expect(agentItem.classList.contains('active')).toBe(true);
+  });
+
+  it('items carry role="menuitem"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const items = p.shadowRoot.querySelectorAll(
+      '.tab-strip-overflow-item',
+    );
+    for (const item of items) {
+      expect(item.getAttribute('role')).toBe('menuitem');
+    }
+  });
+});
+
+describe('ChatPanel tab strip overflow — jump', () => {
+  it('clicking an item flips _activeTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-1"]',
+    );
+    item.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-1');
+  });
+
+  it('clicking an item closes the menu', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    item.click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(false);
+  });
+
+  it('clicking dispatches active-tab-changed', async () => {
+    // Same path as clicking a strip button — goes
+    // through the setter, which fires the event for
+    // sibling components.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+        )
+        .click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('clicking the already-active item is a no-op', async () => {
+    // The setter short-circuits; no event fires. Menu
+    // still closes though — explicit close in the
+    // item handler.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      // Main is already active; clicking its item is
+      // a no-op event-wise but still closes the menu.
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-overflow-item[data-tab-id="main"]',
+        )
+        .click();
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+      expect(p._tabStripOverflowOpen).toBe(false);
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+});
+
+describe('ChatPanel tab strip overflow — cleanup', () => {
+  it('disconnect releases document listeners', async () => {
+    // If the menu is open at unmount, the document
+    // click and keydown listeners must be removed
+    // (belt-and-braces — a closing transition would
+    // also remove them, but disconnect short-
+    // circuits that path).
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    expect(p._tabStripOverflowOpen).toBe(true);
+    // Unmount with menu open.
+    p.remove();
+    // A subsequent document click / Escape must not
+    // throw. No easy way to observe absence directly,
+    // but if the listener were still attached it
+    // would try to mutate a detached component.
+    expect(() => document.body.click()).not.toThrow();
+    expect(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+        }),
+      ),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab close button (D21 Phase B3)
+// ---------------------------------------------------------------------------
+
+// The close button is the user-facing mechanism for
+// retiring an agent tab. Main tab never shows it; agent
+// tabs always do. Clicking dispatches a `close-tab`
+// event (for future backend wiring) and removes the tab
+// from the strip. If the closed tab was active, we
+// switch to Main so no per-tab getter ends up querying
+// a deleted key.
+
+describe('ChatPanel tab close — rendering', () => {
+  it('main tab does not render a close button', async () => {
+    // Main can't be closed — the only conversation
+    // path that always exists. Absence of the button
+    // is load-bearing: a stray ✕ on Main would let
+    // users accidentally delete their primary
+    // conversation.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.querySelector('.tab-close')).toBeNull();
+  });
+
+  it('agent tabs render a close button', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const agentBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    const close = agentBtn.querySelector('.tab-close');
+    expect(close).toBeTruthy();
+    // ✕ glyph for visual identification.
+    expect(close.textContent.trim()).toBe('✕');
+  });
+
+  it('close button carries accessible label', async () => {
+    // Screen readers need to identify which tab the
+    // button closes when multiple are present.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    expect(close.getAttribute('aria-label')).toBe(
+      'Close Agent 0: refactor',
+    );
+  });
+
+  it('close button has role=button and keyboard affordance', async () => {
+    // Rendered as a <span role="button" tabindex="0">
+    // because a nested <button> inside a <button> is
+    // invalid HTML — browsers may hoist it out of the
+    // parent, breaking the layout. Same screen-reader
+    // semantics, no parser interference.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    expect(close.tagName).toBe('SPAN');
+    expect(close.getAttribute('role')).toBe('button');
+    expect(close.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('overflow menu items have no close affordance', async () => {
+    // Close is strip-only by design. The menu is a
+    // pure jump affordance; destructive actions live
+    // where the user is already aiming precisely.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(item.querySelector('.tab-close')).toBeNull();
+  });
+});
+
+describe('ChatPanel tab close — behavior', () => {
+  it('clicking close removes the tab from _tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(true);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+    // Sibling agent still present.
+    expect(p._tabs.has('agent-1')).toBe(true);
+    // Main always stays.
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('removes from _tabLabels too', async () => {
+    // Label Map is parallel storage; leaving a stale
+    // entry would accumulate over long sessions and
+    // produce ghost labels if a tab with the same ID
+    // were ever spawned again.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._tabLabels.has('agent-0')).toBe(false);
+  });
+
+  it('closing the active tab switches to main', async () => {
+    // Load-bearing — if we didn't switch, the active
+    // ID would point at a deleted key and every
+    // per-tab getter would lazy-create a fresh empty
+    // state there, reviving the tab we just closed.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('closing an inactive tab preserves the active one', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-1';
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.click();
+    await settle(p);
+    expect(p._activeTabId).toBe('agent-1');
+  });
+
+  it('close click does not flip activeTabId to the closing tab', async () => {
+    // The parent tab button's click handler flips
+    // activeTabId; the close span's handler must call
+    // stopPropagation so clicking ✕ doesn't first
+    // switch to the tab we're about to delete (which
+    // would fire a stray active-tab-changed event).
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
+    p.requestUpdate();
+    await settle(p);
+    p._activeTabId = 'agent-1';
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      const close = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      );
+      close.click();
+      await settle(p);
+      // No active-tab-changed fires (the closed tab
+      // wasn't active, and the close handler doesn't
+      // touch active state in that case).
+      expect(listener).not.toHaveBeenCalled();
+      // Active tab unchanged.
+      expect(p._activeTabId).toBe('agent-1');
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('dispatches close-tab event with tabId', async () => {
+    // The event is the hook Phase C's backend
+    // integration will use: a handler on close-tab
+    // will call LLMService.close_agent_context once
+    // that RPC lands. Firing now (with nothing
+    // listening) keeps the surface stable.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('close-tab', listener);
+    try {
+      const close = p.shadowRoot.querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      );
+      close.click();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'agent-0',
+      });
+    } finally {
+      p.removeEventListener('close-tab', listener);
+    }
+  });
+
+  it('event bubbles and composes across shadow DOM', async () => {
+    // Phase C's handler may live in the files-tab or
+    // app shell — needs to cross the shadow boundary
+    // to reach either.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const outerListener = vi.fn();
+    document.body.addEventListener(
+      'close-tab',
+      outerListener,
+    );
+    try {
+      p.shadowRoot
+        .querySelector(
+          '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+        )
+        .click();
+      await settle(p);
+      expect(outerListener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'close-tab',
+        outerListener,
+      );
+    }
+  });
+
+  it('Enter key on the close button fires close', async () => {
+    // Keyboard users reach the close button via Tab.
+    // Enter / Space activate like a native button.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('Space key on the close button fires close', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const close = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+    );
+    close.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: ' ',
+        bubbles: true,
+      }),
+    );
+    await settle(p);
+    expect(p._tabs.has('agent-0')).toBe(false);
+  });
+
+  it('strip disappears when last agent tab closes', async () => {
+    // The strip hides in single-tab operation (only
+    // Main). Closing the last agent tab should
+    // cascade back to that state.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeTruthy();
+    p.shadowRoot
+      .querySelector(
+        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
+      )
+      .click();
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+  });
+});
+
+describe('ChatPanel tab close — guards', () => {
+  it('_onTabClose ignores main', async () => {
+    // Programmatic safety guard — the UI never
+    // renders a close button for main, but a future
+    // caller (keyboard shortcut, tests, etc.) could
+    // invoke _onTabClose directly. Must refuse.
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    p._onTabClose('main');
+    await settle(p);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('_onTabClose ignores unknown tab IDs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // No throw, no change.
+    expect(() => p._onTabClose('nonexistent')).not.toThrow();
+    expect(p._tabs.size).toBe(2);
+  });
+
+  it('_onTabClose ignores malformed input', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    // Non-string, empty, null, undefined all no-op.
+    expect(() => p._onTabClose(null)).not.toThrow();
+    expect(() => p._onTabClose(undefined)).not.toThrow();
+    expect(() => p._onTabClose('')).not.toThrow();
+    expect(() => p._onTabClose(42)).not.toThrow();
+    expect(p._tabs.has('agent-0')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // URL chips integration (Layer 5.30)
 // ---------------------------------------------------------------------------
 
@@ -6254,5 +7667,2368 @@ describe('ChatPanel URL chip lifecycle', () => {
     // Detection should NOT have fired — the timer was
     // cleared in disconnectedCallback.
     expect(detect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// URL chip per-tab snapshot / restore (D21 per-tab state)
+// ---------------------------------------------------------------------------
+//
+// The singleton <ac-url-chips> element in the chat panel's
+// shadow always shows the ACTIVE tab's chip state. When the
+// user flips tabs, the leaving tab's chips snapshot into its
+// `urlChips` state slot, and the entering tab's snapshot
+// restores into the element's live `_chips` Map. Tabs with
+// no prior URL activity get a fresh empty Map on entry.
+//
+// Per specs4/5-webapp/agent-browser.md § Per-Tab State —
+// "URL chip state (which URLs are detected/fetched/excluded
+// for this conversation)" is per-tab.
+
+describe('ChatPanel URL chip per-tab state', () => {
+  /**
+   * Helper to seed a tab state slot, used by tests that
+   * need multiple tabs populated before switching.
+   */
+  function seedTab(panel, tabId) {
+    panel._tabs.set(tabId, panel._makeTabState());
+  }
+
+  it('snapshots chips to leaving tab on switch', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Seed the singleton chip element with main-tab chips.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    expect(chipsEl._chips.size).toBe(1);
+    // Switch to agent-0 — snapshot should fire.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Main tab's slot now carries the snapshot.
+    const mainTab = p._tabs.get('main');
+    expect(mainTab.urlChips).toBeInstanceOf(Map);
+    expect(mainTab.urlChips.has('https://main.com')).toBe(true);
+  });
+
+  it('restores chips from entering tab snapshot', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Pre-populate agent-0's snapshot with chips (simulate
+    // a tab that had URL activity earlier).
+    const agentChips = new Map();
+    agentChips.set('https://agent.com', {
+      url: 'https://agent.com',
+      type: 'generic',
+      displayName: 'agent',
+      status: 'fetched',
+      content: { content: 'body' },
+      excluded: false,
+    });
+    p._tabs.get('agent-0').urlChips = agentChips;
+    // Switch to agent-0.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    expect(chipsEl._chips.size).toBe(1);
+    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
+  });
+
+  it('fresh tab with no snapshot gets empty Map', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Seed main with a chip so we can verify it doesn't
+    // leak into the agent tab.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    // Switch to fresh agent tab — urlChips slot is null.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Element's chip Map should be empty.
+    expect(chipsEl._chips.size).toBe(0);
+  });
+
+  it('round-trip switch preserves per-tab state', async () => {
+    // Seed main and agent with distinct chips, flip
+    // between them, verify each tab sees its own chips.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    // Main gets main.com.
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    // Switch to agent-0.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Now add agent.com to agent-0's element state.
+    chipsEl.updateDetected([
+      { url: 'https://agent.com', type: 'generic', display_name: 'agent' },
+    ]);
+    await settle(p);
+    // Switch back to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Main's chips restored — main.com present, agent.com absent.
+    expect(chipsEl._chips.has('https://main.com')).toBe(true);
+    expect(chipsEl._chips.has('https://agent.com')).toBe(false);
+    // Switch to agent-0 again.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    // Agent's chips restored — agent.com present, main.com absent.
+    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
+    expect(chipsEl._chips.has('https://main.com')).toBe(false);
+  });
+
+  it('snapshot is a copy, not a reference', async () => {
+    // The snapshot must be independent of the element's
+    // live Map so subsequent mutations to the element
+    // don't retroactively alter stored state.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://a.com', type: 'generic', display_name: 'a' },
+    ]);
+    await settle(p);
+    // Switch away — snapshot taken.
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    const snapshot = p._tabs.get('main').urlChips;
+    const snapshotSize = snapshot.size;
+    // Mutate the element's live Map (simulating new
+    // activity on agent-0 — though the element now holds
+    // agent-0's empty state).
+    chipsEl._chips = new Map();
+    chipsEl._chips.set('https://new.com', {
+      url: 'https://new.com',
+      type: 'generic',
+      displayName: 'new',
+      status: 'detected',
+      excluded: false,
+    });
+    // Main's snapshot unaffected.
+    expect(snapshot.size).toBe(snapshotSize);
+    expect(snapshot.has('https://new.com')).toBe(false);
+  });
+
+  it('session-changed clears all per-tab snapshots', async () => {
+    // specs4/5-webapp/chat.md § URL Chips UI — on session
+    // change, all chips including per-tab snapshots wipe.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    // Populate main's snapshot via a switch.
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://main.com', type: 'generic', display_name: 'main' },
+    ]);
+    await settle(p);
+    p._activeTabId = 'agent-0';
+    await settle(p);
+    expect(p._tabs.get('main').urlChips).not.toBeNull();
+    // Session change.
+    pushEvent('session-changed', {
+      session_id: 'sess_new',
+      messages: [],
+    });
+    await settle(p);
+    // Every tab's snapshot cleared.
+    for (const tab of p._tabs.values()) {
+      expect(tab.urlChips).toBeNull();
+    }
+  });
+
+  it('no-op when switching to same tab', async () => {
+    // Same-value writes should not snapshot or restore.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
+    chipsEl.updateDetected([
+      { url: 'https://a.com', type: 'generic', display_name: 'a' },
+    ]);
+    await settle(p);
+    // Snapshot should be null before the no-op.
+    expect(p._tabs.get('main').urlChips).toBeNull();
+    // Assign same value.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Still null — no snapshot ran.
+    expect(p._tabs.get('main').urlChips).toBeNull();
+  });
+
+  it('snapshot survives when element not yet rendered', async () => {
+    // Defensive — if the ac-url-chips element isn't in
+    // the shadow yet (pre-first-render), snapshot/restore
+    // must no-op without throwing.
+    publishFakeRpc({});
+    const p = mountPanel();
+    // Don't settle — switch tabs before first render
+    // commits. The setter path must tolerate a missing
+    // element gracefully.
+    p._tabs.set('agent-0', p._makeTabState());
+    expect(() => {
+      p._activeTabId = 'agent-0';
+    }).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-tab state structure (D21 Phase A1)
+// ---------------------------------------------------------------------------
+
+// These tests pin the Map-based storage contract directly —
+// the Map exists, holds exactly one `"main"` entry after
+// construction, `_activeTabId` defaults to `"main"`, and
+// every migrated field round-trips through its getter to
+// the active tab's state object. Without this block, the
+// existing feature-level tests would catch most regressions
+// but wouldn't distinguish between "direct field still
+// works" and "Map-backed field still works" — both read
+// the same in single-tab operation. These tests look
+// directly at the Map so a refactor that drops the Map
+// machinery fails loudly.
+
+describe('ChatPanel per-tab state — structure', () => {
+  it('constructs with exactly one "main" tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._tabs).toBeInstanceOf(Map);
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('_activeTabId defaults to "main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('main tab state has every migrated field', async () => {
+    // Pin the field list so a future refactor that drops
+    // a field from _makeTabState fails here rather than
+    // silently breaking reads in production.
+    const p = mountPanel();
+    await settle(p);
+    const tab = p._tabs.get('main');
+    // Conversation
+    expect(tab.messages).toEqual([]);
+    expect(tab.input).toBe('');
+    expect(tab.pendingImages).toEqual([]);
+    // Streaming
+    expect(tab.streaming).toBe(false);
+    expect(tab.streamingContent).toBe('');
+    expect(tab.currentRequestId).toBeNull();
+    expect(tab.lastRequestId).toBeNull();
+    expect(tab.streams).toBeInstanceOf(Map);
+    expect(tab.pendingChunks).toBeInstanceOf(Map);
+    // Selection
+    expect(tab.selectedFiles).toEqual([]);
+    // Search
+    expect(tab.searchQuery).toBe('');
+    expect(typeof tab.searchIgnoreCase).toBe('boolean');
+    expect(typeof tab.searchRegex).toBe('boolean');
+    expect(typeof tab.searchWholeWord).toBe('boolean');
+    expect(tab.searchCurrentIndex).toBe(-1);
+    expect(tab.searchMode).toBe('message');
+    expect(tab.fileSearchResults).toEqual([]);
+    expect(tab.fileSearchLoading).toBe(false);
+    expect(tab.fileSearchFocusedIndex).toBe(-1);
+    expect(tab.fileSearchGeneration).toBe(0);
+    expect(tab.fileSearchDebounceTimer).toBeNull();
+    expect(tab.fileSearchScrollPaused).toBe(false);
+    // UI
+    expect(tab.historyOpen).toBe(false);
+    expect(typeof tab.snippetDrawerOpen).toBe('boolean');
+    expect(tab.lightboxImage).toBeNull();
+    expect(tab.urlViewDialog).toBeNull();
+    expect(tab.urlViewTab).toBe('content');
+    expect(tab.snippets).toEqual([]);
+    // URL chip detection
+    expect(tab.urlDetectDebounceTimer).toBeNull();
+    expect(tab.urlDetectGeneration).toBe(0);
+    // Misc
+    expect(tab.autoScroll).toBe(true);
+    expect(tab.suppressNextPaste).toBe(false);
+    expect(tab.activeMention).toBeNull();
+  });
+
+  it('getter round-trips through active tab state', async () => {
+    // Pin that reads go through the tab state, not a
+    // shadow field on `this`. Mutate the Map directly;
+    // the getter should reflect the change.
+    const p = mountPanel();
+    await settle(p);
+    const tab = p._tabs.get('main');
+    tab.messages = [{ role: 'user', content: 'direct' }];
+    expect(p.messages).toEqual([
+      { role: 'user', content: 'direct' },
+    ]);
+  });
+
+  it('setter writes to active tab state', async () => {
+    // Pin that writes land in the Map, not a shadow
+    // field. Set via the public property; the Map
+    // should reflect the change.
+    const p = mountPanel();
+    await settle(p);
+    p.messages = [{ role: 'user', content: 'via setter' }];
+    const tab = p._tabs.get('main');
+    expect(tab.messages).toEqual([
+      { role: 'user', content: 'via setter' },
+    ]);
+  });
+
+  it('setter triggers Lit re-render', async () => {
+    // requestUpdate is the contract — without it, Lit's
+    // dirty-check doesn't fire and the template stays
+    // stale. Spy on the panel's requestUpdate to
+    // verify the setter invokes it.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._input = 'new value';
+    expect(spy).toHaveBeenCalled();
+    // First arg is the property name; second is the old
+    // value. Matches Lit's reactive-property signature.
+    expect(spy.mock.calls[0][0]).toBe('_input');
+  });
+
+  it('non-reactive fields do not trigger re-render', async () => {
+    // Streams, pendingChunks, autoScroll, etc. are
+    // per-tab but non-reactive — Lit shouldn't re-render
+    // on their mutation. Pinned so a future setter
+    // refactor that accidentally adds requestUpdate
+    // calls to these paths fails here.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._streams = new Map();
+    p._pendingChunks = new Map();
+    p._autoScroll = false;
+    p._currentRequestId = 'fake-id';
+    p._lastRequestId = 'another-id';
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('per-tab state is distinct from component fields', async () => {
+    // Make sure we didn't accidentally leave a shadow
+    // instance field next to the getter. If a shadow
+    // field existed, the getter would still work but
+    // hasOwnProperty would find the name on the
+    // instance. With the Map-backed approach, only the
+    // Map itself is on the instance; the reactive
+    // names live on the prototype as accessor
+    // descriptors.
+    const p = mountPanel();
+    await settle(p);
+    // `messages` is a reactive accessor — should live
+    // on the prototype, not the instance.
+    expect(
+      Object.prototype.hasOwnProperty.call(p, 'messages'),
+    ).toBe(false);
+    // But `_tabs` is a plain field on the instance.
+    expect(
+      Object.prototype.hasOwnProperty.call(p, '_tabs'),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Active-tab-changed event plumbing (D21 Phase A3)
+// ---------------------------------------------------------------------------
+
+// A3 wires the reactive-property machinery for tab
+// switches without creating any new tabs. The event
+// fires on real `_activeTabId` transitions, carries
+// `{tabId, previousTabId}`, and bubbles + composes so
+// sibling components hear it across shadow boundaries.
+// Single-tab operation never fires the event in
+// practice — the plumbing is for Phase C when agent
+// tabs materialise.
+
+// Helper — seed an additional tab entry in the Map so the
+// per-tab accessors find valid state when the test flips
+// `_activeTabId` to the new key. Without this, any getter
+// call (via a subsequent render() or disconnectedCallback
+// during teardown) hits `this._tabs.get(unknownKey)` which
+// returns undefined and crashes.
+//
+// Phase C will spawn tabs via build_agent_context_manager's
+// frontend counterpart. For A3 we just need a valid tab
+// state at the target key — the existing `_makeTabState`
+// factory produces exactly that.
+function seedTab(panel, tabId) {
+  panel._tabs.set(tabId, panel._makeTabState());
+}
+
+describe('ChatPanel active-tab-changed event', () => {
+  it('_activeTabId defaults to "main"', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('setting to same value is a no-op (no event)', async () => {
+    // Spam the setter with the current value — no
+    // events, no re-renders. Keeps the channel quiet
+    // for sibling components that might otherwise
+    // do expensive sync work on every dispatch.
+    const p = mountPanel();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'main';
+      p._activeTabId = 'main';
+      p._activeTabId = 'main';
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('setting to a different value fires the event', async () => {
+    // Single-tab operation doesn't normally hit this
+    // path, but the reactive plumbing works — we can
+    // seed a second tab, flip to it, and observe the
+    // dispatch. Phase C's spawning path will assign
+    // real agent tab IDs like `{turn_id}/agent-NN`;
+    // the plumbing is identical.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'some-other-tab');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'some-other-tab';
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('event detail carries tabId and previousTabId', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'new-tab');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'new-tab';
+      await settle(p);
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail).toEqual({
+        tabId: 'new-tab',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('successive changes fire once each with correct previous', async () => {
+    // Chain of transitions — each event's previousTabId
+    // is the previous current, each event's tabId is
+    // the new current.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'a');
+    seedTab(p, 'b');
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      p._activeTabId = 'a';
+      p._activeTabId = 'b';
+      p._activeTabId = 'main';
+      await settle(p);
+      expect(listener).toHaveBeenCalledTimes(3);
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'a',
+        previousTabId: 'main',
+      });
+      expect(listener.mock.calls[1][0].detail).toEqual({
+        tabId: 'b',
+        previousTabId: 'a',
+      });
+      expect(listener.mock.calls[2][0].detail).toEqual({
+        tabId: 'main',
+        previousTabId: 'b',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('event bubbles out of the shadow DOM (composed)', async () => {
+    // The files-tab orchestrator listens at its own
+    // level; the event must cross the shadow boundary.
+    // Bubbles + composed is the standard pattern for
+    // cross-boundary events in this codebase (see
+    // file-mention-click, file-chip-click, etc.).
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    const outerListener = vi.fn();
+    document.body.addEventListener(
+      'active-tab-changed',
+      outerListener,
+    );
+    try {
+      p._activeTabId = 'agent-0';
+      await settle(p);
+      expect(outerListener).toHaveBeenCalledOnce();
+    } finally {
+      document.body.removeEventListener(
+        'active-tab-changed',
+        outerListener,
+      );
+    }
+  });
+
+  it('triggers a Lit re-render on change', async () => {
+    // _activeTabId flipping means the template's
+    // getter reads (messages, _input, etc.) will
+    // return different tab state. requestUpdate must
+    // fire so the template re-renders; without it
+    // Lit would keep showing stale state.
+    //
+    // No settle() after the flip — the assertions run
+    // synchronously against the requestUpdate spy.
+    // Teardown calls disconnectedCallback which reads
+    // per-tab accessors, so we seed the target tab to
+    // keep the Map lookup valid.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'x');
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._activeTabId = 'x';
+    expect(spy).toHaveBeenCalled();
+    // First arg is the property name; second is the
+    // old value. Matches Lit's reactive-property
+    // signature.
+    expect(spy.mock.calls[0][0]).toBe('_activeTabId');
+    expect(spy.mock.calls[0][1]).toBe('main');
+  });
+
+  it('same-value write does not call requestUpdate', async () => {
+    // Pinned alongside the no-event check so a future
+    // refactor that accidentally drops the early return
+    // from the setter fails loudly. Re-rendering on
+    // no-op writes would produce spurious template
+    // work on every settle loop.
+    const p = mountPanel();
+    await settle(p);
+    const spy = vi.spyOn(p, 'requestUpdate');
+    p._activeTabId = 'main';
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('getter reflects the new value after setter', async () => {
+    // Sanity — the scalar backing round-trips through
+    // the property. Not just event-dispatch plumbing;
+    // the getter must see the updated value so the
+    // Map lookup in every per-tab accessor finds the
+    // right tab.
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent-0');
+    expect(p._activeTabId).toBe('main');
+    p._activeTabId = 'agent-0';
+    expect(p._activeTabId).toBe('agent-0');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent tab spawning (D21 Phase C2a)
+// ---------------------------------------------------------------------------
+
+// When a main-tab stream completes with agent blocks in
+// its result, the panel creates tab state + labels for
+// each valid block. The tab strip materialises (since
+// `_tabs.size > 1`), and each new tab's message list is
+// seeded with the task text as the initial user message.
+//
+// Spawn is gated to: main-tab completions only, non-
+// error, non-cancelled, valid turn_id, non-empty
+// agent_blocks. Any other completion leaves `_tabs`
+// unchanged.
+
+describe('ChatPanel agent tab spawning — gating', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('no spawn when agent_blocks is missing', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'plain response',
+        turn_id: 'turn_abc',
+      },
+    });
+    await settle(p);
+    // Still just main.
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+  });
+
+  it('no spawn when agent_blocks is empty array', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'no agents',
+        turn_id: 'turn_abc',
+        agent_blocks: [],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn when turn_id is missing', async () => {
+    // Defensive — backend always includes turn_id, but
+    // a malformed result shouldn't produce tabs without
+    // the key we need for routing.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'missing turn_id',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn on error completion', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        error: 'something broke',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn on cancelled completion', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        cancelled: true,
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'do it', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('no spawn for agent-tab completions (tree depth 1)', async () => {
+    // When an agent tab's own stream completes, its
+    // response might contain agent blocks (the agent
+    // emitted them as prose), but the frontend must not
+    // spawn sub-agents — tree depth is 1 per spec. The
+    // backend's _is_child_request gate prevents actual
+    // agent execution; we match that semantic on the
+    // frontend so ghost tabs don't appear.
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab manually, simulating that the
+    // backend spawned it earlier.
+    const agentTabId = 'turn_xyz/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    // Make the agent tab active so its tab owns the
+    // about-to-fire request.
+    p._activeTabId = agentTabId;
+    await settle(p);
+    // Start a stream from the agent tab. The fake RPC
+    // captures the request ID.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(p);
+    p._input = 'continue';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Fire stream-complete for the agent tab with agent
+    // blocks — would spawn if the gate were absent.
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'nested agents',
+        turn_id: 'turn_nested',
+        agent_blocks: [
+          { id: 'agent-0', task: 'nested', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    // No new tab — main + original agent only.
+    expect(p._tabs.size).toBe(2);
+    expect(p._tabs.has('turn_nested/agent-00')).toBe(false);
+  });
+});
+
+describe('ChatPanel agent tab spawning — tab creation', () => {
+  // Per specs4/5-webapp/agent-browser.md § "Tab Creation
+  // Ordering": "Tab identity — the key in the chat
+  // panel's `_tabs` Map — is the agent's LLM-chosen id
+  // from its `🟧🟧🟧 AGENT` block." The padded numeric
+  // index in child request IDs (`{parent}-agent-NN`) and
+  // archive file names (`{turn_id}/agent-NN.jsonl`) is a
+  // routing/storage detail — it does not feed back into
+  // tab identity.
+
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('creates one tab per valid block, keyed by agent id', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'delegated',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'frontend-trivial', task: 'first', agent_idx: 0 },
+          { id: 'backend-auth', task: 'second', agent_idx: 1 },
+          { id: 'docs-update', task: 'third', agent_idx: 2 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(4); // main + 3 agents
+    expect(p._tabs.has('frontend-trivial')).toBe(true);
+    expect(p._tabs.has('backend-auth')).toBe(true);
+    expect(p._tabs.has('docs-update')).toBe(true);
+  });
+
+  it('tab id matches the spawn block id verbatim', async () => {
+    // The id is the agent's choice; the frontend
+    // preserves whatever string the LLM emitted. No
+    // reconstruction from turn_id + agent_idx.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'a', task: 't', agent_idx: 0 },
+          { id: 'streaming-pipeline', task: 't', agent_idx: 7 },
+          { id: 'with-suffix-42', task: 't', agent_idx: 42 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.has('a')).toBe(true);
+    expect(p._tabs.has('streaming-pipeline')).toBe(true);
+    expect(p._tabs.has('with-suffix-42')).toBe(true);
+  });
+
+  it('seeds each tab with task as initial user message', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          {
+            id: 'auth-refactor',
+            task: 'refactor the auth module',
+            agent_idx: 0,
+          },
+        ],
+      },
+    });
+    await settle(p);
+    const tab = p._tabs.get('auth-refactor');
+    expect(tab).toBeTruthy();
+    expect(tab.messages).toHaveLength(1);
+    expect(tab.messages[0]).toEqual({
+      role: 'user',
+      content: 'refactor the auth module',
+    });
+  });
+
+  it('copies main tab selected files into each agent tab', async () => {
+    // Per specs4/7-future/parallel-agents.md § Execution,
+    // agents inherit the parent's selected_files as a
+    // deep copy. The backend already copies server-side;
+    // the frontend copy here is the per-tab picker
+    // state so each tab shows the initial selection.
+    const p = mountPanel();
+    // Seed main tab with a selection.
+    p._tabs.get('main').selectedFiles = ['src/auth.py', 'src/db.py'];
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'a0', task: 't', agent_idx: 0 },
+          { id: 'a1', task: 't', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    const tab0 = p._tabs.get('a0');
+    const tab1 = p._tabs.get('a1');
+    expect(tab0.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
+    expect(tab1.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
+    // Distinct arrays — mutations don't leak.
+    expect(tab0.selectedFiles).not.toBe(tab1.selectedFiles);
+    expect(tab0.selectedFiles).not.toBe(p._tabs.get('main').selectedFiles);
+  });
+
+  it('labels use deriveAgentTabLabel', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'a0', task: 'refactor auth', agent_idx: 0 },
+          { id: 'a1', task: '', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabLabels.get('a0')).toBe(
+      'Agent 00: refactor auth',
+    );
+    expect(p._tabLabels.get('a1')).toBe('Agent 01');
+  });
+
+  it('does not switch to a newly spawned tab', async () => {
+    // User's focus stays on the main tab after spawn —
+    // the assistant message (with spawn blocks as prose)
+    // just landed there. They switch tabs deliberately
+    // via the strip, not automatically.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    expect(p._activeTabId).toBe('main');
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'a0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('tab strip becomes visible after first spawn', async () => {
+    // The strip's render gate is `_tabs.size > 1`. Spawn
+    // flips it from 1 to 2+, so the strip materialises.
+    const p = mountPanel();
+    await settle(p);
+    // Before spawn — strip hidden.
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'a0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    // After spawn — strip rendered with main + agent.
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeTruthy();
+    const buttons = strip.querySelectorAll('.tab-strip-tab');
+    expect(buttons.length).toBe(2);
+  });
+});
+
+describe('ChatPanel agent tab spawning — defensive', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('idempotent on duplicate stream-complete', async () => {
+    // A duplicate event for the same turn (defensive
+    // against weird reconnect edge cases) shouldn't
+    // wipe the tab's existing messages. The idempotence
+    // guard preserves state the user may already have
+    // seen.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const result = {
+      response: 'ok',
+      turn_id: 'turn_abc',
+      agent_blocks: [
+        { id: 'agent-0', task: 'initial', agent_idx: 0 },
+      ],
+    };
+    pushEvent('stream-complete', { requestId: reqId, result });
+    await settle(p);
+    // Mutate the tab's state to simulate user-visible
+    // content arriving between the two events.
+    const tab = p._tabs.get('agent-0');
+    tab.messages.push({ role: 'assistant', content: 'agent reply' });
+    // Duplicate event — same id.
+    pushEvent('stream-complete', { requestId: reqId, result });
+    await settle(p);
+    // Tab state preserved; assistant message survives.
+    const same = p._tabs.get('agent-0');
+    expect(same).toBe(tab);
+    expect(same.messages).toHaveLength(2);
+    expect(same.messages[1].content).toBe('agent reply');
+  });
+
+  it('skips entries with non-numeric agent_idx', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: 'good', agent_idx: 0 },
+          { id: 'agent-bad', task: 'bad', agent_idx: 'zero' },
+          { id: 'agent-1', task: 'also good', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    // Only the two with valid indices spawn.
+    expect(p._tabs.size).toBe(3); // main + 2
+    expect(p._tabs.has('agent-0')).toBe(true);
+    expect(p._tabs.has('agent-1')).toBe(true);
+  });
+
+  it('skips entries with negative agent_idx', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-neg', task: 't', agent_idx: -1 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('non-array agent_blocks silently drops', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: 'not an array',
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+
+  it('null blocks within array are skipped', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          null,
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+          undefined,
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(2);
+    expect(p._tabs.has('agent-0')).toBe(true);
+  });
+
+  it('non-string task falls back to empty string', async () => {
+    // Defensive — backend should always send a string
+    // task (the parser enforces it), but a malformed
+    // payload shouldn't crash the spawn.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'agent-0', task: null, agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    const tab = p._tabs.get('agent-0');
+    expect(tab).toBeTruthy();
+    // Empty-string task → bare "Agent 00" label, no
+    // colon.
+    expect(p._tabLabels.get('agent-0')).toBe('Agent 00');
+    // First message content is the empty string.
+    expect(tab.messages[0].content).toBe('');
+  });
+
+  it('empty turn_id is rejected', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'ok',
+        turn_id: '',
+        agent_blocks: [
+          { id: 'agent-0', task: 't', agent_idx: 0 },
+        ],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2c — close button → close_agent_context RPC
+// ---------------------------------------------------------------------------
+
+// Clicking ✕ on an agent tab removes it locally
+// (covered by B3) AND fires the backend RPC to free
+// the agent's ConversationScope. The RPC is
+// idempotent per C1b, so duplicate calls or calls
+// for already-closed agents are safe.
+
+describe('ChatPanel close-tab backend wiring', () => {
+  it('fires close_agent_context with the agent id', async () => {
+    // Per parallel-agents.md, close_agent_context takes
+    // a single agent_id parameter — the same string
+    // that keys the tab.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab.
+    const agentTabId = 'frontend-trivial';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'frontend-trivial');
+    p.requestUpdate();
+    await settle(p);
+    // Click the close button.
+    const closeBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+    );
+    closeBtn.click();
+    await settle(p);
+    // RPC fired with the agent id verbatim.
+    expect(close).toHaveBeenCalledOnce();
+    expect(close.mock.calls[0]).toEqual(['frontend-trivial']);
+  });
+
+  it('preserves arbitrary characters in the agent id', async () => {
+    // Agent ids are LLM-chosen strings; the frontend
+    // doesn't impose a shape. Hyphens, underscores,
+    // numbers — all flow through unchanged.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'auth_v2-refactor';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'auth_v2-refactor');
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    expect(close.mock.calls[0]).toEqual(['auth_v2-refactor']);
+  });
+
+  it('tab is removed locally regardless of RPC outcome', async () => {
+    // Optimistic close — the local state mutation
+    // happens before the RPC, and doesn't depend on
+    // the RPC's success.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabs.has(agentTabId)).toBe(true);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    // Tab gone locally.
+    expect(p._tabs.has(agentTabId)).toBe(false);
+    expect(p._tabLabels.has(agentTabId)).toBe(false);
+  });
+
+  it('RPC failure does not restore the tab', async () => {
+    // The tab stays closed locally even when the
+    // backend call fails. Users clicked remove; they
+    // expect the tab gone. A failed RPC just means
+    // the scope leaks server-side until session end.
+    const close = vi
+      .fn()
+      .mockRejectedValue(new Error('network down'));
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const debugSpy = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      const agentTabId = 'turn_abc/agent-00';
+      p._tabs.set(agentTabId, p._makeTabState());
+      p._tabLabels.set(agentTabId, 'Agent 00');
+      p.requestUpdate();
+      await settle(p);
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      expect(p._tabs.has(agentTabId)).toBe(false);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it('restricted-caller response emits warning toast', async () => {
+    const close = vi.fn().mockResolvedValue({
+      error: 'restricted',
+      reason: 'Participants cannot close agent tabs',
+    });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toContain('Participants');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('generic RPC failure does not emit toast', async () => {
+    // Non-restricted failures (network, server error)
+    // stay silent — the user already sees the tab
+    // gone, and a toast would be confusing without
+    // an actionable next step.
+    const close = vi
+      .fn()
+      .mockRejectedValue(new Error('server exploded'));
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const debugSpy = vi
+      .spyOn(console, 'debug')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      const agentTabId = 'turn_abc/agent-00';
+      p._tabs.set(agentTabId, p._makeTabState());
+      p._tabLabels.set(agentTabId, 'Agent 00');
+      p.requestUpdate();
+      await settle(p);
+      const toastListener = vi.fn();
+      window.addEventListener('ac-toast', toastListener);
+      try {
+        p.shadowRoot
+          .querySelector(
+            `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+          )
+          .click();
+        await settle(p);
+        expect(toastListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener('ac-toast', toastListener);
+      }
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it('does not fire RPC when RPC is disconnected', async () => {
+    // No fake RPC published → rpcConnected is false.
+    // Close should work locally but skip the backend
+    // call entirely.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // Should not throw.
+    expect(() => {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+    }).not.toThrow();
+    await settle(p);
+    expect(p._tabs.has(agentTabId)).toBe(false);
+  });
+
+  it('still dispatches close-tab event alongside RPC', async () => {
+    // The event remains for any external listener
+    // that wants to observe tab closes. Pinned so a
+    // refactor that moves the RPC dispatch doesn't
+    // accidentally drop the event.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const closeTabListener = vi.fn();
+    p.addEventListener('close-tab', closeTabListener);
+    try {
+      p.shadowRoot
+        .querySelector(
+          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+        )
+        .click();
+      await settle(p);
+      expect(closeTabListener).toHaveBeenCalledOnce();
+      expect(closeTabListener.mock.calls[0][0].detail).toEqual({
+        tabId: agentTabId,
+      });
+      // And the RPC also fired.
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      p.removeEventListener('close-tab', closeTabListener);
+    }
+  });
+
+  it('active tab close fires RPC and switches to main', async () => {
+    // B3 already covers the active-tab switch; this
+    // test pins that the RPC still fires on the
+    // active-tab close path (not just inactive tabs).
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot
+      .querySelector(
+        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
+      )
+      .click();
+    await settle(p);
+    expect(close).toHaveBeenCalledOnce();
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('close from overflow menu item does NOT fire RPC', async () => {
+    // Overflow menu items are jump affordances only
+    // per B2 — no close button is rendered there.
+    // Pinned so a future refactor that adds close
+    // buttons to menu items has to update this test,
+    // forcing the author to think about whether RPC
+    // dispatch should fire twice or migrate.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // Open the overflow menu.
+    p.shadowRoot
+      .querySelector('.tab-strip-overflow')
+      .click();
+    await settle(p);
+    // Confirm there's no close button in the menu
+    // item.
+    const menuItem = p.shadowRoot.querySelector(
+      `.tab-strip-overflow-item[data-tab-id="${agentTabId}"]`,
+    );
+    expect(menuItem.querySelector('.tab-close')).toBeNull();
+    // Clicking the menu item jumps to the tab, doesn't
+    // close it, and doesn't fire the RPC.
+    menuItem.click();
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+    expect(p._tabs.has(agentTabId)).toBe(true);
+  });
+
+  it('programmatic _onTabClose also fires RPC', async () => {
+    // Safety — a future path that calls _onTabClose
+    // directly (keyboard shortcut, new UI affordance)
+    // should get the same backend behaviour as a
+    // click.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    p._onTabClose(agentTabId);
+    await settle(p);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('calling _onTabClose on main does not fire RPC', async () => {
+    // Main tab can't be closed (guard at top of
+    // _onTabClose), and wouldn't parse as an agent
+    // tab ID anyway. Double-pinning — explicit guard
+    // + parse rejection — so both layers are tested.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._onTabClose('main');
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('non-existent tab ID does not fire RPC', async () => {
+    // _onTabClose short-circuits on unknown IDs. The
+    // RPC dispatch is inside the guarded branch, so
+    // this path doesn't fire it either.
+    const close = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: true });
+    publishFakeRpc({
+      'LLMService.close_agent_context': close,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._onTabClose('turn_nonexistent/agent-00');
+    await settle(p);
+    expect(close).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D1 — Streaming indicator on tab labels
+// ---------------------------------------------------------------------------
+
+// Small pulsing dot appears on tab buttons when that
+// tab has an in-flight stream. Visible on all tabs
+// regardless of active state so users see work
+// happening on tabs they're not currently looking at.
+// Read directly from the per-tab `streaming` field,
+// which flips True in _send and False in
+// _onStreamComplete.
+
+describe('ChatPanel D1 streaming indicator', () => {
+  it('does not render indicator on idle tabs', async () => {
+    const p = mountPanel();
+    await settle(p);
+    // Seed two agent tabs so the strip renders.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    const indicators = p.shadowRoot.querySelectorAll(
+      '.tab-streaming-indicator',
+    );
+    expect(indicators).toHaveLength(0);
+  });
+
+  it('renders indicator on streaming tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    // Flip the tab's streaming flag directly.
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    // Indicator appears inside that tab's button.
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      tabBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+    // Main tab has no indicator.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('renders indicator on active tab too', async () => {
+    // The indicator shows regardless of active state —
+    // the active tab may also be streaming, and the
+    // visual feedback is useful there too.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p._activeTabId = agentTabId;
+    p.requestUpdate();
+    await settle(p);
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(tabBtn.classList.contains('active')).toBe(true);
+    expect(
+      tabBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator on main tab when main is streaming', async () => {
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab so the strip renders.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    // Main is streaming.
+    p._tabs.get('main').streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('multiple tabs can show indicators simultaneously', async () => {
+    // Parallel streams — main plus an agent, or
+    // multiple agents. All get their own indicators.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p._tabs.get('turn_abc/agent-00').streaming = true;
+    p._tabs.get('turn_abc/agent-01').streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const indicators = p.shadowRoot.querySelectorAll(
+      '.tab-streaming-indicator',
+    );
+    // Two indicators — one per streaming tab. Main
+    // isn't streaming so no indicator there. The
+    // overflow menu isn't open so no duplicates.
+    expect(indicators).toHaveLength(2);
+  });
+
+  it('aria-busy reflects streaming state', async () => {
+    // Screen readers need to know which tabs are
+    // active/busy. aria-busy=true is the standard
+    // signal.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const tabBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(tabBtn.getAttribute('aria-busy')).toBe('true');
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('indicator appears when send starts on active tab', async () => {
+    // End-to-end — start a real stream and verify the
+    // indicator renders. Covers the reactive-setter
+    // path (_streaming = true triggers requestUpdate).
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Seed an agent tab so strip is visible.
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    // No indicators yet.
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-streaming-indicator'),
+    ).toHaveLength(0);
+    // Send from main.
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Main tab now has indicator.
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator disappears when stream completes on active tab', async () => {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Complete the stream.
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done' },
+    });
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(
+      mainBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('indicator persists after switching away from streaming tab', async () => {
+    // User sends from an agent tab, then switches to
+    // main. The agent tab's indicator should stay
+    // visible in the strip so the user knows work is
+    // continuing.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    await settle(p);
+    // Send from agent tab.
+    p._input = 'work';
+    await p._send();
+    await settle(p);
+    // Switch to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Agent tab's indicator is still there.
+    const agentBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      agentBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+  });
+
+  it('indicator disappears when stream completes on inactive tab', async () => {
+    // User streams from agent tab, switches away, stream
+    // completes. The strip must re-render so the
+    // indicator disappears even though the user is on
+    // a different tab. Without the `else requestUpdate()`
+    // branch in _onStreamComplete, this would leak.
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._activeTabId = agentTabId;
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const reqId = started.mock.calls[0][0];
+    // Switch to main.
+    p._activeTabId = 'main';
+    await settle(p);
+    // Stream completes (still on main).
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done' },
+    });
+    await settle(p);
+    // Indicator gone from the (inactive) agent tab.
+    const agentBtn = p.shadowRoot.querySelector(
+      `.tab-strip-tab[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      agentBtn.querySelector('.tab-streaming-indicator'),
+    ).toBeNull();
+  });
+
+  it('indicator renders in overflow menu too', async () => {
+    // Consistency — a user with many tabs scrolling
+    // through the overflow menu should see the same
+    // indicator they'd see on the strip button.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    // Open overflow menu.
+    p.shadowRoot.querySelector('.tab-strip-overflow').click();
+    await settle(p);
+    const menuItem = p.shadowRoot.querySelector(
+      `.tab-strip-overflow-item[data-tab-id="${agentTabId}"]`,
+    );
+    expect(
+      menuItem.querySelector('.tab-streaming-indicator'),
+    ).toBeTruthy();
+    expect(menuItem.getAttribute('aria-busy')).toBe('true');
+  });
+
+  it('indicator is marked aria-hidden', async () => {
+    // The indicator is decorative — screen readers see
+    // the aria-busy attribute instead. Marking the
+    // visual dot aria-hidden prevents double-reporting.
+    const p = mountPanel();
+    await settle(p);
+    const agentTabId = 'turn_abc/agent-00';
+    p._tabs.set(agentTabId, p._makeTabState());
+    p._tabLabels.set(agentTabId, 'Agent 00');
+    p._tabs.get(agentTabId).streaming = true;
+    p.requestUpdate();
+    await settle(p);
+    const indicator = p.shadowRoot.querySelector(
+      '.tab-streaming-indicator',
+    );
+    expect(indicator.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2 — chat-tab keyboard cycling (Alt+` / Alt+Shift+`)
+// ---------------------------------------------------------------------------
+
+// Document-level keyboard handler. Alt+` moves to the
+// next tab, Alt+Shift+` to the previous. Wraps at
+// both ends. Gated on tab count > 1 so single-tab
+// operation doesn't intercept the keystroke.
+//
+// The original agent-browser spec called for Alt+1..0;
+// implemented as Alt+backtick cycling instead because
+// app-shell already owns Alt+1..4 for dialog tab
+// switching. Documented in chat-panel.js.
+
+describe('ChatPanel D2 tab cycling shortcuts', () => {
+  /**
+   * Fire Alt+backtick (with optional shift) at the
+   * document level — matches where the chat panel
+   * installs its listener.
+   */
+  function pressAltBacktick(shift = false) {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: '`',
+        altKey: true,
+        shiftKey: shift,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  it('single-tab mode does not intercept the key', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+    // No agent tabs yet. The shortcut should be a
+    // no-op — activeTabId stays main.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('single-tab mode does not preventDefault', async () => {
+    // Gating matters for future features that might
+    // use Alt+` for something else (e.g., a global
+    // command palette). Pinned so a refactor that
+    // forgets the tab-count guard fails here.
+    const p = mountPanel();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('Alt+` cycles to the next tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    // Start at main; Alt+` → agent-00.
+    expect(p._activeTabId).toBe('main');
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-00');
+    // Alt+` again → agent-01.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-01');
+  });
+
+  it('Alt+Shift+` cycles to the previous tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p._activeTabId = 'turn_abc/agent-01';
+    await settle(p);
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-00');
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+` wraps from last to first', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._activeTabId = 'turn_abc/agent-00';
+    await settle(p);
+    // agent-00 is the last tab; Alt+` wraps to main.
+    pressAltBacktick();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+Shift+` wraps from first to last', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    // main is the first tab; Alt+Shift+` wraps to the
+    // last (agent-01).
+    pressAltBacktick(true);
+    await settle(p);
+    expect(p._activeTabId).toBe('turn_abc/agent-01');
+  });
+
+  it('preventDefault fires on handled keys', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('Ctrl+Alt+` is ignored (WM conflict)', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Meta+Alt+` is ignored (macOS conflict)', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: true,
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('plain backtick (no Alt) does not cycle', async () => {
+    // Regression — typing ` in a textarea must not
+    // cycle tabs.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '`',
+      altKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
+  });
+
+  it('Alt+1 does not trigger the shortcut', async () => {
+    // Alt+1..4 belong to app-shell's dialog-tab
+    // shortcuts. The chat panel must NOT consume
+    // them, even with multiple tabs open. Pinned to
+    // prevent accidental conflicts.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const ev = new KeyboardEvent('keydown', {
+      key: '1',
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const spy = vi.spyOn(ev, 'preventDefault');
+    document.dispatchEvent(ev);
+    await settle(p);
+    // activeTabId unchanged AND preventDefault not
+    // called — app-shell needs the event to bubble
+    // through.
+    expect(p._activeTabId).toBe('main');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('dispatches active-tab-changed on cycle', async () => {
+    // Sanity — the cycle uses the same setter that
+    // click handlers use, so sibling components (files
+    // tab) get the same sync signal whether the user
+    // clicked or typed.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const listener = vi.fn();
+    p.addEventListener('active-tab-changed', listener);
+    try {
+      pressAltBacktick();
+      await settle(p);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        tabId: 'turn_abc/agent-00',
+        previousTabId: 'main',
+      });
+    } finally {
+      p.removeEventListener('active-tab-changed', listener);
+    }
+  });
+
+  it('disconnect removes the document listener', async () => {
+    // Without cleanup, a removed chat panel would keep
+    // receiving document keydowns and try to mutate
+    // detached state.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p.requestUpdate();
+    await settle(p);
+    const activeTabIdBefore = p._activeTabId;
+    p.remove();
+    // After remove, the keystroke must NOT mutate the
+    // detached panel. The panel's _activeTabId still
+    // readable but shouldn't change.
+    pressAltBacktick();
+    expect(p._activeTabId).toBe(activeTabIdBefore);
+  });
+
+  it('three-tab cycle: main → agent-00 → agent-01 → main', async () => {
+    // End-to-end sanity check on the full cycle.
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.set('turn_abc/agent-00', p._makeTabState());
+    p._tabs.set('turn_abc/agent-01', p._makeTabState());
+    p._tabLabels.set('turn_abc/agent-00', 'Agent 00');
+    p._tabLabels.set('turn_abc/agent-01', 'Agent 01');
+    p.requestUpdate();
+    await settle(p);
+    const sequence = [
+      'turn_abc/agent-00',
+      'turn_abc/agent-01',
+      'main',
+      'turn_abc/agent-00',
+    ];
+    for (const expected of sequence) {
+      pressAltBacktick();
+      await settle(p);
+      expect(p._activeTabId).toBe(expected);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2d — stale-tag error handling on chat_streaming resolution
+// ---------------------------------------------------------------------------
+
+// The backend's chat_streaming resolves with an error
+// dict (not a rejection) for gate failures: stale
+// agent_tag, duplicate stream, malformed payload,
+// restricted caller. _handleStreamStartError routes
+// these per-case:
+//
+// - "agent not found" → close stale tab, switch to
+//   main, toast, remove optimistic user message
+// - anything else → assistant error message in the
+//   current tab
+//
+// All paths clear streaming state and the request-ID
+// accumulator so stray stream events are dropped.
+
+describe('ChatPanel stream-start error handling', () => {
+  async function setupAgentTab(panel, tabId = 'frontend-trivial') {
+    panel._tabs.set(tabId, panel._makeTabState());
+    panel._tabLabels.set(tabId, tabId);
+    panel._activeTabId = tabId;
+    await settle(panel);
+    return tabId;
+  }
+
+  it('stale agent_tag closes tab, switches to main, toasts', async () => {
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    const closeAgent = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: false });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': closeAgent,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabId = await setupAgentTab(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p._input = 'hello stale';
+      await p._send();
+      await settle(p);
+      // Tab is gone, active is main.
+      expect(p._tabs.has(tabId)).toBe(false);
+      expect(p._activeTabId).toBe('main');
+      // Warning toast fired.
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0].message).toMatch(/Agent tab closed/);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('stale agent_tag removes optimistic user message', async () => {
+    // The user message added before the RPC completes
+    // is removed — the scope is gone, the message
+    // never landed, pretending it was sent would be
+    // misleading. Cleaner to wipe it.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': vi
+        .fn()
+        .mockResolvedValue({ status: 'ok', closed: false }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await setupAgentTab(p);
+    p._input = 'stale message';
+    await p._send();
+    await settle(p);
+    // Optimistic user message gone from the tab's
+    // state (the tab itself is gone anyway, but
+    // verify we didn't leak it into main).
+    const mainTab = p._tabs.get('main');
+    expect(mainTab.messages).toEqual([]);
+  });
+
+  it('generic error appends assistant error message in current tab', async () => {
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Another stream is active (request xyz)',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // Main tab send.
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    // User message still there, error message
+    // appended after it.
+    expect(p.messages).toHaveLength(2);
+    expect(p.messages[0].role).toBe('user');
+    expect(p.messages[0].content).toBe('hello');
+    expect(p.messages[1].role).toBe('assistant');
+    expect(p.messages[1].content).toContain('Another stream');
+  });
+
+  it('generic error clears streaming state', async () => {
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Malformed agent_tag',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(p._streaming).toBe(false);
+    expect(p._streamingContent).toBe('');
+    expect(p._currentRequestId).toBeNull();
+  });
+
+  it('generic error on agent tab keeps the tab open', async () => {
+    // Not "agent not found" — just a duplicate stream
+    // or similar recoverable issue. Tab stays, user
+    // can retry.
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'Another stream is active',
+    });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabId = await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Tab still there.
+    expect(p._tabs.has(tabId)).toBe(true);
+    expect(p._activeTabId).toBe(tabId);
+    // Error message in that tab.
+    const tab = p._tabs.get(tabId);
+    expect(tab.messages).toHaveLength(2);
+    expect(tab.messages[1].content).toContain('Another stream');
+  });
+
+  it('"agent not found" on main tab does NOT close anything', async () => {
+    // Defensive — if the backend ever returns "agent
+    // not found" for a main-tab send (shouldn't
+    // happen, agent_tag is null), it falls through
+    // to generic error handling because agentTag is
+    // null.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    // No agent tabs — main only.
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Main tab still there.
+    expect(p._tabs.has('main')).toBe(true);
+    expect(p._activeTabId).toBe('main');
+    // Error message appended.
+    expect(p.messages[1].content).toContain('agent not found');
+  });
+
+  it('RPC rejection still goes through the catch block', async () => {
+    // Network failures (Promise rejects, not resolves
+    // with error dict) still take the catch path.
+    // Pinned to prevent a refactor that accidentally
+    // conflates the two.
+    const chatStreaming = vi
+      .fn()
+      .mockRejectedValue(new Error('network died'));
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+    });
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const p = mountPanel();
+      await settle(p);
+      p._input = 'hi';
+      await p._send();
+      await settle(p);
+      expect(p.messages[1].content).toContain('network died');
+      expect(p._streaming).toBe(false);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('stale tag clears request tracking', async () => {
+    // Stream events arriving for the failed request
+    // shouldn't be routed anywhere. Request ID
+    // accumulator must be cleared.
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': vi
+        .fn()
+        .mockResolvedValue({ status: 'ok', closed: false }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    // Streaming state cleared on main (the tab we
+    // got switched to).
+    expect(p._streaming).toBe(false);
+    expect(p._currentRequestId).toBeNull();
+  });
+
+  it('stale tag still fires close_agent_context via _onTabClose', async () => {
+    // The stale-tag path goes through _onTabClose,
+    // which fires close_agent_context. The backend's
+    // idempotent-or-noop shape means double-firing
+    // is safe (first call already closed the agent,
+    // second returns closed:false).
+    const chatStreaming = vi
+      .fn()
+      .mockResolvedValue({ error: 'agent not found' });
+    const closeAgent = vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', closed: false });
+    publishFakeRpc({
+      'LLMService.chat_streaming': chatStreaming,
+      'LLMService.close_agent_context': closeAgent,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabId = await setupAgentTab(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(closeAgent).toHaveBeenCalledOnce();
+    // Per flat-identity contract, RPC takes the agent
+    // id directly.
+    expect(closeAgent.mock.calls[0]).toEqual([tabId]);
   });
 });

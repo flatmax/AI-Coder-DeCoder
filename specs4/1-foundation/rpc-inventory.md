@@ -28,6 +28,7 @@ Authoritative catalog of every RPC method in the system. Other specs reference m
 - File selection — set, get, set-excluded, get-excluded
 - Streaming — start streaming chat, cancel streaming
 - Sessions — new session, load session into context, list sessions, get session messages, search history, get history status
+- Agent turns — get turn archive (per-agent conversations for a turn), close agent context (free ContextManager + tracker on tab close; archive preserved on disk), set agent selected files (per-agent file selection, parallel to the main-tab surface)
 - Commit workflow — generate commit message, commit-all (background)
 - Reset — reset-to-HEAD (records system event)
 - Context inspection — context breakdown (tiers, categories, session totals), file map block (symbol or doc block for a path), manual cache rebuild (wipe + redistribute tier assignments; localhost-only)

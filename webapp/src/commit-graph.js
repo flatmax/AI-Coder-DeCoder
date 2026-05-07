@@ -125,6 +125,7 @@ function _laneColor(index) {
  *
  *   {full sha}
  *   Parents: {p1} {p2}          (omitted when root commit)
+ *   Branches: {name}, {name}    (omitted when none reachable)
  *
  *   {author}
  *   {iso date}  ({relative})
@@ -132,14 +133,22 @@ function _laneColor(index) {
  *   {full commit message}
  *
  * Parents section uses short SHAs (7 chars) so the line
- * fits on typical tooltip widths. Author email isn't
- * surfaced — the backend returns `author` as a display
- * name only, so there's no email to include.
+ * fits on typical tooltip widths. Branch names are full —
+ * the user is hovering specifically to see what reaches
+ * this commit, truncating defeats the purpose. Author
+ * email isn't surfaced — the backend returns `author` as
+ * a display name only, so there's no email to include.
  *
  * Defensive against missing fields — any unavailable
  * field drops its line rather than rendering "undefined".
+ *
+ * `branchNames` is an optional array of branch-name
+ * strings reachable from this commit. Caller computes it
+ * via findBranchesReachingCommit so the tooltip shows
+ * the same set of branches the disambiguation popover
+ * would offer.
  */
-function _buildCommitTooltip(commit) {
+function _buildCommitTooltip(commit, branchNames) {
   if (!commit || typeof commit !== 'object') return '';
   const parts = [];
   if (typeof commit.sha === 'string' && commit.sha) {
@@ -155,6 +164,9 @@ function _buildCommitTooltip(commit) {
     if (shorts.length > 0) {
       parts.push(`Parents: ${shorts.join(' ')}`);
     }
+  }
+  if (Array.isArray(branchNames) && branchNames.length > 0) {
+    parts.push(`Branches: ${branchNames.join(', ')}`);
   }
   parts.push('');
   if (typeof commit.author === 'string' && commit.author) {
@@ -529,6 +541,18 @@ export class CommitGraph extends LitElement {
      * render as "off".
      */
     _hiddenBranches: { type: Object, state: true },
+    /**
+     * SHA of the most recently clicked commit. Drives
+     * a visible selection ring and row-background
+     * tint so the user can confirm what they picked
+     * — the disambiguation popover and the parent
+     * confirm button are easy to miss otherwise.
+     * Cleared when the popover is dismissed without
+     * a choice; persists after a successful click so
+     * the selection stays visible while the parent
+     * decides what to do.
+     */
+    _selectedSha: { type: String, state: true },
   };
 
   static styles = css`
@@ -636,6 +660,12 @@ export class CommitGraph extends LitElement {
     .row-hit:hover {
       fill: rgba(88, 166, 255, 0.08);
     }
+    .row-hit.selected {
+      fill: rgba(88, 166, 255, 0.18);
+    }
+    .row-hit.selected:hover {
+      fill: rgba(88, 166, 255, 0.22);
+    }
 
     .commit-node {
       cursor: pointer;
@@ -644,6 +674,16 @@ export class CommitGraph extends LitElement {
     }
     .commit-node:hover {
       filter: brightness(1.3);
+    }
+    .commit-node.selected {
+      stroke: #58a6ff;
+      stroke-width: 2.5;
+    }
+    .commit-selection-ring {
+      fill: none;
+      stroke: #58a6ff;
+      stroke-width: 2;
+      pointer-events: none;
     }
     /* Highlight rings — drawn as a separate circle
      * outside the commit node. Base (merge-base) is
@@ -780,6 +820,7 @@ export class CommitGraph extends LitElement {
     this._loading = false;
     this._popover = null;
     this._hiddenBranches = new Set();
+    this._selectedSha = null;
     this._onScroll = this._onScroll.bind(this);
     this._onDocumentClickForPopover =
       this._onDocumentClickForPopover.bind(this);
@@ -908,6 +949,13 @@ export class CommitGraph extends LitElement {
     event.stopPropagation();
     // Close any stale popover first.
     if (this._popover) this._closePopover();
+    // Mark this commit as the active selection so the
+    // user gets immediate visual confirmation —
+    // ring around the node plus a tinted row band.
+    // Applies to both readOnly (inspect) and
+    // selection flows.
+    this._selectedSha =
+      typeof commit?.sha === 'string' ? commit.sha : null;
     // Read-only mode (review history display) dispatches
     // commit-inspected with no branch-disambiguation
     // popover. The embedding context decides what to do
@@ -1129,8 +1177,33 @@ export class CommitGraph extends LitElement {
     // getBoundingClientRect dimensions. svg`` puts
     // them in the SVG namespace so they become real
     // graphic primitives.
+    //
+    // Skip edges whose source row OR target row is
+    // fully hidden (every reaching branch toggled off
+    // in the legend). The commit node itself is
+    // suppressed in `_renderRow`, so dangling edges
+    // attached to it would float pointing at empty
+    // space. Pre-compute the hidden set once for
+    // O(1) per-edge lookup instead of re-walking
+    // findBranchesReachingCommit per row.
+    const hiddenShas = new Set();
+    for (const row of layout.rows) {
+      const candidates = findBranchesReachingCommit(
+        row.commit.sha,
+        this._branches,
+        this._commits,
+        layout.branchLanes,
+      );
+      if (
+        candidates.length > 0 &&
+        candidates.every((c) => this._hiddenBranches.has(c.branch.name))
+      ) {
+        hiddenShas.add(row.commit.sha);
+      }
+    }
     const paths = [];
     for (const row of layout.rows) {
+      if (hiddenShas.has(row.commit.sha)) continue;
       // Primary lane continuation — straight line from
       // this commit to the next commit on the same
       // lane below (its first parent, usually). If the
@@ -1144,7 +1217,7 @@ export class CommitGraph extends LitElement {
         const nextRow = layout.rows.find(
           (r) => r.rowIndex > row.rowIndex && r.lane === row.lane,
         );
-        if (nextRow) {
+        if (nextRow && !hiddenShas.has(nextRow.commit.sha)) {
           const x = _GRAPH_LEFT_MARGIN + row.lane * _LANE_WIDTH;
           paths.push(svg`
             <line
@@ -1158,8 +1231,17 @@ export class CommitGraph extends LitElement {
           `);
         }
       }
-      // Cross-lane edges.
+      // Cross-lane edges. Drop edges whose target
+      // commit is hidden — even loaded targets with
+      // a real toY are visually orphaned without the
+      // target node.
       for (const edge of row.edges) {
+        if (
+          edge.targetSha
+          && hiddenShas.has(edge.targetSha)
+        ) {
+          continue;
+        }
         const x1 = _GRAPH_LEFT_MARGIN + edge.fromLane * _LANE_WIDTH;
         const x2 = _GRAPH_LEFT_MARGIN + edge.toLane * _LANE_WIDTH;
         const y1 = edge.fromY + _NODE_RADIUS;
@@ -1192,13 +1274,28 @@ export class CommitGraph extends LitElement {
     const tipBranches = this._branches.filter(
       (b) => b && b.sha === commit.sha,
     );
+    // Branches reaching this commit. Single source of
+    // truth for tooltip annotations and the
+    // all-hidden filter check below — computing once
+    // keeps the row's branch-name listing consistent
+    // with what the disambiguation popover would
+    // offer on click.
+    const candidates = findBranchesReachingCommit(
+      commit.sha, this._branches, this._commits, layout.branchLanes,
+    );
+    const reachingBranchNames = candidates.map(
+      (c) => c.branch.name,
+    );
     // Build the full hover tooltip. Native SVG <title>
     // child — browser handles positioning, delay, and
-    // dismissal. Content: full SHA, parent SHAs, author,
-    // ISO and relative date, then the full commit message
-    // preserving line breaks so conventional-commit
-    // bodies stay readable.
-    let tooltipText = _buildCommitTooltip(commit);
+    // dismissal. Content: full SHA, parent SHAs,
+    // reachable branches, author, ISO and relative
+    // date, then the full commit message preserving
+    // line breaks so conventional-commit bodies stay
+    // readable.
+    let tooltipText = _buildCommitTooltip(
+      commit, reachingBranchNames,
+    );
     // Highlight role — "base" when this commit is the
     // review's merge-base, "tip" when it's the branch
     // tip under review, null otherwise. Drives the
@@ -1223,15 +1320,27 @@ export class CommitGraph extends LitElement {
     }
     // Check whether any branch reaching this commit
     // is hidden — muted rendering for filtered-out
-    // branches. We only dim when ALL reaching
-    // branches are hidden; partial dimming is confusing.
-    const candidates = findBranchesReachingCommit(
-      commit.sha, this._branches, this._commits, layout.branchLanes,
-    );
+    // branches. When ALL reaching branches are hidden,
+    // we hide the row entirely (returns empty SVG
+    // below) AND the edge renderer skips edges into
+    // and out of this commit. Partial overlaps still
+    // render normally — only fully-hidden rows
+    // disappear from the graph.
     const allCandidatesHidden =
       candidates.length > 0 &&
       candidates.every((c) => this._hiddenBranches.has(c.branch.name));
-    const hiddenClass = allCandidatesHidden ? 'hidden-branch' : '';
+    if (allCandidatesHidden) {
+      // Skip rendering this row entirely. The lane is
+      // still reserved (lane assignments don't reflow
+      // on toggle, per the property docstring), but
+      // no node, no row hit-rect, no labels appear.
+      return svg``;
+    }
+    const hiddenClass = '';
+    const isSelected =
+      typeof commit.sha === 'string' &&
+      this._selectedSha === commit.sha;
+    const selectedClass = isSelected ? 'selected' : '';
     const shortSha =
       typeof commit.short_sha === 'string' && commit.short_sha
         ? commit.short_sha
@@ -1253,7 +1362,7 @@ export class CommitGraph extends LitElement {
       <g>
         <title>${tooltipText}</title>
         <rect
-          class="row-hit"
+          class="row-hit ${selectedClass}"
           x="0"
           y=${row.y - _ROW_HEIGHT / 2}
           width="100%"
@@ -1277,13 +1386,21 @@ export class CommitGraph extends LitElement {
           `
           : ''}
         <circle
-          class="commit-node"
+          class="commit-node ${selectedClass}"
           cx=${nodeX}
           cy=${row.y}
           r=${_NODE_RADIUS}
           fill=${color}
           @click=${(e) => this._onCommitClick(e, commit, layout)}
         />
+        ${isSelected
+          ? svg`<circle
+              class="commit-selection-ring"
+              cx=${nodeX}
+              cy=${row.y}
+              r=${_NODE_RADIUS + 5}
+            />`
+          : ''}
         <text
           class="commit-sha ${hiddenClass}"
           x=${textX}

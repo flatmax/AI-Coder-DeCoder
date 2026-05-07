@@ -145,6 +145,16 @@ Three layers of defense applied before and after LLM requests.
 - Each mode maintains an independent tracker instance; switching back preserves state
 - Each context manager holds its own tracker — trackers are per-context-manager, not per-mode. Mode switching happens to swap which of two trackers the user-facing context manager points at. Parallel-agent contexts each hold additional tracker instances, fully independent of the user-facing ones.
 
+## Agent Context Managers
+
+- A dedicated factory function constructs ContextManager instances for agents spawned under a parent turn
+- Agent ContextManagers differ from the user-facing one in two ways:
+  - They carry a turn ID inherited from the user request that spawned them
+  - They have an archival sink attached, routing every appended message to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` rather than to the main history store
+- The factory closes over the turn ID and agent index so the sink's per-call payload stays narrow (role, content, extras) — callers appending messages never need to juggle identity fields
+- Agents use the same streaming pipeline as the main user-facing session — the future parallel-agent implementation passes an agent ContextManager as a parameter to the existing `_stream_chat`-equivalent method rather than running a separate streaming path
+- See [parallel-agents.md](../7-future/parallel-agents.md) for the full agent execution model
+
 ## Lifecycle
 
 ### Session Start

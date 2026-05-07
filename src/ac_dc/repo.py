@@ -2438,39 +2438,62 @@ class Repo:
         if branch_tip is None:
             return {"error": f"Unknown branch: {branch}"}
 
-        # Step 3: compute the merge-base. The cascade order is
-        # ``original_branch → main → master``. Falls back to
-        # ``base_commit^`` if all three fail — matches the behaviour
-        # specs4/4-features/code-review.md specifies.
+        # Step 3: determine the review base.
+        #
+        # The user explicitly chose ``base_commit`` in the graph
+        # — that's the commit they want to review from, not a
+        # fallback. Use its parent as the review base so the
+        # range becomes ``base_commit..branch_tip`` inclusive
+        # of the selected commit's changes.
+        #
+        # The merge-base cascade is only used when the user
+        # didn't pick a base (legacy callers that pass an empty
+        # base_commit) or when computing the parent fails (root
+        # commit on an unrelated branch).
         merge_base: str | None = None
-        # Try original_branch first (most specific).
-        if original_branch and original_branch != branch:
-            attempt = self.get_merge_base(branch_tip, original_branch)
-            if "sha" in attempt:
-                merge_base = str(attempt["sha"])
-        # Fallback cascade: main, then master.
+        if base_commit:
+            parent = self.get_commit_parent(base_commit)
+            if "sha" in parent:
+                merge_base = str(parent["sha"])
+            else:
+                # Root commit — no parent. Fall through to the
+                # merge-base cascade so we don't block the review
+                # entirely; the cascade will pick something
+                # sensible even if the selected commit was
+                # unreachable.
+                logger.debug(
+                    "base_commit %s has no parent (root?); "
+                    "falling back to merge-base cascade",
+                    base_commit,
+                )
+        # Cascade fallback when no base_commit provided or its
+        # parent couldn't be resolved.
+        if merge_base is None:
+            if original_branch and original_branch != branch:
+                attempt = self.get_merge_base(branch_tip, original_branch)
+                if "sha" in attempt:
+                    merge_base = str(attempt["sha"])
         if merge_base is None:
             attempt = self.get_merge_base(branch_tip)  # tries main, master
             if "sha" in attempt:
                 merge_base = str(attempt["sha"])
-        # Final fallback: parent of the user-selected commit. This
-        # is the specs4 "all candidates fail" path — not as accurate
-        # as a real merge-base but lets the review proceed.
-        if merge_base is None:
-            parent = self.get_commit_parent(base_commit)
-            if "sha" in parent:
-                merge_base = str(parent["sha"])
-                logger.warning(
-                    "Review merge-base cascade failed; "
-                    "falling back to parent of %s (%s)",
-                    base_commit,
-                    merge_base,
-                )
         if merge_base is None:
             return {
                 "error": (
-                    f"Could not determine a merge-base for {branch}. "
+                    f"Could not determine a review base for {branch}. "
                     f"Unrelated histories?"
+                )
+            }
+        # Sanity check: a base equal to the tip means there's
+        # nothing to review. Surface a clear error rather than
+        # silently producing a clean detached-HEAD checkout.
+        if merge_base == branch_tip:
+            return {
+                "error": (
+                    f"Nothing to review: the selected base commit "
+                    f"is at or after the tip of {branch}. "
+                    f"Pick an older commit, or pick a different "
+                    f"branch."
                 )
             }
 
@@ -2730,13 +2753,34 @@ class Repo:
             })
         return entries
 
-    def get_review_file_diff(self, path: str | Path) -> dict[str, str]:
-        """Return the staged diff for a single file during review mode.
+    def get_review_file_diff(
+        self,
+        path: str | Path,
+        base_commit: str | None = None,
+        head_commit: str | None = None,
+    ) -> dict[str, str]:
+        """Return the diff for a single file during review mode.
 
-        Used when the user selects a file to include in the review
-        context passed to the LLM. Runs ``git diff --cached -- path``
-        so the output shows what the feature branch changed relative
-        to the merge-base.
+        Forward direction — ``base..head`` — so additions read as
+        ``+`` and removals as ``-``, matching the convention in
+        commit messages, GitHub PRs, and every other diff-rendering
+        tool the LLM has seen during training. Reading "what did
+        this branch add" against a forward diff is one mental
+        model; against a reverse diff it's two (negate the sign,
+        then interpret).
+
+        When ``base_commit`` and ``head_commit`` are both supplied,
+        runs ``git diff <base> <head> -- <path>`` against the
+        object database. Working tree state is irrelevant — the
+        diff is the same regardless of where ``HEAD`` currently
+        sits or what's staged.
+
+        When either is missing, falls back to ``git diff --cached``,
+        which during the review's soft-reset state produces the
+        reverse-direction patch. Kept as a defensive fallback so
+        callers that don't yet thread the SHAs through (or that
+        invoke this method outside the review entry sequence)
+        produce *some* diff rather than an empty string.
 
         Parameters
         ----------
@@ -2744,6 +2788,12 @@ class Repo:
             Relative path to the file. Must be validated and inside
             the repo root — same rules as any other path-accepting
             method.
+        base_commit:
+            Full SHA of the review base (the merge-base, or the
+            parent of the user-selected commit). Together with
+            ``head_commit`` produces a forward diff.
+        head_commit:
+            Full SHA of the branch tip being reviewed.
 
         Returns
         -------
@@ -2755,10 +2805,21 @@ class Repo:
         """
         self._validate_rel_path(path)
         rel = self._normalise_rel_path(path)
-        result = self._run_git(
-            ["diff", "--cached", "--", rel],
-            check=True,
-        )
+        if base_commit and head_commit:
+            # Forward diff via the object database — independent
+            # of working tree state.
+            result = self._run_git(
+                ["diff", base_commit, head_commit, "--", rel],
+                check=True,
+            )
+        else:
+            # Fallback for callers that haven't threaded SHAs
+            # through yet. Reverse direction during a soft-reset
+            # review, but at least non-empty.
+            result = self._run_git(
+                ["diff", "--cached", "--", rel],
+                check=True,
+            )
         return {"path": rel, "diff": result.stdout}
 
     # ------------------------------------------------------------------

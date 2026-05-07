@@ -75,6 +75,7 @@ import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import './file-picker.js';
 import './chat-panel.js';
+import { parseAgentTabId } from './chat-panel.js';
 import './commit-graph.js';
 
 // ---------------------------------------------------------------
@@ -96,6 +97,46 @@ const _PICKER_COLLAPSED_KEY = 'ac-dc-picker-collapsed';
 const _PICKER_MIN_WIDTH = 180;
 const _PICKER_COLLAPSED_WIDTH = 24;
 const _PICKER_DEFAULT_WIDTH = 280;
+
+// localStorage keys for the L0-invalidation-on-exclude
+// preference. The dialog stores either "always" (don't
+// ask, always invalidate) or "never" (don't ask, always
+// defer). When neither is set, the dialog appears.
+// Symmetric with the existing per-feature preferences
+// stored elsewhere; can be reset via the Settings tab.
+//
+// Design note — three states (ask / always / never) is
+// the right shape. A single boolean would force the
+// user into one of the two pre-set choices; keeping
+// "ask" as the absence of a stored value lets the
+// dialog be the discoverable default and lets users
+// who want a permanent answer opt in to one.
+const _L0_EXCLUDE_PREF_KEY = 'ac-dc-l0-exclude-pref';
+const _L0_EXCLUDE_PREF_ASK = 'ask';
+const _L0_EXCLUDE_PREF_ALWAYS = 'always';
+const _L0_EXCLUDE_PREF_NEVER = 'never';
+
+/**
+ * Read the stored L0-exclude preference. Returns one of
+ * 'ask' / 'always' / 'never'. Anything else (missing key,
+ * malformed value) falls back to 'ask' so users see the
+ * dialog by default — the prompt is the discoverable
+ * surface for understanding the L0 trade-off.
+ */
+function _loadL0ExcludePref() {
+  try {
+    const raw = localStorage.getItem(_L0_EXCLUDE_PREF_KEY);
+    if (raw === _L0_EXCLUDE_PREF_ALWAYS) return _L0_EXCLUDE_PREF_ALWAYS;
+    if (raw === _L0_EXCLUDE_PREF_NEVER) return _L0_EXCLUDE_PREF_NEVER;
+  } catch (_) {}
+  return _L0_EXCLUDE_PREF_ASK;
+}
+
+function _saveL0ExcludePref(pref) {
+  try {
+    localStorage.setItem(_L0_EXCLUDE_PREF_KEY, pref);
+  } catch (_) {}
+}
 
 /**
  * Read the persisted picker width from localStorage, falling
@@ -316,6 +357,25 @@ export class FilesTab extends RpcMixin(LitElement) {
      * presence flag is enough to drive rendering.
      */
     _reviewGraphModal: { type: Object, state: true },
+    /**
+     * L0-exclude confirmation dialog state. Null when
+     * the dialog is closed; populated with the
+     * pending exclusion shape when open:
+     *   {nextExcluded: Set<string>,
+     *    addedPaths: string[]}
+     *
+     * The dialog asks whether to invalidate L0 now
+     * (full cache rewrite, ~100K+ tokens) or defer
+     * until the next L0-invalidating event. User's
+     * choice flows back through `_resolveL0ExcludeDialog`
+     * which calls `_applyExclusion` with the
+     * appropriate `invalidate_l0` flag.
+     *
+     * Only the exclusion path uses this dialog —
+     * inclusion always invalidates immediately and
+     * skips the prompt.
+     */
+    _l0ExcludeDialog: { type: Object, state: true },
   };
 
   static styles = css`
@@ -600,21 +660,126 @@ export class FilesTab extends RpcMixin(LitElement) {
       text-align: center;
       opacity: 0.7;
     }
+
+    /* L0-exclude confirmation dialog. Smaller than the
+     * review modal — prompt + two buttons + remember
+     * checkbox. Same backdrop colour scheme so the
+     * floating-modal language is consistent across the
+     * app. Width is fixed (not viewport-relative)
+     * because the body text is short and a wide dialog
+     * for one paragraph reads as poorly designed. */
+    .l0-dialog-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 2600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .l0-dialog {
+      background: rgba(22, 27, 34, 0.98);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      width: 480px;
+      max-width: 90vw;
+      padding: 1.25rem;
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.875rem;
+      backdrop-filter: blur(8px);
+    }
+    .l0-dialog-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 0 0 0.75rem;
+    }
+    .l0-dialog-body {
+      margin: 0 0 1rem;
+      line-height: 1.5;
+      color: var(--text-secondary, #8b949e);
+    }
+    .l0-dialog-body strong {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .l0-dialog-remember {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.8125rem;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 1rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .l0-dialog-remember input {
+      margin: 0;
+    }
+    .l0-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    .l0-dialog-btn {
+      padding: 0.4rem 0.85rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .l0-dialog-btn.primary {
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .l0-dialog-btn.primary:hover {
+      background: rgba(88, 166, 255, 0.25);
+      border-color: var(--accent-primary, #58a6ff);
+    }
+    .l0-dialog-btn.secondary {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .l0-dialog-btn.secondary:hover {
+      background: rgba(240, 246, 252, 0.06);
+      border-color: rgba(240, 246, 252, 0.35);
+    }
+    .l0-dialog-btn.cancel {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary, #8b949e);
+    }
+    .l0-dialog-btn.cancel:hover {
+      color: var(--text-primary, #c9d1d9);
+    }
   `;
 
   constructor() {
     super();
-    // Authoritative selection state. Held as a Set for O(1)
-    // membership checks; the picker consumes a Set prop
-    // directly.
-    this._selectedFiles = new Set();
-    // Authoritative exclusion state — the third position in
-    // the picker's three-state checkbox model. Parallel to
-    // `_selectedFiles`: orchestrator owns the Set, picker
-    // receives a copy via direct-update pattern, server is
-    // notified via `LLMService.set_excluded_index_files` on
-    // every change.
-    this._excludedFiles = new Set();
+    // Authoritative selection state — keyed by tab ID so
+    // agent tabs (Phase C) can each own their own
+    // selection. In Phase A only the main tab exists,
+    // so every read/write flows through the same entry
+    // and behaviour matches pre-refactor byte-for-byte.
+    //
+    // The `_selectedFiles` getter/setter defined below
+    // routes through `this._activeTabId` so existing
+    // call sites (_applySelection, _onSelectionChanged,
+    // etc.) don't need to know about the Map.
+    this._activeTabId = 'main';
+    this._selectedFilesByTab = new Map();
+    this._selectedFilesByTab.set('main', new Set());
+    // Authoritative exclusion state — per-tab, parallel to
+    // selection. Per specs4/5-webapp/agent-browser.md §
+    // File Picker Scope: "Excluded-files state is also
+    // per-tab." The `_excludedFiles` getter/setter below
+    // routes through the active tab's entry, matching the
+    // selection pattern.
+    this._excludedFilesByTab = new Map();
+    this._excludedFilesByTab.set('main', new Set());
     // Path of the file currently active in a viewer, or
     // null. Updated from viewer `active-file-changed`
     // events (they bubble + compose out to the window),
@@ -725,6 +890,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     // tip highlighted.
     this._reviewGraphModal = null;
 
+    // L0-exclude confirmation dialog state. Null when
+    // closed. Populated by `_applyExclusionWithPrompt`
+    // when the user shift+clicks to exclude a file (or
+    // the context menu's Exclude action runs) and the
+    // stored preference is 'ask'. The dialog's button
+    // handlers commit or cancel via
+    // `_resolveL0ExcludeDialog`.
+    this._l0ExcludeDialog = null;
+    // Local copy of the L0-exclude preference. Hydrated
+    // synchronously so the first dialog open / skip
+    // decision uses the persisted value.
+    this._l0ExcludePref = _loadL0ExcludePref();
+
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
     this._onOpenReviewSelector =
@@ -772,6 +950,15 @@ export class FilesTab extends RpcMixin(LitElement) {
     // from what the editor is showing.
     this._onRevealFileInPicker =
       this._onRevealFileInPicker.bind(this);
+    // Chat panel's active-tab-changed bubbles +
+    // composes out to the window (D21 A3). We listen
+    // there so the picker's checkbox state tracks
+    // whichever tab is currently visible. Phase A
+    // only has the main tab, so the listener never
+    // actually swaps — but wiring it now means
+    // Phase C's spawn path doesn't re-touch this
+    // component.
+    this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
     // New-file and new-directory commit handlers —
     // fired when the picker's inline input is
     // confirmed with Enter. Same bind pattern as
@@ -790,6 +977,56 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onSplitterPointerUp.bind(this);
     this._onSplitterDoubleClick =
       this._onSplitterDoubleClick.bind(this);
+  }
+
+  // ---------------------------------------------------------------
+  // Per-tab selection accessors (D21 Phase A4)
+  // ---------------------------------------------------------------
+
+  // `_selectedFiles` was a plain Set pre-A4; now it's a
+  // getter that routes through the tab-keyed Map. Every
+  // existing call site — _applySelection,
+  // _onSelectionChanged, the initial-auto-select pass,
+  // _sendSelectionToServer — writes or reads
+  // `this._selectedFiles` and gets the active tab's
+  // slot transparently.
+  //
+  // A missing Map entry for the active tab is created on
+  // demand with an empty Set. This defends against a
+  // race where `active-tab-changed` hasn't been observed
+  // yet but the active tab's slot is queried — the
+  // fresh empty Set is the correct starting state for
+  // any tab Phase C spawns.
+
+  get _selectedFiles() {
+    let set = this._selectedFilesByTab.get(this._activeTabId);
+    if (set === undefined) {
+      set = new Set();
+      this._selectedFilesByTab.set(this._activeTabId, set);
+    }
+    return set;
+  }
+
+  set _selectedFiles(value) {
+    // Wrap non-Set inputs defensively — the pre-A4 code
+    // always assigned Set instances, but _applySelection
+    // passes whatever it was given.
+    const set = value instanceof Set ? value : new Set(value);
+    this._selectedFilesByTab.set(this._activeTabId, set);
+  }
+
+  get _excludedFiles() {
+    let set = this._excludedFilesByTab.get(this._activeTabId);
+    if (set === undefined) {
+      set = new Set();
+      this._excludedFilesByTab.set(this._activeTabId, set);
+    }
+    return set;
+  }
+
+  set _excludedFiles(value) {
+    const set = value instanceof Set ? value : new Set(value);
+    this._excludedFilesByTab.set(this._activeTabId, set);
   }
 
   // ---------------------------------------------------------------
@@ -827,6 +1064,13 @@ export class FilesTab extends RpcMixin(LitElement) {
     // detail carries the full review-state dict.
     window.addEventListener('review-started', this._onReviewStarted);
     window.addEventListener('review-ended', this._onReviewEnded);
+    // Chat panel tab switches (D21 A4). The event is
+    // bubbled + composed so we catch it at the
+    // window level without coupling to the chat
+    // panel's shadow root.
+    window.addEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
   }
 
   disconnectedCallback() {
@@ -849,6 +1093,9 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onReviewStarted,
     );
     window.removeEventListener('review-ended', this._onReviewEnded);
+    window.removeEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
     // If a splitter drag was in progress at unmount (hot
     // reload, tab switch under load), release the
     // document-scope listeners. Without this, pointermove
@@ -1123,6 +1370,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.statusData = this._latestStatusData;
     picker.branchInfo = this._latestBranchInfo;
     picker.excludedFiles = new Set(this._excludedFiles);
+    picker.pinnedFiles = this._computePinnedFiles();
     picker.activePath = this._activePath;
     picker.reviewState = this._reviewState;
     picker.requestUpdate();
@@ -1225,6 +1473,32 @@ export class FilesTab extends RpcMixin(LitElement) {
         new Set(excluded),
         /* notifyServer */ false,
       );
+    }
+    // Restore review state so the picker's amber banner
+    // reappears after a browser refresh during an active
+    // review. Without this, the post-refresh UI looks
+    // identical to non-review mode even though git HEAD
+    // is detached at the merge-base — confusing, because
+    // the user has no affordance to exit review and
+    // recover their original branch.
+    //
+    // The backend's get_current_state includes the full
+    // review-state dict under the `review_state` key
+    // (matching get_review_state's shape); we mirror it
+    // into _reviewState and push to the picker via the
+    // same direct-update pattern the review-started
+    // handler uses.
+    const review =
+      state.review_state && typeof state.review_state === 'object'
+        ? state.review_state
+        : null;
+    if (review && review.active) {
+      this._reviewState = review;
+      const picker = this._picker();
+      if (picker) {
+        picker.reviewState = review;
+        picker.requestUpdate();
+      }
     }
   }
 
@@ -1349,6 +1623,65 @@ export class FilesTab extends RpcMixin(LitElement) {
     // post-review state (HEAD reattached, staging
     // cleared).
     this._loadFileTree();
+  }
+
+  /**
+   * Chat panel's active-tab-changed event — swap the
+   * picker's selection state to whichever tab is now
+   * visible. Phase A always has the main tab active,
+   * so the handler is reachable but the branch below
+   * that swaps picker state only fires in Phase C when
+   * agent tabs materialise.
+   *
+   * Detail shape: `{tabId, previousTabId}`.
+   *
+   * The handler has two jobs:
+   *
+   *   1. Update `_activeTabId` so the `_selectedFiles`
+   *      getter routes to the right Map slot. Every
+   *      subsequent selection read/write inside this
+   *      component lands on the correct tab.
+   *   2. Push the new tab's selection to the picker
+   *      via direct-update so its checkboxes reflect
+   *      the tab's state without re-rendering the
+   *      orchestrator.
+   *
+   * The chat panel is the source of truth for tab
+   * activation — its `_activeTabId` setter fires the
+   * event, and files-tab follows. Files-tab does NOT
+   * originate tab switches.
+   */
+  _onActiveTabChanged(event) {
+    const tabId = event?.detail?.tabId;
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === this._activeTabId) return;
+    this._activeTabId = tabId;
+    // Ensure the Maps have entries — the getters do
+    // this lazily too, but doing it up front keeps the
+    // subsequent .get() deterministic.
+    if (!this._selectedFilesByTab.has(tabId)) {
+      this._selectedFilesByTab.set(tabId, new Set());
+    }
+    if (!this._excludedFilesByTab.has(tabId)) {
+      this._excludedFilesByTab.set(tabId, new Set());
+    }
+    const tabSelection = this._selectedFilesByTab.get(tabId);
+    const tabExclusion = this._excludedFilesByTab.get(tabId);
+    // Push to the picker. Direct-update pattern, same as
+    // _applySelection — assign fresh Sets then
+    // requestUpdate so the picker's internal
+    // `selectedFiles` / `excludedFiles` props reflect
+    // the active tab.
+    const picker = this._picker();
+    if (picker) {
+      picker.selectedFiles = new Set(tabSelection);
+      picker.excludedFiles = new Set(tabExclusion);
+      picker.requestUpdate();
+    }
+    // Chat panel is already tracking the active tab
+    // (the event came from its setter), so we don't
+    // push to it — its own getter now reads from the
+    // right tab slot automatically.
   }
 
   async _onExitReview() {
@@ -1506,10 +1839,69 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   _applySelection(newSelection, notifyServer) {
+    // Modified-file pin (cache-tiering invariant): a file
+    // with working-tree or staged changes cannot be
+    // deselected. Edited files pin into lower cache tiers
+    // (D27) and the picker should reflect their residency
+    // — letting the user uncheck them while they're still
+    // pinned would create a confusing split between "what
+    // the picker shows" and "what's actually in the
+    // prompt." If the incoming set drops any modified
+    // file, re-add it and toast the user.
+    //
+    // Only working-tree-modified and staged files pin.
+    // Untracked files were auto-added as a convenience
+    // (Increment 4 / first-load auto-select) and the user
+    // remains free to drop them. Deleted files have no
+    // content to pin, and the delete-cleanup paths need
+    // to keep working.
+    const sd = this._latestStatusData;
+    let pinnedReverted = false;
+    if (sd) {
+      const pinned = [];
+      for (const path of this._selectedFiles) {
+        if (newSelection.has(path)) continue;
+        if (sd.modified?.has(path) || sd.staged?.has(path)) {
+          pinned.push(path);
+        }
+      }
+      if (pinned.length > 0) {
+        const next = new Set(newSelection);
+        for (const p of pinned) next.add(p);
+        newSelection = next;
+        pinnedReverted = true;
+        const label =
+          pinned.length === 1
+            ? pinned[0]
+            : `${pinned.length} modified files`;
+        this._showToast(
+          `${label} cannot be removed from context while modified — commit or discard changes first.`,
+          'warning',
+        );
+      }
+    }
     // Fast-path no-op when the set hasn't actually changed.
     // Prevents loopback from the server broadcast doing
     // another round-trip for our own update.
-    if (this._setsEqual(this._selectedFiles, newSelection)) return;
+    //
+    // Exception: when we just reverted a pinned-file
+    // removal, the corrected `newSelection` equals our
+    // current state — but the picker's optimistic local
+    // state still shows the unticked checkbox from the
+    // user's click. We must push the corrected selection
+    // to the picker (below) so the checkbox snaps back
+    // on. The server doesn't need notification because
+    // its state hasn't changed.
+    if (this._setsEqual(this._selectedFiles, newSelection)) {
+      if (pinnedReverted) {
+        const picker = this._picker();
+        if (picker) {
+          picker.selectedFiles = new Set(newSelection);
+          picker.requestUpdate();
+        }
+      }
+      return;
+    }
     this._selectedFiles = newSelection;
 
     // Direct-update pattern (load-bearing — see class
@@ -1534,28 +1926,63 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   async _sendSelectionToServer(files) {
+    // Route by active tab: main → set_selected_files,
+    // agent tab → set_agent_selected_files(turn_id,
+    // agent_idx, files). parseAgentTabId returns null
+    // for 'main' or malformed IDs, in which case we use
+    // the main RPC path (the tab-as-main case).
+    //
+    // Per specs4/5-webapp/agent-browser.md § File Picker
+    // Scope: "A user granting a file to agent 2 doesn't
+    // affect the main LLM's context on the next turn."
+    // Without this dispatch, every selection change on
+    // any tab clobbers the main tab's server-side
+    // selection.
+    const agentTag = parseAgentTabId(this._activeTabId);
     try {
-      const result = await this.rpcExtract(
-        'LLMService.set_selected_files',
-        files,
-      );
-      // The server returns either an array of paths (success)
-      // or `{error: "restricted", reason: ...}` for
-      // non-localhost callers in collab mode. Surface the
-      // restricted case via toast; the picker's optimistic
-      // state has already been applied. In collab mode the
-      // server will follow up with a `filesChanged` broadcast
-      // that restores the authoritative state.
+      let result;
+      if (agentTag) {
+        // agentTag IS the agent's LLM-chosen id —
+        // post-flat-identity refactor flattened the
+        // (turn_id, agent_idx) tuple into a single
+        // string keyed in the backend registry.
+        result = await this.rpcExtract(
+          'LLMService.set_agent_selected_files',
+          agentTag,
+          files,
+        );
+      } else {
+        result = await this.rpcExtract(
+          'LLMService.set_selected_files',
+          files,
+        );
+      }
+      // The server returns either an array of paths
+      // (success) or an error dict. `{error:
+      // "restricted", ...}` is collab-mode localhost gate.
+      // `{error: "agent not found"}` happens when the
+      // tab was closed server-side between the last tab
+      // switch and this selection change — treat it as a
+      // warning; the tab's local state is stale but the
+      // chat panel's close-tab flow will clean up
+      // eventually.
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         if (result.error === 'restricted') {
           this._showToast(
             result.reason || 'Restricted operation',
             'warning',
           );
+        } else if (result.error === 'agent not found') {
+          this._showToast(
+            'Agent tab no longer available on server',
+            'warning',
+          );
         }
       }
     } catch (err) {
-      console.error('[files-tab] set_selected_files failed', err);
+      console.error(
+        '[files-tab] set_selected_files failed', err,
+      );
       this._showToast(
         `Failed to update selection: ${err?.message || err}`,
         'error',
@@ -1570,12 +1997,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     // of excluded paths; we update our authoritative state,
     // push to the picker via direct-update, and notify the
     // server.
+    //
+    // User-driven exclusion goes through the L0
+    // invalidation prompt — see `_applyExclusionWithPrompt`
+    // for the pref-driven dispatch. Pure removals (the
+    // user un-excluded a file via shift+click on an
+    // already-excluded entry) skip the prompt because
+    // there's nothing for the user to opt into.
     const incoming = event.detail?.excludedFiles;
     if (!Array.isArray(incoming)) return;
-    this._applyExclusion(new Set(incoming), /* notifyServer */ true);
+    this._applyExclusionWithPrompt(new Set(incoming));
   }
 
-  _applyExclusion(newExcluded, notifyServer) {
+  _applyExclusion(newExcluded, notifyServer, invalidateL0 = false) {
     // Fast-path no-op when the set hasn't actually changed.
     // Prevents loopback from the server broadcast (when
     // collab mode lands this for real) doing another
@@ -1590,23 +2024,187 @@ export class FilesTab extends RpcMixin(LitElement) {
       picker.requestUpdate();
     }
     if (notifyServer) {
-      this._sendExclusionToServer(Array.from(newExcluded));
+      this._sendExclusionToServer(
+        Array.from(newExcluded),
+        invalidateL0,
+      );
     }
   }
 
-  async _sendExclusionToServer(files) {
-    try {
-      const result = await this.rpcExtract(
-        'LLMService.set_excluded_index_files',
-        files,
+  /**
+   * Apply an exclusion with the L0-invalidation prompt.
+   *
+   * Wraps `_applyExclusion` for the user-driven exclusion
+   * paths: the picker's shift+click handler and the
+   * context-menu Exclude / Exclude-all actions. Inclusion
+   * paths skip this — they always pass `invalidateL0=true`
+   * directly because the user wants the file's structural
+   * block back in the map immediately.
+   *
+   * Behaviour driven by the stored preference:
+   *
+   * - 'always' → invalidate L0 immediately, no prompt
+   * - 'never' → defer L0 invalidation, no prompt
+   * - 'ask' (default) → open the dialog; user's choice
+   *   determines the flag and may also persist the
+   *   preference for next time
+   *
+   * Set-equality short-circuit happens BEFORE the prompt
+   * — there's no point asking about an exclusion change
+   * that's a no-op.
+   *
+   * The added-paths list is computed here so the dialog
+   * body can name what's being excluded ("foo.py" vs.
+   * "3 files in src/"). Empty list when the diff is a
+   * pure removal — shouldn't reach this method since
+   * removals are inclusions, but defensive against a
+   * future caller that passes a smaller set than the
+   * current one.
+   */
+  _applyExclusionWithPrompt(nextExcluded) {
+    if (this._setsEqual(this._excludedFiles, nextExcluded)) return;
+    // Compute newly-excluded paths (set difference). If
+    // the diff has no additions, treat it as a plain
+    // exclusion-change call without prompt — there's
+    // nothing the user is opting into invalidating.
+    const addedPaths = [];
+    for (const p of nextExcluded) {
+      if (!this._excludedFiles.has(p)) addedPaths.push(p);
+    }
+    if (addedPaths.length === 0) {
+      this._applyExclusion(
+        nextExcluded, /* notifyServer */ true, /* invalidateL0 */ false,
       );
-      // Same shape as set_selected_files — array on success,
-      // restricted-error dict for non-localhost callers in
-      // collab mode.
+      return;
+    }
+    // Pref-driven dispatch.
+    if (this._l0ExcludePref === _L0_EXCLUDE_PREF_ALWAYS) {
+      this._applyExclusion(nextExcluded, true, true);
+      return;
+    }
+    if (this._l0ExcludePref === _L0_EXCLUDE_PREF_NEVER) {
+      this._applyExclusion(nextExcluded, true, false);
+      return;
+    }
+    // 'ask' — open the dialog. The pending exclusion
+    // sits in dialog state until the user picks; the
+    // user can also cancel, which discards the
+    // pending change entirely (the picker's optimistic
+    // state will reconcile on the next render via the
+    // direct-update path).
+    this._l0ExcludeDialog = {
+      nextExcluded,
+      addedPaths,
+    };
+  }
+
+  /**
+   * Resolve an open L0-exclude dialog. Called by the
+   * three button handlers (Apply now, Defer, Cancel).
+   *
+   * `choice` is one of:
+   *   - 'invalidate' → apply with invalidateL0=true
+   *   - 'defer' → apply with invalidateL0=false
+   *   - 'cancel' → discard the pending exclusion
+   *
+   * `remember` is the "Don't ask again" checkbox state.
+   * Only meaningful for invalidate / defer choices —
+   * cancel never persists a preference.
+   *
+   * After resolving, the picker's checkbox state may be
+   * stale (the user shift-clicked, the picker
+   * optimistically updated, then the user cancelled).
+   * The direct-update inside `_applyExclusion` re-pushes
+   * the canonical `excludedFiles` Set, which causes the
+   * picker to re-render with the correct state.
+   */
+  _resolveL0ExcludeDialog(choice, remember) {
+    const dialog = this._l0ExcludeDialog;
+    this._l0ExcludeDialog = null;
+    if (!dialog) return;
+    if (choice === 'cancel') {
+      // Re-push current excluded set to the picker so
+      // its visual state reconciles with the
+      // unchanged authoritative state. Without this,
+      // a shift-click that opened the dialog and was
+      // cancelled could leave the picker showing a
+      // ticked checkbox even though our set is
+      // unchanged.
+      const picker = this._picker();
+      if (picker) {
+        picker.excludedFiles = new Set(this._excludedFiles);
+        picker.requestUpdate();
+      }
+      return;
+    }
+    const invalidate = choice === 'invalidate';
+    if (remember) {
+      const pref = invalidate
+        ? _L0_EXCLUDE_PREF_ALWAYS
+        : _L0_EXCLUDE_PREF_NEVER;
+      this._l0ExcludePref = pref;
+      _saveL0ExcludePref(pref);
+    }
+    this._applyExclusion(dialog.nextExcluded, true, invalidate);
+  }
+
+  /**
+   * Reset the stored L0-exclude preference back to
+   * 'ask'. Exposed so the Settings tab can offer a
+   * "reset preferences" affordance — users who picked
+   * "always" once and now want the dialog back have
+   * an escape hatch.
+   */
+  resetL0ExcludePref() {
+    this._l0ExcludePref = _L0_EXCLUDE_PREF_ASK;
+    try {
+      localStorage.removeItem(_L0_EXCLUDE_PREF_KEY);
+    } catch (_) {}
+  }
+
+  async _sendExclusionToServer(files, invalidateL0 = false) {
+    // Same dispatch rule as _sendSelectionToServer. Per
+    // specs4/5-webapp/agent-browser.md § File Picker
+    // Scope: "Excluded-files state is also per-tab."
+    //
+    // `invalidateL0` flows through to the main-tab RPC
+    // as a third argument. Agent tabs don't accept it
+    // — agent ContextManagers share the orchestrator's
+    // L0 prefix per the parallel-agents design, so an
+    // agent-tab exclusion can't invalidate the
+    // orchestrator's L0 cache directly. (The
+    // orchestrator's own next L0-invalidation event
+    // refreshes when needed.) We silently drop the
+    // flag for agent tabs rather than raise — agent
+    // exclusions are still applied via the per-agent
+    // tracker; only the L0 refresh decision differs.
+    const agentTag = parseAgentTabId(this._activeTabId);
+    try {
+      let result;
+      if (agentTag) {
+        // agentTag IS the agent's LLM-chosen id —
+        // matches the backend's flat registry key.
+        result = await this.rpcExtract(
+          'LLMService.set_agent_excluded_index_files',
+          agentTag,
+          files,
+        );
+      } else {
+        result = await this.rpcExtract(
+          'LLMService.set_excluded_index_files',
+          files,
+          invalidateL0,
+        );
+      }
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         if (result.error === 'restricted') {
           this._showToast(
             result.reason || 'Restricted operation',
+            'warning',
+          );
+        } else if (result.error === 'agent not found') {
+          this._showToast(
+            'Agent tab no longer available on server',
             'warning',
           );
         }
@@ -2576,15 +3174,19 @@ export class FilesTab extends RpcMixin(LitElement) {
    * Excluding a selected file also deselects it —
    * the two states are mutually exclusive. Mirrors
    * the shift+click behaviour in the picker's
-   * `_toggleExclusion` path.
+   * `_toggleExclusion` path. Routes through the
+   * L0-invalidation prompt — same pref logic as
+   * shift+click.
    */
   _dispatchExclude(path) {
     if (this._excludedFiles.has(path)) return;
     const nextExcluded = new Set(this._excludedFiles);
     nextExcluded.add(path);
-    this._applyExclusion(nextExcluded, /* notifyServer */ true);
+    this._applyExclusionWithPrompt(nextExcluded);
     // Deselect if currently selected — excluded and
-    // selected can't coexist.
+    // selected can't coexist. Selection clear does
+    // NOT route through the L0 prompt because it's a
+    // selection change, not an exclusion change.
     if (this._selectedFiles.has(path)) {
       const nextSelected = new Set(this._selectedFiles);
       nextSelected.delete(path);
@@ -2602,12 +3204,18 @@ export class FilesTab extends RpcMixin(LitElement) {
    *
    * Idempotent — a file not currently excluded
    * short-circuits via set-equality.
+   *
+   * Inclusion always invalidates L0 — the user wants
+   * the file's structural block back in the aggregate
+   * map immediately. No prompt, no preference check.
    */
   _dispatchInclude(path) {
     if (!this._excludedFiles.has(path)) return;
     const next = new Set(this._excludedFiles);
     next.delete(path);
-    this._applyExclusion(next, /* notifyServer */ true);
+    this._applyExclusion(
+      next, /* notifyServer */ true, /* invalidateL0 */ true,
+    );
   }
 
   /**
@@ -2881,14 +3489,21 @@ export class FilesTab extends RpcMixin(LitElement) {
    * already excluded). Deselects any descendants
    * that were selected, matching the mutual-
    * exclusion rule between selection and exclusion.
+   *
+   * Routes through the L0-invalidation prompt — the
+   * dialog body adapts to show the directory name
+   * and file count when more than one file is being
+   * excluded.
    */
   _dispatchExcludeAll(dirPath) {
     const files = this._collectDescendantFilesFromPath(dirPath);
     if (files.length === 0) return;
     const nextExcluded = new Set(this._excludedFiles);
     for (const p of files) nextExcluded.add(p);
-    this._applyExclusion(nextExcluded, /* notifyServer */ true);
-    // Deselect any that were selected.
+    this._applyExclusionWithPrompt(nextExcluded);
+    // Deselect any that were selected. Same rationale
+    // as `_dispatchExclude` — selection changes don't
+    // route through the L0 prompt.
     const hadSelected = files.some((p) => this._selectedFiles.has(p));
     if (hadSelected) {
       const nextSelected = new Set(this._selectedFiles);
@@ -2901,14 +3516,18 @@ export class FilesTab extends RpcMixin(LitElement) {
    * Remove every descendant file from the excluded
    * set. Returns them to the default index-only
    * state — does NOT auto-select, matching the
-   * file-level Include behaviour.
+   * file-level Include behaviour. Always invalidates
+   * L0 (no prompt) — same rationale as
+   * `_dispatchInclude`.
    */
   _dispatchIncludeAll(dirPath) {
     const files = this._collectDescendantFilesFromPath(dirPath);
     if (files.length === 0) return;
     const next = new Set(this._excludedFiles);
     for (const p of files) next.delete(p);
-    this._applyExclusion(next, /* notifyServer */ true);
+    this._applyExclusion(
+      next, /* notifyServer */ true, /* invalidateL0 */ true,
+    );
   }
 
   /**
@@ -3100,6 +3719,28 @@ export class FilesTab extends RpcMixin(LitElement) {
   // Helpers
   // ---------------------------------------------------------------
 
+  /**
+   * Build the set of paths that should be pinned to
+   * selection — files with working-tree or staged
+   * modifications. The picker uses this to suppress the
+   * native checkbox toggle on attempted deselection so
+   * Lit's reactive binding stays the source of truth.
+   * Untracked and deleted files are excluded — see the
+   * comment in `_applySelection` for the rationale.
+   */
+  _computePinnedFiles() {
+    const pinned = new Set();
+    const sd = this._latestStatusData;
+    if (!sd) return pinned;
+    if (sd.modified instanceof Set) {
+      for (const p of sd.modified) pinned.add(p);
+    }
+    if (sd.staged instanceof Set) {
+      for (const p of sd.staged) pinned.add(p);
+    }
+    return pinned;
+  }
+
   _picker() {
     return this.shadowRoot?.querySelector('ac-file-picker') || null;
   }
@@ -3199,7 +3840,141 @@ export class FilesTab extends RpcMixin(LitElement) {
       </div>
       ${this._renderReviewSelectorModal()}
       ${this._renderReviewGraphModal()}
+      ${this._renderL0ExcludeDialog()}
     `;
+  }
+
+  // ---------------------------------------------------------------
+  // L0-exclude confirmation dialog
+  // ---------------------------------------------------------------
+
+  /**
+   * Render the L0-exclude confirmation dialog when
+   * `_l0ExcludeDialog` is non-null. Three buttons:
+   *
+   *   - Apply now (primary) — invalidate L0
+   *     immediately, full cache rewrite
+   *   - Defer (secondary) — leave L0 cached as-is;
+   *     the next mode switch / cross-ref toggle /
+   *     manual rebuild / restart will refresh
+   *   - Cancel — discard the pending exclusion
+   *
+   * Plus a "Don't ask again" checkbox that persists
+   * the user's choice as the new default for both
+   * exclusion paths. Cancel doesn't persist
+   * anything — it's a "I changed my mind" gesture.
+   */
+  _renderL0ExcludeDialog() {
+    const dialog = this._l0ExcludeDialog;
+    if (!dialog) return '';
+    const count = dialog.addedPaths.length;
+    const target =
+      count === 1
+        ? dialog.addedPaths[0]
+        : `${count} files`;
+    return html`
+      <div
+        class="l0-dialog-backdrop"
+        @click=${this._onL0DialogBackdropClick}
+        @keydown=${this._onL0DialogKeyDown}
+      >
+        <div
+          class="l0-dialog"
+          role="dialog"
+          aria-label="Confirm L0 cache invalidation"
+          tabindex="0"
+          @click=${(e) => e.stopPropagation()}
+        >
+          <div class="l0-dialog-title">
+            Invalidate L0 cache?
+          </div>
+          <div class="l0-dialog-body">
+            Excluding <strong>${target}</strong> from the
+            index can either invalidate the L0 cache
+            immediately (a full cache rewrite — typically
+            100,000+ tokens) or leave the cached aggregate
+            map stale until the next L0-invalidating event
+            (mode switch, cross-reference toggle, manual
+            rebuild, restart).
+            <br /><br />
+            <strong>Apply now</strong> if you want the
+            exclusion to take effect on the next request
+            and don't mind the cache cost. <strong>Defer</strong>
+            if you'd rather not pay the cache cost yet —
+            the LLM may still see ${target} in the
+            structural map until the cache refreshes
+            naturally.
+          </div>
+          <label class="l0-dialog-remember">
+            <input
+              type="checkbox"
+              data-l0-remember
+            />
+            Don't ask again — remember this choice for
+            future exclusions
+          </label>
+          <div class="l0-dialog-actions">
+            <button
+              class="l0-dialog-btn cancel"
+              @click=${this._onL0DialogCancel}
+            >Cancel</button>
+            <button
+              class="l0-dialog-btn secondary"
+              @click=${this._onL0DialogDefer}
+            >Defer</button>
+            <button
+              class="l0-dialog-btn primary"
+              @click=${this._onL0DialogApplyNow}
+            >Apply now</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Read the "Don't ask again" checkbox state from the
+   * rendered dialog. Returns false when the dialog
+   * isn't mounted or the checkbox can't be queried —
+   * defensive against a race between button click and
+   * dialog close.
+   */
+  _readL0DialogRememberFlag() {
+    const cb = this.shadowRoot?.querySelector(
+      '.l0-dialog input[data-l0-remember]',
+    );
+    return !!(cb && cb.checked);
+  }
+
+  _onL0DialogApplyNow() {
+    const remember = this._readL0DialogRememberFlag();
+    this._resolveL0ExcludeDialog('invalidate', remember);
+  }
+
+  _onL0DialogDefer() {
+    const remember = this._readL0DialogRememberFlag();
+    this._resolveL0ExcludeDialog('defer', remember);
+  }
+
+  _onL0DialogCancel() {
+    // Cancel never persists a preference — the
+    // checkbox value is irrelevant.
+    this._resolveL0ExcludeDialog('cancel', false);
+  }
+
+  _onL0DialogBackdropClick(event) {
+    // Backdrop click = cancel. Same gesture as the
+    // review selector modal's backdrop click.
+    if (event.target === event.currentTarget) {
+      this._onL0DialogCancel();
+    }
+  }
+
+  _onL0DialogKeyDown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this._onL0DialogCancel();
+    }
   }
 
   // ---------------------------------------------------------------

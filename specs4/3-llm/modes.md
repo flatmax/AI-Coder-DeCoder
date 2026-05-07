@@ -46,7 +46,12 @@ File tree, conversation history, edit protocol, compaction, review, URL handling
 
 - Separate initialization pass appends cross-reference items without disturbing primary index items
 - Uses the same reference-graph initialization algorithm with the cross-reference index's graph
+- Items are distributed across L0, L1, L2, and L3 — never landing in the ACTIVE tier
+- Clustering via connected components bin-packs items into L1/L2/L3 by component size
+- Post-measurement L0 backfill promotes the most-referenced cross-reference files into L0 until its token total meets the cache-target overshoot threshold
+- Primary-index items already resident in L0 are never evicted — only L1/L2/L3 candidates are considered for the backfill promotion
 - Cross-ref items receive the standard entry-N for their assigned tier
+- Items already tracked (e.g., from a prior enable that left state behind, or a primary-index item under the same key) are never overwritten
 
 ## Cross-Reference Deactivation
 

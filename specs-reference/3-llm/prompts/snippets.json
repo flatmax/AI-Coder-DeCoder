@@ -34,6 +34,11 @@
       "icon": "🏁",
       "tooltip": "Pre-commit with plan completion",
       "message": "Review the staged changes against the plan we agreed on. For each item in the plan, confirm it's done or flag what's missing. Also flag unused imports, debug prints, or unintended changes."
+    },
+    {
+      "icon": "🤖",
+      "tooltip": "Review agent work",
+      "message": "The agents have finished. Review what they changed and tell me whether the work is complete, whether any pieces are inconsistent across files, and what still needs doing."
     }
   ],
   "review": [

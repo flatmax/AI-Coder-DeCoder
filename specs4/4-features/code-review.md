@@ -74,11 +74,12 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 - Commit message (first line, truncated)
 - Author and relative date
 - Branch tip commits show the branch name as a label badge
+- Hover tooltip shows full SHA, parent SHAs, list of branches reaching the commit, author, ISO+relative date, and the full commit message
 ### Branch Legend
 - Fixed header above the scrollable graph — does not scroll
 - Branch chips colored to match their lanes
 - Ordered by most recent commit
-- Chips toggleable to filter branches in the graph
+- Chips toggleable to filter branches in the graph — clicking a chip hides every commit and edge reachable only through that branch. Commits also reachable from a still-visible branch remain rendered. The chip itself dims and strikes through to indicate the hidden state; clicking again restores. Lane assignments don't reflow on toggle so the graph layout stays stable.
 - Remote branches toggle button (default: local only)
 ### Disambiguation
 - A commit can be reachable from multiple branches
@@ -124,7 +125,7 @@ Review context is inserted as a dedicated section in the message array, between 
 - Review summary — branch, merge-base and tip short SHAs, commit count, files changed, additions, deletions
 - Commit list — short SHA, message, author, relative date per commit
 - Pre-change symbol map — symbol map from the merge-base commit, captured during entry
-- Reverse diffs for selected files — patches showing what would revert each file to pre-review state
+- Diffs for selected files — forward patches (`base..tip`) showing what the branch added relative to the review base
 ### Re-Injection
 - Review context is re-injected on each message (like URL context)
 - Always current with the user's file selection
@@ -134,12 +135,13 @@ Review context is inserted as a dedicated section in the message array, between 
 - Held in memory on the LLM service during the review session
 - Not persisted to disk — rebuilt if needed by re-running entry
 - Having both pre-change and current symbol maps lets the LLM compare topology before and after the reviewed changes
-### Reverse Diffs for Selected Files
+### Diffs for Selected Files
 - When a file is selected (checked in the file picker), its full current content is included in working files (as usual)
-- Additionally, a reverse diff is included in the review context section
+- Additionally, a forward diff (`git diff base..tip -- path`) is included in the review context section so the LLM sees the per-file change in the conventional direction (`+` lines added by the branch, `-` lines removed)
 - Selected files contribute both content and diff
 - Unselected files contribute neither
-- Deleted files excluded from reverse diffs even if selected (no current content)
+- Deleted files contribute only the diff (no current content exists on disk)
+- Diffs run against the object database, so working-tree or index state during the review session does not affect the output
 ### Token Budget
 - Large reviews cannot fit all file diffs
 - User controls token budget through file selection

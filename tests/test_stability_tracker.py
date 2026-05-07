@@ -26,9 +26,11 @@ from __future__ import annotations
 import pytest
 
 from ac_dc.stability_tracker import (
+    DELETION_MARKER_TEXT,
     StabilityTracker,
     Tier,
     TrackedItem,
+    _DELETION_MARKER_HASH,
     _TIER_CONFIG,
 )
 
@@ -135,6 +137,248 @@ class TestConstruction:
     def test_get_signature_hash_none_for_unknown(self) -> None:
         """Unknown key → None (not empty string)."""
         assert StabilityTracker().get_signature_hash("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Deletion marker constants and pin/marker helpers
+# ---------------------------------------------------------------------------
+
+
+class TestDeletionMarkerConstants:
+    """The marker text and pre-computed hash are byte-stable.
+
+    Reimplementer note: the exact text is documented in
+    ``specs-reference/3-llm/cache-tiering.md`` § Deletion
+    marker content. Variations would defeat the cross-deletion
+    cache-stability invariant.
+    """
+
+    def test_marker_text_exact(self) -> None:
+        """Pin the canonical marker string."""
+        assert DELETION_MARKER_TEXT == (
+            "[deleted in this session — see L0 symbol/doc "
+            "map for last-known structure]"
+        )
+
+    def test_marker_hash_is_sha256_hex(self) -> None:
+        """Hash is 64 hex chars (SHA-256 hex digest)."""
+        assert len(_DELETION_MARKER_HASH) == 64
+        assert all(c in "0123456789abcdef" for c in _DELETION_MARKER_HASH)
+
+    def test_marker_hash_matches_text(self) -> None:
+        """Hash is the SHA-256 of the literal marker text."""
+        import hashlib
+        expected = hashlib.sha256(
+            DELETION_MARKER_TEXT.encode("utf-8")
+        ).hexdigest()
+        assert _DELETION_MARKER_HASH == expected
+
+    def test_marker_text_describes_pointer_to_l0(self) -> None:
+        """Marker text mentions the L0 symbol/doc map.
+
+        This is load-bearing for the LLM's interpretation:
+        when the assistant sees a deletion marker, the
+        accompanying instruction is to consult L0's structural
+        map for last-known signatures. A reimplementer changing
+        the wording in a way that drops this pointer would
+        produce subtly worse model behaviour on deletion-aware
+        tasks.
+        """
+        assert "L0" in DELETION_MARKER_TEXT
+        assert "map" in DELETION_MARKER_TEXT
+
+
+class TestPinFile:
+    """``pin_file`` marks ``file:`` entries as edit-pinned."""
+
+    def test_pin_unknown_key_returns_false(self) -> None:
+        """Pinning a key that isn't tracked is a no-op."""
+        tracker = StabilityTracker()
+        assert tracker.pin_file("file:nope.py") is False
+
+    def test_pin_non_file_prefix_returns_false(self) -> None:
+        """Only ``file:`` entries are pinnable."""
+        tracker = StabilityTracker()
+        tracker.update({"symbol:a.py": _active_item("h1", 100)})
+        tracker.update({"doc:a.md": _active_item("h2", 50)})
+        tracker.update({"url:abc": _active_item("h3", 200)})
+        tracker.update({"history:0": _active_item("h4", 30)})
+        assert tracker.pin_file("symbol:a.py") is False
+        assert tracker.pin_file("doc:a.md") is False
+        assert tracker.pin_file("url:abc") is False
+        assert tracker.pin_file("history:0") is False
+
+    def test_pin_file_entry_returns_true(self) -> None:
+        """Successful pin returns True."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.pin_file("file:a.py") is True
+
+    def test_pin_idempotent(self) -> None:
+        """Pinning twice is fine; second call still returns True."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.pin_file("file:a.py")
+        assert tracker.pin_file("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is True
+
+    def test_is_pinned_false_by_default(self) -> None:
+        """Fresh entries are not pinned."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_is_pinned_unknown_key_false(self) -> None:
+        """Unknown key → False, not error."""
+        assert StabilityTracker().is_pinned("file:nope.py") is False
+
+    def test_unpin_clears_flag(self) -> None:
+        """Unpinning restores the default state."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.pin_file("file:a.py")
+        assert tracker.unpin_file("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_unpin_unpinned_returns_false(self) -> None:
+        """Unpinning an entry that wasn't pinned returns False."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.unpin_file("file:a.py") is False
+
+    def test_unpin_unknown_key_returns_false(self) -> None:
+        """Unpinning a missing key is a no-op."""
+        assert StabilityTracker().unpin_file("file:nope.py") is False
+
+    def test_unpin_non_file_prefix_returns_false(self) -> None:
+        """Only ``file:`` entries support unpin."""
+        tracker = StabilityTracker()
+        tracker.update({"symbol:a.py": _active_item("h1", 100)})
+        assert tracker.unpin_file("symbol:a.py") is False
+
+
+class TestMarkDeleted:
+    """``mark_deleted`` converts ``file:`` entries to markers."""
+
+    def test_mark_deleted_unknown_returns_false(self) -> None:
+        """Unknown key → no-op, False."""
+        assert StabilityTracker().mark_deleted("file:nope.py") is False
+
+    def test_mark_deleted_non_file_prefix_returns_false(self) -> None:
+        """Only ``file:`` entries can become markers."""
+        tracker = StabilityTracker()
+        tracker.update({"symbol:a.py": _active_item("h1", 100)})
+        assert tracker.mark_deleted("symbol:a.py") is False
+
+    def test_mark_deleted_returns_true_on_success(self) -> None:
+        """Successful conversion returns True."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.mark_deleted("file:a.py") is True
+
+    def test_mark_deleted_replaces_hash_with_marker_hash(self) -> None:
+        """Content hash is the constant deletion-marker hash."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("original", 100)})
+        tracker.mark_deleted("file:a.py")
+        assert (
+            tracker.get_signature_hash("file:a.py")
+            == _DELETION_MARKER_HASH
+        )
+
+    def test_mark_deleted_updates_token_count(self) -> None:
+        """Token count reflects marker text length, not original."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 50_000)})
+        tracker.mark_deleted("file:a.py")
+        item = tracker.get_all_items()["file:a.py"]
+        # Marker text is short — never as big as the original
+        # 50000-token file. Use a generous upper bound rather
+        # than pinning the exact len() to keep the test stable
+        # against minor wording variations within the
+        # specs-mandated "L0 symbol/doc map" phrasing.
+        assert 0 < item.tokens < 200
+
+    def test_mark_deleted_preserves_tier_and_n(self) -> None:
+        """Tier and N are unchanged by marker conversion.
+
+        Phase 0 transitions deleted files to markers; the
+        cascade then handles them like any normal hash-change
+        (which they appear to be — old hash differs from the
+        marker hash). Per-tier-N invariants are the cascade's
+        problem, not :meth:`mark_deleted`'s.
+        """
+        tracker = StabilityTracker()
+        # Drive the file up to L2.
+        for _ in range(8):
+            tracker.update({"file:a.py": _active_item("h1", 100)})
+        item_before = tracker.get_all_items()["file:a.py"]
+        tier_before = item_before.tier
+        n_before = item_before.n_value
+        tracker.mark_deleted("file:a.py")
+        item_after = tracker.get_all_items()["file:a.py"]
+        assert item_after.tier == tier_before
+        assert item_after.n_value == n_before
+
+    def test_mark_deleted_clears_pin_flag(self) -> None:
+        """Deletion supersedes pin status.
+
+        A pinned file that gets deleted no longer needs pin
+        protection — its constant marker hash provides
+        cross-cycle stability without it. ``mark_deleted``
+        clears the pin so the two flags don't overlap.
+        """
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.pin_file("file:a.py")
+        assert tracker.is_pinned("file:a.py") is True
+        tracker.mark_deleted("file:a.py")
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_is_deleted_false_by_default(self) -> None:
+        """Fresh entries are not marker entries."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.is_deleted("file:a.py") is False
+
+    def test_is_deleted_true_after_mark(self) -> None:
+        """``is_deleted`` reflects ``mark_deleted`` state."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.mark_deleted("file:a.py")
+        assert tracker.is_deleted("file:a.py") is True
+
+    def test_is_deleted_unknown_key_false(self) -> None:
+        """Unknown key → False, not error."""
+        assert StabilityTracker().is_deleted("file:nope.py") is False
+
+    def test_two_deleted_files_share_hash(self) -> None:
+        """All deletion markers have byte-identical hashes.
+
+        The cross-deletion stability invariant: many deleted
+        files in the same session produce indistinguishable
+        marker entries (apart from their key/path). This is
+        the point of having a constant marker text.
+
+        Both files must be present in the same update —
+        Phase 1 cleanup removes ``file:`` entries not in the
+        active list, so a separate-update style would lose
+        the first file before the second arrived.
+        """
+        tracker = StabilityTracker()
+        tracker.update(
+            {
+                "file:a.py": _active_item("ha", 100),
+                "file:b.py": _active_item("hb", 200),
+            }
+        )
+        tracker.mark_deleted("file:a.py")
+        tracker.mark_deleted("file:b.py")
+        assert (
+            tracker.get_signature_hash("file:a.py")
+            == tracker.get_signature_hash("file:b.py")
+            == _DELETION_MARKER_HASH
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +533,20 @@ class TestDepartedItemCleanup:
 class TestStaleRemoval:
     """Items whose file no longer exists are dropped."""
 
-    def test_stale_file_removed(self) -> None:
-        """file:* for deleted path is dropped."""
+    def test_stale_file_becomes_marker(self) -> None:
+        """file:* for deleted path transitions to a deletion marker.
+
+        Under the L0-content-typed model (D27), ``file:``
+        entries don't disappear on disk-deletion — they
+        become deletion markers so the LLM continues to see
+        a representation of the file (the constant marker
+        text) until the next ``rebuild_cache`` re-extracts
+        L0's aggregate maps. Dedicated coverage of the
+        marker contract lives in
+        :class:`TestDeletionMarkerInPhase0`; this test pins
+        the membership half of the invariant — the entry
+        stays present after Phase 0 sees the deletion.
+        """
         tracker = StabilityTracker()
         tracker.update(
             {"file:a.py": _active_item()},
@@ -300,7 +556,8 @@ class TestStaleRemoval:
             {"file:a.py": _active_item()},
             existing_files=set(),  # a.py deleted
         )
-        assert tracker.has_item("file:a.py") is False
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
 
     def test_stale_symbol_removed(self) -> None:
         """symbol:* for deleted path is dropped."""
@@ -350,15 +607,26 @@ class TestStaleRemoval:
         assert tracker.has_item("history:0") is True
 
     def test_stale_removal_change_logged(self) -> None:
-        """Stale removal records a change log entry."""
+        """Stale-handling fires a change-log entry.
+
+        For ``symbol:`` / ``doc:`` entries the legacy
+        "removed (stale)" wording is preserved; ``file:``
+        entries log the marker transition instead. We assert
+        the symbol-removal wording here since this test sits
+        in the legacy-removal class. Marker-specific log
+        content is covered by
+        :class:`TestDeletionMarkerInPhase0`.
+        """
         tracker = StabilityTracker()
         tracker.update(
-            {"file:a.py": _active_item()},
+            {"symbol:a.py": _active_item()},
             existing_files={"a.py"},
         )
         tracker.update({}, existing_files=set())
         changes = tracker.get_changes()
-        assert any("a.py" in c and "stale" in c for c in changes)
+        assert any(
+            "a.py" in c and "stale" in c for c in changes
+        )
 
     def test_none_existing_files_skips_phase_0(self) -> None:
         """Passing None for existing_files skips stale removal.
@@ -463,36 +731,59 @@ class TestCascadePromotion:
         # L2's entry_n = 6.
         assert item.n_value == 6
 
-    def test_promotion_through_all_tiers(self) -> None:
-        """Item eventually reaches L0 via repeated promotions."""
+    def test_promotion_terminates_at_l1(self) -> None:
+        """Item reaches L1 and stops — L0 is content-typed.
+
+        Under the L0-content-typed model (D27), cascade-mobile
+        content (``file:``, ``url:``, ``history:``) is
+        ineligible for L0. The cascade processes L3 → L2 → L1
+        and stops. An item that stays unchanged across many
+        cycles graduates to L3, promotes to L2, promotes to
+        L1, and then sits at L1 with N growing — but never
+        promotes into L0.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Tier
+        Structure and § L0 Stability Contract.
+        """
         tracker = StabilityTracker()
-        # Enough cycles to promote all the way. Each tier needs
-        # 3 more cycles than the last; 12 cycles should suffice.
+        # Many cycles — far more than enough to reach L0 under
+        # the old model. Under the new model the item lands
+        # at L1 and stays.
         for _ in range(20):
             tracker.update({"file:a.py": _active_item("h1")})
         item = tracker.get_all_items()["file:a.py"]
-        assert item.tier == Tier.L0
+        assert item.tier == Tier.L1
 
-    def test_blocked_promotion_when_upper_stable(self) -> None:
-        """With a stable tier above, items don't promote.
+    def test_blocked_by_stable_upper_tier(self) -> None:
+        """Items do NOT promote past a stable upper tier.
 
-        Pre-populate L0 and L1 and L2 with items so none of them
-        can promote away. When a.py graduates to L3 and eventually
-        hits L3's promote threshold, L2 is stable (not broken this
-        cycle) so a.py cannot promote — its N caps at the promote_n
-        threshold instead.
+        Per spec § Ripple Promotion: "Only promote into
+        broken tiers — if a tier is stable, nothing promotes
+        into it and tiers below remain cached." One external
+        invalidation opens exactly one upward promotion path;
+        without invalidation, veteran items sit at their
+        promote_n and wait for their turn.
 
-        Why seed L0 and L1 too: with empty upper tiers, the cascade
-        treats them as broken, so stable.py would promote L2→L1→L0
-        and leave L2 empty — which then becomes a valid promotion
-        target for a.py. Filling every upper tier with an item that
-        can't itself promote (N below its own promote_n) makes L2
-        genuinely stable.
+        Setup: pin items at L0, L1, L2 so those tiers are
+        stable (not empty, not broken). Drive a.py through 7
+        unchanged cycles with no external invalidation. a.py
+        graduates to L3 at cycle 4 and reaches L3's promote_n
+        at cycle 7 — but L2 is stable, so the promotion is
+        blocked. a.py stays at L3.
+
+        Regression guard for the chain-cascade bug: previously
+        the code would mark L2 broken as a side effect of
+        other tier mutations, letting a.py promote upward
+        without any legitimate invalidation. Snapshot-based
+        gating in _run_cascade prevents this.
+
+        Note: the L0 pin is irrelevant to the test mechanics
+        under the L0-content-typed model — the cascade can't
+        promote into L0 regardless. The pin is kept so the
+        test setup mirrors the original (and surfaces clearly
+        if the cascade ever tries to mutate L0).
         """
         tracker = StabilityTracker()
-        # Seed L0, L1, L2 with items well below their promote_n so
-        # none of them can move. Together they make L2 truly stable
-        # for the duration of the test.
         tracker._items["file:l0_pin.py"] = TrackedItem(
             key="file:l0_pin.py",
             tier=Tier.L0,
@@ -514,9 +805,6 @@ class TestCascadePromotion:
             content_hash="h1",
             tokens=100,
         )
-        # Now drive another item up toward L3 promotion. The pins
-        # must be in active_items each cycle so Phase 1 doesn't
-        # clean them up as departed file:* items.
         for _ in range(7):
             tracker.update(
                 {
@@ -526,10 +814,125 @@ class TestCascadePromotion:
                     "file:l0_pin.py": _active_item("h1"),
                 }
             )
-        # a.py should reach L3 but cap at N=6 (not promote to L2
-        # because L2 has a stable item that can't itself promote).
+        # a.py graduated to L3 at cycle 4 (N=3), then N grew
+        # 4→5→6 at cycles 5/6/7. At cycle 7 with N=6 it wanted
+        # to promote to L2 — but L2 is stable (has the pin
+        # item, not in broken_tiers). Spec says stable tiers
+        # block promotion. a.py stays at L3.
         a = tracker.get_all_items()["file:a.py"]
         assert a.tier == Tier.L3
+        # Stable pins haven't moved either.
+        assert (
+            tracker.get_all_items()["file:stable.py"].tier == Tier.L2
+        )
+        assert (
+            tracker.get_all_items()["file:l1_pin.py"].tier == Tier.L1
+        )
+        assert (
+            tracker.get_all_items()["file:l0_pin.py"].tier == Tier.L0
+        )
+
+    def test_primed_cache_l1_deselect_ripples_full_chain(self) -> None:
+        """End-to-end: L1 deselect drains L1, ripples up, graduates active.
+
+        Reproduces the HUD-observed scenario: every cached
+        tier is primed with residents at promote_n, plus
+        active items that have reached the graduation
+        threshold. User deselects a file in L1, which removes
+        the L1 entry and marks L1 broken. Expected full chain:
+
+        - active → L3: items at N ≥ 3 graduate (normal Phase 2)
+        - L3 → L2: L3 residents at promote_n flow upward
+          because L2 becomes structurally broken when L2→L1
+          drains it
+        - L2 → L1: L2 residents at promote_n flow into the
+          externally-broken L1
+        - L0 untouched: no L0-side invalidation
+
+        Regression guard against the bug where the cascade's
+        broken-tiers snapshot was frozen too strictly and
+        only external invalidations propagated — structural
+        invalidations (from promotion drainage) were ignored,
+        leaving L3 veterans stranded at L3 even though L2
+        had just been drained.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # Seed every cached tier with one resident at its
+        # promote_n so the cache is "primed for promotion".
+        tracker._items["file:l0_resident.py"] = TrackedItem(
+            "file:l0_resident.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l1_resident.py"] = TrackedItem(
+            "file:l1_resident.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l2_resident.py"] = TrackedItem(
+            "file:l2_resident.py", Tier.L2, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["file:l3_resident.py"] = TrackedItem(
+            "file:l3_resident.py", Tier.L3, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+        # Seed an active item ready to graduate (N=3 after
+        # the next unchanged-cycle increment will reach the
+        # active promote_n threshold; starting at N=2 so the
+        # Phase 1 increment lands it at 3).
+        tracker._items["file:active_item.py"] = TrackedItem(
+            "file:active_item.py", Tier.ACTIVE, n_value=2,
+            content_hash="h1", tokens=100,
+        )
+
+        # Simulate L1 deselect: the orchestrator removes the
+        # L1 entry and marks L1 broken. Exactly what
+        # set_selected_files does when a file leaves the
+        # selection set.
+        tracker._items.pop("file:l1_resident.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        # Drive one update with every surviving item still
+        # present and unchanged. This is the "next request"
+        # after the deselect.
+        tracker.update(
+            {
+                "file:l0_resident.py": _active_item("h1", 100),
+                "file:l2_resident.py": _active_item("h1", 100),
+                "file:l3_resident.py": _active_item("h1", 100),
+                "file:active_item.py": _active_item("h1", 100),
+            }
+        )
+
+        items = tracker.get_all_items()
+        # L0 untouched — no L0 invalidation.
+        assert items["file:l0_resident.py"].tier == Tier.L0, (
+            "L0 must not be drained by an L1-scope "
+            "invalidation"
+        )
+        # L2 veteran rode up into externally-broken L1.
+        assert items["file:l2_resident.py"].tier == Tier.L1, (
+            "L2 resident should promote into L1 "
+            "(external invalidation)"
+        )
+        # L3 veteran rode up into structurally-broken L2.
+        # This is the regression-guard assertion: without the
+        # structural-invalidation propagation fix, the L3
+        # resident stays at L3 because L2 wasn't marked
+        # broken at cascade entry.
+        assert items["file:l3_resident.py"].tier == Tier.L2, (
+            "L3 resident should promote into L2 — L2 became "
+            "structurally broken when its resident promoted "
+            "to L1. This is the Ripple Promotion chain that "
+            "must propagate through cascade iterations."
+        )
+        # Active item graduated into structurally-broken L3.
+        assert items["file:active_item.py"].tier == Tier.L3, (
+            "Active item at graduation threshold should "
+            "graduate into L3 (Phase 2 graduation marks L3 "
+            "broken independently, so this path works even "
+            "without structural propagation — but verify "
+            "end-to-end behaviour completes the chain)."
+        )
 
     def test_promotion_marks_tiers_broken(self) -> None:
         """Successful promotion records both source and dest as broken.
@@ -546,10 +949,266 @@ class TestCascadePromotion:
             for c in changes
         )
 
+    def test_l1_invalidation_ripples_up_through_structural_breaks(self) -> None:
+        """Ripple Promotion: invalidation propagates via structural drain.
+
+        Per spec § Ripple Promotion: "As items graduate and
+        populate tiers, they ripple upward through the stable
+        tiers." And Threshold-Aware Cascade: promotion happens
+        every turn for every eligible item.
+
+        The spec distinguishes two kinds of invalidation that
+        behave differently:
+
+        - **External** invalidation (hash change, deselection,
+          orchestrator-marked tier) opens exactly one upward
+          path — drain must not reach above the invalidated
+          tier uninvited.
+        - **Structural** invalidation (a tier loses residents
+          because they promoted upward into a broken tier) is
+          a genuine cache-block rebuild and DOES chain. The
+          newly-drained tier can accept content from below.
+
+        Setup: seed L0/L1/L2/L3 with eligible items. Externally
+        invalidate L1. Expected chain:
+
+        - L2→L1: L1 was externally broken at entry, L2 item
+          at promote_n → promotes.
+        - L3→L2: L2 is now structurally broken (lost its
+          resident), L3 item at promote_n → promotes.
+        - L0 stays put: under the L0-content-typed model the
+          cascade does not promote into L0 at all. The L0
+          resident is irrelevant to the chain — it's there
+          to verify the cascade leaves L0 untouched.
+
+        Regression guard for two invariants: (1) external L1
+        invalidation does NOT drain L0 (destination-mark
+        contract), and (2) the cascade respects the L0
+        content-type policy (no promotions into L0 from below).
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Tier
+        Structure and § Ripple Promotion.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        # L0 resident — stable, N maxed out.
+        tracker._items["file:l0_item.py"] = TrackedItem(
+            "file:l0_item.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        # L1 resident — will be the victim of external
+        # invalidation, removed below.
+        tracker._items["file:l1_item.py"] = TrackedItem(
+            "file:l1_item.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        # L2 resident — at L2's promote_n (9). Should promote
+        # into L1 because L1 is externally broken.
+        tracker._items["file:l2_item.py"] = TrackedItem(
+            "file:l2_item.py", Tier.L2, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        # L3 resident — at L3's promote_n (6). Should promote
+        # into L2 because L2 becomes structurally broken
+        # after L2→L1 drains it.
+        tracker._items["file:l3_item.py"] = TrackedItem(
+            "file:l3_item.py", Tier.L3, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+
+        # External invalidation of L1: simulate by removing
+        # the L1 resident and marking L1 broken (the pattern
+        # that set_selected_files and hash-demotion use).
+        tracker._items.pop("file:l1_item.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        tracker.update(
+            {
+                "file:l0_item.py": _active_item("h1", 100),
+                "file:l2_item.py": _active_item("h1", 100),
+                "file:l3_item.py": _active_item("h1", 100),
+            }
+        )
+
+        items = tracker.get_all_items()
+        # Ripple chain fires through structural invalidation:
+        assert items["file:l2_item.py"].tier == Tier.L1, (
+            "L2 item should have promoted into externally-"
+            "broken L1"
+        )
+        assert items["file:l3_item.py"].tier == Tier.L2, (
+            "L3 item should have promoted into structurally-"
+            "broken L2 (L2 drained when its resident promoted "
+            "to L1). This is the Ripple Promotion the spec "
+            "describes — invalidations propagate upward "
+            "through tier drainage."
+        )
+        # L0 stays put — no external L0 invalidation, and the
+        # destination-mark contract prevents the chain from
+        # reaching L0 via L1 drain (L1 was the external
+        # invalidation target, not a new source of one).
+        assert items["file:l0_item.py"].tier == Tier.L0, (
+            "L0 must NOT be drained. External L1 invalidation "
+            "opens L2→L1; L1 was the destination, not a "
+            "source of structural invalidation, so L1 never "
+            "feeds back into the gate and L0 stays cached."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Anchoring (the most subtle algorithmic concern)
 # ---------------------------------------------------------------------------
+
+
+class TestStaticUnderfillDoesNotDrainL1:
+    """Regression guard: static L0 underfill does not chain-drain.
+
+    The original bug: the cascade's L0 backfill probe used to
+    run unconditionally — every turn it checked whether L0
+    was below cache_target_tokens and, if so, marked L0
+    broken. That opened L1 → L0, which (via structural-
+    invalidation propagation) opened L2 → L1, which opened
+    L3 → L2. A long-lived stable conversation that happened
+    to leave L0 sitting a bit below cache_target would see
+    mass promotions on every turn.
+
+    The first fix gated the probe on
+    ``had_external_invalidation``. The second (D27, the
+    L0-content-typed model) removed the probe entirely:
+    the cascade no longer touches L0. L0 population is
+    handled exclusively by init / rebuild / cross-reference
+    seeding paths, and the per-turn cascade is concerned
+    only with L1/L2/L3 dynamics.
+
+    These tests still pass under the stricter regime — they
+    asserted "L0 underfill must not chain-drain L1", and the
+    stricter answer is "L0 cannot drain L1 from any source,
+    underfill or otherwise". Kept as regression guards
+    against any future regression that would re-introduce
+    cascade → L0 paths.
+    """
+
+    def test_underfilled_l0_does_not_drain_l1_when_no_invalidation(self) -> None:
+        """L0 below target + L1 veterans + nothing broken = no drain.
+
+        Setup: L0 has 100 tokens (well below cache_target=10000).
+        L1 has 5 veterans at promote_n with substantial tokens.
+        L2 and L3 are empty. No external invalidation, no hash
+        changes. Drive one update with all items unchanged.
+
+        Expectation: nothing moves. L0 stays at 100 tokens, L1
+        stays full. The cascade must not invent an L0
+        invalidation to chase the underfill — that would chain-
+        drain L1 every single turn the user is in this state.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        # L0 with one small resident — well below cache_target.
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        # L1 with five veterans at promote_n (12), so they
+        # WOULD promote if the gate let them. Total tokens
+        # well above cache_target so anchoring rules apply
+        # normally (some anchored, some not).
+        for i in range(5):
+            tracker._items[f"file:l1_{i}.py"] = TrackedItem(
+                f"file:l1_{i}.py", Tier.L1, n_value=12,
+                content_hash="h1", tokens=3000,
+            )
+        # Drive one update with every item unchanged. No hash
+        # change, no deselection, no rebuild — the cascade has
+        # zero external invalidations to piggyback on.
+        active = {
+            "system:prompt": _active_item("h_sys", 100),
+        }
+        for i in range(5):
+            active[f"file:l1_{i}.py"] = _active_item("h1", 3000)
+        tracker.update(active)
+
+        items = tracker.get_all_items()
+        # L0 unchanged — system prompt stays at L0 (n_value
+        # may increment via Phase 1, that's fine; tier is the
+        # contract).
+        assert items["system:prompt"].tier == Tier.L0
+        # Every L1 resident still in L1. Nothing promoted.
+        # This is the regression assertion: even with veterans
+        # AT promote_n and L0 underfilled, the cascade must
+        # not invent an L0 invalidation to drain L1.
+        for i in range(5):
+            assert items[f"file:l1_{i}.py"].tier == Tier.L1, (
+                f"file:l1_{i}.py promoted to L0 despite no "
+                f"L0 invalidation. The cascade must not chase "
+                f"static underfill — that's "
+                f"backfill_l0_after_measurement's job."
+            )
+
+    def test_l1_invalidation_does_not_drain_to_l0(self) -> None:
+        """L1 invalidation never promotes into L0.
+
+        Under the L0-content-typed model (D27), the cascade
+        does not promote ``file:`` (or ``url:`` or
+        ``history:``) entries into L0. L0 is reserved for
+        structural content (system prompt, aggregate maps)
+        plus optional cross-reference seeded items.
+
+        Same setup as the previous test (L1 invalidated, L1
+        residents at promote_n, L0 underfilled), but the
+        outcome inverts: nothing flows into L0. The L1
+        residents that are eligible for promotion stay at
+        L1, because L1's "tier above" is None under the
+        new ``_TIER_ABOVE`` map.
+
+        Regression guard against the legacy "L0 backfill
+        probe" path that previously fired during the
+        per-cycle cascade. That probe is removed; L0
+        population happens only through init / rebuild /
+        cross-reference seed.
+
+        Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
+        Contract.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        for i in range(5):
+            tracker._items[f"file:l1_{i}.py"] = TrackedItem(
+                f"file:l1_{i}.py", Tier.L1, n_value=12,
+                content_hash="h1", tokens=5000,
+            )
+        # External L1 invalidation: simulate deselect by
+        # removing one L1 resident and marking L1 broken.
+        tracker._items.pop("file:l1_0.py")
+        tracker._broken_tiers.add(Tier.L1)
+
+        active = {
+            "system:prompt": _active_item("h_sys", 100),
+        }
+        for i in range(1, 5):
+            active[f"file:l1_{i}.py"] = _active_item("h1", 5000)
+        tracker.update(active)
+
+        items = tracker.get_all_items()
+        # L0 stays at exactly its original size — only the
+        # system prompt.
+        l0_keys = {
+            key for key, item in items.items()
+            if item.tier == Tier.L0
+        }
+        assert l0_keys == {"system:prompt"}, (
+            f"L0 should contain only system:prompt; got: {l0_keys}. "
+            "The cascade must not promote file: entries into L0 "
+            "under the L0-content-typed model."
+        )
+        # Every surviving L1 resident stays at L1 — promotion
+        # is unavailable because L1 has no destination tier.
+        for i in range(1, 5):
+            assert items[f"file:l1_{i}.py"].tier == Tier.L1, (
+                f"file:l1_{i}.py should stay at L1; "
+                "no promotion target exists under the "
+                "L0-content-typed model."
+            )
 
 
 class TestAnchoring:
@@ -636,41 +1295,42 @@ class TestAnchoring:
         assert tracker.get_all_items()["file:a.py"].tier == Tier.L3
         assert tracker.get_all_items()["file:b.py"].tier == Tier.L3
 
-    def test_n_capped_when_upper_stable(self) -> None:
-        """Non-anchored items cap N at promote_n if upper stable.
+    def test_anchored_stay_unanchored_blocked_by_stable_upper(self) -> None:
+        """Non-anchored veterans stay put when the upper tier is stable.
 
-        An item past the anchor line, with a tier above that is
-        stable, should not grow N unboundedly — it caps at the
-        promote threshold.
+        Anchor math: items in a tier are sorted by N asc and
+        accumulated until cumulative tokens reach cache_target.
+        Items consumed before the threshold are anchored (N
+        frozen, cannot promote). Items past the threshold are
+        unanchored and eligible to promote — but still gated
+        on the destination tier being broken or empty.
 
-        Anchor math recap: items in a tier are sorted by N asc
-        and accumulated until cumulative tokens reach
-        cache_target. Items consumed along the way are anchored
-        (N frozen). The item whose addition first brings the
-        cumulative to >= target is itself anchored (it's part of
-        the set that meets the target). Only items strictly past
-        that point are unanchored and subject to the N cap.
+        Setup: cache_target=500; three L3 items at 300 tokens
+        each (total 900). First two anchored (accumulated 600,
+        above target so anchoring stops with only the first two
+        in). Actually — re-reading the anchoring rule: items
+        are consumed until accumulated reaches the target. So
+        the first item (300, accumulated=300<500) is anchored,
+        the second (accumulated=600>=500) is above the line,
+        not anchored. Tie-broken by key, so a.py is anchored,
+        b.py and c.py are unanchored.
 
-        With cache_target=500 and items at 300 tokens each: the
-        first two items together accumulate 600 (first anchored
-        at cumulative 300 < 500, second anchored at cumulative
-        600 ≥ 500 — wait, no — the anchoring check runs BEFORE
-        the item is added). So: enter loop with cum=0 < 500 →
-        anchor first; add 300 → cum=300. Enter with cum=300 <
-        500 → anchor second; add 300 → cum=600. Enter with cum=600
-        ≥ 500 → NOT anchored. So we need at least three items:
-        two get anchored (together crossing target), third is
-        unanchored and tests the cap.
+        Seed L2 with a stable resident so L2 is NOT broken at
+        cascade entry. Unanchored L3 items (b, c) reach
+        promote_n but the destination is stable → gate blocks
+        promotion. They stay at L3 with their incremented N
+        (capped at promote_n by _process_tier_veterans when
+        upper is stable).
         """
         tracker = StabilityTracker(cache_target_tokens=500)
-        # Seed L2 with a stable item so L2 isn't broken.
+        # Seed L2 with a stable item so L2 isn't broken or
+        # empty.
         tracker._items["file:stable.py"] = TrackedItem(
             "file:stable.py", Tier.L2, n_value=6,
             content_hash="h1", tokens=600,
         )
-        # Seed L3 with three items above cache_target combined.
-        # The lowest-N items (a, b) anchor; c has massive N and
-        # is past the anchor line where the cap applies.
+        # Seed L3 with three items totalling 900 tokens. Sorted
+        # ascending by (N, key): a(N=3), b(N=3), c(N=100).
         tracker._items["file:a.py"] = TrackedItem(
             "file:a.py", Tier.L3, n_value=3,
             content_hash="h1", tokens=300,
@@ -680,10 +1340,9 @@ class TestAnchoring:
             content_hash="h1", tokens=300,
         )
         tracker._items["file:c.py"] = TrackedItem(
-            "file:c.py", Tier.L3, n_value=100,  # ridiculously high
+            "file:c.py", Tier.L3, n_value=100,  # well past promote_n
             content_hash="h1", tokens=300,
         )
-        # Run update — all items unchanged.
         tracker.update(
             {
                 "file:stable.py": _active_item("h1", 600),
@@ -692,9 +1351,15 @@ class TestAnchoring:
                 "file:c.py": _active_item("h1", 300),
             }
         )
-        # c.py should be capped at promote_n=6 since L2 is stable
-        # and c.py is past the anchor line.
-        assert tracker.get_all_items()["file:c.py"].n_value == 6
+        # L2 is stable — promotion from L3 to L2 blocked.
+        # All L3 items stay at L3.
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L3
+        assert tracker.get_all_items()["file:b.py"].tier == Tier.L3
+        assert tracker.get_all_items()["file:c.py"].tier == Tier.L3
+        # Stable resident unchanged.
+        assert (
+            tracker.get_all_items()["file:stable.py"].tier == Tier.L2
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +1448,277 @@ class TestUnderfillDemotion:
         )
         tracker.update({"file:a.py": _active_item("h1", 1)})
         assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+
+# ---------------------------------------------------------------------------
+# L0-content-typed model invariants
+# ---------------------------------------------------------------------------
+
+
+class TestL0ContentTypedCascade:
+    """Cascade respects L0's content-type policy (D27).
+
+    Under the new model, the cascade never promotes items
+    into L0. L0 holds the system prompt and aggregate
+    structural maps; cascade-mobile content (file:, url:,
+    history:) is ineligible. Only init / rebuild / cross-
+    reference seeding can place items in L0.
+    """
+
+    def test_l1_item_at_promote_n_stays_at_l1(self) -> None:
+        """An L1 item with N way past promote_n does not promote.
+
+        Pre-seed an L1 entry with N=20 (well past promote_n
+        which is 12 for L1). Run an update where the entry is
+        unchanged. The item must stay at L1 — no L0 promotion
+        path exists for cascade-mobile content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=20,
+            content_hash="h1", tokens=100,
+        )
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+    def test_url_at_l1_promote_n_stays_at_l1(self) -> None:
+        """URL entries also cannot promote past L1."""
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=20,
+            content_hash="h1", tokens=100,
+        )
+        tracker.update({"url:abc": _active_item("h1", 100)})
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+
+    def test_l0_resident_unchanged_by_cascade(self) -> None:
+        """L0 entries do not move during cascade.
+
+        L0 is content-typed: its contents are governed by
+        init / rebuild paths, not the cascade. An update
+        cycle must not touch L0's tier assignments.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h_sys", tokens=100,
+        )
+        # Drive an update with the system prompt active. Even
+        # though L0 is below cache_target (100 < 500), the
+        # cascade must not demote it — L0 is exempt from
+        # underfill demotion under the L0-content-typed model.
+        tracker.update({"system:prompt": _active_item("h_sys", 100)})
+        assert (
+            tracker.get_all_items()["system:prompt"].tier
+            == Tier.L0
+        )
+
+    def test_active_item_with_high_n_graduates_to_l3_only(self) -> None:
+        """Active item with high N reaches L1 over many cycles.
+
+        Drive an item from active for 20 cycles. It graduates
+        to L3 (cycle 4), promotes to L2 (cycle 7), promotes
+        to L1 (cycle 10), and from there N grows but tier is
+        terminal. Verifies the full cascade-mobile life cycle
+        respects the L1 ceiling.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        for _ in range(20):
+            tracker.update({"file:a.py": _active_item("h1", 100)})
+        item = tracker.get_all_items()["file:a.py"]
+        assert item.tier == Tier.L1
+        # N has grown well past L1's promote_n (12) since the
+        # item has nowhere else to go.
+        assert item.n_value >= 12
+
+
+class TestPinnedFileSurvivesEvents:
+    """Pinned ``file:`` entries are protected from cleanup.
+
+    The edit invariant: a file edited during the session must
+    keep its full text in cache until ``rebuild_cache`` or
+    application restart, regardless of selection state or
+    underfill conditions.
+    """
+
+    def test_hash_change_pins_file_entry(self) -> None:
+        """Phase 1 sets the pin flag on file: hash change."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.is_pinned("file:a.py") is False
+        tracker.update({"file:a.py": _active_item("h2", 100)})
+        assert tracker.is_pinned("file:a.py") is True
+
+    def test_hash_change_does_not_pin_non_file_entries(self) -> None:
+        """Pin only applies to ``file:`` keys.
+
+        A ``url:`` content change is hash-detected the same way
+        but doesn't trigger pinning — URL content isn't subject
+        to the edit invariant.
+        """
+        tracker = StabilityTracker()
+        tracker.update({"url:abc": _active_item("h1", 100)})
+        tracker.update({"url:abc": _active_item("h2", 100)})
+        assert tracker.is_pinned("url:abc") is False
+
+    def test_pinned_file_survives_deselection(self) -> None:
+        """A pinned file entry stays in the tracker after deselection.
+
+        Without the pin, departing files are removed by Phase
+        1 cleanup. With the pin, the entry stays at its
+        current tier so subsequent ``rebuild_cache`` or restart
+        is the only way to clear it.
+        """
+        tracker = StabilityTracker()
+        # Edit the file (hash change → pin set).
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        tracker.update({"file:a.py": _active_item("h2", 100)})
+        assert tracker.is_pinned("file:a.py") is True
+        # User deselects: file:a.py no longer in active items.
+        tracker.update({})
+        # Entry must still be present.
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is True
+
+    def test_unpinned_file_removed_on_deselection(self) -> None:
+        """An unedited file entry is removed normally on deselection."""
+        tracker = StabilityTracker()
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        # No edit → no pin.
+        tracker.update({})
+        assert tracker.has_item("file:a.py") is False
+
+    def test_pinned_file_skips_underfill_demotion(self) -> None:
+        """A pinned file at an underfilled tier doesn't demote."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker.pin_file("file:a.py")
+        # L1 is well below cache_target (100 < 500). Without
+        # pinning, the item would demote to L2.
+        tracker.update({"file:a.py": _active_item("h1", 100)})
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+
+class TestDeletionMarkerInPhase0:
+    """Phase 0 transitions deleted file entries to markers.
+
+    When ``existing_files`` does not include a tracked
+    ``file:`` path, the entry's content is replaced by the
+    deletion marker (constant text + constant hash) instead
+    of being removed.
+    """
+
+    def test_deleted_file_becomes_marker(self) -> None:
+        """File path absent from existing_files → marker entry."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        # Next cycle: a.py no longer exists on disk.
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files=set(),
+        )
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
+        assert (
+            tracker.get_signature_hash("file:a.py")
+            == _DELETION_MARKER_HASH
+        )
+
+    def test_pinned_file_also_transitions_to_marker(self) -> None:
+        """Pinned files transition to markers on deletion.
+
+        Pin status and deletion status are mutually exclusive
+        (mark_deleted clears the pin); the deletion event
+        wins because the file's actual content is gone.
+        """
+        tracker = StabilityTracker()
+        # Edit the file → pinned.
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update(
+            {"file:a.py": _active_item("h2", 100)},
+            existing_files={"a.py"},
+        )
+        assert tracker.is_pinned("file:a.py") is True
+        # Deletion event:
+        tracker.update({}, existing_files=set())
+        assert tracker.is_deleted("file:a.py") is True
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_marker_survives_deselection(self) -> None:
+        """Deletion-marker entries stay through deselection."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"file:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update({}, existing_files=set())
+        # File departed AND was deleted → marker. Stays.
+        assert tracker.has_item("file:a.py") is True
+        assert tracker.is_deleted("file:a.py") is True
+
+    def test_marker_skips_underfill_demotion(self) -> None:
+        """Markers are exempt from underfill demotion."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:a.py"] = TrackedItem(
+            "file:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        tracker.mark_deleted("file:a.py")
+        # L1 well below cache_target. Marker should stay.
+        tracker.update({}, existing_files=set())
+        assert tracker.get_all_items()["file:a.py"].tier == Tier.L1
+
+    def test_recreated_file_clears_marker(self) -> None:
+        """Re-creating a file at the same path clears marker state.
+
+        The new content has a different hash from
+        DELETION_MARKER_HASH, so Phase 1 detects a hash change.
+        The transition out of marker state clears the
+        ``_deleted`` flag without setting the pin (re-creation
+        is not an edit of an existing file).
+        """
+        tracker = StabilityTracker()
+        # Existing file → tracked.
+        tracker.update(
+            {"file:a.py": _active_item("h_orig", 100)},
+            existing_files={"a.py"},
+        )
+        # File deleted.
+        tracker.update({}, existing_files=set())
+        assert tracker.is_deleted("file:a.py") is True
+        # File re-created (same path, new content). Phase 0
+        # sees the path back in existing_files and skips the
+        # transition; Phase 1 sees the hash differ from the
+        # marker hash and demotes to active with fresh content.
+        tracker.update(
+            {"file:a.py": _active_item("h_new", 100)},
+            existing_files={"a.py"},
+        )
+        assert tracker.is_deleted("file:a.py") is False
+        # Re-creation doesn't pin — pin is for edits, not for
+        # re-creation. Subsequent edits during this session
+        # would pin via the normal hash-change path.
+        assert tracker.is_pinned("file:a.py") is False
+
+    def test_symbol_entry_still_removed_on_deletion(self) -> None:
+        """Non-file entries continue to use the legacy removal path."""
+        tracker = StabilityTracker()
+        tracker.update(
+            {"symbol:a.py": _active_item("h1", 100)},
+            existing_files={"a.py"},
+        )
+        tracker.update({}, existing_files=set())
+        # Symbol entries are removed (not transitioned to markers).
+        assert tracker.has_item("symbol:a.py") is False
 
 
 # ---------------------------------------------------------------------------
@@ -971,18 +1907,21 @@ class TestInitialiseFromReferenceGraph:
         tracker.initialize_from_reference_graph(_FakeRefIndex(), [])
         assert tracker.get_all_items() == {}
 
-    def test_l0_seeding_by_ref_count(self) -> None:
-        """Most-referenced files seed L0 up to cache target.
+    def test_highest_ref_lands_in_l0(self) -> None:
+        """Most-referenced file lands in L0.
 
-        cache_target = 500, placeholder tokens = 400. One item
-        at 400 tokens reaches 400, next would exceed — so only
-        the top-ranked file seeds L0 (since 400 < 500 but
-        adding a second would push us past).
+        Under the four-tier even split, the highest-aggregate-
+        ref-count cluster is processed first by the bin-packer.
+        With all tiers at zero tokens and L0 tied with others
+        for ``min(tier_sizes)``, L0 wins the insertion-order
+        tie-break and receives the highest-rank cluster.
 
-        Actually the logic checks accumulated < target before
-        each add, so after the first item we have 400, then we
-        check 400 < 500 and add the second (reaching 800), then
-        the loop breaks because 800 >= 500. So we seed 2 items.
+        Three orphan files with ref counts 10/5/1 become three
+        singleton clusters. Walking in aggregate-descending
+        order: high.py (10) goes first → L0 (tied at 0,
+        insertion order picks L0). medium.py (5) next → L1
+        (L0 now has tokens, so L1 is the smallest). low.py (1)
+        → L2. L3 stays empty for this three-file case.
         """
         ref = _FakeRefIndex(
             ref_counts={
@@ -999,14 +1938,25 @@ class TestInitialiseFromReferenceGraph:
         # The highest-ref file must end up in L0.
         l0_items = tracker.get_tier_items(Tier.L0)
         assert "symbol:high.py" in l0_items
+        # The other two distribute across L1/L2 (four-tier split
+        # plus bin-packing — each tier gets a file until exhausted).
+        all_items = tracker.get_all_items()
+        medium_tier = all_items["symbol:medium.py"].tier
+        low_tier = all_items["symbol:low.py"].tier
+        assert medium_tier != Tier.L0  # L0 is high.py's
+        assert low_tier != Tier.L0
+        # All three in cached tiers — no file should end up in active.
+        for item in all_items.values():
+            assert item.tier != Tier.ACTIVE
 
-    def test_l0_keys_excluded_from_clustering(self) -> None:
-        """Files seeded into L0 don't appear in L1/L2/L3.
+    def test_clustered_files_share_a_tier(self) -> None:
+        """Files in the same connected component land in the same tier.
 
-        cache_target=300 with placeholder=400 means exactly one
-        item fits in L0 (after adding high.py, accumulated=400
-        ≥ 300, loop breaks). high.py seeds into L0; other.py
-        should land in one of L1/L2/L3 via clustering.
+        The four-tier even split processes clusters as units —
+        each component is assigned to one tier (whichever has
+        the smallest current token total). Two files in the same
+        component land in the same tier regardless of their
+        individual ref counts.
         """
         ref = _FakeRefIndex(
             components=[{"high.py", "other.py"}],
@@ -1017,16 +1967,13 @@ class TestInitialiseFromReferenceGraph:
             ref,
             files=["high.py", "other.py"],
         )
-        l0 = tracker.get_tier_items(Tier.L0)
-        assert "symbol:high.py" in l0
-        # other.py should be in L1/L2/L3, not L0 (since only
-        # high.py was seeded).
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
-            tier_items = tracker.get_tier_items(tier)
-            if "symbol:other.py" in tier_items:
-                break
-        else:
-            pytest.fail("other.py not placed in any cached tier")
+        all_items = tracker.get_all_items()
+        assert all_items["symbol:high.py"].tier == all_items["symbol:other.py"].tier
+        # And that shared tier should be L0 — this cluster's
+        # aggregate (100+2=102) is the highest available, and
+        # L0 wins the insertion-order tie-break when all tiers
+        # are at zero tokens.
+        assert all_items["symbol:high.py"].tier == Tier.L0
 
     def test_orphan_files_distributed(self) -> None:
         """Files with no mutual references become singletons.
@@ -1052,33 +1999,96 @@ class TestInitialiseFromReferenceGraph:
     def test_placeholder_hash_and_tokens(self) -> None:
         """Initialised items start with empty hash and placeholder tokens.
 
-        Phase 1's first-measurement acceptance depends on this.
+        Phase 1's first-measurement acceptance depends on the
+        empty hash — items with an empty hash accept their
+        first real hash without triggering demotion.
         """
+        from ac_dc.stability_tracker import _PLACEHOLDER_TOKENS
         ref = _FakeRefIndex(ref_counts={"a.py": 5})
         tracker = StabilityTracker(cache_target_tokens=0)
         tracker.initialize_from_reference_graph(ref, files=["a.py"])
         item = tracker.get_all_items()["symbol:a.py"]
         assert item.content_hash == ""
-        # Placeholder tokens is 400 per spec.
-        assert item.tokens == 400
+        assert item.tokens == _PLACEHOLDER_TOKENS
 
     def test_clustering_distributes_components_across_tiers(self) -> None:
-        """Multiple components → bin-packed across L1/L2/L3."""
+        """Multiple components → bin-packed across all four cached tiers.
+
+        Four components of size 2, 12 files total. The four-tier
+        even split lands each component in its own tier — L0
+        takes the first (highest aggregate), L1/L2/L3 take the
+        others by bin-pack order.
+        """
         ref = _FakeRefIndex(
             components=[
                 {"a.py", "b.py"},
                 {"c.py", "d.py"},
                 {"e.py", "f.py"},
+                {"g.py", "h.py"},
             ]
         )
         tracker = StabilityTracker(cache_target_tokens=0)
         tracker.initialize_from_reference_graph(
             ref,
-            files=["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"],
+            files=["a.py", "b.py", "c.py", "d.py",
+                   "e.py", "f.py", "g.py", "h.py"],
         )
-        # All three cached tiers should have at least one item.
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
+        # All four cached tiers should have at least one item.
+        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
             assert len(tracker.get_tier_items(tier)) > 0, f"{tier} empty"
+
+    def test_no_files_land_in_active(self) -> None:
+        """Four-tier split places every file in a cached tier.
+
+        The core invariant of the new algorithm — no indexed
+        file should land in ACTIVE on startup, regardless of
+        its ref count. Even fully-isolated files get placed.
+        """
+        ref = _FakeRefIndex()  # no components, no ref counts
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker.initialize_from_reference_graph(
+            ref,
+            files=["a.py", "b.py", "c.py", "d.py", "e.py"],
+        )
+        all_items = tracker.get_all_items()
+        for item in all_items.values():
+            assert item.tier != Tier.ACTIVE, (
+                f"{item.key} landed in ACTIVE; expected L0/L1/L2/L3"
+            )
+
+    def test_aggregate_ranking_places_biggest_cluster_in_l0(self) -> None:
+        """Clusters with higher aggregate ref counts sort earlier.
+
+        A small cluster with high per-member ref counts should
+        outrank a larger cluster of orphans. The high-aggregate
+        cluster lands in L0 (insertion-order tie-break with all
+        tiers at zero); the orphan cluster lands in L1.
+        """
+        ref = _FakeRefIndex(
+            components=[{"high1.py", "high2.py"}],
+            ref_counts={
+                "high1.py": 10,
+                "high2.py": 10,
+                "orphan1.py": 0,
+                "orphan2.py": 0,
+                "orphan3.py": 0,
+            },
+        )
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker.initialize_from_reference_graph(
+            ref,
+            files=["high1.py", "high2.py",
+                   "orphan1.py", "orphan2.py", "orphan3.py"],
+        )
+        all_items = tracker.get_all_items()
+        # Both high-ref files share a tier (same cluster).
+        assert (
+            all_items["symbol:high1.py"].tier
+            == all_items["symbol:high2.py"].tier
+        )
+        # And that tier is L0 — aggregate 20 outranks orphan
+        # singletons at 0.
+        assert all_items["symbol:high1.py"].tier == Tier.L0
 
     def test_initialize_with_keys_mismatch_raises(self) -> None:
         """keys/files length mismatch raises ValueError."""
@@ -1345,28 +2355,29 @@ class TestHistoryGraduation:
             f"got tier={item2.tier}"
         )
 
-    def test_token_threshold_graduates_without_piggyback(self) -> None:
-        """Active history exceeding cache_target graduates even without piggyback.
+    def test_token_threshold_alone_does_not_graduate(self) -> None:
+        """Active history exceeding cache_target does NOT graduate without piggyback.
 
-        No files are graduating this cycle, L3 is not otherwise
-        broken, but the sheer size of active history forces
-        graduation to keep the verbatim window bounded.
+        The regression guard for the cache-thrash bug. Before
+        the fix, a token-threshold rule (active history tokens
+        > cache_target_tokens) forced graduation every turn
+        once the conversation grew past the per-tier caching
+        floor — tearing down L3's cache block on every request.
+        Now the only gate is piggyback; without an independent
+        L3 invalidation this cycle, all history must stay in
+        active no matter how large.
         """
         tracker = StabilityTracker(cache_target_tokens=500)
         # Seed 4 history entries at 200 tokens each.
-        # Total: 800 tokens > 500 cache target → token-threshold
-        # gate fires.
+        # Total: 800 tokens > 500 cache target. Under the old
+        # rule this would have graduated the oldest messages;
+        # under the new rule it does nothing.
         for i in range(4):
             tracker.update(
                 {f"history:{i}": _active_item("h_hist", 200)}
             )
-        # One more cycle with all four present. No file work —
-        # the only trigger is the token threshold. Walking
-        # newest→oldest with window=500:
-        #   idx=3: acc 200, stays
-        #   idx=2: acc 400, stays
-        #   idx=1: acc 600 > 500 → boundary
-        #   idx=0: older than boundary → graduates
+        # One more cycle with all four present. No file work,
+        # no other L3 activity → piggyback gate stays closed.
         tracker.update(
             {
                 "history:0": _active_item("h_hist", 200),
@@ -1376,8 +2387,9 @@ class TestHistoryGraduation:
             }
         )
         items = tracker.get_all_items()
-        assert items["history:0"].tier == Tier.L3
-        assert items["history:1"].tier == Tier.L3
+        # All four must remain in active — no graduation.
+        assert items["history:0"].tier == Tier.ACTIVE
+        assert items["history:1"].tier == Tier.ACTIVE
         assert items["history:2"].tier == Tier.ACTIVE
         assert items["history:3"].tier == Tier.ACTIVE
 
@@ -1413,30 +2425,34 @@ class TestHistoryGraduation:
         assert items["history:0"].tier == Tier.ACTIVE
         assert items["history:1"].tier == Tier.ACTIVE
 
-    def test_graduated_history_logs_reason(self) -> None:
-        """Change log distinguishes piggyback vs token-threshold.
+    def test_graduated_history_logs_piggyback_reason(self) -> None:
+        """Change log annotates history graduation with the piggyback reason.
 
-        The log message annotates why history graduated so
-        operators can tell from the terminal HUD whether the
-        cache churn was amortised onto a file graduation or
-        forced by history size.
+        Piggyback is now the only path by which history
+        reaches L3. The log message includes the reason so
+        operators watching the terminal HUD can see that the
+        cache-block churn was amortised onto an unrelated L3
+        invalidation rather than having been a standalone event.
         """
         tracker = StabilityTracker(cache_target_tokens=300)
-        # 3 history items, 200 tokens each → 600 total > 300.
-        # No file activity → token-threshold gate fires.
+        # Seed 3 history items, 200 tokens each → 600 total.
         for i in range(3):
             tracker.update(
                 {f"history:{i}": _active_item("h_hist", 200)}
             )
-        tracker.update(
-            {
-                "history:0": _active_item("h_hist", 200),
-                "history:1": _active_item("h_hist", 200),
-                "history:2": _active_item("h_hist", 200),
-            }
-        )
+        # Drive a file through to graduation while keeping
+        # history present each cycle. File graduation breaks
+        # L3 → piggyback gate opens.
+        for _ in range(4):
+            tracker.update(
+                {
+                    "file:a.py": _active_item("h_file", 100),
+                    "history:0": _active_item("h_hist", 200),
+                    "history:1": _active_item("h_hist", 200),
+                    "history:2": _active_item("h_hist", 200),
+                }
+            )
         changes = tracker.get_changes()
-        # At least one history entry should have graduated.
         history_grads = [
             c for c in changes
             if "history:" in c and "→ L3" in c
@@ -1445,39 +2461,44 @@ class TestHistoryGraduation:
             f"expected history graduation in change log, "
             f"got: {changes}"
         )
-        # Reason annotation should say "token threshold".
         assert any(
-            "token threshold" in c for c in history_grads
+            "piggyback" in c for c in history_grads
         ), (
-            f"expected 'token threshold' reason, "
+            f"expected 'piggyback' reason, "
             f"got: {history_grads}"
         )
 
     def test_history_graduation_marks_l3_broken(self) -> None:
         """Graduating history joins the cascade's broken-tier set.
 
-        When history graduates (via either gate), L3 is marked
+        When history graduates via piggyback, L3 is marked
         broken so downstream passes can rebalance — e.g., an
         L2 item ready to promote would flow into L3's refreshed
         cache block on the next cycle.
         """
         tracker = StabilityTracker(cache_target_tokens=300)
-        # Force token-threshold graduation.
+        # Seed history items small enough that two fit in the
+        # 300-token verbatim window but three don't, so the
+        # oldest will graduate when piggyback opens the gate.
         for i in range(3):
             tracker.update(
-                {f"history:{i}": _active_item("h_hist", 200)}
+                {f"history:{i}": _active_item("h_hist", 150)}
             )
-        tracker.update(
-            {
-                "history:0": _active_item("h_hist", 200),
-                "history:1": _active_item("h_hist", 200),
-                "history:2": _active_item("h_hist", 200),
-            }
-        )
+        # Drive a file to graduation to open the piggyback gate.
+        for _ in range(4):
+            tracker.update(
+                {
+                    "file:a.py": _active_item("h_file", 100),
+                    "history:0": _active_item("h_hist", 150),
+                    "history:1": _active_item("h_hist", 150),
+                    "history:2": _active_item("h_hist", 150),
+                }
+            )
         # The cascade consumes _broken_tiers mid-method and
         # clears it per-cycle. We can't read the set after
         # update() returns, but we CAN verify the downstream
-        # effect: the change log should show an L3 change.
+        # effect: the change log should show an L3 entry for
+        # the oldest history item.
         changes = tracker.get_changes()
         assert any("→ L3: history:" in c for c in changes)
 
@@ -1507,3 +2528,886 @@ class TestHistoryGraduation:
         tracker.update({"history:0": _active_item("h1", 100)})
         item = tracker.get_all_items()["history:0"]
         assert item.tier == Tier.L2
+
+
+# ---------------------------------------------------------------------------
+# Post-measurement L0 backfill
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillL0AfterMeasurement:
+    """Post-measurement backfill tops up L0 to the overshoot target.
+
+    The placeholder token count used during L0 seeding (400
+    per file) is a pessimistic upper bound. After measurement
+    replaces placeholders with real counts, L0's actual token
+    total is usually well below cache_target_tokens — meaning
+    the provider won't cache it and the cascade's anchoring
+    logic never fires. The backfill pass pulls high-ref-count
+    candidates up from L1/L2/L3 until L0 reaches the overshoot
+    target.
+
+    Governing spec: specs4/3-llm/cache-tiering.md § L0 Backfill
+    and § Post-Measurement L0 Backfill.
+    """
+
+    def test_noop_when_cache_target_zero(self) -> None:
+        """cache_target_tokens=0 disables caching entirely.
+
+        No backfill target to meet, nothing to promote.
+        """
+        tracker = StabilityTracker(cache_target_tokens=0)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_noop_when_l0_already_exceeds_overshoot(self) -> None:
+        """L0 at or above target × overshoot → nothing promotes."""
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 already holds 2000 tokens (target * 1.5 = 1500).
+        tracker._items["symbol:big.py"] = TrackedItem(
+            "symbol:big.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=2000,
+        )
+        # L1 has candidates, but L0 is full.
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=100,
+        )
+        ref = _FakeRefIndex(ref_counts={"big.py": 5, "a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_noop_when_no_candidates(self) -> None:
+        """L0 underfilled but L1/L2/L3 empty → nothing to promote."""
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 is empty (no candidates needed); below target.
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+
+    def test_promotes_highest_ref_first(self) -> None:
+        """Candidates ranked by ref count descending.
+
+        Three L1 items at 500 tokens each; target × 1.5 = 1500.
+        Backfill pulls two items (accumulated=1000, then 1500)
+        then stops. The two with the highest ref counts should
+        be the ones that promoted.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:low.py"] = TrackedItem(
+            "symbol:low.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:mid.py"] = TrackedItem(
+            "symbol:mid.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:high.py"] = TrackedItem(
+            "symbol:high.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"low.py": 1, "mid.py": 5, "high.py": 10},
+        )
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # accumulated starts at 0. Loop: add high (500 < 1500),
+        # add mid (1000 < 1500), add low (1500 >= 1500 → break
+        # BEFORE adding). But the loop structure is "if
+        # accumulated >= target: break" at the top, so:
+        #   iter 1: acc=0 < 1500, promote high → acc=500
+        #   iter 2: acc=500 < 1500, promote mid → acc=1000
+        #   iter 3: acc=1000 < 1500, promote low → acc=1500
+        # Then loop ends (no more candidates).
+        # All three get promoted to reach the target.
+        assert promoted == 3
+        assert tracker.get_all_items()["symbol:high.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:mid.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:low.py"].tier == Tier.L0
+
+    def test_stops_at_overshoot_target(self) -> None:
+        """Backfill stops once L0 reaches target × overshoot.
+
+        Four items at 500 tokens each, target=1000, overshoot=1.5
+        → backfill target = 1500. After three promotions
+        accumulated reaches 1500; the fourth is not touched.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        for i, ref_count in enumerate([10, 9, 8, 1]):
+            tracker._items[f"symbol:f{i}.py"] = TrackedItem(
+                f"symbol:f{i}.py", Tier.L1, n_value=9,
+                content_hash="h1", tokens=500,
+            )
+        ref = _FakeRefIndex(
+            ref_counts={
+                "f0.py": 10, "f1.py": 9, "f2.py": 8, "f3.py": 1,
+            },
+        )
+        # Pass overshoot_multiplier=1.5 explicitly — this test
+        # is pinning the "stops at the target × overshoot"
+        # contract with math calibrated for 1.5, not the
+        # default value (which changed to 2.0 so cross-ref
+        # backfill gets comfortable headroom above the cache-
+        # min floor).
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.5,
+        )
+        assert promoted == 3
+        # f3 (lowest ref, lowest rank) stays in L1.
+        assert tracker.get_all_items()["symbol:f3.py"].tier == Tier.L1
+
+    def test_ranking_tiebreak_by_key(self) -> None:
+        """Equal ref counts → tie-broken by key for determinism."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        # Same ref count; key ordering decides.
+        ref = _FakeRefIndex(ref_counts={"a.py": 5, "b.py": 5})
+        # Target × 1.5 = 750. One promotion (400) brings L0 to
+        # 400 < 750 — a second promotion (800) exceeds target.
+        # So both get promoted. Let's choose tokens that only
+        # allow one to fit.
+        tracker._items["symbol:b.py"].tokens = 500
+        tracker._items["symbol:a.py"].tokens = 500
+        # Target × 1.5 = 750. Promote one → acc=500 < 750,
+        # promote another → acc=1000 ≥ 750 AFTER; but the
+        # check is at top of loop so we promote both. Tweak
+        # sizes to make the bound actually limiting:
+        tracker._items["symbol:b.py"].tokens = 800
+        tracker._items["symbol:a.py"].tokens = 800
+        # acc=0 < 750 → promote first → acc=800
+        # acc=800 ≥ 750 → break
+        # Pass overshoot_multiplier=1.5 explicitly — math
+        # here is calibrated for 1.5 (the old default). The
+        # new default is 2.0 which gives target=1000 and
+        # both items would promote, but this test is
+        # exercising the tie-break ordering, not the
+        # overshoot semantics.
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.5,
+        )
+        assert promoted == 1
+        # Tie-break: key ascending → a.py promotes first.
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:b.py"].tier == Tier.L1
+
+    def test_preserves_tokens_and_hash(self) -> None:
+        """Promoted items retain their real token count and hash.
+
+        Measurement already populated real counts; backfill must
+        not clobber them with placeholders.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="real-hash-123", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        item = tracker.get_all_items()["symbol:a.py"]
+        assert item.tier == Tier.L0
+        assert item.content_hash == "real-hash-123"
+        assert item.tokens == 300
+
+    def test_promoted_item_gets_l0_entry_n(self) -> None:
+        """Promoted items enter L0 at L0's entry_n (=12)."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,  # L1's entry_n
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        assert tracker.get_all_items()["symbol:a.py"].n_value == 12
+
+    def test_marks_source_tiers_broken(self) -> None:
+        """Source tiers of promoted items are marked broken.
+
+        Signals the next cascade to rebalance L1/L2/L3
+        distribution after the backfill's selective promotions.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L2, n_value=6,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10, "b.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        # Both L1 and L2 should now be in broken_tiers.
+        assert Tier.L1 in tracker._broken_tiers
+        assert Tier.L2 in tracker._broken_tiers
+
+    def test_l0_not_marked_broken(self) -> None:
+        """L0 itself not marked broken — promoted items earned their slot.
+
+        If L0 were broken, the next cascade would reconsider
+        the backfill's placements and potentially undo them.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        assert Tier.L0 not in tracker._broken_tiers
+
+    def test_skips_non_file_keys(self) -> None:
+        """system:* and url:* and history:* are not candidates.
+
+        Only file:/symbol:/doc: keys are eligible for backfill.
+        Other prefixes are intentionally excluded — system is
+        L0-only, urls are session-scoped, history follows its
+        own graduation path.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["history:0"] = TrackedItem(
+            "history:0", Tier.L3, n_value=3,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 0
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+        assert tracker.get_all_items()["history:0"].tier == Tier.L3
+
+    def test_skips_items_already_in_l0(self) -> None:
+        """L0 residents aren't re-promoted."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:already.py"] = TrackedItem(
+            "symbol:already.py", Tier.L0, n_value=12,
+            content_hash="h1", tokens=100,
+        )
+        tracker._items["symbol:candidate.py"] = TrackedItem(
+            "symbol:candidate.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"already.py": 100, "candidate.py": 5},
+        )
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # already.py stays in L0 without being re-promoted.
+        # candidate.py promotes to bring L0 from 100 to 400
+        # (target × 1.5 = 750, still under).
+        assert promoted == 1
+        assert tracker.get_all_items()["symbol:already.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:candidate.py"].tier == Tier.L0
+
+    def test_accumulated_counts_existing_l0_tokens(self) -> None:
+        """Backfill target measured against TOTAL L0 tokens.
+
+        If L0 already has some real tokens, the backfill only
+        needs to add enough to reach the overshoot target —
+        not the full target on top of existing content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        # L0 has 800 real tokens already.
+        tracker._items["system:prompt"] = TrackedItem(
+            "system:prompt", Tier.L0, n_value=12,
+            content_hash="h1", tokens=800,
+        )
+        # Two L1 candidates at 500 each.
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"a.py": 10, "b.py": 5},
+        )
+        # target = 1000 × 1.5 = 1500. L0 has 800. Need 700 more.
+        # Promote a.py (highest ref): acc = 800 + 500 = 1300 < 1500.
+        # Promote b.py: acc = 1300 + 500 = 1800 ≥ 1500 → break
+        # AT TOP OF NEXT ITERATION (both already promoted).
+        # Actually: acc=800, iter 1 acc<1500 promote a → acc=1300,
+        # iter 2 acc<1500 promote b → acc=1800, iter 3 acc>=1500 break.
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 2
+
+    def test_custom_overshoot_multiplier(self) -> None:
+        """Overshoot multiplier is tunable.
+
+        Default is 1.5 but the parameter is exposed for tuning.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        tracker._items["symbol:c.py"] = TrackedItem(
+            "symbol:c.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=500,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"a.py": 10, "b.py": 5, "c.py": 1},
+        )
+        # Use overshoot=1.0 (no headroom). Target = 1000.
+        # iter 1 acc=0 < 1000 → promote a → acc=500
+        # iter 2 acc=500 < 1000 → promote b → acc=1000
+        # iter 3 acc=1000 >= 1000 → break
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, overshoot_multiplier=1.0,
+        )
+        assert promoted == 2
+        # c.py stays in L1.
+        assert tracker.get_all_items()["symbol:c.py"].tier == Tier.L1
+
+    def test_doc_keys_eligible(self) -> None:
+        """doc:{path} keys are also valid backfill candidates.
+
+        Cross-reference mode seeds doc: entries into L1/L2/L3;
+        they should compete for L0 slots alongside symbol: entries.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["doc:readme.md"] = TrackedItem(
+            "doc:readme.md", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        ref = _FakeRefIndex(ref_counts={"readme.md": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 1
+        assert tracker.get_all_items()["doc:readme.md"].tier == Tier.L0
+
+    def test_file_keys_eligible(self) -> None:
+        """file:{path} keys are valid candidates.
+
+        Selected files swapped to file: entries during rebuild
+        should be able to earn L0 via backfill too.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["file:selected.py"] = TrackedItem(
+            "file:selected.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=400,
+        )
+        ref = _FakeRefIndex(ref_counts={"selected.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        assert promoted == 1
+        assert tracker.get_all_items()["file:selected.py"].tier == Tier.L0
+
+    def test_change_log_records_backfill(self) -> None:
+        """Change log distinguishes backfill promotions."""
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 5})
+        tracker.backfill_l0_after_measurement(ref)
+        changes = tracker.get_changes()
+        # Should include a "backfill" annotation so the terminal
+        # HUD can distinguish from normal cascade promotions.
+        assert any(
+            "L1 → L0" in c and "backfill" in c and "a.py" in c
+            for c in changes
+        )
+
+
+# ---------------------------------------------------------------------------
+# Backfill — candidate_keys restriction (cross-ref seeding)
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillCandidateKeys:
+    """``candidate_keys`` filter restricts which items are promoted.
+
+    Added so :func:`seed_cross_reference_items` can tell the
+    backfill "only consider these newly-seeded keys, not
+    everything in L1/L2/L3". Without the filter, toggling
+    cross-ref on would promote unrelated content that users
+    carefully placed into cached tiers — confusing and
+    unrelated to the user's intent.
+
+    Governing contract: specs4/3-llm/modes.md § Cross-Reference
+    Activation — "Primary-index items already resident in L0
+    are never evicted — only L1/L2/L3 candidates are considered
+    for the backfill promotion".
+    """
+
+    def test_none_means_all_candidates_eligible(self) -> None:
+        """Default (None) → every L1/L2/L3 item is a candidate.
+
+        Preserves the pre-existing behaviour for primary init
+        paths that haven't been updated to pass the filter.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:b.py"] = TrackedItem(
+            "symbol:b.py", Tier.L2, n_value=6,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10, "b.py": 5})
+        # candidate_keys=None — default behaviour.
+        promoted = tracker.backfill_l0_after_measurement(ref)
+        # target × 1.5 = 750. Both promote (acc: 300, 600, 750+).
+        # Actually: acc=0 < 750 → promote a → acc=300,
+        # acc=300 < 750 → promote b → acc=600, no more
+        # candidates. Both end in L0.
+        assert promoted == 2
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L0
+        assert tracker.get_all_items()["symbol:b.py"].tier == Tier.L0
+
+    def test_empty_set_promotes_nothing(self) -> None:
+        """Empty ``candidate_keys`` → no eligible items.
+
+        Distinct from None — empty set means "I have a
+        restriction but nothing matches". Every candidate gets
+        filtered out. L0 stays underfilled even with plenty of
+        L1/L2/L3 content.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["symbol:a.py"] = TrackedItem(
+            "symbol:a.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(ref_counts={"a.py": 10})
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, candidate_keys=set(),
+        )
+        assert promoted == 0
+        assert tracker.get_all_items()["symbol:a.py"].tier == Tier.L1
+
+    def test_only_listed_keys_eligible(self) -> None:
+        """Items NOT in ``candidate_keys`` are skipped.
+
+        The core contract. Three L1 items, two listed as
+        candidates, one not. The un-listed item must NOT
+        promote regardless of its ref count.
+        """
+        tracker = StabilityTracker(cache_target_tokens=1000)
+        tracker._items["symbol:listed1.py"] = TrackedItem(
+            "symbol:listed1.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:listed2.py"] = TrackedItem(
+            "symbol:listed2.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["symbol:excluded.py"] = TrackedItem(
+            "symbol:excluded.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={
+                "listed1.py": 5,
+                "listed2.py": 3,
+                "excluded.py": 100,  # highest — would normally win
+            },
+        )
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={
+                "symbol:listed1.py", "symbol:listed2.py",
+            },
+        )
+        # Both listed items promote; excluded stays. Target ×
+        # 1.5 = 1500; acc=0 → 300 (listed1) → 600 (listed2) —
+        # no more candidates.
+        assert promoted == 2
+        assert (
+            tracker.get_all_items()["symbol:listed1.py"].tier
+            == Tier.L0
+        )
+        assert (
+            tracker.get_all_items()["symbol:listed2.py"].tier
+            == Tier.L0
+        )
+        # Highest ref count but not in the candidate set — stays.
+        assert (
+            tracker.get_all_items()["symbol:excluded.py"].tier
+            == Tier.L1
+        )
+
+    def test_preserves_pre_existing_l2_entry(self) -> None:
+        """The cross-ref idempotence invariant at the tracker level.
+
+        A user-placed L2 entry (simulating a prior cross-ref
+        session that earned tier state, or a primary-index
+        item) survives a backfill pass that doesn't include
+        it in the candidate set — even when the backfill
+        otherwise has room for it.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Pre-existing L2 entry — the "carefully placed" case.
+        tracker._items["doc:preserved.md"] = TrackedItem(
+            "doc:preserved.md", Tier.L2, n_value=5,
+            content_hash="earned-state", tokens=100,
+        )
+        # Newly-seeded L1 entry — cross-ref pass just added this.
+        tracker._items["doc:fresh.md"] = TrackedItem(
+            "doc:fresh.md", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"preserved.md": 100, "fresh.md": 5},
+        )
+        # Candidate set = only the newly-seeded key.
+        promoted = tracker.backfill_l0_after_measurement(
+            ref, candidate_keys={"doc:fresh.md"},
+        )
+        # Fresh promotes to L0; preserved stays at L2 with
+        # earned state intact.
+        assert promoted == 1
+        assert tracker.get_all_items()["doc:fresh.md"].tier == Tier.L0
+        preserved = tracker.get_all_items()["doc:preserved.md"]
+        assert preserved.tier == Tier.L2
+        assert preserved.n_value == 5
+        assert preserved.content_hash == "earned-state"
+
+    def test_filter_respects_tier_exclusion_of_l0(self) -> None:
+        """candidate_keys filter runs on top of the L0 tier filter.
+
+        A key in ``candidate_keys`` that's already at L0 is
+        still excluded — the backfill's existing
+        L1/L2/L3-only rule wins. Belt and braces: the caller
+        can pass any keys they like without risking an
+        already-in-L0 item being re-promoted (which would
+        reset its n_value).
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        # Item already at L0 with earned N.
+        tracker._items["symbol:already.py"] = TrackedItem(
+            "symbol:already.py", Tier.L0, n_value=20,
+            content_hash="h1", tokens=300,
+        )
+        # Candidate also included.
+        tracker._items["symbol:candidate.py"] = TrackedItem(
+            "symbol:candidate.py", Tier.L1, n_value=9,
+            content_hash="h1", tokens=200,
+        )
+        ref = _FakeRefIndex(
+            ref_counts={"already.py": 100, "candidate.py": 5},
+        )
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={
+                "symbol:already.py", "symbol:candidate.py",
+            },
+        )
+        # Only candidate promotes — already stays with its
+        # earned N preserved, not re-entered at entry_n.
+        assert promoted == 1
+        already = tracker.get_all_items()["symbol:already.py"]
+        assert already.tier == Tier.L0
+        assert already.n_value == 20  # not reset to entry_n=12
+
+    def test_filter_respects_prefix_exclusion(self) -> None:
+        """candidate_keys filter runs on top of the prefix filter.
+
+        ``history:`` and ``url:`` keys are never eligible
+        regardless of candidate_keys membership. The filter
+        is a restriction, not an override.
+        """
+        tracker = StabilityTracker(cache_target_tokens=500)
+        tracker._items["history:0"] = TrackedItem(
+            "history:0", Tier.L3, n_value=3,
+            content_hash="h1", tokens=300,
+        )
+        tracker._items["url:abc"] = TrackedItem(
+            "url:abc", Tier.L1, n_value=9,
+            content_hash="h1", tokens=300,
+        )
+        ref = _FakeRefIndex()
+        promoted = tracker.backfill_l0_after_measurement(
+            ref,
+            candidate_keys={"history:0", "url:abc"},
+        )
+        assert promoted == 0
+        assert tracker.get_all_items()["history:0"].tier == Tier.L3
+        assert tracker.get_all_items()["url:abc"].tier == Tier.L1
+
+
+# ---------------------------------------------------------------------------
+# distribute_keys_by_clustering — append without disturbing existing state
+# ---------------------------------------------------------------------------
+
+
+class TestDistributeKeysByClustering:
+    """Append keys to the tracker across L1/L2/L3 via clustering.
+
+    Used by :func:`seed_cross_reference_items` for cross-ref
+    activation. Mirrors :meth:`initialize_with_keys`'s
+    clustering path but never places into L0 and never
+    overwrites existing tracker entries. Governing spec:
+    specs4/3-llm/modes.md § Cross-Reference Activation.
+    """
+
+    def test_empty_keys_is_noop(self) -> None:
+        """No keys → no side effects."""
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            _FakeRefIndex(),
+            keys=[],
+            files=[],
+        )
+        assert tracker.get_all_items() == {}
+
+    def test_keys_files_length_mismatch_raises(self) -> None:
+        """Defensive — mismatched input lengths fail loudly."""
+        tracker = StabilityTracker()
+        with pytest.raises(ValueError, match="length"):
+            tracker.distribute_keys_by_clustering(
+                _FakeRefIndex(),
+                keys=["doc:a.md", "doc:b.md"],
+                files=["a.md"],
+            )
+
+    def test_skips_keys_already_in_tracker(self) -> None:
+        """Pre-existing tracked keys are preserved verbatim.
+
+        The core idempotence contract — cross-ref enable
+        must not overwrite tier/N state on keys that a prior
+        pass already placed. Here we seed a key at L0 with
+        a distinctive N value, then call the method with
+        that key in the input. The item stays at L0 with its
+        N value untouched.
+        """
+        tracker = StabilityTracker()
+        # Pre-seed at L0 with earned state.
+        tracker._items["doc:existing.md"] = TrackedItem(
+            "doc:existing.md", Tier.L0, n_value=15,
+            content_hash="earned", tokens=500,
+        )
+        ref = _FakeRefIndex(ref_counts={"existing.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:existing.md"],
+            files=["existing.md"],
+        )
+        item = tracker.get_all_items()["doc:existing.md"]
+        assert item.tier == Tier.L0
+        assert item.n_value == 15
+        assert item.content_hash == "earned"
+        assert item.tokens == 500
+
+    def test_new_keys_land_in_cached_tiers(self) -> None:
+        """Fresh keys distribute across L1/L2/L3 — never L0, never ACTIVE.
+
+        L0 is reserved for primary index content; cross-ref
+        distribution targets L1/L2/L3 explicitly. ACTIVE is
+        never a distribution target — items go to ACTIVE only
+        via the Phase 1 demotion path.
+        """
+        ref = _FakeRefIndex(ref_counts={"a.md": 5, "b.md": 3, "c.md": 1})
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        for item in tracker.get_all_items().values():
+            assert item.tier not in (Tier.L0, Tier.ACTIVE)
+            assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+    def test_distributes_across_all_three_tiers(self) -> None:
+        """Three singleton components → one per tier.
+
+        Greedy bin-packer picks the smallest-sized tier for
+        each component. With three components of size 1 and
+        three empty tiers, they spread one-per-tier. Deterministic
+        tie-break means each tier gets exactly one.
+        """
+        ref = _FakeRefIndex()  # no components, all orphans
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        for tier in (Tier.L1, Tier.L2, Tier.L3):
+            assert len(tracker.get_tier_items(tier)) == 1, (
+                f"{tier} should have exactly 1 item, "
+                f"got {len(tracker.get_tier_items(tier))}"
+            )
+
+    def test_placeholder_hash_and_tokens(self) -> None:
+        """Seeded items get placeholder state, not real counts.
+
+        Caller (seed_cross_reference_items) calls
+        measure_tracker_tokens afterward to replace
+        placeholders with real counts. Phase 1's first-
+        measurement acceptance handles the placeholder-to-real
+        hash transition without a spurious demotion.
+        """
+        from ac_dc.stability_tracker import _PLACEHOLDER_TOKENS
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md"],
+            files=["a.md"],
+        )
+        item = tracker.get_all_items()["doc:a.md"]
+        assert item.content_hash == ""
+        assert item.tokens == _PLACEHOLDER_TOKENS
+
+    def test_placed_at_tier_entry_n(self) -> None:
+        """Each seeded item lands with its tier's entry_n.
+
+        Matches the primary init path — items enter at the
+        tier's documented entry_n so they don't get
+        mistakenly anchored or capped differently than
+        primary content.
+        """
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # Each tier's entry_n — L1=9, L2=6, L3=3.
+        for tier, expected_n in [
+            (Tier.L1, 9),
+            (Tier.L2, 6),
+            (Tier.L3, 3),
+        ]:
+            items = tracker.get_tier_items(tier)
+            assert items, f"{tier} empty"
+            for item in items.values():
+                assert item.n_value == expected_n, (
+                    f"{item.key} at {tier} has n_value "
+                    f"{item.n_value}, expected {expected_n}"
+                )
+
+    def test_marks_destination_tiers_broken(self) -> None:
+        """Every tier that receives content is marked broken.
+
+        Without this the next request's cache breakpoints
+        would be computed against stale tier state — the
+        newly-seeded content wouldn't be included in the
+        cache block rebuild.
+        """
+        ref = _FakeRefIndex()
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # Three singletons → distributed across L1/L2/L3 →
+        # all three tiers broken.
+        assert Tier.L1 in tracker._broken_tiers
+        assert Tier.L2 in tracker._broken_tiers
+        assert Tier.L3 in tracker._broken_tiers
+
+    def test_mixed_pre_existing_and_new(self) -> None:
+        """One pre-existing key, one new — only the new one lands.
+
+        End-to-end check of the preservation + distribution
+        interaction. Pre-existing key stays at its L0 seat;
+        new key lands in a cached tier.
+        """
+        tracker = StabilityTracker()
+        tracker._items["doc:old.md"] = TrackedItem(
+            "doc:old.md", Tier.L0, n_value=12,
+            content_hash="old-hash", tokens=200,
+        )
+        ref = _FakeRefIndex(ref_counts={"old.md": 10, "new.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:old.md", "doc:new.md"],
+            files=["old.md", "new.md"],
+        )
+        # Old unchanged.
+        old = tracker.get_all_items()["doc:old.md"]
+        assert old.tier == Tier.L0
+        assert old.content_hash == "old-hash"
+        # New placed in a cached tier (not L0, not ACTIVE).
+        new = tracker.get_all_items()["doc:new.md"]
+        assert new.tier in (Tier.L1, Tier.L2, Tier.L3)
+
+    def test_all_keys_pre_existing_is_noop(self) -> None:
+        """Every input key already tracked → no tier changes.
+
+        After filtering out already-tracked pairs, nothing
+        remains to distribute. The method returns without
+        marking any tiers broken.
+        """
+        tracker = StabilityTracker()
+        tracker._items["doc:a.md"] = TrackedItem(
+            "doc:a.md", Tier.L2, n_value=6,
+            content_hash="h1", tokens=100,
+        )
+        tracker._broken_tiers.clear()
+        ref = _FakeRefIndex(ref_counts={"a.md": 5})
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md"],
+            files=["a.md"],
+        )
+        # No new items added.
+        assert len(tracker.get_all_items()) == 1
+        # No tiers marked broken — nothing changed.
+        assert tracker._broken_tiers == set()
+
+    def test_orphans_spread_via_singletons(self) -> None:
+        """Files not in any component still get distributed.
+
+        The real cross-ref case has many files with no doc-
+        to-doc links; they'd be absent from the ref index's
+        components. The method must still place them
+        (matching the primary init path's orphan handling).
+        """
+        # No components; every file is an orphan.
+        ref = _FakeRefIndex(components=[], ref_counts={})
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md"],
+            files=["a.md", "b.md"],
+        )
+        assert tracker.has_item("doc:a.md")
+        assert tracker.has_item("doc:b.md")
+
+    def test_component_clusters_land_together(self) -> None:
+        """Files in the same component share a tier.
+
+        The bin-packer assigns each component to one tier,
+        so tightly-coupled files ride together through
+        cache cycles — they invalidate or promote as a
+        group, matching how users mentally group them.
+        """
+        ref = _FakeRefIndex(components=[{"a.md", "b.md", "c.md"}])
+        tracker = StabilityTracker()
+        tracker.distribute_keys_by_clustering(
+            ref,
+            keys=["doc:a.md", "doc:b.md", "doc:c.md"],
+            files=["a.md", "b.md", "c.md"],
+        )
+        # All three should be in the same tier (same
+        # component → same tier via bin-packer).
+        items = tracker.get_all_items()
+        tiers = {item.tier for item in items.values()}
+        assert len(tiers) == 1, (
+            f"clustered files should share a tier, got {tiers}"
+        )

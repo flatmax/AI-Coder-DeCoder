@@ -55,9 +55,11 @@ The archive is created lazily — only when a turn actually spawns agents. Turns
 
 Agent archives are surfaced through an extension of the chat panel itself (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The chat panel remains the vertical spine of the session — the user message / assistant response pairs the user already knows. When the active turn spawned agents, an agent region fans out alongside the chat with one column per agent.
 
-The backend exposes one RPC to support this:
+The backend exposes three RPCs to support this:
 
 - `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
+- `close_agent_context(turn_id, agent_idx)` — frees the agent's ContextManager, stability tracker, and file_context when the user closes an agent tab. The per-turn archive file on disk is preserved. Idempotent — closing a non-existent or already-closed agent returns a no-op status rather than raising. Localhost-only.
+- `set_agent_selected_files(turn_id, agent_idx, files)` — per-agent analogue of the main-tab file selection RPC. The frontend routes picker checkbox toggles here when an agent tab is active; the main-tab path is unchanged. Filters non-existent paths against the repo. Localhost-only.
 
 No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and different turns become active.
 

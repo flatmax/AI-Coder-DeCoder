@@ -14,11 +14,17 @@ Several specs4 invariants exist specifically to make this future mode implementa
 | Stability tracker is per-context-manager | [context-model.md](../3-llm/context-model.md#stability-tracker-attachment) | Trackers scope to their owning context manager, not to modes |
 | Single-stream guard gates user-initiated requests only | [streaming.md](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request) | Internal agent streams coexist under a parent request ID |
 | Request IDs are the multiplexing primitive | [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics) | All server-push events route by exact request ID |
+| `agentsSpawned` event fires BEFORE agent dispatch | [streaming.md](../3-llm/streaming.md) | Frontend creates tabs in time to claim child request IDs; without it, fast-completing agents' chunks are dropped |
 | Streaming state is keyed by request ID on the frontend | [chat.md](../5-webapp/chat.md#streaming-state-keyed-by-request-id) | Chat panel can render N concurrent streams |
 | Agent conversations are archived per turn | [history.md](../3-llm/history.md#agent-turn-archive) | Per-agent files under `.ac-dc4/agents/{turn_id}/`; main LLM stays in main history |
+| Agent ContextManager factory exists | [context-model.md](../3-llm/context-model.md#agent-context-managers) | Constructs a ContextManager whose archival sink writes to the per-turn archive. Lifetime is session-scoped (cleared by `new_session`), NOT turn-scoped, so the agent registry persists across turns for id-based reuse |
 | Re-indexing happens between rounds | [symbol-index.md](../2-indexing/symbol-index.md), [document-index.md](../2-indexing/document-index.md) | Indexes are read-only snapshots within a request's execution window |
+| Assimilation refreshes full file content | [context-model.md](../3-llm/context-model.md) | Post-agent `file_context.add_file` re-reads from disk so the parent's next turn sees full post-edit content, not diffs |
+| Edit parser tolerates unknown markers as prose | [edit-protocol.md](../3-llm/edit-protocol.md#agent-spawn-blocks-reserved-marker) | `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` lines are ignored by the current parser; future agent-spawn handling adds branches without breaking existing edit parsing |
 
 None of these invariants cost anything in single-agent operation. Preserving them in the initial build means agent mode can be added later without refactoring the foundation layers.
+
+The agent implementation itself reduces to: refactor `_stream_chat` so its ContextManager is a parameter rather than hardcoded to `self._context`, then invoke it N times in parallel with N agent ContextManagers. Each agent runs through the existing streaming pipeline — same edit parsing, same apply path, same persistence, same post-response work. No separate runner, no separate orchestrator, no separate applier.
 
 AC⚡DC could execute multiple LLM agents in parallel to accelerate large tasks. The main LLM — the same instance that handles ordinary user turns — decomposes a user request into independent sub-tasks, spawns N agents to execute them in parallel, observes their results, decides whether to iterate (spawn different agents with revised scope) or synthesize, and produces the final assistant response. There is no separate "planner" or "assessor" role; decomposition, review, iteration decisions, and synthesis are all things the main LLM does within a single turn, using its normal conversation store.
 
@@ -43,6 +49,40 @@ Agent conversations are persisted to the per-turn archive (see [history.md — A
 
 The archive is the **audit trail** for agent execution, not the runtime state. When a turn completes, the only data that matters for subsequent turns is what landed in the main store (the final assistant response and any applied edits). The archive exists purely so users can inspect what each spawned agent did after the fact. The main LLM's own conversation for the turn is in the main store by design — it's an ordinary assistant message, visible in chat scrollback, preserved across session restore.
 
+## User-Visible Agent Browsing and Interaction
+
+Agents surface as additional tabs in the existing chat panel — one "Main" tab plus one tab per spawned agent in the active turn (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The tab strip IS the agent browser. Each agent tab is a full chat panel targeting that agent's `ContextManager`; interaction is identical to the main chat (type in the input box, hit send).
+
+This means agents that need clarification, a file, or a decision just say so as normal assistant messages — no dedicated question protocol, no pause-resume state machine. The user answers by replying in that agent's tab, or by ticking a file in the (per-tab-scoped) picker, or by leaving the agent alone until they come back to it. Agents persist for the lifetime of the turn — their ContextManager and StabilityTracker stay warm in memory, so provider cache benefits accrue across interactions.
+
+Agents from a previous agentic turn are reachable via the history browser: scrolling the main chat back to that turn surfaces a "View agents" affordance which loads read-only tabs from the archive. Archives stay on disk across server restarts; read-only tabs are fully browsable but their input boxes are disabled because the ContextManager is long gone.
+
+### Frontend agent-block rendering
+
+Agent-spawn blocks emitted in the orchestrator's assistant message render as cards in the main chat, symmetric to the existing edit-block cards. The mechanism mirrors edit-block rendering:
+
+- The chat panel's response segmenter (`webapp/src/edit-blocks.js`) learns an `agent` segment type alongside the existing prose and edit segments. AGENT/AGEND markers in the response are detected and the body is parsed into `{id, task}`.
+- A new module `webapp/src/agent-block-render.js`, symmetric to `edit-block-render.js`, takes an agent segment plus optional execution status (`pending` / `streaming` / `complete` / `error`) and returns the card HTML.
+- The card displays:
+  - The agent's `id` as a clickable chip, styled like edit-block file-path chips
+  - The `task` body, rendered as markdown (collapsible if long)
+  - A status badge reflecting the agent's child stream — pulled from the chat panel's per-request streaming state (keyed by `{parent_request_id}-agent-{idx}`)
+- Clicking the id chip dispatches a custom event that the chat panel handles by switching to that agent's tab — the same code path `_onTabClick` already uses. The agent's tab is guaranteed to exist by the `agentsSpawned` event ordering invariant. Tab IDs are the agent's id directly (no `{turnId}/agent-NN` compound shape) — `parseAgentTabId` becomes a no-op identity function since the agent id IS the tab id.
+
+Status integration is the same per-request-id story streaming already uses. The card subscribes to its agent's stream state during the turn and updates as chunks arrive at the child request id; once the child completes, the card freezes at the final status. Across turns the card is static — clicking the id still routes to the agent's tab, where the user can read the full conversation.
+
+This gives the orchestrator's narration a structured shape: when the user reads the orchestrator's response, they see the prose explanation, the agent cards (one per spawn block), and any edit cards from work the orchestrator did itself, all interleaved in source order. Clicking through agent cards navigates to the matching tab; clicking through edit cards opens the diff viewer. Both work the same way.
+
+### Backend RPCs
+
+The backend exposes one RPC to support historical browsing:
+
+- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
+
+No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and surfaces historical agent tabs.
+
+Archived conversations are NOT used during session restore. Session restore reads only `history.jsonl` and produces the same in-memory context as before — the user continues where they left off, seeing only their own conversation. Historical agent tabs are populated on demand via `get_turn_archive` when the user navigates to a previous turn, not eagerly at startup.
+
 ## Core Principle: Anchor-Based Non-Overlapping Edits
 
 The edit protocol uses exact text anchors (old text → new text), not line numbers. Two agents can safely edit the same file provided their anchors target non-overlapping text regions. The main LLM's job when decomposing is to assign independent work units — classes, functions, documentation sections — not disjoint file sets.
@@ -54,24 +94,61 @@ If an agent's edit fails validation (anchor not found, or anchor became ambiguou
 ## Execution Model
 
 - User request arrives; the main LLM (the same ContextManager handling all user turns) begins streaming its response
-- Main LLM decides whether the task benefits from parallel decomposition. This is a per-turn judgment based on the request, the symbol map, and any document index; there is no user-facing toggle
+- Main LLM decides whether the task benefits from parallel decomposition. This is a per-turn judgment based on the request, the symbol map, and any document index; gated by the `agents.enabled` config toggle — when the toggle is off the agentic appendix is absent from the system prompt and the LLM never emits spawn blocks
 - If yes — main LLM emits a decomposition describing N sub-tasks, each specifying work units (classes, functions, doc sections) to create or modify, plus read context
+- **Backend fires `agentsSpawned` immediately after the main LLM's response is parsed and BEFORE spawning agents.** Payload: `{turn_id, parent_request_id, agent_blocks: [{id, task, agent_idx}, ...]}`. The frontend's handler creates one tab per agent with its child request ID (`{parent_request_id}-agent-{NN:02d}`) pre-populated so `_findTabForRequest` can route subsequent chunks to the correct tab. Without this event fired BEFORE spawn, agents whose streams complete quickly (a common case for small tasks) would finish before the main `streamComplete` event arrives carrying `agent_blocks` — and every child chunk routed during that window would be silently dropped because no tab claimed the child request ID yet. Landing `agentsSpawned` first narrows the race to zero: tabs exist before any child chunk reaches the frontend
 - Main LLM spawns N agent ContextManagers, each with its own turn-scoped archival sink, a focused sub-task, and shared read-only access to indexes and repo
 - Agents execute in parallel; no inter-agent communication
 - Edits applied to the working directory via the existing edit-block apply pipeline (per-path mutex ensures atomic writes)
-- Main LLM waits for all agents to complete, then continues streaming — reviews the combined forward diff, decides whether to iterate (spawn different agents) or synthesize
-- On iterate — new decomposition, new agent ContextManagers, another round
-- On synthesize — main LLM writes the final synthesis; the assistant message for this turn is complete; user sees the full reasoning and synthesis in chat scrollback
+- When all agents complete, the backend assimilates their work into the parent conversation: the union of agent-modified and agent-created files is loaded (or refreshed) into the parent's file context, added to the parent's selection, and broadcast via `filesChanged` and `filesModified` so the frontend picker reloads. No automatic second LLM call fires
+- The main LLM's assistant message for the turn consists only of its initial response (which contains the spawn blocks as prose narrating what it delegated). The user reads that, inspects the working-tree changes via the picker and diff viewer, and drives review in a follow-up turn — "review what the agents did" is a one-click snippet in the chat panel's code-mode snippets (see [chat.md § Snippet Drawer](../5-webapp/chat.md#snippet-drawer))
+- On the next user turn, the parent LLM sees the newly-assimilated files (as full post-edit content) in its context and can synthesise, iterate, or fix as the user directs. Full files rather than diffs means the parent reviews the way a human would — reading the code in its current state — rather than reasoning over a diff that loses context. A parent that wants to see what specifically changed can invoke `git diff` via shell-command detection, but the default review input is the current on-disk state. Iteration rounds (main LLM spawns a fresh decomposition after seeing the results) happen through the normal multi-turn flow, not as backend-driven recursion
 
-## Main LLM — Decomposition and Synthesis
+## Main LLM — Decomposition
 
-The main LLM's system prompt (the normal user-facing prompt, extended for agent-mode turns) describes agent-spawning as a tool-like capability. When the main LLM judges a task worth parallelizing, it emits a structured decomposition:
+The main LLM's system prompt (the normal user-facing prompt, extended for agent-mode turns) describes agent-spawning as a tool-like capability. When the main LLM judges a task worth parallelizing, it emits one or more agent-spawn blocks, each declaring a sub-task.
 
-- Natural-language description of each sub-task
-- Work units (classes, functions, doc sections) each agent should create or modify
-- Read context — files and symbols each agent needs to see but not edit
+### Agent-spawn block format
 
-The decomposition becomes the agents' initial prompts. The LLM does not need to assign disjoint file sets — it assigns independent work units. Using the symbol map's imports, call sites, and cross-references, the LLM identifies clusters of symbols with no cross-references between them, making them safe to edit in parallel.
+An agent block uses a distinct marker pair with no middle separator:
+
+- Start: `🟧🟧🟧 AGENT` — three orange squares (U+1F7E7), space, literal `AGENT`
+- End: `🟩🟩🟩 AGEND` — three green squares (U+1F7E9), space, literal `AGEND`
+
+Rendered as an indented diagram to avoid nesting the literal markers inside a fenced code block:
+
+    ORANGE-START    🟧🟧🟧 AGENT
+    line 1          id: agent-0
+    line 2          task: Refactor the auth module to extract session logic into
+    line 3          a new SessionManager class. Update callers of auth.Session to
+    line 4          use the new class.
+    GREEN-END       🟩🟩🟩 AGEND
+
+**Why the end marker differs from the edit-block end marker.** An edit block closes with `🟩🟩🟩 END`. If an agent block used the same end marker, a parser scanning line-by-line would have to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input and forces frontend and backend parsers to stay in lockstep on state tracking. A distinct agent end marker lets each parser match on the literal line: `🟩🟩🟩 END` closes edits, `🟩🟩🟩 AGEND` closes agents, no state disambiguation needed. An LLM response that interleaves both block types, or a document quoting both in the same code fence, cannot cause one marker to accidentally terminate the other's block.
+
+**Fields.** Body is a minimal YAML-ish payload of `key: value` pairs. Only two fields are defined:
+
+- **`id`** — identifier the main LLM uses to reference this agent in subsequent review and synthesis. Scoped to the turn; unique within the turn's decomposition. Convention is `agent-N` (zero-indexed), but the parser accepts any string.
+- **`task`** — the initial prompt handed to the agent. One logical instruction in natural language; may span multiple lines until the end marker. The task should describe the goal, not enumerate file paths — the agent discovers files the same way the user's chat session does (symbol map, reference index, file mentions via edit blocks).
+
+Unknown keys are preserved in an `extras` dict for forward compatibility. When the spec gains a new field (e.g., sequencing dependencies, MCP server keys), old parser versions still surface the value rather than dropping it.
+
+### Why not pre-declare files
+
+The decomposition deliberately does NOT enumerate which files each agent should read or edit. Pre-declaring file sets is error-prone (the planner has to predict the agent's navigation before the agent has started), brittle to refactors (an agent discovering it needs one more file would violate the declaration), and wasteful of the planner's reasoning budget (the whole point of agents is to parallelize reasoning).
+
+Agents inherit the same repo view the main LLM has:
+
+- Symbol map with imports, call sites, and `←N` reference counts
+- Document index (in doc mode or cross-reference mode)
+- Reference graph for identifying independent work units
+- File tree and edit protocol for navigation and modification
+
+An agent that edits `src/auth.py` auto-adds it to its selection via the existing `files_auto_added` mechanism — same behaviour as a user's chat session today. The main LLM's job is decomposition, not file-level specification.
+
+### Assigning independent work units
+
+Using the symbol map's reference graph, the main LLM identifies clusters of symbols with no cross-references between them, making them safe to edit in parallel. The decomposition describes these clusters in the `task` string at whatever granularity is useful — "refactor the auth module", "update the logging format", "extract the paging helper". The agent reads the task, consults the symbol map, and navigates to the relevant files on its own.
 
 When all spawned agents have completed, the main LLM reviews the combined forward diff and decides:
 
@@ -87,10 +164,12 @@ Each agent runs with:
 
 - Own ContextManager (own conversation history, own file context, own stability tracker)
 - Shared read-only access to symbol index, reference index, repo
-- A focused sub-task from the main LLM's decomposition
+- The `task` string from the main LLM's spawn block as its initial user message
 - A turn-scoped archival sink appending to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`
 
-Agents produce edit blocks applied via the existing apply pipeline.
+Agents start with an empty file context — same as a fresh user session. They navigate the repo via the symbol map, add files to their selection by emitting edit blocks (which trigger the existing `files_auto_added` path on not-in-context edits or `files_created` on creates), and produce modifications via the normal edit protocol. The apply pipeline treats an agent's edit blocks identically to a user's — per-path mutex, anchor matching, dry-run option, and result reporting all work unchanged.
+
+No file-set restriction is enforced on agents. If agent-0's task is to refactor the auth module and it decides it needs to read `src/logging.py` too, it does — nothing in the protocol prevents this. The main LLM's review step (next section) is the semantic-conflict safety net, not a file-level pre-declaration.
 
 ### Per-File I/O Serialization
 
@@ -111,24 +190,36 @@ Each agent's ContextManager operates correctly while other agents concurrently m
 - No shared cache tiers — each agent's stability tracker is independent during parallel execution
 - The main LLM's ContextManager is not an agent — it's the user-facing session ContextManager. It runs on the main event loop thread; agents run on worker threads. The main LLM observes agent completion, reviews diffs, and decides next steps via the same streaming path used for ordinary user turns
 
-## Review Step — Handled by the Main LLM
+## Review Step — User-Driven
 
-After all spawned agents complete, the main LLM observes the combined forward diff (current state vs HEAD before the turn) and decides what to do next. This is NOT a separate LLM call with a dedicated prompt — it's the main LLM continuing its own conversation on the main event loop, with the agent output injected as observation into its context. The next chunks it streams are either a synthesis (turn complete) or a revised decomposition (iterate).
+There is no automatic synthesis LLM call after agents complete. The backend's post-agent work is purely mechanical: assimilate the union of agent-modified and agent-created files into the parent conversation's file context and selection, emit `filesChanged` and `filesModified` broadcasts so the picker reloads, and let the turn end with the main LLM's initial response as the turn's final assistant message.
 
-What the main LLM sees when agents complete:
+The user drives review on the next turn. They see:
 
-- Forward diff of everything the agents changed
-- Per-agent completion status and per-edit result flags (applied / failed / not-in-context)
-- Changed files' current content (re-indexed since the agents ran)
-- Symbol map and document index refreshed for changed files
+- The main LLM's initial response in the chat, including the spawn blocks as prose (they render as ordinary markdown — a future frontend pass per [agent-browser.md](../5-webapp/agent-browser.md) will render them as tabs)
+- The files the agents touched, now visible in the picker with modified-file badges
+- The diffs, visible in the diff viewer
+- The newly-selected files in the parent's context on their next LLM call
 
-What the main LLM decides:
+On the next turn the user can:
 
-- **Synthesize** — the work is complete; write the synthesis and end the turn
-- **Iterate** — decompose again with revised scope; spawn fresh agents
-- **Recover from mechanical failure** — some edits failed anchor-match (text moved because another agent edited nearby); reissue edits with updated anchors, possibly via a single follow-up agent rather than a full re-decomposition
+- Ask the main LLM to review the agents' work ("review what the agents did" is a one-click snippet). Because the agent-modified files are now in the parent's context as full post-edit content, the main LLM sees each file the way a human reviewer would — reading the code in its current state rather than reasoning over a diff — and can judge completeness, flag inconsistencies, and suggest fixes.
+- Ask for iteration ("the auth changes are good but the session handling needs another pass"). The main LLM may emit a fresh agent-spawn decomposition if the task still warrants parallelism, or finish the work itself.
+- Ask for specific fixes ("agent 1's edit to `src/logging.py` introduced a bug; fix it"). The main LLM has the full post-change file content and can produce a normal edit block.
+- Ignore the agents' output and continue with something else.
 
-The main LLM's review is informed by any test output the user chose to feed into the conversation. The system does not run tests automatically — the user drives test execution, and test results are an ordinary input to the main LLM's next prompt, just like any other user message in a normal session.
+The system does not run tests automatically — the user drives test execution, and test results are an ordinary input to the main LLM's next prompt, just like any other user message in a normal session.
+
+### Why not automatic synthesis
+
+Earlier designs had the backend automatically fire a second LLM call after agents completed, feeding the transcripts into a synthesis prompt. Dropped because:
+
+- The main LLM already SAW what it was going to delegate (it wrote the spawn blocks). Having it re-read transcripts to summarise its own plan's execution is redundant token spend.
+- The interesting judgment — "is this complete, are the pieces consistent, what's left to do" — benefits from user context. The user knows which parts of the task they care about most, which tests they ran, which tradeoffs they'd accept. A synthesis LLM call without that context produces a plausible-sounding summary that might miss the point.
+- Stopping after the initial response leaves a natural checkpoint. The user sees the file changes before any further LLM work, which means they can catch agents that went off the rails before spending more tokens on a synthesis of bad work.
+- Frontend UX is simpler: one assistant message per turn, agent activity surfaced through file-picker state and (eventually) the agent tab strip, user follow-ups driven by the existing chat loop.
+
+Future work may revisit this — e.g., an auto-synthesis setting for users who prefer it, or a heuristic-driven auto-review when all agents succeed cleanly with small diffs. For now, user-driven review is simpler and more correct.
 
 ## System Prompt
 
@@ -151,7 +242,7 @@ All agents share the existing single WebSocket connection. Each agent's stream c
 
 Bandwidth is not a constraint — N agents at a typical generation rate produce aggregate throughput well within WebSocket frame limits.
 
-The existing per-animation-frame coalescing in the chat panel handles DOM update batching. The main LLM's output streams to the chat panel's primary message card; each agent's output streams to its column in the agent region (see [agent-browser.md](../5-webapp/agent-browser.md)), each with independent coalescing.
+The existing per-animation-frame coalescing in the chat panel handles DOM update batching. The main LLM's output streams to the Main tab's message list; each agent's output streams to its own tab in the chat panel's tab strip (see [agent-browser.md](../5-webapp/agent-browser.md)), each tab with independent coalescing.
 
 ## No Git Branches or Worktrees
 
@@ -188,7 +279,128 @@ The main LLM decides per-turn whether to spawn agents. Typical cases:
 - Bulk documentation updates across independent sections
 - Codebase migrations (e.g., API version upgrades across many callers)
 
-For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. Users don't opt in or out — the decision is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
+For typical single-file or tightly-coupled tasks, the main LLM completes the work itself without the overhead of decomposition. When agent mode is enabled, the decision to decompose is the main LLM's, based on the request shape and the codebase structure it sees via the symbol map.
+
+## Agent Reuse by ID
+
+Agents are addressed by `id` in the spawn block. The backend's dispatch is a single rule:
+
+- Look up the `id` in the live agent registry (`_agent_contexts`)
+- **Hit** — route the new task into the existing agent. Its `ContextManager`, conversation, file context, and `StabilityTracker` are preserved; provider cache stays warm; the new task arrives as the next user message in that agent's existing conversation
+- **Miss** — spawn a fresh agent with the given `id`
+
+There is no separate `CONTINUE` block type. One block, fall-through semantics. The orchestrator picks reuse vs. fresh-spawn by picking the `id` — using a known id continues an existing agent, using a new id spawns one. The parser stays simple, the protocol stays small, and the LLM only has to remember "I name agents by id."
+
+IDs are arbitrary non-empty strings chosen by the orchestrator. The system prompt's agentic appendix should encourage stable, descriptive ids ("frontend-chat", "streaming-pipeline") so the orchestrator can re-address the same agent by name across turns. The backend does not validate id shape beyond non-emptiness.
+
+### Agent lifetime
+
+Agents linger for the life of the session and survive across user-initiated session resets. Once spawned, an agent's `ContextManager`, `StabilityTracker`, file context, file selection, and identity all persist. There is no idle timer, no explicit close block, and no garbage collection — agents stay on the sideline as part of the team until the application exits. The user manages agent population implicitly by directing the orchestrator (asking it to spawn new agents, retask existing ones, or leave them alone).
+
+`new_session` clears each agent's *chat history* — the per-agent conversation messages — but does NOT tear down the agent itself. The agent's `ContextManager` retains its file context, the `StabilityTracker` keeps its tier assignments and provider-cache state, and the agent remains addressable by its id for the next turn. This mirrors the main conversation's `new_session` behaviour: the main chat history is wiped, but the main `ContextManager` survives intact.
+
+The symmetry matters. From the user's perspective, `new_session` is "start a fresh conversation with the same warm team" — applied uniformly to the orchestrator and every live agent. Stability trackers, file contexts, and identities are session-scoped state that survives history resets; only the conversation messages themselves are turn-scoped enough to be wiped. Application exit is the only event that drops the agents themselves.
+
+Implication for the chat panel: agent tabs persist across `new_session` with empty message lists. Users see their team is still there but the conversations have been reset. Tab-based browsing of historical archives (via `get_turn_archive`) is unaffected — those are read-only and live on disk regardless.
+
+### Per-agent state descriptor
+
+For the main LLM to orchestrate agent reuse — decide which existing agent to retask vs. spawn a fresh one — it needs a minimal summary of each live agent at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
+
+Each descriptor entry carries exactly two fields:
+
+- **Identity** — the agent's id, the same string used in `🟧🟧🟧 AGENT` blocks to address it
+- **Files in context** — a list of `{path, depth}` entries, where `depth` distinguishes how deeply the agent has loaded the file. Three values:
+  - `full` — the agent has the file's full text in its context (loaded into `file_context` either by user selection, edit-block auto-add, or file-create). The agent can reason about the file's exact content; the orchestrator can retask precise work onto this agent without a re-read penalty.
+  - `symbol` — the agent has only the symbol-map summary for this file (in code mode, with cross-reference disabled or enabled). Structural awareness only; the agent will re-read the body if asked to edit it.
+  - `doc` — the agent has only the document-index outline for this file (in doc mode, with cross-reference disabled or enabled). Heading and link structure only; same re-read implication.
+
+That's it. The orchestrator picks an agent for a new task by matching the task's affected files against each agent's loaded paths *and* depth — an agent already holding `webapp/src/chat-panel.js` at `full` depth is the cheapest target for an edit there; an agent with the same path at `symbol` depth would have to re-read it (still cheaper than a cold spawn, but more expensive than the warm one). Path-and-depth lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to reflect the new paths and depths on its next turn.
+
+The descriptor builder reads each agent's `ContextManager.file_context` for `full` entries, then walks the agent's stability tracker for `file:`-prefixed entries (symbol map) and `doc:`-prefixed entries (doc index) to populate the `symbol` and `doc` lists. A path that appears at `full` depth is omitted from `symbol`/`doc` to avoid redundancy — the orchestrator only needs to know the deepest level the agent has loaded.
+
+### Single-copy invariant — assembly-time injection
+
+The descriptor must appear in the prompt sent to the LLM *exactly once per turn*, reflecting the current agent population. It must NOT be persisted to the main history store, because every persisted copy would shadow the previous one in the active context window — wasting tokens and giving the LLM N stale snapshots to disambiguate.
+
+The mechanism is the same one the system reminder uses (see [prompt-assembly.md — System Reminder Injection](../3-llm/prompt-assembly.md#system-reminder-injection)): the descriptor is built at assembly time from the live agent registry and prepended to the outgoing user message *in transit*. The message recorded in `history.jsonl` is the user's plain text; the descriptor never lands on disk and never enters compaction's view.
+
+Concrete contract:
+
+- The orchestrator's `ContextManager` (or `LLMService` at assembly) reads the current `_agent_contexts` registry on every turn
+- A descriptor block is constructed fresh from the live registry — closed agents drop out, new agents appear, file lists reflect each agent's current selection
+- The block is injected into the user message during `assemble_tiered_messages`, alongside the system reminder
+- The persisted user message (via `add_message` and the archival sink) is the user's raw text only
+
+Consequences:
+
+- The LLM sees exactly one descriptor per call: the one current at that turn's assembly time
+- History playback (session restore, search, history-browser) shows clean user messages without descriptor noise
+- An agent that closes between turn N and turn N+1 simply disappears from turn N+1's descriptor with no special invalidation step
+- Compaction operates on the persisted history, which has no descriptors, so summarisation logic doesn't need to know about agent state
+- The descriptor is cheap to rebuild (path lists from the registry); rebuilding per turn is preferable to caching it, because caching invites staleness bugs after agent state changes
+
+### What's deliberately omitted
+
+Earlier drafts included more fields that turned out to be redundant, unhelpful, or actively harmful to retasking:
+
+- **Original task text** — task is turn-scoped; agent identity is not. Including the original brief implies the agent has a stable role, which discourages retasking. If the orchestrator wants to know what an agent did last, the per-turn archive is one RPC away.
+- **Focus label / role description** — same problem amplified. A label like "frontend specialist" makes the orchestrator reluctant to send the agent to a backend task even when the agent's loaded files no longer match the label. Paths are the truth; labels lie as soon as the agent is retasked.
+- **Last-turn summary** — useful for review, not for routing. The orchestrator routing on "which agent already has these files open" doesn't care what the agent finished last.
+- **Cache warmth / last-active timestamp** — tracking liveness across turns adds maintenance cost (clock handling, restart semantics, what counts as "active") for a signal that doesn't change routing decisions. An agent either exists with files loaded or it doesn't; staleness is implicit in the path list (an agent with paths that have since been heavily edited will need to re-read them, but that's the apply pipeline's problem, not the descriptor's).
+- **Turn count, status, finish reason, token usage** — turn-scoped review data, not routing data. Surface on demand if the orchestrator asks; not in the standing descriptor.
+- **Fetched URLs** — treated as user-owned state. When URL lifecycle is in question, the main LLM raises it with the user rather than deciding silently.
+- **Stability tier summary** — cache warmth isn't actionable without a mental model of the tier system, which the main LLM doesn't have.
+- **Full conversation history** — expensive and unnecessary; archived already.
+- **Per-agent session totals** — exposed via the token HUD rather than as LLM routing input.
+- **Raw file content** — the main LLM's own context already has the relevant content via assimilation; the agent descriptor is metadata, not a content channel.
+
+### Reference mechanism
+
+The main LLM's agentic appendix learns a new block type alongside `🟧🟧🟧 AGENT`:
+
+- `🟧🟧🟧 CONTINUE` — address an existing agent by ID and supply a continuation task
+- `🟧🟧🟧 AGENT` — spawn a fresh one (existing semantics)
+
+The spawn-block parser dispatches on the keyword, routing `CONTINUE` to the registered agent's `ContextManager` and `AGENT` to a fresh scope. Per the marker-bytes discipline in `specs4/3-llm/edit-protocol.md`, `CONTINUE` gets its own distinct end marker to avoid the parser-state-tracking brittleness described for AGEND — tentatively `🟩🟩🟩 CONEND`.
+
+### User-confirmation for state changes
+
+When the main LLM wants to clear an agent's state (drop URLs, close the agent, wipe file selection), it asks the user *first* rather than mutating directly. The user answers yes or no in the main chat; the backend acts on the confirmed answer. Keeps destructive state changes under the user's control — the main LLM can only read the descriptor, never mutate agent state unilaterally.
+
+### Registry shape
+
+`LLMService._agent_contexts[turn_id][agent_idx]` gains an `AgentDescriptor` field populated by the agent's streaming pipeline as it runs. The last-turn summary is produced by a small LLM call after each agent turn completes, paid for once and re-used across subsequent main-conversation turns until the agent's next reply invalidates it.
+
+### Revisit trigger
+
+This design should be revisited once enough real multi-agent turns have run to reveal natural patterns — whether the main LLM spontaneously reuses agents when told it can, or whether the descriptor block adds noise the main LLM mostly ignores. Premature implementation would lock in guesses; the current fresh-per-turn model costs nothing and preserves every implementation option.
+
+## User Control — Agent Mode Toggle
+
+Agent mode is an opt-in capability gated by a user setting. Users who prefer predictable single-LLM turns, users on constrained token budgets, or users working in repos too small to benefit from decomposition can disable agent mode entirely — the main LLM then handles every turn as a single call, regardless of request shape.
+
+### Configuration
+
+- Stored in `app.json` under `agents.enabled` (boolean). Default: `false`.
+- Exposed through the Settings tab as a toggle card. The card's description names the trade-off clearly — "Allow the assistant to decompose complex requests into parallel agent conversations. Uses more tokens per turn but finishes large refactors faster."
+- Settings-service whitelist covers the app-config field. Hot-reload picks up toggle changes without a server restart; the next user turn sees the new state.
+- The agent-spawn capability is described in a separate bundled file, `system_agentic_appendix.md`. When `agents.enabled` is `true`, the config layer concatenates the appendix onto `system.md` during prompt assembly. When `false`, the appendix is never read and the LLM is never told about the capability — it cannot emit agent-spawn blocks regardless of task shape.
+- The appendix is a managed file (treated like `system.md`, `review.md`, etc.) — bundled defaults ship with the app, users can edit their copy to customise the agent instructions, and the upgrade pass backs up customisations on version change.
+- Assembly order: `system.md` → `system_agentic_appendix.md` (if enabled) → `system_extra.md`. User project-specific customisation in `system_extra.md` lands last so it can extend or override anything above.
+
+### Frontend surface
+
+- Settings tab includes an "Agentic coding" card alongside the other configuration cards.
+- Card renders as a toggle with a short description and a "learn more" link pointing at this spec file.
+- State change broadcasts `modeChanged` — the Settings service's reload path fires it so connected collaborators see the update.
+- Non-localhost participants in collaboration mode see the card in read-only form: the toggle reflects the host's state but cannot be changed. Matches the existing settings-service restriction pattern.
+
+### Runtime behaviour
+
+- `LLMService` reads `config.agents_enabled` on each turn's prompt assembly. When false, the system prompt's agent-spawn description is omitted.
+- The parser's AGENT/AGEND tolerance (per Foundation Requirements) stays active regardless — a disabled-agent-mode setup that somehow receives an agent block in its input (stale session, malformed config) still parses cleanly and ignores the block.
+- Disabling agent mode mid-turn is not possible — the setting is read at prompt-assembly time and the turn proceeds to completion regardless of subsequent toggle flips. A user wanting to abort mid-turn uses the normal cancel mechanism.
 
 ## Invariants (Design Targets)
 
@@ -200,7 +412,7 @@ For typical single-file or tightly-coupled tasks, the main LLM completes the wor
 - User drives test execution — the system does not run tests automatically
 - Git state is unchanged by parallel execution — no branches, worktrees, or auto-commits
 - Final review and commit always happen via the existing manual workflow
-- Every turn produces exactly one assistant message in the main history store, regardless of how many agents ran and how many iteration rounds occurred. The main LLM's decomposition narration, review commentary, and synthesis all land in the same assistant message's `content` field
+- Every turn produces exactly one assistant message in the main history store, regardless of how many agents ran. The main LLM's decomposition narration (including the agent-spawn blocks as prose) IS that message; there is no automatic synthesis LLM call that would produce a second message. Review and iteration happen on subsequent user turns, each producing their own single assistant message per the normal chat flow
 - Agent archive files are append-only within a turn; re-iteration within the turn appends rather than overwrites
 - Archive existence is optional for main-store correctness — an archive can be deleted at any time without invalidating chat playback or session restore
-- There is no separate planner or assessor ContextManager. The main LLM IS the planner and the assessor, and its conversation lives in the main history store, not in the archive
+- There is no separate planner or assessor ContextManager. The main LLM IS the planner; the user is the assessor (driving review on follow-up turns). Both the main LLM's conversation and any review/iteration turns live in the main history store, not in the archive

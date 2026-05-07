@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _MANAGED_FILES = frozenset({
     "system.md",
     "system_doc.md",
+    "system_agentic_appendix.md",
     "review.md",
     "commit.md",
     "compaction.md",
@@ -106,6 +107,7 @@ CONFIG_TYPES: dict[str, str] = {
 _HIGH_MIN_MODELS = (
     "opus-4-5", "opus-4.5",
     "opus-4-6", "opus-4.6",
+    "opus-4-7", "opus-4.7",
     "haiku-4-5", "haiku-4.5",
 )
 _HIGH_MIN_TOKENS = 4096
@@ -703,6 +705,39 @@ class ConfigManager:
             ),
         }
 
+    @property
+    def agents_config(self) -> dict[str, Any]:
+        """Agent-mode section with defaults filled in.
+
+        Gates the parallel-agents capability described in
+        specs4/7-future/parallel-agents.md. Until agent mode is
+        implemented, this flag only affects whether the system
+        prompt's agent-spawn block description is visible to the
+        LLM — it does not change any runtime code path beyond
+        :meth:`get_system_prompt`'s fenced-section stripping.
+
+        Kept separate from :attr:`agents_enabled` so future
+        agent-mode settings (max concurrent agents, per-agent
+        token budget, synthesis delay) can be added to the dict
+        without changing the bool accessor's shape.
+        """
+        section = self.app_config.get("agents", {})
+        if not isinstance(section, dict):
+            section = {}
+        return {
+            "enabled": bool(section.get("enabled", False)),
+        }
+
+    @property
+    def agents_enabled(self) -> bool:
+        """Convenience accessor — True when agent mode is on.
+
+        Callers in the hot prompt-assembly path read this rather
+        than unpacking the config dict on every turn. Defaults to
+        False — agent mode is strictly opt-in.
+        """
+        return self.agents_config["enabled"]
+
     # ------------------------------------------------------------------
     # Directory accessors
     # ------------------------------------------------------------------
@@ -773,8 +808,76 @@ class ConfigManager:
         return f"{main}\n\n{extra}"
 
     def get_system_prompt(self) -> str:
-        """Main coding-agent system prompt (``system.md`` + extra)."""
+        """Main coding-agent system prompt.
+
+        Assembly order (top to bottom):
+
+        1. ``system.md`` — base prompt
+        2. ``system_agentic_appendix.md`` — appended only when
+           ``agents_enabled`` is True AND the file exists in
+           the user config dir. Describes the agent-spawn
+           capability to the LLM. When ``False`` or file
+           absent, the LLM is never told about agent mode —
+           it cannot emit agent-spawn blocks even if
+           ``app.json`` somehow carries a stale reference.
+        3. ``system_extra.md`` — user customisation, always
+           appended last so project-specific rules apply to
+           everything above.
+
+        Each section is separated from the next by a blank
+        line. Absent or empty sections are skipped cleanly —
+        a user install without the agentic appendix file
+        (e.g., stripped-down release, or user-deleted file)
+        falls through to the extra prompt without error.
+
+        The appendix falls back to the bundled copy when the
+        user-dir file is absent. This matters because
+        ``system_agentic_appendix.md`` was added to the
+        managed-files set in a specific release — users who
+        installed AC⚡DC before that release have a version
+        marker that prevents the upgrade pass from copying the
+        file, but their toggle-enabled state still expects the
+        appendix text to flow into the prompt. The fallback
+        papers over this cross-version gap so "toggle on" reliably
+        produces agent instructions regardless of install
+        history. Users who explicitly want to suppress the
+        appendix text can do so via the ``agents.enabled`` flag
+        in ``app.json`` (which the Settings-tab toggle writes
+        to); there is no use case for "toggle on but appendix
+        text suppressed" that warrants a second independent
+        control.
+        """
         main = self._read_user_file("system.md")
+        if self.agents_enabled:
+            # Read from the user dir first, falling back to
+            # the bundle when the user file is absent.
+            #
+            # The user-dir file is created by the upgrade
+            # pass on install. However, users who installed
+            # AC⚡DC before `system_agentic_appendix.md` was
+            # added to the managed-files set have a version
+            # marker that prevents the upgrade pass from
+            # copying the file — the early-return on
+            # matching versions skips the per-file check.
+            # The bundle fallback papers over this
+            # cross-version gap so "toggle on" reliably
+            # produces agent instructions regardless of
+            # install history.
+            #
+            # A user who wants to opt out of the appendix
+            # text while keeping the toggle on must set
+            # `agents.enabled: false` in `app.json` —
+            # deleting the appendix file no longer
+            # suppresses it (the bundle is still present).
+            # This is a deliberate trade-off: reliability
+            # of the toggle across install histories
+            # outweighs the niche escape hatch of partial
+            # opt-out via file deletion.
+            appendix = self._read_user_file(
+                "system_agentic_appendix.md"
+            ).strip()
+            if appendix:
+                main = f"{main}\n\n{appendix}"
         return self._concat_prompt(main)
 
     def get_doc_system_prompt(self) -> str:
@@ -785,6 +888,34 @@ class ConfigManager:
         customisations apply to both.
         """
         main = self._read_user_file("system_doc.md")
+        return self._concat_prompt(main)
+
+    def get_agent_system_prompt(self) -> str:
+        """System prompt for spawned agent conversations.
+
+        Per specs4/7-future/parallel-agents.md § Execution
+        Model, agents run through the same streaming pipeline
+        as main-conversation turns — same edit parsing, same
+        apply path, same tool surface. They therefore need
+        the same behavioural instructions as a non-agent
+        turn: the core coding-agent system prompt plus any
+        user customisation.
+
+        Differs from :meth:`get_system_prompt` in one way:
+        the agentic appendix is NEVER appended, regardless
+        of the ``agents.enabled`` toggle. Tree depth is 1
+        per spec — agents don't spawn sub-agents — so
+        describing the spawn capability to an agent would
+        be misleading (it could emit agent-spawn blocks
+        that the parent's ``_is_child_request`` gate
+        silently drops). Omitting the appendix keeps the
+        agent focused on its task and saves tokens.
+
+        Assembly: ``system.md`` → ``system_extra.md``.
+        Same user-customisation contract as the main
+        prompt.
+        """
+        main = self._read_user_file("system.md")
         return self._concat_prompt(main)
 
     def get_review_prompt(self) -> str:

@@ -12,6 +12,7 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
+import { parseAgentTabId } from './chat-panel.js';
 
 /** Auto-hide delay (ms). */
 const _AUTO_HIDE_MS = 8000;
@@ -421,12 +422,21 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._collapsed = this._loadCollapsed();
     this._mapModalContent = null;
     this._mapModalTitle = '';
+    // Active tab ID — driven by `active-tab-changed`
+    // events from the chat panel. Default 'main' so the
+    // first fetch after construction targets the main
+    // conversation. Per specs4/5-webapp/viewers-hud.md
+    // § Per-Context-Manager Breakdown, the HUD's
+    // breakdown RPC accepts an optional agent identifier
+    // to target a specific context manager.
+    this._activeTabId = 'main';
 
     this._autoHideTimer = null;
     this._fadeTimer = null;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
   }
 
   connectedCallback() {
@@ -439,11 +449,22 @@ export class TokenHud extends RpcMixin(LitElement) {
     // persistent display. Keeps the next streamComplete's HUD
     // consistent with the restored session state.
     window.addEventListener('session-changed', this._onSessionChanged);
+    // Agent-tab switches fire `active-tab-changed` from the
+    // chat panel. The HUD tracks the active tab so the next
+    // stream-complete (on any tab) fetches the right scope's
+    // breakdown. The HUD doesn't show on tab switch alone —
+    // only when a request completes.
+    window.addEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
   }
 
   disconnectedCallback() {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener(
+      'active-tab-changed', this._onActiveTabChanged,
+    );
     this._clearTimers();
     super.disconnectedCallback();
   }
@@ -522,12 +543,45 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._fetchBreakdown();
   }
 
+  _onActiveTabChanged(event) {
+    const tabId = event?.detail?.tabId;
+    if (typeof tabId !== 'string' || !tabId) return;
+    if (tabId === this._activeTabId) return;
+    this._activeTabId = tabId;
+    // Don't refresh or reveal the HUD here. The HUD is
+    // per-request feedback — it appears after a stream
+    // completes and auto-hides. Switching tabs without a
+    // new completion shouldn't flash it. The next
+    // stream-complete on any tab will fetch the current
+    // scope's breakdown via _fetchBreakdown, which reads
+    // _activeTabId at call time.
+  }
+
   async _fetchBreakdown() {
     if (!this.rpcConnected) return;
+    // Resolve the active tab into an agent_tag. null for
+    // main; [turn_id, agent_idx] for agent tabs. Matches
+    // the context-tab's dispatch rule.
+    const agentTag = parseAgentTabId(this._activeTabId);
     try {
       const result = await this.rpcExtract(
         'LLMService.get_context_breakdown',
+        agentTag,
       );
+      // Agent-not-found — the agent tab was closed
+      // server-side between our fetch firing and the
+      // RPC landing. Leave _data unchanged so the HUD
+      // shows the previous scope's numbers rather than
+      // flashing empty; the next request will retry.
+      if (result && typeof result === 'object' && result.error) {
+        if (result.error !== 'agent not found') {
+          console.debug(
+            '[token-hud] get_context_breakdown error',
+            result.error,
+          );
+        }
+        return;
+      }
       this._data = result && typeof result === 'object' ? result : null;
     } catch (err) {
       const msg = err?.message || '';

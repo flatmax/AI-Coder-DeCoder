@@ -91,10 +91,277 @@ Both directory names are in `.gitignore` so a developer running both implementat
 
 Specs4 documents the per-repo directory abstractly ("the per-repo working directory") without pinning the name, which is the right altitude for a behavioral spec. Specs3 correctly documents `.ac-dc/` because it describes the previous implementation. Neither suite needs updating for this rename.
 
+### D27 — L0 is structural-only and never invalidated; edited files pin in lower tiers
 
-unnecessary — let me also add the work plan
+The cache-tiering design allowed any tracked item — including full file content — to be promoted into any tier including L0, as long as it earned the N-counter graduation. Combined with the wide-exclude rule (a selected file's symbol block is removed from the aggregate map when its full content lives in Active), this meant routine selection toggles and edits could rewrite L0's byte sequence. Every cache-busting event paid a full L0 miss — typically the largest single block in the prompt.
 
-Wait, I need to separate this into two edits — one for D18 and one for the work plan section. Let me redo.
+The user's complaint surfaced the cost: "adding full context files invalidates the cache as symbol tables are dropped from the four tiers randomly, as they are added in full file to the context." Each turn that touched a file's selection or edit state risked invalidating the most expensive cached prefix.
+
+Resolution: separate the tier model into **content-typed** and **stability-typed** regions.
+
+**Content-typed region (L0).** Permanent. Holds:
+- System prompt (with new staleness-awareness clause — see below)
+- Aggregate symbol map for every indexed file
+- Aggregate doc map for every indexed file
+
+L0's byte sequence is fixed for the duration of the session. The aggregate maps reflect the index state captured at session start (or after explicit cache rebuild). L0 is invalidated *only* by application restart or explicit `rebuild_cache` RPC. Edits, selections, URL fetches, history compaction, session loads — none touch L0.
+
+**Stability-typed region (L1, L2, L3, Active).** Holds full file content, fetched URL content, and history. The existing N-counter cascade promotes content from Active through L3 → L2 → L1 as it stays stable. Symbol blocks and doc blocks never appear here — they live only in L0's aggregate maps.
+
+**Edit invariant.** When a file's content hash changes, `file:<path>` lands in Active with fresh content and is *pinned* — stale-cleanup and automatic eviction skip it. It rides the cascade upward normally as it stabilises but cannot be silently removed. Only application restart or cache rebuild clears pinned files. Unmodified files can still be deselected by the user as today.
+
+**Why this works.** The structural map L0 holds may drift during a session — a function signature in the symbol map can lag behind the actual edited file. The full edited text is always present in Active or a lower cached tier (the edit invariant guarantees this), and the new system prompt clause ("How Files Appear in This Prompt") tells the LLM that full-text in Current Working Files supersedes the structural map. Modern instruction-tuned models exhibit strong recency bias plus context-hierarchy awareness; the explicit authority rule plus the natural recency weighting handle the staleness gracefully.
+
+**Tradeoff acknowledged.** The structural map can be wrong about session-edited files between L0 rebuilds. Cost per incident: small — at worst, the LLM produces a comment or question based on a stale signature when the truth is right there in Working Files. Benefit: continuous — L0 cache survives every selection toggle, edit, URL fetch, and turn boundary in the session. Net is strongly positive: the structural map is for navigation, the full text is for truth.
+
+**Wide-exclude logic removed.** With L0 always containing the full aggregate maps and L1–L3 never containing symbol/doc blocks at all, there's no longer any "is this symbol block already rendered elsewhere?" decision. The three call sites that previously coordinated on `wide_map_exclude_set` (`_assemble_tiered`, `_get_meta_block`, `get_context_breakdown`) simplify to "L0 always shows everything; lower tiers never show symbols."
+
+**Cascade unchanged.** N-counter, ripple promotion, underfill demotion, hysteresis (when added) — all stay. The only new policy constraints are: nothing promotes into L0, nothing in L0 is rewritten by the cascade, and edited files are pinned against stale removal.
+
+Spec updates landing alongside this decision: `specs4/3-llm/cache-tiering.md`, `specs4/3-llm/prompt-assembly.md`, `specs-reference/3-llm/cache-tiering.md`, `specs-reference/3-llm/prompt-assembly.md`, `src/ac_dc/config/system.md`, `src/ac_dc/config/system_doc.md`. Sync from `system.md` / `system_doc.md` to `specs-reference/3-llm/prompts/` via `scripts/sync_prompts.py` after the prompt files land.
+
+### D20 — Agent-spawn block shape: minimal `{id, task}` + distinct `🟩🟩🟩 AGEND` end marker
+
+Parallel agents (`specs4/7-future/parallel-agents.md`) are speculative future work — no implementation planned in the current scope — but the decomposition format had to be pinned concretely so edit-protocol parsers could reserve the marker bytes and so MCP integration (`specs4/7-future/mcp-integration.md`) had a shape to extend. Two decisions settled during design consolidation:
+
+**Option A — minimal fields.** Agent-spawn blocks carry two required fields, `id` and `task`. No `read:`, `edit:`, or file-set pre-declaration. Agents navigate the repo with the same affordances the main LLM has (symbol map, reference graph, doc index, edit protocol), discovering files via the existing `files_auto_added` / `files_created` mechanisms. Alternatives considered: explicit file lists (rejected — error-prone, brittle, wastes planner reasoning budget), scope hints as non-binding suggestions (rejected — adds a field that duplicates what `task` already implies), independence declaration for sequencing (rejected — sequencing within a turn can be expressed as a second decomposition round). Unknown fields land in an `extras` dict for forward-compatibility; MCP uses this slot for its optional `tools:` field.
+
+**Distinct end marker `🟩🟩🟩 AGEND`.** Agent blocks close with `🟩🟩🟩 AGEND` rather than sharing edit blocks' `🟩🟩🟩 END`. Shared end markers would force the parser to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input, and would force frontend display parsers and backend apply parsers to stay in lockstep on state tracking. Distinct end markers let each parser dispatch on the literal line. The practical trigger was the edit protocol itself: a response (or a spec document) quoting both block types in the same region would have one marker accidentally terminate the other's. The `AGEND` keyword preserves the orange→green color progression and matches the four-character keyword convention (`EDIT`, `REPL`, `END`), while unambiguously differentiating the two block families.
+
+Canonical contracts live in three places: `specs4/7-future/parallel-agents.md` (the behavioural spec, including the Foundation Requirements invariant that the current edit parser must tolerate `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` as prose), `specs4/3-llm/edit-protocol.md` (the edit-protocol spec marks agent blocks as reserved and cross-references the future spec), and `specs-reference/3-llm/edit-protocol.md` (the reference twin documents the exact marker bytes). `specs4/7-future/mcp-integration.md` uses the `extras` slot for `tools:` without introducing new marker syntax.
+
+No code changes from this decision — the current `EditParser`'s state machine already treats unknown lines in `SCANNING` as prose, which is the behaviour the invariant requires. A future agent-spawning implementation will add parser branches that dispatch on the `AGENT` / `AGEND` keywords after the three orange / green emoji.
+
+### D23 — Agent-mode toggle threads through three layers with distinct concerns
+
+The `agents.enabled` toggle in `app.json` gates the parallel-agent capability at three independent layers, each with its own rationale. Landed as a three-commit sequence across one session. Commit 1 added the config property (`agents_enabled`), commit 2 added the prompt-assembly mechanism (`system_agentic_appendix.md`), commit 3 wired the live-refresh path so toggle flips take effect on the next user turn rather than the next mode switch.
+
+**Layer 1 — config.** The toggle is a boolean field under `agents.enabled` with default `false`. Exposed via `ConfigManager.agents_config` (dict shape for future extension — max concurrent agents, per-agent budget, synthesis delay all fit into the same section) and `ConfigManager.agents_enabled` (convenience bool accessor used in the hot prompt-assembly path). Malformed `agents` values — non-dict section, non-bool `enabled`, missing field — all degrade to False via Python's `bool()` coercion semantics. Tests pin every degradation case so a future refactor that "helpfully" rejects truthy strings can't silently flip the invariant.
+
+**Layer 2 — prompt assembly.** The agent-spawn capability description lives in a separate bundled file, `system_agentic_appendix.md`, not fenced into `system.md`. Earlier design explored fence markers (`<!-- APPENDIX_START -->`) with regex stripping based on the toggle, rejected because: two files with a tight concatenation is cleaner than one file with runtime-gated stripping; user customisation is a simple file edit rather than a tricky partial edit of a larger file; and the upgrade pass naturally backs up customisations to the appendix via the standard managed-file mechanism. `get_system_prompt()` concatenates `system.md` → appendix (if enabled) → `system_extra.md`, with `system_extra.md` LAST so project-specific rules apply to everything above (including the appendix when agent mode is on).
+
+The appendix uses **user-dir-only read semantics**, distinct from the base `system.md` where the fallback-to-bundle path is load-bearing. A user who deletes `system_agentic_appendix.md` from their user config dir has made a clear choice to suppress agent-mode instructions; the fallback-to-bundle pattern would defeat that choice by re-injecting the text they just removed. The base `system.md` can't use user-dir-only because a missing base prompt would break every chat request — so the two files deliberately have different read semantics, documented in `specs4/1-foundation/configuration.md` § User-Dir-Only Read for the Agentic Appendix.
+
+Diagnosing the test failure that surfaced this semantic took one turn of back-and-forth. The test deleted `system_agentic_appendix.md` expecting the prompt to omit the appendix, but the assertion still found "Agent-Spawn Capability" in the prompt — because `_read_user_file` was falling back to the bundled copy under `src/ac_dc/config/system_agentic_appendix.md`. Fix was a user-dir-only read path added inline in `get_system_prompt()` rather than plumbing a no-fallback option through the generic helper.
+
+**Layer 3 — LLMService refresh wiring.** Without explicit refresh, the context manager caches the assembled prompt at session start, mode switches, and review entry/exit. Toggling `agents.enabled` in the Settings tab would change what `ConfigManager.get_system_prompt()` returns, but the cached prompt on the active context manager wouldn't refresh until the next mode switch — producing a confusing UX where the toggle UI says "agents on" but the LLM doesn't see the appendix for several turns.
+
+`LLMService.refresh_system_prompt()` re-reads the mode-appropriate prompt from config and installs it on the context manager. Called by `Settings.reload_app_config()` after a successful `ConfigManager.reload_app_config()`. Respects review mode (the review prompt stays authoritative until review exit), is idempotent, and has its own localhost gate independent of Settings' gate.
+
+The `Settings(config, llm_service=...)` constructor takes an optional LLMService reference. Existing tests and call sites that omit the kwarg keep working — the refresh just doesn't fire when no service is attached, matching pre-commit-3 behaviour. `main.py` wires the reference post-construction via `settings._llm_service = llm_service` because Settings is constructed before LLMService (the usual dependency-inversion pattern for collab and other cross-service wiring).
+
+**Layer 4 — Settings-tab toggle card (frontend).** The backend wire-through (commits 1–3) left the toggle reachable only by editing `app.json` directly. Commit 4 (`d56586d`) adds a dedicated toggle-card renderer to `webapp/src/settings-tab.js` that surfaces `agents.enabled` as an inline switch in the Settings tab — read-in reads the underlying `app.json` content, click-to-flip writes it back via `Settings.save_config_content`, which triggers the reload-and-refresh chain the three backend commits set up.
+
+The card uses a new `renderer: 'toggle'` mode in the `CONFIG_CARDS` catalog, distinct from the default textarea-editor cards. The `toggleConfigKey` names the underlying config type (`'app'`), and `togglePath` is a dot-separated path into that JSON (`'agents.enabled'`). Defensive parsing falls back to `toggleDefault` when JSON is malformed, the `agents` section is missing, or the field is non-bool. A per-card `_togglingKey` field prevents rapid-click double-writes while the save+reload is in flight. Remote collab participants see the switch rendered disabled with a "Host controls this setting" note; mutation is still enforced backend-side by `save_config_content`'s localhost gate, the disabled switch is defensive UI only.
+
+`_loadLocalhostFlag` currently hardcodes `_localhost = true` with a TODO — wiring it to real role data lives with the broader collab-UI work that's explicitly parked. Until that lands, remote participants get a restricted-error toast on click rather than a pre-disabled switch; the outcome is the same (write rejected) but the UX is less polished.
+
+**Invariant preserved**: when `agents.enabled` is `false`, the LLM is never told about agent-spawn blocks. The appendix file is never read, the system prompt never mentions the capability. This is stronger than "the parser tolerates unknown blocks" — the LLM can't emit blocks it doesn't know exist. Users wanting to experiment with agent mode opt in deliberately; users on budget-sensitive workflows never pay the appendix's token cost.
+
+The four commits form a complete wire-through with no intermediate half-on states. A single commit implementing all four would have been harder to review and harder to revert. The *information plane* is end-to-end deliverable from Settings-tab click through to the next user turn including the appendix in its system prompt.
+
+**What D23 does NOT deliver — the execution plane.** Enabling the toggle tells the LLM about agent-spawn blocks via the appendix. It does not cause anything to spawn. The edit parser recognises `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` as reserved marker syntax (D20) and the `AgentBlock` dataclass captures parsed fields, but no dispatch path consumes those blocks — they surface in the response as prose. The `build_agent_context_manager` factory exists (Slice 5), turn-ID propagation exists (Slice 1), agent archive persistence exists (Slice 2), but the `_stream_chat` refactor that would invoke N agents in parallel has not landed (see D22). The tabbed chat-panel UI described in D21 has not landed either.
+
+So toggling agents on today produces a more informative LLM response — it may reference agent blocks in its reasoning, or emit well-formed blocks that nothing acts on — without changing what actually executes. The toggle is decorative from an *execution* standpoint. This is deliberate: `specs4/7-future/parallel-agents.md` files the dispatch layer under future work, and the gating infrastructure had to land first so when dispatch is implemented, the LLM can be taught the capability and then un-taught without redeploying.
+
+### D24 — `_stream_chat` `ConversationScope` refactor complete; module decomposition deferred
+
+The execution-layer prerequisite called out at the end of D22 has landed. `LLMService._stream_chat` and every per-conversation helper it calls now thread a `ConversationScope` dataclass containing the conversation's `ContextManager`, stability tracker, session ID, selected-files list, and archival-append closure. Shared infrastructure (`_repo`, `_config`, `_symbol_index`, `_doc_index`, `_url_service`, `_edit_pipeline`, executors, event callback, guard state) stays on `LLMService`. For the main user-facing session, `_default_scope()` builds a scope from `self` and the behaviour is byte-identical to the pre-refactor implicit-reads; a future agent-spawning path constructs per-agent scopes via `build_agent_context_manager` (Slice 5) and invokes `_stream_chat` N times in parallel.
+
+**The 11-commit sequence.** Landed over eleven reviewable commits rather than one monolithic diff. Each step left the codebase passing tests; no intermediate half-refactored state shipped. Commit hashes and content in the progress log at `docs/parallel-agents-scope-refactor.md`:
+
+1. Add `ConversationScope` dataclass + `_default_scope()` helper; no call sites use it yet
+2. `_stream_chat` accepts `scope`; `chat_streaming` threads it through
+3. `_post_response(scope)` — compaction system-event writes go through `scope.context.add_message` and `scope.archival_append`
+4. `_update_stability(scope)` — tier assignment reads `scope.tracker`, `scope.context.mode`, `scope.selected_files`
+5. `_sync_file_context(scope)` — file loads target `scope.context.file_context`
+6. `_build_tiered_content(scope)`, `_assemble_tiered(scope)`, `_assemble_messages_flat(scope)` — all tier assembly reads per-conversation state from scope
+7. `_detect_and_fetch_urls(scope)` — URL context attaches to `scope.context`; `_url_service` stays shared
+8. `_build_completion_result(scope)` — auto-add mutations write to `scope.selected_files` and `scope.context.file_context`
+9. `_build_and_set_review_context(scope)` — last per-conversation callee; review-mode state stays main-only on `self`
+10. `TestConversationScopeDefault` — five-test regression guard pinning explicit-scope equivalence
+11. This entry
+
+**Main-conversation-only state pinned to self.** `_review_active` and `_review_state` intentionally do NOT move into scope. Review mode is a main-conversation feature per specs4/4-features/code-review.md § Limitations; agents never enter review. Keeping the state on `self` surfaces that invariant at the method boundary — a reader of `_stream_chat` sees the review-mode branch read from `self._review_active` and understands immediately that this code path is specific to the user-facing session. Threading scope through `_build_and_set_review_context` was for consistency; the method's content still reads `self._review_state` because scope never carries it.
+
+**The `archival_append` closure is the agent-vs-main abstraction.** For the main conversation, `_default_scope()` wraps `HistoryStore.append_message` in a closure that captures the store. For a future agent conversation, `build_agent_context_manager` returns a ContextManager whose `archival_sink` wraps `HistoryStore.append_agent_message` and bakes in the turn_id + agent_idx. At the call site in `_stream_chat`, `scope.archival_append("user", content, session_id=..., turn_id=...)` works identically — it's just a callable that persists one message. Neither the main path nor the agent path has to know the other exists.
+
+**Decomposition of `llm_service.py` deferred.** The module is ~3000 lines — a handful of RPC methods (mode / cross-reference / review / URL / rebuild / session / history / LSP / TeX / settings-refresh), the streaming pipeline, and the orchestration glue that wires context + tracker + compactor + URL service + event callback + guard state. Splitting it now during the refactor would produce a chain of dependencies between new modules that the scope refactor itself doesn't motivate. Candidate carve-outs for a future pass: the RPC surface methods (mode / review / URL / rebuild) into `llm_rpc_methods.py`, the streaming pipeline (`_stream_chat` + `_run_completion_sync` + `_build_completion_result` + helpers) into `llm_streaming.py`, the stability-tier glue (`_try_initialize_stability` / `_update_stability` / `_rebuild_cache_impl`) into `llm_stability.py`, keeping `LLMService` in `llm_service.py` as the public entry point. Not this commit.
+
+**Next concrete work — delivered.** See D25 for the execution-plane shipping record. Summary: parser dispatch, `_spawn_agents_for_turn`, per-agent scope construction, and post-spawn assimilation have all landed across six commits (Steps 1-6 in `docs/agent-spawning-plan.md`). Synthesis was deliberately replaced with user-driven review — see D25 for the scope revision and its rationale.
+
+**What "agentic mode" means today, concretely.** Four things landed:
+
+| Layer | Piece | Delivered |
+|---|---|---|
+| Config | `agents.enabled` flag, `agents_config` / `agents_enabled` properties, malformed-value degradation | ✓ |
+| Prompt assembly | `system_agentic_appendix.md` bundled file, concatenation logic, user-dir-only read semantics | ✓ |
+| Live refresh | `LLMService.refresh_system_prompt()` invoked from `Settings.reload_app_config()` | ✓ |
+| Frontend | Settings-tab toggle card with click-to-save, defensive parsing, localhost gate, in-flight guard | ✓ |
+
+Four things did NOT land and belong to the future spec:
+
+| Layer | Piece | Status |
+|---|---|---|
+| Parser dispatch | Branch in `EditParser` that routes `🟧🟧🟧 AGENT` blocks to a spawn handler instead of treating them as prose | Foundation (D20) tolerates the markers; no dispatch path exists |
+| Execution | `_stream_chat` refactor to take ContextManager as parameter, then invoke N times in parallel per agent block (per D22) | Not started |
+| Archive UI | Tab strip in chat panel, per-tab state keyed by `{turn_id, agent_idx}`, per-tab RPC routing (per D21) | Not started |
+| Synthesis | Main LLM observing agent completion and deciding synthesize / iterate / recover | Not started |
+
+The gap between "information plane complete" and "execution plane implemented" is substantial — roughly the content of `specs4/7-future/parallel-agents.md` § Execution Model, Agents, Review Step. That spec remains in `specs4/7-future/` precisely because it's future work. A user toggling `agents.enabled` on today gets a more informative LLM that knows about a capability it cannot exercise.
+
+The value of landing D23 in isolation is cleanup cost. When the dispatch layer IS implemented later, the prompt-side gating infrastructure is already in place — the feature can be tested with `agents.enabled=true` from day one, and the existing test suite pins the off-state invariant (appendix-never-read, prompt-never-mentions-capability) so a regression that leaked agent instructions into non-agent deployments would trip on the first test run.
+
+### D25 — Agent execution plane delivered; synthesis replaced by user-driven review
+
+The four "not started" items from D24's closing table split: parser dispatch, execution, and post-spawn assimilation landed across six commits following the plan in `docs/agent-spawning-plan.md`. The synthesis item dropped from scope — deliberately replaced by user-driven review on the follow-up turn — and the archive UI (D21 tab strip) remains deferred.
+
+**What shipped.** Six commits, each leaving tests passing:
+
+| Step | Commit | Content |
+|---|---|---|
+| 1 | Step 1 scaffold | Parser dispatch as a reachable no-op; log-only when toggle on; `_filter_dispatchable_agents` gates on `agents.enabled` + non-empty valid blocks |
+| 2 | Step 2 spawn skeleton | `_spawn_agents_for_turn` constructs per-agent scopes via `build_agent_context_manager`, derives child request IDs `{parent}-agent-{NN:02d}`, fans out via `gather(return_exceptions=True)`; `_agent_stream_impl` attribute starts as a no-op stub |
+| 3 | Step 3 real streaming | `_agent_stream_impl` flips to `_stream_chat`; agents run the full pipeline (LLM call, edit apply via per-path mutex, per-agent archive persistence, post-response stability update); `_FakeLiteLLM.queue_streaming_*` supports per-call directives for parallel agents |
+| 4 | `7c0f999` (Step 4+5) | `_assimilate_agent_changes(agent_results, parent_scope)` unions `files_modified` + `files_created`, refreshes parent's `file_context` for every touched path, fires `filesChanged` + `filesModified`; `_stream_chat` returns the completion result so assimilation reads fresh dicts rather than re-parsing archives; 6-test `TestAgentAssimilation` suite covers single/multi-agent, no-op, creates, sibling exceptions, cross-turn observable |
+| 6 | This entry | Delivery note |
+
+**The deliberate scope revision.** Step 4 was originally planned as a synthesis LLM call — after all agents complete, fire a second `completion()` from the parent scope with the per-agent transcripts as context, let the main LLM write a unified response. That got dropped in favour of mechanical assimilation for three reasons documented fully at `specs4/7-future/parallel-agents.md` § Review Step — User-Driven:
+
+1. **Redundant token spend.** The main LLM already SAW what it delegated (it wrote the spawn blocks). Having it re-read per-agent transcripts to summarise its own plan's execution is reasoning the model already did.
+2. **User context is load-bearing.** The judgement "is this complete, are the pieces consistent, what's left to do" depends on what the user cares about most, which tests they ran, which tradeoffs they'd accept. A synthesis LLM call without that context produces plausible-sounding summaries that miss the point.
+3. **Natural checkpoint.** Stopping after the initial response — with agent-spawn blocks rendered as prose — lets the user see file changes in the picker before any further LLM work. Agents that went off the rails get caught before spending more tokens on a synthesis of bad work.
+
+The user-driven path: main LLM's assistant message (containing the spawn blocks as prose narrating what it delegated) IS the turn's final assistant message. The picker updates via `filesChanged` / `filesModified` broadcasts. On the next turn, the user types a follow-up — typically the one-click `🤖 Review agent work` snippet added in Step 4's commit — and the main LLM sees the post-change file state in its context (assimilation loaded it there) and can judge completeness, flag inconsistencies, suggest fixes.
+
+**Rejection of alternatives.** An earlier draft of Step 4 had the assimilation method re-parse `history_store.get_turn_archive(turn_id)` to recover `files_modified` / `files_created` from archive records. That required teaching the archive to persist those metadata fields (currently it stores role + content only — the edit metadata lives on the completion result dict, which predates the archive append). Simpler to have `_stream_chat` return the result dict and let `_spawn_agents_for_turn`'s `gather` collect them. Byproduct: `_stream_chat` is now return-value-bearing for the main-conversation path too, but `chat_streaming`'s `ensure_future` ignores the return — no behaviour change for single-agent operation.
+
+**What remains deferred.** Two deferrals carried over from D24:
+
+| Layer | Piece | Status |
+|---|---|---|
+| Archive UI | Tab strip in chat panel, per-tab state keyed by `{turn_id, agent_idx}`, per-tab RPC routing (per D21) | Not started |
+| Automatic synthesis | Dropped from scope by the D25 scope revision; user-driven review replaces it | Not applicable |
+
+The tab-strip UI is a real deferral — until it lands, agent conversations exist only in the JSONL archive files. Users see the main LLM's response (including the spawn blocks rendered as prose by marked.js) and the resulting working-tree changes via the picker + diff viewer. The `get_turn_archive(turn_id)` RPC exists and works; nothing in the chat panel calls it yet. When the tab strip ships, existing turns from before its delivery remain browsable via the RPC without migration — the archive format is the contract.
+
+Synthesis is not deferred in the "waiting to be implemented" sense — it's replaced. A user wanting a synthesis-like experience types "review what the agents did" (or clicks the snippet). The main LLM reads the post-change files from its context, produces a unified response that takes the user's actual follow-up question into account (tests run? specific concern? broader pattern?), and continues the conversation naturally. The one-click snippet gives the common case a single-gesture entry point without committing the backend to a specific synthesis prompt or timing.
+
+**What "agentic mode" means today, updated from D24.** Seven things landed across D23 + D25:
+
+| Layer | Piece | Delivered |
+|---|---|---|
+| Config | `agents.enabled` flag, `agents_config` / `agents_enabled` properties, malformed-value degradation | ✓ (D23) |
+| Prompt assembly | `system_agentic_appendix.md` bundled file, concatenation logic, user-dir-only read semantics | ✓ (D23) |
+| Live refresh | `LLMService.refresh_system_prompt()` invoked from `Settings.reload_app_config()` | ✓ (D23) |
+| Frontend | Settings-tab toggle card with click-to-save, defensive parsing, localhost gate, in-flight guard | ✓ (D23) |
+| Parser dispatch | `_filter_dispatchable_agents` + `_spawn_agents_for_turn` gating on `agents.enabled`, valid blocks, non-child request | ✓ (D25) |
+| Execution | Per-agent `ConversationScope`, fresh tracker + ContextManager per agent, child request IDs, `asyncio.gather` fan-out; agents run the full `_stream_chat` pipeline | ✓ (D25) |
+| Assimilation | `_assimilate_agent_changes` unions modified+created, refreshes parent's file context, broadcasts to picker | ✓ (D25) |
+
+When the toggle is on and the LLM emits agent-spawn blocks, the backend now genuinely fans out N parallel streams, each with their own ContextManager / tracker / archive, each producing real LLM calls and real edits on disk. The parent's next user turn sees the unioned file changes in its prompt automatically. The deferrals are all in the UI layer — the execution substrate is complete.
+
+### D22 — Parallel-agents foundation uses the existing streaming pipeline
+
+Earlier iteration of the parallel-agents foundation built three new modules: `agent_runner.py` (Slice 6a — runs one agent end-to-end), `agent_orchestrator.py` (Slice 6b — dispatches N agents concurrently), and a planned `agent_edit_applier.py` (Slice 6c — applies agent edits to disk). 6a and 6b shipped with full test coverage; 6c was partially written.
+
+All three are being removed. The shipped work is being reverted.
+
+The problem: each agent is a chat session (per D21). A chat session has a streaming pipeline — `LLMService._stream_chat` — that already handles message assembly, litellm invocation, edit parsing, edit application, persistence, stability tracking, and post-response work. Building a parallel runner / orchestrator / applier duplicates that pipeline while missing the features it provides.
+
+The right foundation is a refactor of `_stream_chat` so its ContextManager is a parameter rather than hardcoded to `self._context`. Once that lands, agent mode becomes:
+
+- Parse agent-spawn blocks (existing edit_protocol work — already landed)
+- Construct N agent ContextManagers via `build_agent_context_manager` (Slice 5 — already landed)
+- Invoke `_stream_chat` N times in parallel with different ContextManagers and child request IDs
+
+No new runner. No new orchestrator. No new applier. Each agent benefits automatically from every feature `_stream_chat` has — URL fetching, review-mode gating, edit-block retry prompts, session totals tracking, terminal HUD, compaction triggers — and from any future improvements to that pipeline.
+
+The `AgentBlock` marker parsing (Slice 3) and per-agent ContextManager factory (Slice 5) stay — they're genuine foundation work that the eventual `_stream_chat` refactor will consume. The turn-ID propagation (Slice 1) and archive persistence (Slice 2) also stay — same reason.
+
+Files deleted:
+
+- `src/ac_dc/agent_runner.py`
+- `src/ac_dc/agent_orchestrator.py`
+- `tests/test_agent_runner.py`
+- `tests/test_agent_orchestrator.py`
+
+Also reverted: the `cancelled` and `apply_report` fields added to `AgentResult` (the dataclass itself goes with agent_runner.py).
+
+Spec change: `specs4/7-future/parallel-agents.md` § Foundation Requirements gains a pointer to the ContextManager factory invariant and adds a short paragraph describing the refactor-based implementation approach.
+
+### D21 — Parallel agents interact through the existing chat panel via tabs
+
+The `specs4/7-future/parallel-agents.md` spec originally described an "agent region" — a horizontally-scrolling strip of columns alongside the main chat, one column per spawned agent of the active turn. During design review of how a user would interact with a paused agent (answer a question, grant access to a file, kill a stuck agent), an elaborate protocol was considered: a dedicated `🟦🟦🟦 ASK` / `🟪🟪🟪 KSA` block format, a four-state agent lifecycle with `awaiting_user`, dedicated RPCs for replies and file grants, dedicated UI cards for question rendering.
+
+All of that was rejected in favour of a much simpler model: **each agent is a chat conversation, surfaced as another tab in the existing chat panel**.
+
+The insight is that the chat panel already IS a one-agent conversation UI with every affordance an agent interaction needs — streaming messages, file mentions, copy/paste, input history, snippets, image paste, URL chips, file picker integration. Building a separate ASK-block protocol with dedicated reply paths duplicates most of that work for questionable gain.
+
+**What collapses:**
+
+- No `ASK` / `KSA` marker protocol. Agents that need clarification just emit a normal assistant message — "I need to see `src/auth.py` to understand the token flow" — and stop streaming. This is indistinguishable at the protocol level from an agent that finished its work.
+- No pause/resume state machine. An agent's "state" is whatever its `ContextManager` holds. "Waiting for user input" is just "the conversation hasn't had a follow-up user message added yet." Same as the main chat between user turns.
+- No dedicated reply or file-grant RPCs. Replying to an agent is `chat_streaming(request_id, message)` routed at the active tab's `{turn_id, agent_idx}` identifier instead of the main conversation. Granting a file is ticking the box in the file picker while that agent's tab is active — the picker's selection state scopes to the active tab.
+- No dedicated confirmation cards for file requests. Agent asks for a file in English; user clicks it in the picker; agent's next turn has it. The picker already does this job for the main conversation.
+
+**Lifecycle simplification:**
+
+- Agents persist for the lifetime of their turn, not the lifetime of a single LLM call. An agent that stops streaming doesn't vanish — its tab stays, its ContextManager and stability tracker stay, its provider cache stays warm. The user can walk away, come back hours later, reply to the agent, and the next call benefits from the cached prefix.
+- The turn's agents all disappear when the user starts the next agentic turn in the main tab. New decomposition, new turn_id, new agent tabs. Previous turn's archive persists on disk and is readable via the history browser.
+- A user can explicitly close an individual agent tab to free its ContextManager early (equivalent to killing that agent). The archive file stays.
+- Synthesis happens when the user asks for it — a "synthesise now" button in the main tab's action bar, or an explicit message to the main LLM. Not auto-triggered by some heuristic, because the user is the authority on "have I heard enough from the agents."
+
+**Provider-level implications (the reason this works at all):**
+
+- litellm is stateless — each `completion()` call is independent. Multiple ContextManagers making concurrent calls never cross-contaminate.
+- Provider chat-completion APIs are stateless — the full message array ships with each request. Two agents holding different conversations really are different conversations to the provider.
+- Cache breakpoints are per-agent because StabilityTrackers are per-ContextManager (the D10 "trackers scope to their owning context manager, not a singleton" invariant). Agent 2's fifteenth turn reuses Agent 2's accumulated L0/L1/L2/L3 cache prefixes — the persistence of the agent across interactions is exactly what makes the cache useful.
+- Tab switching on the frontend is pure UI state. No tracker invalidation, no cache eviction, no backend notification. Switching to agent 3's tab just changes which ContextManager's history renders in the chat panel.
+
+**What the frontend still needs to build:**
+
+1. Tab strip in the chat panel. One "Main" tab plus dynamically-added agent tabs for the active turn. Scrollable / overflow-menu when tab count exceeds viewport width.
+2. Per-tab state — active request ID, message list, selection set — keyed by `{turn_id, agent_idx}` for agents or `"main"` for the main conversation. Streaming-state routing (D10's request-ID-keyed model, already in place) surfaces each agent's chunks into its own tab.
+3. Per-tab RPC routing. `chat_streaming`, `cancel_streaming`, file selection operations all operate on the active tab's scope rather than an implicit singleton.
+4. Tab lifecycle — spawn on agent-spawn blocks, remove when a new turn begins in the main tab, allow explicit per-tab close, surface the archive via history-browser scroll for closed turns.
+
+None of this requires backend protocol changes beyond what Slices 1-3 of the parallel-agents foundation have already landed. The AGENT/AGEND block format stays as specced; the agent archive format stays as specced; the tab strip is the surface through which the archived conversations become live, interactive, cache-warm conversations while the turn is active.
+
+**What this means for `specs4/7-future/parallel-agents.md` and `specs4/5-webapp/agent-browser.md`:**
+
+- The "Agent region" model in agent-browser.md is replaced with a tabbed-chat model (D21 delivery).
+- The "User-Visible Agent Browsing" section in parallel-agents.md updates to reference tabs rather than regions.
+- The ASK-block / pause-resume thinking is NOT in any spec — it got rejected before it was written down. This decision log is the record that we considered it and chose differently.
+
+### D26 — Webapp test rewrite for flat agent-identity contract
+
+D21 originally specified agent tab IDs as the compound shape `{turn_id}/agent-{NN}`, with `parseAgentTabId` returning a `[turn_id, agent_idx]` tuple and the corresponding RPCs (`set_agent_selected_files`, `set_agent_excluded_index_files`, `close_agent_context`, `chat_streaming`'s `agent_tag`) taking three or four positional arguments to thread the tuple components through.
+
+Specs4/5-webapp/agent-browser.md and specs4/7-future/parallel-agents.md § "Agent Reuse by ID" subsequently revised this contract to **flat identity**: the agent's LLM-chosen `id` from its `🟧🟧🟧 AGENT` block IS the tab ID IS the backend registry key. `parseAgentTabId(tabId)` becomes the identity function for any non-"main" non-empty string, returning `null` only for `"main"` and malformed inputs (empty string, non-string types). The backend RPCs take a single `agent_id` string instead of a `(turn_id, agent_idx)` pair. The padded numeric index in child request IDs (`{parent}-agent-{NN}`) and archive file names (`.ac-dc4/agents/{turn_id}/agent-{NN}.jsonl`) is a routing/storage detail — it does not feed back into tab identity, and the frontend never reconstructs identity from it.
+
+Production code in `webapp/src/chat-panel.js` and `webapp/src/files-tab.js` was updated to match the flat-identity spec when the spec change landed, but 27 tests in `chat-panel.test.js` and `files-tab.test.js` still asserted the obsolete tuple-parsing contract. The failures broke into six buckets:
+
+| Bucket | Tests | Stale assertion shape | New shape |
+|---|---|---|---|
+| `parseAgentTabId` unit tests | 8 | Returned `[turn_id, agent_idx]` tuple | Returns the input string verbatim |
+| `agent_tag` routing | 4 | `args[5]` was `[turn_id, agent_idx]` | `args[5]` is the agent id string |
+| Agent tab spawning — tab creation | 5 | Tab ID was `{turn_id}/agent-{NN}` | Tab ID is the spawn block's `id` field |
+| Agent tab spawning — defensive | 4 | Same tab-ID expectations | Updated to flat ids (`agent-0`, etc.) |
+| Close-tab + stale-tag | 3 | RPC called with `[turn_id, agent_idx]` | RPC called with `[agent_id]` |
+| Files-tab routing | 3 | RPC took 3 positional args | RPC takes 2 (`agent_id`, `files`) |
+
+Total: 27 tests rewritten. The "malformed agent tab ID falls back to main RPC" test was also retired — under flat identity, any non-"main" non-empty string is a valid agent id, so the test's premise (malformed tab IDs that fall back to main routing) no longer exists. Replaced with a "main tab routes to main RPC" test that pins the only routing distinction the new contract makes ("main" → main RPCs, anything else → agent RPCs).
+
+The decision was tests-rewritten-not-code-reverted because:
+
+1. **Spec is authoritative.** Three independent spec sections (parallel-agents.md § Agent Reuse by ID, agent-browser.md § Per-Tab State, agent-browser.md § Tab Creation Ordering, agent-browser.md § Invariants) all explicitly call out flat identity. The production code matches; the tests don't.
+
+2. **Reverting would require coordinated changes across both layers.** Going back to the tuple shape means changing `chat-panel.js` (`parseAgentTabId`, tab creation in `_spawnAgentTabs`, `_onTabClose`'s RPC dispatch), `files-tab.js` (`_sendSelectionToServer`, `_sendExclusionToServer`), AND the four backend RPC method signatures in `LLMService`. Plus updating four spec files in two suites. Compared to rewriting 27 tests' expectations to match the spec the production code already implements: the test edit is mechanical and surgical.
+
+3. **Flat identity has clearer semantic.** "The id IS the tab IS the registry key" is one rule; "the tab id encodes turn-and-index, parsed back into a tuple at three RPC boundaries" is three rules with parsing failure modes at each boundary. The spec revision wasn't arbitrary — flat identity makes id-based reuse across turns natural (the user's "frontend-trivial" agent stays "frontend-trivial" regardless of which turn spawned it), and removes the disambiguation layer that the parsing required.
+
+The fix updated test fixtures and assertions only. No production code changed.
 
 ## Build order
 
@@ -187,6 +454,20 @@ Historical detail archived to [specs4/impl-history/layer-1.md](specs4/impl-histo
 Historical detail archived to [specs4/impl-history/layer-2.md](specs4/impl-history/layer-2.md). All sub-layers delivered: 2.1–2.7 (symbol index), 2.8.1 (markdown doc index), 2.8.2 (LLMService wiring), 2.8.3 (SVG extractor), 2.8.4 (keyword enrichment).
 
 ## Layer 5 — in progress
+
+## Known bugs — per-tab state
+
+### URL fetch result lands in wrong tab when user switches tabs mid-fetch
+
+**Symptom.** A URL fetch is initiated from agent tab A (user clicks "Fetch" on a chip). While the RPC is in flight (GitHub repo clone + symbol map generation can take 10+ seconds), the user switches to agent tab B. When the fetch resolves, `chipsEl.markFetched(url, result)` runs against whichever tab's chip state is currently installed on the singleton `ac-url-chips` element — which is B, not A. The user sees a chip for a URL they never fetched on B, and A's own chip stays in `fetching` state indefinitely.
+
+**Root cause.** Per-tab URL chip state (D23 Commit 4) is swapped in/out of the singleton `ac-url-chips` element on tab switch via `_snapshotUrlChipsForTab` / `_restoreUrlChipsForTab`. The fetch RPC closure in `_onUrlFetchRequested` captures the `chipsEl` reference, not the tab ID — so when the promise resolves, the mutation lands on whichever tab is currently showing.
+
+**Fix shape (when this becomes a real pain point).** Capture the originating tab ID at fetch-initiation time, look up that tab's state slot when the promise resolves, and mutate the state slot directly (rather than via the singleton element). If the originating tab is still active, also mutate the live element. If it's inactive, the snapshot carries the updated state and restoration on next tab switch surfaces it. Same pattern for `markErrored`.
+
+**Why deferred.** The bug only fires when the user actively switches tabs during a multi-second fetch — rare outside of GitHub repo clones. The common case (stay on the tab while URL fetches complete) works correctly. Fixing it requires threading the tab ID through three async paths (`markFetching`, `markFetched`/`markErrored`, and the chat-panel-level view-content dialog's fallback fetch) and adding a per-tab chip-mutation helper that operates on snapshots rather than the live element.
+
+**Grep for `TODO(url-fetch-cross-tab)` in `chat-panel.js` when attacking this.**
 
 ## Deferred cleanup
 

@@ -35,8 +35,7 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Build and inject review context when review mode is active
 - Append system reminder to user prompt
 - Build tiered content from stability tracker
-- Recompute symbol map with full tier exclusions (two-pass)
-- Assemble tiered message array with cache-control markers
+- Assemble tiered message array with cache-control markers — the aggregate symbol/doc map in L0 contains every indexed file (only user-excluded files filtered)
 - Run LLM completion in a worker thread, streaming
 - Add assistant response to context after stream completes
 - Save symbol map to per-repo working directory
@@ -48,13 +47,12 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Launch deferred doc enrichment (if any)
 - Run post-response compaction
 
-## Two-Pass Symbol Map Regeneration
+## Aggregate Map Rendering
 
-- First pass (before building tiered content) — excludes selected files and user-excluded files
-- Second pass (after building tiered content) — adds all paths from cached tiers to the exclusion set
-- The second pass enforces the uniqueness invariant: files whose index blocks are already in a cached tier are excluded from the main map
+Under the L0-content-typed model, the symbol map (code mode) or doc map (document mode) in L0's system message contains every indexed file's block. Selected files appear in the map AND as full text in a lower tier — that's the design. The system prompt's authority rule instructs the LLM to treat full text in Working Files as canonical when it disagrees with the structural map. The only filter applied at map-render time is the user's index-exclusion set (file picker's three-state checkbox), since excluded files have no representation in the prompt at all.
 
 ## File Context Sync
+🟨🟨🟨 REPL
 
 - Compare current file context against incoming selected files list
 - Remove files present in context but absent from new selection
@@ -165,6 +163,16 @@ The worker captures whichever chunk first reports a non-null value and propagate
 - Server adds request ID to cancelled set; streaming thread checks each iteration and breaks out
 - Partial content stored with marker; completion event sent with cancelled flag
 
+## Agents Spawned Event
+
+When a user turn's main-LLM response contains valid agent-spawn blocks AND the `agents.enabled` config toggle is on, the backend fires an `agentsSpawned` server-push event immediately after parsing the main response and BEFORE invoking the agent-gather step. Payload: `{turn_id, parent_request_id, agent_blocks: [{id, task, agent_idx}, ...]}`.
+
+Ordering is load-bearing. Agent child streams begin as soon as the spawn step dispatches them; without `agentsSpawned` firing first, a fast-completing agent can finish its entire stream before the main `streamComplete` arrives carrying `agent_blocks` in its result dict — and the frontend's tab-lookup logic silently drops every chunk whose request ID doesn't match an existing tab's current request. Firing `agentsSpawned` between response parse and agent dispatch lets the frontend create the tabs and seed their child request IDs before any child chunk reaches the chunk handler.
+
+Child request IDs follow the format `{parent_request_id}-agent-{NN:02d}` where NN is the zero-padded agent index. Archive files use the same NN convention (`{turn_id}/agent-NN.jsonl`). Tab identity is decoupled from this index — tab ids are the agent's LLM-chosen id from its spawn block — so the frontend's `_findTabForRequest` matches the child request ID against each tab's stored `currentRequestId` rather than reconstructing the tab id from the index.
+
+Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComplete` fallback path: the frontend's tab creation short-circuits when a tab for the same agent id already exists, so an older backend that only surfaces `agent_blocks` via `streamComplete` continues to work (tabs appear after all agents finish, as before — child chunks still dropped, but the final transcripts become visible via the archive).
+
 ## Stream Completion Result
 
 - Full assistant response text
@@ -262,4 +270,4 @@ Three reports printed after each response:
 - User message is persisted before LLM call begins — mid-stream crashes preserve user intent
 - Assistant message is persisted after LLM call completes — no partial assistant messages in history
 - The captured event loop reference is always usable from the worker thread
-- The two-pass symbol map regeneration ensures no file appears in both the main map and a cached tier
+- The aggregate symbol/doc map in L0 contains every indexed file's block (minus user-excluded paths); duplication with full text in lower tiers is the intended design and is resolved at LLM read time by the system prompt's authority rule

@@ -699,7 +699,7 @@ export class AppShell extends JRPCClient {
     .toast-layer {
       position: fixed;
       bottom: 1rem;
-      right: 1rem;
+      left: 1rem;
       z-index: 2000;
       display: flex;
       flex-direction: column;
@@ -721,7 +721,7 @@ export class AppShell extends JRPCClient {
     .toast.error { border-left: 3px solid #f85149; }
     .toast.warning { border-left: 3px solid #d29922; }
     @keyframes toast-in {
-      from { opacity: 0; transform: translateX(20px); }
+      from { opacity: 0; transform: translateX(-20px); }
       to { opacity: 1; transform: translateX(0); }
     }
   `;
@@ -1208,11 +1208,15 @@ export class AppShell extends JRPCClient {
       if (typeof state.cross_ref_enabled === 'boolean') {
         this._crossRefEnabled = state.cross_ref_enabled;
       }
-      // Review state — the snapshot carries a review
-      // object with `active: bool`. Missing field means
-      // no review in progress.
-      if (state.review && typeof state.review === 'object') {
-        this._reviewActive = !!state.review.active;
+      // Review state — the snapshot carries a `review_state`
+      // object with `active: bool` (matching the
+      // get_review_state RPC's return shape). Missing
+      // field means no review in progress.
+      if (
+        state.review_state
+        && typeof state.review_state === 'object'
+      ) {
+        this._reviewActive = !!state.review_state.active;
       } else {
         this._reviewActive = false;
       }
@@ -1558,6 +1562,19 @@ export class AppShell extends JRPCClient {
 
   modeChanged(data) {
     window.dispatchEvent(new CustomEvent('mode-changed', { detail: data }));
+    return true;
+  }
+
+  agentsSpawned(data) {
+    // Fired by the backend immediately after the main LLM
+    // finishes and before spawning agents. Carries
+    // {turn_id, parent_request_id, agent_blocks} so the
+    // chat panel can create agent tabs in time to receive
+    // the child streams. See specs4/7-future/
+    // parallel-agents.md § Execution Model.
+    window.dispatchEvent(
+      new CustomEvent('agents-spawned', { detail: data }),
+    );
     return true;
   }
 
@@ -3585,6 +3602,40 @@ export class AppShell extends JRPCClient {
     if (typeof fn !== 'function') {
       this._showToast('Commit not available', 'warning');
       return;
+    }
+    // Preflight: short-circuit on a clean tree so we don't
+    // optimistically toast "Generating commit message…" and
+    // burn a smaller-model RPC call before the backend's
+    // own empty-diff guard fires. The backend's
+    // commit_all_background runs stage_all first (which
+    // stages untracked files too), so this check must use
+    // is_clean rather than just inspecting staged+unstaged
+    // diffs the way _onCopyDiff does — otherwise a repo
+    // with only untracked files would pass the frontend
+    // check, get staged by the backend, and produce a
+    // non-empty diff the LLM would then summarise.
+    // Repo.is_clean() matches the backend's view of "is
+    // there anything stage_all could pick up".
+    const isCleanFn = this.call['Repo.is_clean'];
+    if (typeof isCleanFn === 'function') {
+      try {
+        const cleanRaw = await isCleanFn();
+        let clean = cleanRaw;
+        if (
+          cleanRaw && typeof cleanRaw === 'object'
+          && !Array.isArray(cleanRaw)
+        ) {
+          const keys = Object.keys(cleanRaw);
+          if (keys.length === 1) clean = cleanRaw[keys[0]];
+        }
+        if (clean === true) {
+          this._showToast('Nothing to commit', 'info');
+          return;
+        }
+      } catch (_) {
+        // is_clean failure shouldn't block commit — fall
+        // through to the backend, which has its own guard.
+      }
     }
     this._committing = true;
     try {
