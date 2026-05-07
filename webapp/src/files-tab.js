@@ -1483,13 +1483,14 @@ export class FilesTab extends RpcMixin(LitElement) {
     // recover their original branch.
     //
     // The backend's get_current_state includes the full
-    // review-state dict (matching get_review_state's
-    // shape); we mirror it into _reviewState and push to
-    // the picker via the same direct-update pattern the
-    // review-started handler uses.
+    // review-state dict under the `review_state` key
+    // (matching get_review_state's shape); we mirror it
+    // into _reviewState and push to the picker via the
+    // same direct-update pattern the review-started
+    // handler uses.
     const review =
-      state.review && typeof state.review === 'object'
-        ? state.review
+      state.review_state && typeof state.review_state === 'object'
+        ? state.review_state
         : null;
     if (review && review.active) {
       this._reviewState = review;

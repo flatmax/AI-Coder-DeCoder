@@ -1208,11 +1208,15 @@ export class AppShell extends JRPCClient {
       if (typeof state.cross_ref_enabled === 'boolean') {
         this._crossRefEnabled = state.cross_ref_enabled;
       }
-      // Review state — the snapshot carries a review
-      // object with `active: bool`. Missing field means
-      // no review in progress.
-      if (state.review && typeof state.review === 'object') {
-        this._reviewActive = !!state.review.active;
+      // Review state — the snapshot carries a `review_state`
+      // object with `active: bool` (matching the
+      // get_review_state RPC's return shape). Missing
+      // field means no review in progress.
+      if (
+        state.review_state
+        && typeof state.review_state === 'object'
+      ) {
+        this._reviewActive = !!state.review_state.active;
       } else {
         this._reviewActive = false;
       }

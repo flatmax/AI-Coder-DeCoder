@@ -209,7 +209,7 @@ CurrentState:
     cross_ref_ready: bool
     cross_ref_enabled: bool
     doc_convert_available: bool
-    review_state?: ReviewState        // present when review is active
+    review_state: ReviewState         // always present; check `active` flag
     enrichment_status: "unavailable" | "pending" | "building" | "complete"
 ```
 
