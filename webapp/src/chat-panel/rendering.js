@@ -164,6 +164,35 @@ export function render(panel) {
       : ''}
     <div class="input-area">
       <div class="action-bar" role="toolbar">
+        ${panel._activeTabId === 'main'
+          ? html`<div class="mode-toggle" role="group" aria-label="Context mode">
+              <div class="mode-segmented">
+                <button
+                  class="mode-btn ${panel._mode === 'code' ? 'active' : ''}"
+                  ?disabled=${!panel.rpcConnected}
+                  title="Code mode — symbol index feeds context"
+                  aria-pressed=${panel._mode === 'code'}
+                  @click=${() => panel._switchMode('code')}
+                >💻</button>
+                <button
+                  class="mode-btn ${panel._mode === 'doc' ? 'active' : ''}"
+                  ?disabled=${!panel.rpcConnected}
+                  title="Document mode — doc index feeds context"
+                  aria-pressed=${panel._mode === 'doc'}
+                  @click=${() => panel._switchMode('doc')}
+                >📄</button>
+              </div>
+              <button
+                class="crossref-btn ${panel._crossRefEnabled ? 'active' : ''}"
+                ?disabled=${!panel.rpcConnected}
+                title=${panel._crossRefEnabled
+                  ? 'Cross-reference ON — both indexes active (click to disable)'
+                  : 'Cross-reference OFF — click to add the other index alongside'}
+                aria-pressed=${panel._crossRefEnabled}
+                @click=${() => panel._toggleCrossRef()}
+              >🔀</button>
+            </div>`
+          : ''}
         <div class="action-group">
           ${_EXPERIMENTAL_ENABLED
             ? html`<button
@@ -1246,35 +1275,6 @@ export function renderSearchBar(panel) {
           ▼
         </button>
       </div>
-      ${panel._activeTabId === 'main'
-        ? html`<div class="mode-toggle" role="group" aria-label="Context mode">
-            <div class="mode-segmented">
-              <button
-                class="mode-btn ${panel._mode === 'code' ? 'active' : ''}"
-                ?disabled=${!panel.rpcConnected}
-                title="Code mode — symbol index feeds context"
-                aria-pressed=${panel._mode === 'code'}
-                @click=${() => panel._switchMode('code')}
-              >💻</button>
-              <button
-                class="mode-btn ${panel._mode === 'doc' ? 'active' : ''}"
-                ?disabled=${!panel.rpcConnected}
-                title="Document mode — doc index feeds context"
-                aria-pressed=${panel._mode === 'doc'}
-                @click=${() => panel._switchMode('doc')}
-              >📄</button>
-            </div>
-            <button
-              class="crossref-btn ${panel._crossRefEnabled ? 'active' : ''}"
-              ?disabled=${!panel.rpcConnected}
-              title=${panel._crossRefEnabled
-                ? 'Cross-reference ON — both indexes active (click to disable)'
-                : 'Cross-reference OFF — click to add the other index alongside'}
-              aria-pressed=${panel._crossRefEnabled}
-              @click=${() => panel._toggleCrossRef()}
-            >🔀</button>
-          </div>`
-        : ''}
     </div>
   `;
 }
