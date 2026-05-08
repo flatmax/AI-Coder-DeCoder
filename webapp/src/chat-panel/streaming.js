@@ -604,6 +604,19 @@ export function maybePopulateRetryPrompt(panel, result) {
  * Both paths clear request tracking so stream
  * events arriving for the failed request are
  * dropped.
+ *
+ * Owning-tab outcome write: ``send()`` flips
+ * ``panel._streaming`` (the active-tab reactive
+ * surface) but doesn't touch the per-tab
+ * ``tab.streaming`` / ``tab.lastEditOutcome`` state
+ * the LED row reads. Without writing those here,
+ * a stream-start error on the main tab leaves the
+ * LED at its prior outcome — green if a previous
+ * turn succeeded — even though this turn failed.
+ * Mirror the structure ``onStreamComplete`` uses:
+ * find the owning tab (null agent_tag → main),
+ * compute the error outcome, write it. The LED
+ * row's next render then resolves to red.
  */
 export function handleStreamStartError(
   panel, requestId, errorMsg, agentTag,
@@ -612,6 +625,35 @@ export function handleStreamStartError(
   panel._streamingContent = '';
   panel._currentRequestId = null;
   panel._streams.delete(requestId);
+
+  // Resolve the owning tab. Per the flat-registry
+  // contract, ``agentTag`` is null for the main
+  // tab and the agent's id (== tab id) otherwise.
+  // Fall back to the active tab when the resolved
+  // id isn't registered (defensive — shouldn't
+  // happen because send() opens the stream against
+  // the active tab) so we still surface error
+  // outcome state somewhere visible.
+  const ownerTabId = agentTag === null ? 'main' : agentTag;
+  const ownerTab =
+    panel._tabs.get(ownerTabId)
+    || panel._tabs.get(panel._activeTabId);
+  if (ownerTab) {
+    ownerTab.streaming = false;
+    ownerTab.streamingContent = '';
+    ownerTab.currentRequestId = null;
+    ownerTab.pendingChunks.delete(requestId);
+    ownerTab.streams.delete(requestId);
+    // Error outcome shape matches what
+    // ``computeLastEditOutcome`` produces for the
+    // stream-error path so the LED row's
+    // green/red branch sees a uniform value.
+    ownerTab.lastEditOutcome = {
+      status: 'error',
+      appliedCount: 0,
+      failureReason: errorMsg || 'stream failed to start',
+    };
+  }
 
   const isStaleAgent =
     errorMsg === 'agent not found' && agentTag !== null;
@@ -641,7 +683,11 @@ export function handleStreamStartError(
 
   // Generic error — append as an assistant message
   // so it renders inline with the failed user
-  // message. Keeps the tab open for retry.
+  // message. Keeps the tab open for retry. Update
+  // the panel — the active tab's render now needs
+  // to reflect both the new message and the
+  // owner-tab outcome we just wrote (LED row
+  // re-renders on every panel update).
   panel.messages = [
     ...panel.messages,
     {
@@ -649,6 +695,7 @@ export function handleStreamStartError(
       content: `**Error:** ${errorMsg}`,
     },
   ];
+  panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
