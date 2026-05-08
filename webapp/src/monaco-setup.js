@@ -57,6 +57,30 @@
 // node_modules/.vite` to flush the dep-bundle cache.
 import * as monaco from 'monaco-editor/esm/vs/editor/edcore.main.js';
 
+// Register tokenizers for built-in languages (js, ts,
+// python, c, cpp, json, yaml, html, css, markdown, etc.).
+//
+// `edcore.main.js` deliberately excludes
+// `basic-languages` to dodge a registerTokensProviderFactory
+// API mismatch in `editor.main.js`. But without this
+// contribution import, Monaco accepts language ids like
+// 'javascript' (because language *registration* is built
+// in) yet has no Monarch tokenizer for them — so every
+// file renders as plain text.
+//
+// The contribution module registers `LanguageRegistration`
+// entries that lazy-load each language's tokenizer on
+// first use. It does NOT call the missing
+// `registerTokensProviderFactory` — that was an
+// `editor.main.js`-specific path. Safe to import alongside
+// `edcore.main.js`.
+//
+// Symptom if this import is missing: code shows up
+// monochrome regardless of file extension; only the
+// custom MATLAB and LaTeX tokenizers below produce
+// coloured output.
+import 'monaco-editor/esm/vs/basic-languages/monaco.contribution.js';
+
 // Vite's `?worker` suffix — compiles monaco-worker.js
 // as a dedicated Web Worker and returns a constructor.
 // Calling `new EditorWorker()` yields a Worker instance
