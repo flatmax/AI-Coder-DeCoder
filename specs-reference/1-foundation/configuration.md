@@ -279,6 +279,14 @@ Both dash and dot separators match because different providers format version nu
 
 The version-aware upgrade is not atomic — if the process crashes mid-upgrade, some managed files may be overwritten and others not. On next startup the version marker still reflects the OLD bundled version (it's written last), so the upgrade re-runs and catches unfinished files. Partially-written files are simply overwritten again with the new bundle content; user files are never touched either way.
 
+### Provider SDK env-var caching
+
+Most LLM provider SDKs read environment variables at client-construction time and cache the result on the client instance. boto3 (used by litellm's Bedrock backend) is the canonical example: a Bedrock client constructed before `apply_llm_env` runs will hold the region / profile from the shell environment, and subsequent env-var changes via `os.environ[...] = ...` will not retroactively reconfigure that client.
+
+litellm constructs its provider clients lazily, on the first `completion` call for a given provider. This means `apply_llm_env` only needs to run before the *first* litellm call, not before every call — but it must run at least once before any chat or aux-LLM completion is attempted. See `specs4/1-foundation/configuration.md` § Env-var export timing for the lifecycle contract.
+
+The `AWS_REGION` vs `AWS_DEFAULT_REGION` precedence is a frequent source of confusion. boto3 reads in this order: `AWS_REGION` → `AWS_DEFAULT_REGION` → profile config from `~/.aws/config` → service-level default (typically `us-east-1`). A user setting `AWS_REGION` in `llm.json` expects it to win, and it does — but only after `apply_llm_env` has exported it. Before that, a stale shell `AWS_DEFAULT_REGION` or a profile-default region wins instead.
+
 ## Cross-references
 
 - Hot reload semantics, accessor patterns, upgrade flow narrative: `specs4/1-foundation/configuration.md`

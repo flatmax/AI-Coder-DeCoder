@@ -69,6 +69,28 @@ Completed layers and the decision log have been moved to [specs4/impl-history/](
 
 ## Decisions
 
+### D29 — `apply_llm_env` runs explicitly on cold start, not from `ConfigManager.__init__`
+
+Cold start was failing on the first LLM turn with provider-side errors that disappeared after any save in the LLM-config UI. Diagnosed to `main.run` constructing `ConfigManager` without ever calling `apply_llm_env`. The `env` dict in `llm.json` (typically `AWS_REGION`, `AWS_PROFILE`, or provider API keys) was dead config until the first `reload_llm_config` triggered the export. The first turn used whatever `os.environ` carried from the shell — frequently a stale `AWS_DEFAULT_REGION` or an inherited profile default — and providers rejected it.
+
+Two placements considered:
+
+1. **Inside `ConfigManager.__init__`** — every consumer gets correct env automatically. Rejected: tests like `test_apply_llm_env_exports_variables` assume `os.environ` is clean before they call `apply_llm_env` explicitly. More fundamentally, hiding a process-state mutation inside a constructor is surprising — settings inspection, history-store testing, and other non-runtime consumers shouldn't have their environment rewritten as a side effect of asking what the config says.
+
+2. **Explicit call in `main.run`** — chosen. One line right after `config = ConfigManager(repo_root=repo_path)`, before `Settings(config)` or any other service that might trigger litellm provider construction. Construction stays free of side effects; the cold-start entry point owns the lifecycle contract.
+
+Why hot reload masks the bug: `Settings.save_config_content` → `Settings.reload_llm_config` → `ConfigManager.reload_llm_config` → `apply_llm_env`. The reload path was always correct; only the cold-start path missed the call. Once a user saved any change in the LLM-config UI (even the same value re-saved), the env exported and the next turn worked — making the failure look intermittent and configuration-related rather than a startup bug.
+
+Why provider hot-reload also benefits: litellm constructs provider clients lazily on the first `completion()` call for that provider. boto3 (Bedrock's transport) reads `AWS_REGION` at `boto3.Session()` construction time and caches it on the session. If the first call already happened with a stale region, subsequent env changes wouldn't reconfigure the cached session — but in practice the first call happens AFTER `apply_llm_env`, so this hasn't been observed. Documented as a future-proofing concern in `specs-reference/1-foundation/configuration.md` § Provider SDK env-var caching.
+
+Spec updates landing alongside this decision:
+
+- `specs4/1-foundation/configuration.md` § Env-var export timing — the lifecycle contract (cold start + every reload), and the explicit pin that `__init__` does NOT call it.
+- `specs4/6-deployment/startup.md` § Phase 1 step 3 expanded — env application slotted between config-manager construction and other lightweight services, with rationale and cross-reference. New invariant added at the bottom of the file.
+- `specs-reference/1-foundation/configuration.md` § Provider SDK env-var caching — boto3-specific quirk, lazy provider construction in litellm, `AWS_REGION` vs `AWS_DEFAULT_REGION` precedence.
+
+Code change is one line in `src/ac_dc/main.py` between `ConfigManager` construction and `Settings` construction. No tests added — the existing `test_apply_llm_env_exports_variables` covers the helper; an integration test against `main.run` would require extracting a `_init_lightweight_services` helper since `main.run` itself opens sockets and starts servers. Filed as a follow-up if the cold-start path regresses.
+
 ### D19 — SVG viewer listens directly for `files-modified`
 
 The diff viewer's D18 rewrite eliminated cross-run staleness by refetching on every `openFile`. The SVG viewer kept its multi-tab `_files[]` cache and relied on the app shell's narrower set of refresh triggers (`streamComplete` with non-empty `files_modified`, `commitResult`, `files-reverted`), which miss external edits that fire only the generic `files-modified` broadcast — git pulls, edit-pipeline applies on unrelated workflows, collab writes, terminal edits.

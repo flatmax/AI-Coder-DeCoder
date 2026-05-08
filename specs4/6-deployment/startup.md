@@ -10,7 +10,10 @@ The startup sequence is split into two phases to give the user early feedback. T
 ## Phase 1: Fast (under a second)
 1. Validate git repository — if not a repo, write a self-contained instruction HTML to a temp file, open as a file URL in the browser, print terminal banner with remediation commands, exit
 2. Find available ports for WebSocket and webapp servers
-3. Initialize lightweight services — config manager, repo, settings, doc convert availability check
+3. Initialize lightweight services:
+   - Construct config manager
+   - **Apply LLM env vars** — call `apply_llm_env` before constructing anything that may invoke litellm. Provider SDKs (notably boto3 for Bedrock) read environment at client-construction time; if `AWS_REGION` / `AWS_PROFILE` / API keys from `llm.json` are not exported now, the first turn will use whatever the shell or default profile provides and may fail with a provider-side region or entitlement error. See `specs4/1-foundation/configuration.md` § Env-var export timing.
+   - Construct repo, settings, doc convert availability check
 4. Start webapp server — bundled static server (default), Vite dev, or Vite preview
 5. Create LLM service with deferred-init flag (no symbol index, no stability init)
 6. **Restore last session** — explicitly, before starting the WebSocket server, so `get_current_state` returns previous messages to the first browser connection
@@ -140,3 +143,4 @@ Structured to stderr. Default level INFO. Verbose flag enables DEBUG.
 - Both the WebSocket port and webapp port are probed before the server starts; a second concurrent instance probes past the first's ports rather than cross-wiring into it
 - Browser tab title always matches the repo name; no branding prefix
 - SIGINT / SIGTERM always trigger clean shutdown with child process termination
+- LLM env vars from `llm.json` are exported to `os.environ` during Phase 1 step 3, before any service that may invoke litellm is constructed; subsequent `reload_llm_config` calls re-export them
