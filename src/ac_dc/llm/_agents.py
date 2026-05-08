@@ -49,6 +49,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.agent_factory import build_agent_context_manager
+from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import AgentBlock
 from ac_dc.llm._types import ConversationScope
 from ac_dc.stability_tracker import StabilityTracker
@@ -57,6 +58,54 @@ if TYPE_CHECKING:
     from ac_dc.llm_service import LLMService
 
 logger = logging.getLogger("ac_dc.llm_service")
+
+
+# ---------------------------------------------------------------------------
+# Mode-string resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_agent_mode(
+    block_mode: str,
+    parent_mode: Mode,
+    parent_cross_ref: bool,
+) -> tuple[Mode, bool]:
+    """Resolve an agent's ``(Mode, cross_ref)`` from its block.
+
+    Per ``specs4/7-future/parallel-agents.md`` § "Agent-spawn
+    block format":
+
+    - Empty ``block_mode`` → inherit the orchestrator's
+      current mode (both axes).
+    - One of the four valid mode strings → flatten back into
+      ``(Mode, bool)``.
+
+    The parser already validated the value (commit 1) so any
+    non-empty string we see here is one of the four; an
+    invalid string would have been flagged ``valid=False``
+    upstream and filtered out by ``filter_dispatchable_agents``
+    before reaching this code.
+
+    A defensive ``ValueError`` for unrecognised strings stays
+    in place anyway — if the validation pipeline is ever
+    bypassed (test-only construction of an AgentBlock with a
+    bad mode), failing loudly here is better than silently
+    inheriting parent mode.
+    """
+    if not block_mode:
+        return parent_mode, parent_cross_ref
+    if block_mode == "code":
+        return Mode.CODE, False
+    if block_mode == "doc":
+        return Mode.DOC, False
+    if block_mode == "code+xref":
+        return Mode.CODE, True
+    if block_mode == "doc+xref":
+        return Mode.DOC, True
+    raise ValueError(
+        f"Unrecognised agent mode {block_mode!r}; expected one "
+        f"of '', 'code', 'doc', 'code+xref', 'doc+xref'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +374,19 @@ def build_agent_scope(
     Agent mode requires a history store — the archive IS
     the transcript the main LLM reads in synthesis. Without
     one, raises :class:`RuntimeError`.
+
+    Mode resolution: ``block.mode`` (one of ``""``, ``code``,
+    ``doc``, ``code+xref``, ``doc+xref``) is flattened back
+    into ``(Mode, cross_reference_enabled)`` and applied to
+    the agent's ContextManager via the factory. An empty
+    ``block.mode`` inherits both axes from
+    ``parent_scope.context``. Per
+    ``specs4/7-future/parallel-agents.md`` § "Agent-spawn
+    block format", the agent's mode is fixed for its
+    lifetime; if a known id is re-used with a different
+    mode, the spawn is rejected via :class:`ValueError` —
+    the orchestrator must close the existing agent and
+    re-spawn.
     """
     if service._history_store is None:
         raise RuntimeError(
@@ -332,6 +394,42 @@ def build_agent_scope(
             "construct LLMService with history_store=... "
             "to enable agent mode."
         )
+
+    # Resolve the agent's (mode, cross_ref) pair. Inherits
+    # from the parent scope's ContextManager when the block
+    # didn't specify a mode.
+    parent_cm = parent_scope.context
+    parent_mode = parent_cm.mode if parent_cm else Mode.CODE
+    parent_cross_ref = (
+        parent_cm.cross_reference_enabled if parent_cm else False
+    )
+    resolved_mode, resolved_cross_ref = _resolve_agent_mode(
+        block.mode, parent_mode, parent_cross_ref,
+    )
+
+    # Mode-conflict check on retask. If a scope already
+    # exists for this id, its mode is fixed for its
+    # lifetime; a re-spawn with a different mode is a
+    # programming error in the orchestrator. Reject loudly
+    # so the user sees the malformed decomposition rather
+    # than silently getting a tracker mismatch on the next
+    # turn.
+    existing = service._agent_contexts.get(block.id)
+    if existing is not None and existing.context is not None:
+        existing_mode = existing.context.mode
+        existing_cross_ref = existing.context.cross_reference_enabled
+        if (
+            existing_mode != resolved_mode
+            or existing_cross_ref != resolved_cross_ref
+        ):
+            raise ValueError(
+                f"Agent {block.id!r} already exists in mode "
+                f"{_format_mode(existing_mode, existing_cross_ref)!r}; "
+                f"cannot retask with mode "
+                f"{_format_mode(resolved_mode, resolved_cross_ref)!r}. "
+                f"Close the existing agent and respawn."
+            )
+
     agent_context = build_agent_context_manager(
         turn_id=turn_id,
         agent_idx=agent_idx,
@@ -355,6 +453,8 @@ def build_agent_scope(
         # depth is 1 per spec, agents don't spawn
         # sub-agents.
         system_prompt=service._config.get_agent_system_prompt(),
+        mode=resolved_mode,
+        cross_reference_enabled=resolved_cross_ref,
     )
     agent_tracker = StabilityTracker(
         cache_target_tokens=(
@@ -378,6 +478,18 @@ def build_agent_scope(
     service._agent_contexts[block.id] = scope
 
     return scope
+
+
+def _format_mode(mode: Mode, cross_ref: bool) -> str:
+    """Render a ``(Mode, bool)`` pair as the user-facing string.
+
+    Inverse of :func:`_resolve_agent_mode`. Used in error
+    messages so the orchestrator (and the user reading the
+    backend log) sees ``code+xref`` rather than the raw
+    ``Mode.CODE / cross_ref=True`` representation.
+    """
+    base = mode.value  # "code" or "doc"
+    return f"{base}+xref" if cross_ref else base
 
 
 # ---------------------------------------------------------------------------

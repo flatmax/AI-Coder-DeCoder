@@ -1035,6 +1035,211 @@ class TestAgentSpawn:
         assert service._agent_stream_impl != service._stream_chat_stub
 
 
+class TestAgentScopeMode:
+    """Per-agent mode and cross-reference resolution.
+
+    Covers :func:`_resolve_agent_mode` and the mode-aware
+    behaviour of :func:`build_agent_scope`:
+
+    - Empty ``block.mode`` inherits the orchestrator's
+      current mode (both axes).
+    - Each of the four valid mode strings flattens back to
+      ``(Mode, bool)`` correctly.
+    - The resolved values reach the agent's ContextManager
+      via the factory.
+    - Re-spawning a known id with a different mode raises
+      ``ValueError`` — the orchestrator must close + respawn,
+      not silently retask.
+
+    The descriptor consumes the per-agent mode for the
+    orchestrator's prompt; that integration is covered in
+    :mod:`test_agent_descriptor`. Here we just pin the
+    spawn-time wiring.
+    """
+
+    def _make_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do work",
+        mode: str = "",
+    ) -> "AgentBlock":  # type: ignore[name-defined]
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task, mode=mode)
+
+    def test_resolve_empty_inherits_parent(self) -> None:
+        from ac_dc.context_manager import Mode
+        from ac_dc.llm._agents import _resolve_agent_mode
+
+        # Inherits both axes when block.mode is empty.
+        assert _resolve_agent_mode("", Mode.CODE, False) == (
+            Mode.CODE, False,
+        )
+        assert _resolve_agent_mode("", Mode.DOC, True) == (
+            Mode.DOC, True,
+        )
+        assert _resolve_agent_mode("", Mode.CODE, True) == (
+            Mode.CODE, True,
+        )
+
+    def test_resolve_each_explicit_mode(self) -> None:
+        from ac_dc.context_manager import Mode
+        from ac_dc.llm._agents import _resolve_agent_mode
+
+        # The four valid strings flatten correctly. Parent
+        # values are ignored when the block is explicit.
+        assert _resolve_agent_mode(
+            "code", Mode.DOC, True
+        ) == (Mode.CODE, False)
+        assert _resolve_agent_mode(
+            "doc", Mode.CODE, True
+        ) == (Mode.DOC, False)
+        assert _resolve_agent_mode(
+            "code+xref", Mode.DOC, False
+        ) == (Mode.CODE, True)
+        assert _resolve_agent_mode(
+            "doc+xref", Mode.CODE, False
+        ) == (Mode.DOC, True)
+
+    def test_resolve_unknown_raises(self) -> None:
+        """Defensive guard if validation pipeline is bypassed."""
+        from ac_dc.context_manager import Mode
+        from ac_dc.llm._agents import _resolve_agent_mode
+
+        with pytest.raises(ValueError, match="Unrecognised"):
+            _resolve_agent_mode("typescript", Mode.CODE, False)
+
+    def test_block_mode_reaches_context_manager(
+        self, service: LLMService
+    ) -> None:
+        """Resolved mode is set on the agent's ContextManager."""
+        from ac_dc.context_manager import Mode
+
+        parent = service._default_scope()
+        block = self._make_block("agent-doc", mode="doc+xref")
+        scope = service._build_agent_scope(
+            block=block,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_empty_block_mode_inherits_orchestrator(
+        self, service: LLMService
+    ) -> None:
+        """Agent inherits orchestrator's current mode when omitted."""
+        from ac_dc.context_manager import Mode
+
+        # Flip the orchestrator into doc+xref so we can observe
+        # inheritance rather than the default.
+        service._context.set_mode(Mode.DOC)
+        service._context.set_cross_reference_enabled(True)
+        parent = service._default_scope()
+        block = self._make_block("agent-inherit", mode="")
+        scope = service._build_agent_scope(
+            block=block,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_each_axis_inherited_independently(
+        self, service: LLMService
+    ) -> None:
+        """Inheriting cross_ref independently of mode."""
+        from ac_dc.context_manager import Mode
+
+        # Orchestrator: code mode but xref enabled.
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(True)
+        parent = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_block("agent-x", mode=""),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_mode_conflict_on_retask_raises(
+        self, service: LLMService
+    ) -> None:
+        """Re-spawn with a different mode raises ValueError."""
+        parent = service._default_scope()
+        # First spawn: code mode.
+        first = self._make_block("frontend", mode="code")
+        service._build_agent_scope(
+            block=first,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        # Second spawn under same id but different mode.
+        conflicting = self._make_block("frontend", mode="doc")
+        with pytest.raises(ValueError, match="frontend"):
+            service._build_agent_scope(
+                block=conflicting,
+                agent_idx=0,
+                parent_scope=parent,
+                turn_id="t",
+            )
+
+    def test_mode_match_on_retask_allowed(
+        self, service: LLMService
+    ) -> None:
+        """Re-spawn with the same mode is fine.
+
+        Today this still produces a fresh scope (the
+        retask-existing path isn't implemented). What
+        matters here is that NO ValueError is raised — the
+        conflict check is mode-specific, not "any second
+        spawn is rejected".
+        """
+        parent = service._default_scope()
+        first_block = self._make_block("frontend", mode="code")
+        service._build_agent_scope(
+            block=first_block,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        # Same mode → no raise.
+        same_mode = self._make_block("frontend", mode="code")
+        service._build_agent_scope(
+            block=same_mode,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+
+    def test_xref_axis_conflict_also_rejected(
+        self, service: LLMService
+    ) -> None:
+        """Different cross-ref state alone is also a conflict."""
+        parent = service._default_scope()
+        first = self._make_block("agent-0", mode="code")
+        service._build_agent_scope(
+            block=first,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        # Same primary but different xref axis.
+        conflicting = self._make_block("agent-0", mode="code+xref")
+        with pytest.raises(ValueError, match="agent-0"):
+            service._build_agent_scope(
+                block=conflicting,
+                agent_idx=0,
+                parent_scope=parent,
+                turn_id="t",
+            )
+
+
 class TestAgentExecutionEndToEnd:
     """Step 3 — agents run through the real _stream_chat pipeline.
 

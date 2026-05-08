@@ -129,10 +129,26 @@ _AGENT_FIELD_REGEX = re.compile(r"^(\w+):\s*(.*)$")
 # Extending this set when new structured fields are added
 # (e.g., ``tools:`` for the future MCP integration per
 # specs4/7-future/mcp-integration.md) is a one-line change
-# here. Until then, ``id`` and ``task`` are the only
-# structured fields the parser knows about; everything else
-# is prose.
-_AGENT_KNOWN_FIELDS: frozenset[str] = frozenset({"id", "task"})
+# here. Today ``id``, ``task``, and ``mode`` are the only
+# structured fields; everything else is prose that lands in
+# the accumulated ``task`` value verbatim.
+_AGENT_KNOWN_FIELDS: frozenset[str] = frozenset({"id", "task", "mode"})
+
+
+# Allowed ``mode`` values per
+# specs4/7-future/parallel-agents.md § "Per-agent state
+# descriptor". Mirror the user-facing two-axis mode toggle
+# (primary=code|doc; cross-reference=on|off) flattened into
+# four strings. The parser validates the value at parse
+# time so a malformed block surfaces as ``valid=False``
+# rather than waiting until spawn-time to fail.
+#
+# Empty ``mode`` is also valid: it signals "inherit from
+# orchestrator at spawn time" (see ``build_agent_scope``
+# in ``ac_dc.llm._agents``).
+_AGENT_VALID_MODES: frozenset[str] = frozenset({
+    "code", "doc", "code+xref", "doc+xref",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +305,18 @@ class AgentBlock:
       ``key:`` prefix are appended to the current field's
       value with a newline separator).
 
+    Optional field:
+
+    - ``mode`` — the agent's repo-view mode, one of ``code``,
+      ``doc``, ``code+xref``, ``doc+xref``. Empty string
+      means "inherit from orchestrator at spawn time".
+      Mirrors the two-axis user-facing mode toggle. The
+      parser validates the value at parse time so a
+      malformed mode (e.g., ``mode: typescript``) surfaces
+      as ``valid=False`` rather than waiting until spawn
+      time to fail. See ``specs4/7-future/parallel-agents.md``
+      § "Per-agent state descriptor".
+
     ``extras`` carries forward-compatible unknown fields. Per
     ``specs4/7-future/mcp-integration.md``, a future MCP
     integration uses this slot for the optional ``tools:``
@@ -297,9 +325,10 @@ class AgentBlock:
     them.
 
     ``valid`` flags whether the block had both required fields
-    on emission. Missing required fields don't silently drop
-    the block — callers can surface the malformed output to
-    the user / LLM as feedback.
+    on emission AND an acceptable ``mode`` if one was given.
+    Missing required fields or an unrecognised mode don't
+    silently drop the block — callers can surface the
+    malformed output to the user / LLM as feedback.
 
     ``completed`` mirrors :class:`EditBlock.completed` —
     ``False`` when the stream ended mid-block (no closing
@@ -308,6 +337,7 @@ class AgentBlock:
 
     id: str = ""
     task: str = ""
+    mode: str = ""
     extras: dict[str, str] = field(default_factory=dict)
     valid: bool = True
     completed: bool = True
@@ -703,10 +733,19 @@ class EditParser:
     def _build_agent_block(self, *, completed: bool) -> AgentBlock:
         """Materialise an :class:`AgentBlock` from current fields.
 
-        Extracts ``id`` and ``task`` from the field dict,
-        dropping them from the dict so the remainder lands in
+        Extracts ``id``, ``task``, and ``mode`` from the field
+        dict, dropping them so the remainder lands in
         ``extras``. Missing required fields → ``valid=False``.
         Blank values for required fields also count as missing.
+
+        ``mode`` is optional: an empty string is fine and
+        means "inherit from orchestrator at spawn time". A
+        non-empty value must be one of the four allowed
+        strings (see :data:`_AGENT_VALID_MODES`); anything
+        else also marks the block ``valid=False`` so the
+        orchestrator's malformed output is surfaced to the
+        user rather than being silently retried at spawn
+        time.
 
         ``completed`` mirrors the caller's state: True from the
         normal-termination path, False from the stream-ended-
@@ -715,13 +754,17 @@ class EditParser:
         fields = dict(self._agent_fields)
         agent_id = fields.pop("id", "").strip()
         task = fields.pop("task", "").strip()
+        mode = fields.pop("mode", "").strip()
         valid = bool(agent_id and task)
+        if mode and mode not in _AGENT_VALID_MODES:
+            valid = False
         # Strip extras values — multi-line extras get the same
         # whitespace treatment as ``task``.
         extras = {k: v.strip() for k, v in fields.items()}
         return AgentBlock(
             id=agent_id,
             task=task,
+            mode=mode,
             extras=extras,
             valid=valid,
             completed=completed,
