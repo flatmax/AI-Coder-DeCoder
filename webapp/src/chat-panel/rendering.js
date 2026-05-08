@@ -53,6 +53,7 @@ import {
 import { renderEditCard } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
+import { renderLedRow } from './led-row.js';
 import { renderTabStrip } from './tabs.js';
 import { _EXPERIMENTAL_ENABLED } from './helpers.js';
 import {
@@ -137,6 +138,7 @@ export function render(panel) {
   const fileMode = panel._searchMode === 'file';
   return html`
     ${renderTabStrip(panel)}
+    ${renderLedRow(panel)}
     <div class="messages-wrapper">
       <div
         class="messages ${fileMode ? 'messages-hidden' : ''}"

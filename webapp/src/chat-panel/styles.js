@@ -244,6 +244,84 @@ export const STYLES = css`
     color: var(--accent-primary, #58a6ff);
   }
 
+  /* LED row (D21 Phase E). Compact dot row sitting
+   * directly under the tab strip in the main tab
+   * header. One dot per agent tab; click activates the
+   * agent's tab (same effect as clicking the tab).
+   * Three colour variants:
+   *
+   *   .led-cyan  — agent stream is in flight (flashing)
+   *   .led-green — last completion clean
+   *   .led-red   — last completion errored
+   *
+   * The row hides itself by being empty when there are
+   * no agent tabs — renderLedRow returns an empty
+   * template which produces no DOM. flex-wrap means 8+ agents
+   * flow onto a second row rather than truncating, per
+   * specs4/5-webapp/agent-browser.md § Layout.
+   *
+   * The active-tab dot is slightly enlarged so users
+   * can see at a glance which agent's transcript is
+   * currently shown in the message area. */
+  .led-row {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.75rem;
+    background: rgba(22, 27, 34, 0.4);
+    border-bottom: 1px solid rgba(240, 246, 252, 0.06);
+  }
+  .led-dot {
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    padding: 0;
+    cursor: pointer;
+    background: var(--text-secondary, #8b949e);
+    transition: transform 100ms ease, box-shadow 100ms ease;
+  }
+  .led-dot:hover {
+    transform: scale(1.25);
+  }
+  .led-dot.active {
+    width: 12px;
+    height: 12px;
+    box-shadow: 0 0 0 2px rgba(240, 246, 252, 0.25);
+  }
+  .led-dot.led-cyan {
+    background: #4fc3f7;
+    animation: led-pulse 1.2s ease-in-out infinite;
+  }
+  .led-dot.led-green {
+    background: #7ee787;
+  }
+  .led-dot.led-red {
+    background: #f85149;
+  }
+  @keyframes led-pulse {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.5);
+    }
+    50% {
+      opacity: 0.55;
+      box-shadow: 0 0 0 4px rgba(79, 195, 247, 0);
+    }
+  }
+  /* Active dot in cyan state — keep the white outline
+   * ring (so users see it's active) on top of the
+   * pulsing cyan glow. The ring uses a separate
+   * outline so the keyframe's box-shadow can still
+   * pulse without fighting the ring. */
+  .led-dot.led-cyan.active {
+    outline: 2px solid rgba(240, 246, 252, 0.4);
+    outline-offset: 1px;
+  }
+
   .messages-wrapper {
     flex: 1;
     min-height: 0;
