@@ -815,6 +815,40 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  binaryFilesSkipped(data) {
+    // Fired during sync_file_context when one or more
+    // selected files fail binary detection. The picker's
+    // selection state is unchanged — the file stays
+    // checked — but the LLM never sees the file's
+    // content because the repo layer refuses to decode
+    // binary bytes as text. Without this toast the
+    // rejection is invisible to the user.
+    //
+    // Spec: specs4/5-webapp/file-picker.md
+    // § Binary File Selection
+    // Spec: specs-reference/5-webapp/shell.md
+    // § binaryFilesSkipped server-push event
+    const paths = Array.isArray(data?.paths) ? data.paths : [];
+    if (paths.length === 0) return true;
+    window.dispatchEvent(new CustomEvent('binary-files-skipped', {
+      detail: { paths },
+    }));
+    // Toast wording: lead with the first file, append a
+    // "(+N more)" suffix when the list is long. Keeps the
+    // toast a single line. The Doc Convert hint is
+    // appended unconditionally since that's the standard
+    // resolution path.
+    const head = paths[0];
+    const extra = paths.length > 1
+      ? ` (+${paths.length - 1} more)`
+      : '';
+    this._showToast(
+      `Binary file not loaded: ${head}${extra}. Convert via the Doc Convert tab.`,
+      'warning',
+    );
+    return true;
+  }
+
   userMessage(data) {
     window.dispatchEvent(new CustomEvent('user-message', { detail: data }));
     return true;

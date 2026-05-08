@@ -75,6 +75,20 @@ Creates on construction:
 - Binary files rejected
 - Path traversal (`..` segments) blocked
 
+### Binary file rejection at sync time
+
+The file picker accepts selection of binary files (xlsx, pdf, image archive, etc.) at click time — selection-time rejection would require an 8KB read per click and would surprise users with checkboxes that refuse to stay set.
+
+The reckoning happens at turn start. `sync_file_context` materialises the selected list into `FileContext`; binary files raise `RepoError` from the repo layer. The sync handler catches the error and acts on three channels:
+
+1. **Logs at WARNING** — operator visibility in the server log.
+2. **Removes the path from the scope's `selected_files`** — the next `get_selected_files()` returns the trimmed list, and the file's checkbox in the picker clears on the next render.
+3. **Broadcasts `filesChanged`** with the trimmed selection so the picker updates immediately, and **broadcasts `binaryFilesSkipped`** with the dropped paths so the shell can render a toast naming the rejected files and pointing at the Doc Convert tab.
+
+The LLM never sees the binary file's bytes, and the user gets unambiguous feedback that the file is no longer selected. After running Doc Convert, the user selects the produced sibling markdown (the right file all along — the xlsx selection was a mistake the system silently tolerated before this fix).
+
+For agent scopes, only the agent's `selected_files` is trimmed; the user-facing selection is untouched.
+
 ### Path Normalization
 
 - Backslashes replaced with forward slashes

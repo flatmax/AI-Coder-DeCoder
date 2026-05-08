@@ -128,6 +128,35 @@ This lets downstream dispatch (RPC handlers, tier builder, UI state) work with e
 
 Unknown strings raise `ValueError` in the enum constructor — `set_mode` catches this and produces a user-friendly error rather than propagating the exception.
 
+### Binary files in selection are trimmed at turn-start materialisation
+
+`sync_file_context` calls `FileContext.add_file(path)` for every newly-selected path. The repo layer raises `RepoError("Binary file cannot be read as text: ...")` when the file's first 8KB contains a null byte (xlsx, pdf, png, zip, etc.). The handler catches `Exception` and logs at WARNING:
+
+```
+Selected file foo.xlsx could not be loaded into context: Binary file
+cannot be read as text: foo.xlsx. The LLM will NOT see this file's
+content until the error is resolved.
+```
+
+For binary-flagged paths only (the message-prefix check distinguishes "binary" from other read failures like permission errors), the handler additionally:
+
+1. Removes the path from `scope.selected_files` in place via `list.remove`. When the scope is the main user-facing one, this same list lives on `LLMService._selected_files` (shared reference per `default_scope`), so the trim writes through to both.
+2. Broadcasts `filesChanged` with the trimmed selection.
+3. Broadcasts `binaryFilesSkipped` with the dropped paths.
+
+Event payload shapes:
+
+```pseudo
+filesChanged: list[str]                # trimmed selection
+binaryFilesSkipped: {paths: list[str]} # rejected paths only
+```
+
+The two broadcasts are independent — `filesChanged` drives picker checkbox state; `binaryFilesSkipped` drives the toast. They fire in this order so the checkbox visibly clears before (or alongside) the toast appears.
+
+Non-binary read failures (permission errors, etc.) log the warning but do NOT trim the selection — the file may simply be transiently unreadable, and dropping it could mask a fixable problem. Only binary-content rejection is treated as a hard contract violation worth correcting unilaterally.
+
+Frontend handler for `binaryFilesSkipped` routes the payload to a single toast naming the affected files and pointing at the Doc Convert tab as the resolution path. See `specs-reference/5-webapp/shell.md` for the AcApp method registration.
+
 ## Cross-references
 
 - Behavioral history operations, mode swap, stability tracker attachment, lifecycle: `specs4/3-llm/context-model.md`
