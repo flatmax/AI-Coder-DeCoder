@@ -454,34 +454,33 @@ Backend-only foundation. Persists the per-turn `{id, agent_idx}` mapping on ever
 
 Delivered via `HistoryStore.append_message` accepting `agent_blocks`, `_stream_chat` parsing the response a second time at persistence-write time and threading the summary through `archival_append`. See D30 for the full rationale and `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction for the contract.
 
-### Increment B — Live agent tabs (current turn)
+### ~~Increment B — Live agent tabs (current turn)~~ — already delivered (audit recovery, post-A)
 
-The biggest piece. Implements specs4/5-webapp/agent-browser.md § "Tab Strip" and § "Streaming Routing" — the chat panel gains a tab strip with one "Main" tab plus one tab per agent the orchestrator spawned. Tabs appear when `agentsSpawned` fires, persist for the turn, and are interactive (user can switch tabs, watch agents stream, reply to an agent, grant a file via the picker while that agent's tab is active).
+Plan-status correction. When the agent-mode UI plan was first written, this increment was tagged "biggest piece, not started." A subsequent audit of the actual webapp source — prompted by the question of whether to start Increment B — revealed the work was substantially complete already, shipped piecemeal across earlier sessions before the plan was written.
 
-Scope:
-- Tab strip in the chat panel; per-tab state slots keyed by `"main"` for the orchestrator and the agent's `id` for each agent (per agent-browser.md § Per-Tab State).
-- Per-tab streaming state — accumulated content keyed by request ID, where the request ID determines which tab the chunk belongs to. Child request IDs (`{parent}-agent-{NN}`) route to the matching agent tab.
-- `agentsSpawned` event handler that creates tabs BEFORE child streams start (per the spec's Tab Creation Ordering invariant — without this, fast-completing agents have their chunks dropped because no tab claims the child request ID yet).
-- `chat_streaming` RPC accepts an `agent_tag` parameter (already present in the backend) for routing user replies to agent tabs; frontend sets the tag based on the active tab.
-- File picker selection scope per tab — ticking a file while agent N's tab is active updates only agent N's selection (per agent-browser.md § File Picker Scope). Existing `set_agent_selected_files` RPC consumes this.
-- LED row in the main tab header (per agent-browser.md § Status LEDs) — one LED per live tab plus one for main, colour-coded to streaming/complete/error state, clicking activates the tab.
-- Close affordance per agent tab — calls `close_agent_context(agent_id)` RPC (already exists), which frees the ContextManager and stability tracker; archive file persists on disk.
+What the audit found in `webapp/src/chat-panel/` and `webapp/src/files-tab/`:
 
-Why this is the highest-value next increment: agent mode is technically running now (Increment A persists the data, the backend executes agents in parallel), but a user has no way to interact with running agents. Their existence surfaces only as text in the orchestrator's narration. Increment B turns agent mode from "the LLM does work in the background" into "the user sees and interacts with their team."
+- **Tab strip rendering** — `renderTabStrip()` in `tabs.js` produces the strip with active-class, streaming indicators, close buttons, mode-aware tooltips, and an overflow menu for many tabs. Hidden when only the main tab exists; appears the moment a second tab materialises.
+- **Per-tab state** — `_tabs: Map<id, state>` on the chat panel, with `makeTabState()` factory and `installReactiveAccessors` (in `state.js`) installing prototype getters/setters that forward every reactive property to the active tab's slot. `noAccessor: true` in `properties.js` opts out of Lit's default accessor installation.
+- **Tab activation** — click handler in `tabs.js`, Alt+` cycling via `onChatTabShortcut`, LED-row click via `led-row.js`'s `scrollTabIntoView`. The setter on `_activeTabId` snapshots / restores per-tab URL chip state across the singleton `ac-url-chips` element so chip state per tab survives switching.
+- **`agentsSpawned` event** — handler in `streaming.js` (`onAgentsSpawned`) calls `spawnAgentTabs` in `tabs.js`, creating tabs SYNCHRONOUSLY before child stream chunks arrive (the spec's tab-creation-ordering invariant — without this, fast-completing agents' chunks are dropped because no tab claims the child request ID yet).
+- **Streaming routing** — `findTabForRequest` in `tabs.js` matches by exact ID first, then by parent-prefix (`{parent}-agent-NN`). Both `onStreamChunk` and `onStreamComplete` route through this. Pending-chunk coalescing per animation frame is per-tab.
+- **`agent_tag` routing** — `send()` in `input.js` reads the active tab id, passes it through `parseAgentTabId` (`null` for main, the id otherwise), and threads the result as `chat_streaming`'s `agent_tag` argument. Stale-agent error response (`{error: "agent not found"}`) closes the tab locally and toasts the user.
+- **LED row** — `led-row.js`'s `renderLedRow()` produces one dot for main plus one per agent tab. State is cyan (streaming) / green (clean) / red (error) per `getLedState()`; tooltip via `formatLedTooltip()` carries id + mode + outcome ("running" / "completed (N edits applied)" / "<failure reason>"). Click activates the tab and scrolls the strip into view.
+- **File picker per-tab scope** — `_selectedFilesByTab` and `_excludedFilesByTab` Maps in `files-tab/index.js`; `active-tab-changed` listener swaps picker state to the new tab; `applySelection` and `applyExclusion` route to `LLMService.set_selected_files` for main / `set_agent_selected_files(agent_id, files)` for agent tabs (mirror for exclusion).
+- **Close affordance** — `onTabClose` in `tabs.js` removes the tab from `_tabs` and `_tabLabels`, switches to main if the closed tab was active, fires the `close-tab` event, and calls `LLMService.close_agent_context(agent_id)` fire-and-forget.
 
-Estimated effort: substantial — comparable to the chat panel's original implementation. New components (tab strip, LED row), per-tab state machine in the chat panel, request ID routing, RPC integration on selection and close. Likely a multi-commit deliverable.
+Test coverage in `webapp/src/chat-panel/tabs.test.js` (~1100 lines), `streaming.test.js` (~1300 lines), `state.test.js`, `led-row.test.js`, and `webapp/src/files-tab/per-tab.test.js` pins every contract item above. Hundreds of test cases.
 
-### Increment C — Tab rehydration on refresh / reconnect
+Why this section says "already delivered" rather than just striking it through: the level of detail above is the audit trail. A future session reading the plan should not re-do the audit to confirm — the catalog of what was found, where it lives, and how tests pin it is the documentation that prevents wasted re-implementation work. The lesson for the plan-writing process is to read the source before writing scope statements; symbol maps showed the existence of `spawnAgentTabs`, `parseAgentTabId`, `_makeTabState`, `installReactiveAccessors`, `findTabForRequest`, and `renderTabStrip` but the original plan still labelled the whole increment "not started." The audit corrected that.
 
-Implements agent-browser.md § "Refresh and Reconnect". Browser refresh kills the chat panel's per-tab state, but the backend's `_agent_contexts` registry (in-memory, scoped to the server process) survives. On `onRpcReady`, the chat panel calls `list_live_agents()` (already exists as an RPC), gets metadata for every registered agent, and reconstructs writable tabs. Conversation content for each tab loads via `get_turn_archive(turn_id)` filtered to the matching `agent_idx`.
+### ~~Increment C — Tab rehydration on refresh / reconnect~~ — already delivered (audit recovery, post-A)
 
-Scope:
-- Frontend `list_live_agents()` call on `onRpcReady` (initial connect and post-reconnect).
-- Per-entry tab construction with the agent's `id` as the tab identifier — same code path as `agentsSpawned`-driven tab creation, just keyed off a different event.
-- Per-tab archive load via `get_turn_archive(turn_id)` filtered to the matching `agent_idx`.
-- Per-tab LED state recomputation from archive content (last assistant message has no error metadata + every persisted edit succeeded → green; otherwise red; cyan never recovers because the frontend can't subscribe mid-stream).
+Same audit, same finding: implemented and tested. `rehydrateLiveAgents` lives in `webapp/src/chat-panel/events.js`; it's called from `onRpcReady` after the proxy publishes. The function calls `LLMService.list_live_agents()` (returns one entry per registered agent), passes the entries to `rehydrateAgentTabs` in `tabs.js` to materialise writable tabs, then loads conversation content per turn via `get_turn_archive(turn_id)` filtered to each agent's `agent_idx`. Per-tab LED outcome is recomputed from archive content via `computeOutcomeFromArchive()` (last assistant record's edit_results determine clean/error; cyan can't be recovered because the frontend can't subscribe mid-stream).
 
-Smaller than Increment B because it shares infrastructure: the tab construction code already exists from B, the RPCs already exist from the backend foundation work. Just a new entry point that invokes them.
+Tab IDs use the agent's LLM-chosen string id (per D26 flat identity); `deriveAgentTabLabelFromEntry` produces the user-facing label, recognising positional ids (`agent-NN`) and rendering them as `Agent NN` for visual consistency with spawn-time labels while preserving descriptive ids (`frontend-chat`) verbatim. Rehydration is idempotent — agents already in `_tabs` (e.g. from an earlier `agentsSpawned` in the same connection) are skipped.
+
+The handler is fire-and-forget on errors: a failed `list_live_agents` call logs at console-error level (skipping the routine "method not found" case for stripped-down test fixtures) but never surfaces a toast — running on every connect, transient failures shouldn't punish the user with a notification on every reload.
 
 ### Increment D — Per-turn historical view
 
@@ -507,7 +506,7 @@ Highest-spec, lowest-volume use case. Defer until B-D are in real use; once you'
 
 ### Delivery order
 
-Increment A delivered. B+C+D form the next coherent push (they share infrastructure: per-tab state, child request routing, archive loading). E follows once B-D have shipped and seen real use. Each B/C/D/E gets its own delivery-note section here when it lands, similar to the file-picker increment notes.
+Increments A, B, and C delivered. (B and C were marked "not started" in the original plan but a post-A audit found both already shipped — see their respective delivery-note sections.) D is the next concrete piece of work; it depends on B's tab construction infrastructure (which is in place). E follows once D has shipped and seen real use. Each remaining increment gets its own delivery-note section here when it lands.
 
 ## UI polish work plan — complete
 
