@@ -95,11 +95,26 @@ import {
   flattenTreePaths,
 } from './helpers.js';
 import {
+  dispatchExclude,
+  dispatchExcludeAll,
+  dispatchInclude,
+  dispatchIncludeAll,
+  dispatchLoadInPanel,
+  isRestrictedError,
+  onContextMenuAction,
+} from './context-menu.js';
+import {
   onFileClicked,
   onFileSearchChanged,
   onFileSearchScroll,
   onFilterFromChat,
 } from './file-search.js';
+import {
+  onDuplicateCommitted,
+  onNewDirectoryCommitted,
+  onNewFileCommitted,
+  onRenameCommitted,
+} from './inline-commits.js';
 import {
   onFileChipClick,
   onFileChipsAddAll,
@@ -1689,1021 +1704,75 @@ export class FilesTab extends RpcMixin(LitElement) {
   // Context-menu action routing (Increment 8b — simple RPCs)
   // ---------------------------------------------------------------
 
-  /**
-   * Route a `context-menu-action` event from the picker
-   * to the corresponding backend RPC. Detail shape (from
-   * 8a): `{action, type, path, name, isExcluded}`. 8b
-   * handles stage / unstage / discard / delete. Later
-   * sub-commits add rename / duplicate / include /
-   * exclude / load-in-panel; unrecognised actions fall
-   * through to a debug log and wait for their owning
-   * sub-commit.
-   */
+  // Bodies live in ./context-menu.js. The host method
+  // names stay so the template binding and any test
+  // hooks see the same shape.
   _onContextMenuAction(event) {
-    const detail = event.detail;
-    if (!detail || typeof detail.action !== 'string') return;
-    const { action, type, path } = detail;
-    if (typeof path !== 'string') return;
-    // Empty string paths ARE legal for the repo root
-    // directory (its `path` is the empty string). File
-    // actions require a non-empty path, dir actions
-    // tolerate the empty string.
-    if (type === 'file') {
-      if (!path) return;
-      this._dispatchFileAction(action, path);
-      return;
-    }
-    if (type === 'dir') {
-      this._dispatchDirAction(action, path, detail.name);
-      return;
-    }
-    if (type === 'root') {
-      // Root-row actions reuse the directory-action
-      // dispatcher — the action IDs (new-file /
-      // new-directory) and their handlers are
-      // identical; the only difference is that the
-      // root's path is the empty string, which
-      // `_dispatchNewFile` / `_dispatchNewDirectory`
-      // already handle as "create at repo root".
-      this._dispatchDirAction(action, path, detail.name);
-      return;
-    }
-    // Unknown type — ignore. Either a future type or a
-    // malformed event; neither should reach any
-    // handler.
+    onContextMenuAction(this, event);
   }
 
-  /**
-   * Route a file-row context menu action to the
-   * appropriate dispatcher. Extracted from the main
-   * handler for readability — 10 cases were starting
-   * to crowd out the type-routing logic.
-   */
-  _dispatchFileAction(action, path) {
-    switch (action) {
-      case 'stage':
-        this._dispatchStage(path);
-        return;
-      case 'unstage':
-        this._dispatchUnstage(path);
-        return;
-      case 'discard':
-        this._dispatchDiscard(path);
-        return;
-      case 'delete':
-        this._dispatchDelete(path);
-        return;
-      case 'rename':
-        this._dispatchRename(path);
-        return;
-      case 'duplicate':
-        this._dispatchDuplicate(path);
-        return;
-      case 'include':
-        this._dispatchInclude(path);
-        return;
-      case 'exclude':
-        this._dispatchExclude(path);
-        return;
-      case 'load-left':
-        this._dispatchLoadInPanel(path, 'left');
-        return;
-      case 'load-right':
-        this._dispatchLoadInPanel(path, 'right');
-        return;
-      default:
-        // No remaining unwired file actions. A
-        // defensive default keeps the switch from
-        // throwing on a future refactor that adds a
-        // new menu item without wiring it here.
-        return;
-    }
-  }
-
-  /**
-   * Route a directory-row context menu action. All
-   * seven dir-menu actions are wired here — the
-   * new-file / new-directory actions open an inline
-   * input via the picker rather than calling an RPC
-   * directly; the RPC fires on the commit event.
-   */
-  _dispatchDirAction(action, path, name) {
-    switch (action) {
-      case 'stage-all':
-        this._dispatchStageAll(path);
-        return;
-      case 'unstage-all':
-        this._dispatchUnstageAll(path);
-        return;
-      case 'rename-dir':
-        this._dispatchRenameDir(path, name);
-        return;
-      case 'new-file':
-        this._dispatchNewFile(path);
-        return;
-      case 'new-directory':
-        this._dispatchNewDirectory(path);
-        return;
-      case 'exclude-all':
-        this._dispatchExcludeAll(path);
-        return;
-      case 'include-all':
-        this._dispatchIncludeAll(path);
-        return;
-      default:
-        // Unknown actions silently drop. A future menu
-        // addition that forgets to wire a handler will
-        // end up here and produce a no-op rather than
-        // a crash.
-        return;
-    }
-  }
-
-  /**
-   * Stage a single file. `Repo.stage_files` accepts an
-   * array so we wrap the path.
-   */
-  async _dispatchStage(path) {
-    try {
-      const result = await this.rpcExtract(
-        'Repo.stage_files',
-        [path],
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(result.reason || 'Restricted operation', 'warning');
-        return;
-      }
-      await this._loadFileTree();
-      this._showToast(`Staged ${path}`, 'success');
-    } catch (err) {
-      console.error('[files-tab] stage_files failed', err);
-      this._showToast(
-        `Failed to stage ${path}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Unstage a single file. Symmetric to stage.
-   */
-  async _dispatchUnstage(path) {
-    try {
-      const result = await this.rpcExtract(
-        'Repo.unstage_files',
-        [path],
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(result.reason || 'Restricted operation', 'warning');
-        return;
-      }
-      await this._loadFileTree();
-      this._showToast(`Unstaged ${path}`, 'success');
-    } catch (err) {
-      console.error('[files-tab] unstage_files failed', err);
-      this._showToast(
-        `Failed to unstage ${path}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Discard changes to a file — tracked files revert
-   * to HEAD; untracked files are deleted. Confirm
-   * dialog because both outcomes are destructive.
-   *
-   * Using `window.confirm` is the simplest accessible
-   * option. A future pass could swap in a Lit modal
-   * that matches the app's styling, but the user-
-   * facing contract (a blocking yes/no before the
-   * action runs) stays the same.
-   */
-  async _dispatchDiscard(path) {
-    const confirmed = this._confirm(
-      `Discard changes to ${path}? This cannot be undone.`,
-    );
-    if (!confirmed) return;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.discard_changes',
-        [path],
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(result.reason || 'Restricted operation', 'warning');
-        return;
-      }
-      await this._loadFileTree();
-      // Notify the app shell that working-tree content
-      // has reverted. The shell's _onFilesReverted
-      // handler calls refreshOpenFiles on the diff /
-      // SVG viewers so any open editor showing this
-      // path picks up the new on-disk content instead
-      // of the stale modified buffer. Without this,
-      // "Discard Changes" silently succeeds on the
-      // backend but the editor keeps the user's edits
-      // visible — confusing, because the next save
-      // round-trips them right back.
-      window.dispatchEvent(
-        new CustomEvent('files-reverted', {
-          detail: { paths: [path] },
-          bubbles: false,
-        }),
-      );
-      this._showToast(`Discarded changes to ${path}`, 'success');
-    } catch (err) {
-      console.error('[files-tab] discard_changes failed', err);
-      this._showToast(
-        `Failed to discard ${path}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Delete a file from the working tree. Confirm with
-   * a strongly-worded prompt since this is permanent
-   * from the picker's perspective (git history still
-   * has the file, but from the current branch tip
-   * forward it's gone).
-   */
-  async _dispatchDelete(path) {
-    const confirmed = this._confirm(
-      `Delete ${path}? The file will be removed from the working tree.`,
-    );
-    if (!confirmed) return;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.delete_file',
-        path,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(result.reason || 'Restricted operation', 'warning');
-        return;
-      }
-      await this._loadFileTree();
-      // Deleted files are also removed from selection /
-      // exclusion if they were there. Server's broadcast
-      // via `filesChanged` will adjust selection; we
-      // clear exclusion locally since there's no
-      // broadcast for that today.
-      if (this._excludedFiles.has(path)) {
-        const next = new Set(this._excludedFiles);
-        next.delete(path);
-        this._applyExclusion(next, /* notifyServer */ true);
-      }
-      this._showToast(`Deleted ${path}`, 'success');
-    } catch (err) {
-      console.error('[files-tab] delete_file failed', err);
-      this._showToast(
-        `Failed to delete ${path}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Kick off an inline rename. The picker renders an
-   * input in place of the file row; Enter dispatches
-   * `rename-committed` back to us, Escape dispatches
-   * nothing (the user bailed). Pure delegation — the
-   * picker owns the inline-input lifecycle.
-   */
-  _dispatchRename(path) {
-    const picker = this._picker();
-    if (!picker) return;
-    picker.beginRename(path);
-  }
-
-  /**
-   * Kick off an inline duplicate. Same pattern as
-   * rename — picker shows an input pre-filled with the
-   * source path so the user can edit the target
-   * location. Commit fires `duplicate-committed`.
-   */
-  _dispatchDuplicate(path) {
-    const picker = this._picker();
-    if (!picker) return;
-    picker.beginDuplicate(path);
-  }
+  // Per-action dispatchers live in ./context-menu.js
+  // (file actions, dir actions, helpers). The host
+  // exposes only the three entries that other
+  // modules / tests reach into directly:
+  // _dispatchInclude, _dispatchExcludeAll,
+  // _dispatchIncludeAll — see below.
 
   // Body lives in ./mentions.js.
   _onInsertPath(event) {
     onInsertPath(this, event);
   }
 
-  /**
-   * Handle the picker's `rename-committed` event. Event
-   * detail: `{sourcePath, targetName}` where
-   * `targetName` is just the filename (not the full
-   * path) — the picker's input pre-filled with the
-   * current name, so the user edited a name, not a
-   * path. We rebuild the full target path by
-   * preserving the source's parent directory.
-   *
-   * Rejects target names with path separators — users
-   * who want to move a file to a different directory
-   * should use duplicate (or a future "move" action)
-   * rather than sneaking in through rename. A slash in
-   * the target would also collide with git's rename-
-   * detection heuristics in confusing ways.
-   */
-  async _onRenameCommitted(event) {
-    const detail = event.detail || {};
-    const sourcePath = detail.sourcePath;
-    const targetName = detail.targetName;
-    if (typeof sourcePath !== 'string' || !sourcePath) return;
-    if (typeof targetName !== 'string' || !targetName) return;
-    if (targetName.includes('/') || targetName.includes('\\')) {
-      this._showToast(
-        'Rename target cannot contain path separators. Use duplicate to move files.',
-        'warning',
-      );
-      return;
-    }
-    // Rebuild full target path from source's parent dir.
-    const lastSlash = sourcePath.lastIndexOf('/');
-    const targetPath =
-      lastSlash >= 0
-        ? `${sourcePath.slice(0, lastSlash)}/${targetName}`
-        : targetName;
-    // Same-path no-op — the picker's commit handler
-    // already short-circuits on unchanged names, but
-    // defensive in case a future refactor loosens that.
-    if (targetPath === sourcePath) return;
-    // Inspect the tree to see whether the source is a
-    // file or a directory. The picker's beginRename
-    // doesn't carry that discriminator — it operates on
-    // a path — so we determine the correct RPC here.
-    // Missing nodes (e.g., deleted between menu open
-    // and Enter press) default to file rename since the
-    // RPC surfaces a clean error anyway.
-    const sourceNode = this._findNodeByPath(sourcePath);
-    const isDir = sourceNode?.type === 'dir';
-    const rpcMethod = isDir ? 'Repo.rename_directory' : 'Repo.rename_file';
-    try {
-      const result = await this.rpcExtract(
-        rpcMethod,
-        sourcePath,
-        targetPath,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      // Migrate selection and exclusion state to the
-      // new path. For directory renames we migrate
-      // every descendant path's prefix so nested
-      // selections survive.
-      if (isDir) {
-        this._migrateSubtreeState(sourcePath, targetPath);
-      } else {
-        if (this._selectedFiles.has(sourcePath)) {
-          const next = new Set(this._selectedFiles);
-          next.delete(sourcePath);
-          next.add(targetPath);
-          this._applySelection(next, /* notifyServer */ true);
-        }
-        if (this._excludedFiles.has(sourcePath)) {
-          const next = new Set(this._excludedFiles);
-          next.delete(sourcePath);
-          next.add(targetPath);
-          this._applyExclusion(next, /* notifyServer */ true);
-        }
-      }
-      this._showToast(
-        `Renamed to ${targetName}`,
-        'success',
-      );
-    } catch (err) {
-      console.error('[files-tab] rename failed', err);
-      this._showToast(
-        `Failed to rename ${sourcePath}: ${err?.message || err}`,
-        'error',
-      );
-    }
+  // Bodies live in ./inline-commits.js. Handler names
+  // preserved so the template bindings stay stable.
+  _onRenameCommitted(event) {
+    return onRenameCommitted(this, event);
   }
 
-  /**
-   * Locate any tree node (file OR directory) by path.
-   * Used by rename commit to distinguish file vs dir
-   * source so we can route to the correct RPC.
-   * Returns null when not found.
-   */
-  _findNodeByPath(path) {
-    const walk = (node) => {
-      if (!node || typeof node !== 'object') return null;
-      if (node.path === path) return node;
-      if (!Array.isArray(node.children)) return null;
-      for (const child of node.children) {
-        const found = walk(child);
-        if (found) return found;
-      }
-      return null;
-    };
-    return walk(this._latestTree);
+  _onDuplicateCommitted(event) {
+    return onDuplicateCommitted(this, event);
   }
 
-  /**
-   * Migrate every selection and exclusion entry
-   * whose path lives under `oldDir` to the
-   * equivalent path under `newDir`. Called after a
-   * successful directory rename so that per-file
-   * state survives the move.
-   */
-  _migrateSubtreeState(oldDir, newDir) {
-    const oldPrefix = `${oldDir}/`;
-    const migrateSet = (set) => {
-      let mutated = false;
-      const next = new Set(set);
-      for (const p of set) {
-        if (p === oldDir || p.startsWith(oldPrefix)) {
-          next.delete(p);
-          const rewritten =
-            p === oldDir ? newDir : `${newDir}/${p.slice(oldPrefix.length)}`;
-          next.add(rewritten);
-          mutated = true;
-        }
-      }
-      return mutated ? next : null;
-    };
-    const nextSelected = migrateSet(this._selectedFiles);
-    if (nextSelected) {
-      this._applySelection(nextSelected, /* notifyServer */ true);
-    }
-    const nextExcluded = migrateSet(this._excludedFiles);
-    if (nextExcluded) {
-      this._applyExclusion(nextExcluded, /* notifyServer */ true);
-    }
+  _onNewFileCommitted(event) {
+    return onNewFileCommitted(this, event);
   }
 
-  /**
-   * Handle the picker's `duplicate-committed` event.
-   * Event detail: `{sourcePath, targetName}` where
-   * `targetName` is the FULL target path (the picker's
-   * input pre-filled with the source path, so the user
-   * edited a path). Read source content via
-   * `Repo.get_file_content`, then create the target
-   * via `Repo.create_file`. No backend
-   * `copy_file` RPC exists, so the client-side
-   * read-then-write is the canonical flow.
-   *
-   * Failure at either step aborts cleanly — if the
-   * read succeeds but the write fails (e.g. target
-   * already exists, per `Repo.create_file`'s semantics),
-   * nothing's created and the toast explains the
-   * failure.
-   */
-  async _onDuplicateCommitted(event) {
-    const detail = event.detail || {};
-    const sourcePath = detail.sourcePath;
-    const targetPath = detail.targetName;
-    if (typeof sourcePath !== 'string' || !sourcePath) return;
-    if (typeof targetPath !== 'string' || !targetPath) return;
-    if (targetPath === sourcePath) return;
-    try {
-      // Read source content. The RPC envelope is
-      // single-key; `rpcExtract` unwraps it.
-      const content = await this.rpcExtract(
-        'Repo.get_file_content',
-        sourcePath,
-      );
-      // The RPC returns a plain string for text files.
-      // Binary files raise a RepoError on the server
-      // side, which surfaces here as a rejected
-      // promise — caught by the outer try/catch.
-      if (typeof content !== 'string') {
-        this._showToast(
-          `Cannot duplicate ${sourcePath}: unexpected content type`,
-          'error',
-        );
-        return;
-      }
-      const result = await this.rpcExtract(
-        'Repo.create_file',
-        targetPath,
-        content,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      this._showToast(
-        `Duplicated to ${targetPath}`,
-        'success',
-      );
-    } catch (err) {
-      console.error('[files-tab] duplicate failed', err);
-      this._showToast(
-        `Failed to duplicate ${sourcePath}: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _onNewDirectoryCommitted(event) {
+    return onNewDirectoryCommitted(this, event);
   }
 
-  /**
-   * Handle the picker's `new-file-committed` event.
-   * Event detail: `{parentPath, name}` where `name` is
-   * the basename typed by the user. Combine with
-   * `parentPath` to produce the full repo-relative path
-   * and call `Repo.create_file(path, '')`.
-   *
-   * Path separators in `name` are rejected — users who
-   * want to create a nested file path should create the
-   * directories separately. This matches the rename
-   * path's behaviour and keeps the interaction
-   * predictable.
-   *
-   * Empty `parentPath` (repo root) is valid — the
-   * resulting target path is just `name`.
-   */
-  async _onNewFileCommitted(event) {
-    const detail = event.detail || {};
-    const parentPath = detail.parentPath;
-    const name = detail.name;
-    if (typeof parentPath !== 'string') return;
-    if (typeof name !== 'string' || !name) return;
-    if (name.includes('/') || name.includes('\\')) {
-      // Path separators rejected — nested paths
-      // should be built step-by-step rather than
-      // sneaking in through a single create. Matches
-      // the rename-committed rejection rule.
-      this._showToast(
-        'File name cannot contain path separators.',
-        'warning',
-      );
-      return;
-    }
-    if (name.includes('/') || name.includes('\\')) {
-      this._showToast(
-        'File name cannot contain path separators.',
-        'warning',
-      );
-      return;
-    }
-    const targetPath = parentPath ? `${parentPath}/${name}` : name;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.create_file',
-        targetPath,
-        '',
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      this._showToast(`Created ${targetPath}`, 'success');
-    } catch (err) {
-      console.error('[files-tab] create_file failed', err);
-      this._showToast(
-        `Failed to create ${targetPath}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
+  // ---------------------------------------------------------------
+  // Context-menu dispatcher forwarders
+  // ---------------------------------------------------------------
+  //
+  // Most dispatchers live in ./context-menu.js and are
+  // reached through onContextMenuAction's routing —
+  // tests don't call them directly. The three below are
+  // exercised via direct method calls in
+  // exclusion.test.js (e.g.
+  // `t._dispatchInclude('a.md')`), so the host method
+  // names stay reachable as one-line forwarders.
 
-  /**
-   * Handle the picker's `new-directory-committed`
-   * event. Event detail: `{parentPath, name}`. Git
-   * doesn't track directories directly — only files
-   * with content — so we create the new directory by
-   * writing a `.gitkeep` file inside it. `.gitkeep` is
-   * a community convention (not a git feature); the
-   * name self-documents the purpose and users who see
-   * it in diffs immediately know what it's for.
-   *
-   * After the user adds real files to the directory,
-   * they can delete `.gitkeep` or leave it.
-   *
-   * Same path-separator validation as new-file.
-   */
-  async _onNewDirectoryCommitted(event) {
-    const detail = event.detail || {};
-    const parentPath = detail.parentPath;
-    const name = detail.name;
-    if (typeof parentPath !== 'string') return;
-    if (typeof name !== 'string' || !name) return;
-    if (name.includes('/') || name.includes('\\')) {
-      // Path separators rejected — see the equivalent
-      // check in _onNewFileCommitted.
-      this._showToast(
-        'Directory name cannot contain path separators.',
-        'warning',
-      );
-      return;
-    }
-    if (name.includes('/') || name.includes('\\')) {
-      this._showToast(
-        'Directory name cannot contain path separators.',
-        'warning',
-      );
-      return;
-    }
-    const dirPath = parentPath ? `${parentPath}/${name}` : name;
-    const keepPath = `${dirPath}/.gitkeep`;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.create_file',
-        keepPath,
-        '',
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      this._showToast(`Created directory ${dirPath}`, 'success');
-    } catch (err) {
-      console.error(
-        '[files-tab] create_file (gitkeep) failed',
-        err,
-      );
-      this._showToast(
-        `Failed to create ${dirPath}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Add `path` to the excluded set via the standard
-   * exclusion path. Idempotent — a file already
-   * excluded produces a set-equality short-circuit
-   * inside `_applyExclusion`, and the user sees no
-   * server round-trip.
-   *
-   * Excluding a selected file also deselects it —
-   * the two states are mutually exclusive. Mirrors
-   * the shift+click behaviour in the picker's
-   * `_toggleExclusion` path. Routes through the
-   * L0-invalidation prompt — same pref logic as
-   * shift+click.
-   */
-  _dispatchExclude(path) {
-    if (this._excludedFiles.has(path)) return;
-    const nextExcluded = new Set(this._excludedFiles);
-    nextExcluded.add(path);
-    this._applyExclusionWithPrompt(nextExcluded);
-    // Deselect if currently selected — excluded and
-    // selected can't coexist. Selection clear does
-    // NOT route through the L0 prompt because it's a
-    // selection change, not an exclusion change.
-    if (this._selectedFiles.has(path)) {
-      const nextSelected = new Set(this._selectedFiles);
-      nextSelected.delete(path);
-      this._applySelection(nextSelected, /* notifyServer */ true);
-    }
-  }
-
-  /**
-   * Remove `path` from the excluded set. Returns the
-   * file to the default index-only state — NOT to
-   * selected. Matches the shift+click-from-excluded
-   * semantics in the picker (the "Include in index"
-   * menu item is the non-selecting path; users who
-   * want to select it can tick the checkbox after).
-   *
-   * Idempotent — a file not currently excluded
-   * short-circuits via set-equality.
-   *
-   * Inclusion always invalidates L0 — the user wants
-   * the file's structural block back in the aggregate
-   * map immediately. No prompt, no preference check.
-   */
   _dispatchInclude(path) {
-    if (!this._excludedFiles.has(path)) return;
-    const next = new Set(this._excludedFiles);
-    next.delete(path);
-    this._applyExclusion(
-      next, /* notifyServer */ true, /* invalidateL0 */ true,
-    );
+    dispatchInclude(this, path);
   }
 
-  /**
-   * Fetch the file's content via `Repo.get_file_content`
-   * and dispatch a `load-diff-panel` event carrying the
-   * content, target panel, and a label (the file's
-   * basename). The app shell catches the event and
-   * routes to the diff viewer's `loadPanel(content,
-   * panel, label)` — same pathway the history browser's
-   * "Load in Left/Right Panel" context menu uses.
-   *
-   * The panel parameter is 'left' or 'right'. Invalid
-   * panels are rejected silently — the switch in
-   * `_onContextMenuAction` only calls us with known
-   * values.
-   *
-   * Failures (binary file, missing file, RPC error)
-   * surface as error toasts. Non-string content (e.g.,
-   * if the backend changes shape) guards with a
-   * defensive type check, mirroring duplicate's
-   * content validation.
-   */
-  async _dispatchLoadInPanel(path, panel) {
-    if (panel !== 'left' && panel !== 'right') return;
-    try {
-      const content = await this.rpcExtract(
-        'Repo.get_file_content',
-        path,
-      );
-      if (typeof content !== 'string') {
-        this._showToast(
-          `Cannot load ${path}: unexpected content type`,
-          'error',
-        );
-        return;
-      }
-      // Derive the label from the basename. The diff
-      // viewer's floating panel label shows this to
-      // disambiguate panels when the user has loaded
-      // content from multiple sources.
-      const lastSlash = path.lastIndexOf('/');
-      const basename = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
-      window.dispatchEvent(
-        new CustomEvent('load-diff-panel', {
-          detail: {
-            content,
-            panel,
-            label: basename,
-          },
-          bubbles: false,
-        }),
-      );
-    } catch (err) {
-      console.error('[files-tab] load-in-panel failed', err);
-      this._showToast(
-        `Failed to load ${path}: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Walk `_latestTree` to find the directory at `path`
-   * and return an array of all repo-relative file
-   * paths beneath it. Empty array when the path
-   * isn't found or the target isn't a directory.
-   *
-   * Used by every directory-level dispatcher — batch-
-   * operations naturally want the full descendant set
-   * so the RPC round-trip count is O(1) regardless of
-   * directory size.
-   */
-  _collectDescendantFilesFromPath(dirPath) {
-    if (typeof dirPath !== 'string') return [];
-    const root = this._latestTree;
-    if (!root || typeof root !== 'object') return [];
-    // Special case — repo root has empty path. Collect
-    // from the root itself without walking to find it.
-    if (dirPath === '') {
-      return this._collectDescendantsOfNode(root);
-    }
-    // Walk to the target directory.
-    const target = this._findDirNode(root, dirPath);
-    if (!target) return [];
-    return this._collectDescendantsOfNode(target);
-  }
-
-  /**
-   * Recursive helper — depth-first walk collecting
-   * file paths. Directories contribute nothing of
-   * their own; their descendants' file paths flow up.
-   */
-  _collectDescendantsOfNode(node) {
-    const out = [];
-    const walk = (n) => {
-      if (!n || typeof n !== 'object') return;
-      if (n.type === 'file' && typeof n.path === 'string' && n.path) {
-        out.push(n.path);
-        return;
-      }
-      if (Array.isArray(n.children)) {
-        for (const child of n.children) walk(child);
-      }
-    };
-    walk(node);
-    return out;
-  }
-
-  /**
-   * Locate a directory node by path within the tree.
-   * Returns null when not found. Simple DFS — tree
-   * sizes are small enough that a path-indexed lookup
-   * wouldn't justify the cache-invalidation
-   * complexity.
-   */
-  _findDirNode(root, dirPath) {
-    if (!root || typeof root !== 'object') return null;
-    if (root.type === 'dir' && root.path === dirPath) return root;
-    if (!Array.isArray(root.children)) return null;
-    for (const child of root.children) {
-      const found = this._findDirNode(child, dirPath);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  /**
-   * Stage every file under the given directory.
-   * Single RPC round-trip for the whole subtree.
-   * Empty directories (no descendants) short-circuit
-   * silently — no server call, no toast.
-   */
-  async _dispatchStageAll(dirPath) {
-    const files = this._collectDescendantFilesFromPath(dirPath);
-    if (files.length === 0) return;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.stage_files',
-        files,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      const label = dirPath || 'repository';
-      this._showToast(
-        `Staged ${files.length} file${files.length === 1 ? '' : 's'} in ${label}`,
-        'success',
-      );
-    } catch (err) {
-      console.error('[files-tab] stage_files (batch) failed', err);
-      this._showToast(
-        `Failed to stage files: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Symmetric to stage-all. A file that isn't
-   * currently staged contributes nothing to the
-   * unstage but doesn't break the batch — git
-   * silently skips unstaged paths.
-   */
-  async _dispatchUnstageAll(dirPath) {
-    const files = this._collectDescendantFilesFromPath(dirPath);
-    if (files.length === 0) return;
-    try {
-      const result = await this.rpcExtract(
-        'Repo.unstage_files',
-        files,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      await this._loadFileTree();
-      const label = dirPath || 'repository';
-      this._showToast(
-        `Unstaged ${files.length} file${files.length === 1 ? '' : 's'} in ${label}`,
-        'success',
-      );
-    } catch (err) {
-      console.error('[files-tab] unstage_files (batch) failed', err);
-      this._showToast(
-        `Failed to unstage files: ${err?.message || err}`,
-        'error',
-      );
-    }
-  }
-
-  /**
-   * Rename a directory. Delegates to the picker's
-   * inline-input flow via `beginRename` — the picker
-   * doesn't currently distinguish file vs directory
-   * rename at the input level (both want an inline
-   * input prefilled with the current name), but the
-   * commit event carries the path unchanged and our
-   * file rename handler rebuilds the target. The
-   * DIRECTORY rename needs a separate commit handler
-   * (`rename-dir-committed`) because the backend RPC
-   * is different: `Repo.rename_directory` vs
-   * `Repo.rename_file`.
-   *
-   * For simplicity we reuse the picker's existing
-   * rename flow — `beginRename` sets `_renaming` to
-   * the node's path regardless of type, and the
-   * `rename-committed` event fires on Enter. We
-   * differentiate at the commit-handler level by
-   * checking whether the source path exists as a
-   * file or a directory in the tree. Alternative
-   * would be to add a parallel `beginRenameDir` but
-   * it duplicates the input rendering for no UX
-   * benefit.
-   *
-   * The dir-case branch is in `_onRenameCommitted`
-   * — it inspects `_latestTree` to decide which RPC
-   * to call.
-   */
-  _dispatchRenameDir(path, name) {
-    const picker = this._picker();
-    if (!picker) return;
-    // Reuse the file rename input — same pre-filled
-    // name pattern.
-    picker.beginRename(path);
-  }
-
-  /**
-   * Open the new-file inline input inside `parentPath`.
-   * Picker renders an empty input at the top of that
-   * directory's children and auto-expands the parent
-   * so the input is visible. On Enter, the picker
-   * fires `new-file-committed` with `{parentPath, name}`
-   * which `_onNewFileCommitted` catches.
-   *
-   * parentPath may be the empty string (repo root).
-   */
-  _dispatchNewFile(parentPath) {
-    const picker = this._picker();
-    if (!picker) return;
-    picker.beginCreateFile(parentPath);
-  }
-
-  /**
-   * Open the new-directory inline input inside
-   * `parentPath`. Parallel to `_dispatchNewFile`.
-   * Commit fires `new-directory-committed`; the
-   * orchestrator creates the directory by writing a
-   * `.gitkeep` file inside it (git doesn't track
-   * empty directories, so a placeholder file is
-   * needed for the directory to exist in the next
-   * commit).
-   */
-  _dispatchNewDirectory(parentPath) {
-    const picker = this._picker();
-    if (!picker) return;
-    picker.beginCreateDirectory(parentPath);
-  }
-
-  /**
-   * Add every descendant file to the excluded set.
-   * Skips the server round-trip when the union is
-   * already the current state (every descendant
-   * already excluded). Deselects any descendants
-   * that were selected, matching the mutual-
-   * exclusion rule between selection and exclusion.
-   *
-   * Routes through the L0-invalidation prompt — the
-   * dialog body adapts to show the directory name
-   * and file count when more than one file is being
-   * excluded.
-   */
   _dispatchExcludeAll(dirPath) {
-    const files = this._collectDescendantFilesFromPath(dirPath);
-    if (files.length === 0) return;
-    const nextExcluded = new Set(this._excludedFiles);
-    for (const p of files) nextExcluded.add(p);
-    this._applyExclusionWithPrompt(nextExcluded);
-    // Deselect any that were selected. Same rationale
-    // as `_dispatchExclude` — selection changes don't
-    // route through the L0 prompt.
-    const hadSelected = files.some((p) => this._selectedFiles.has(p));
-    if (hadSelected) {
-      const nextSelected = new Set(this._selectedFiles);
-      for (const p of files) nextSelected.delete(p);
-      this._applySelection(nextSelected, /* notifyServer */ true);
-    }
+    dispatchExcludeAll(this, dirPath);
+  }
+
+  _dispatchIncludeAll(dirPath) {
+    dispatchIncludeAll(this, dirPath);
   }
 
   /**
-   * Remove every descendant file from the excluded
-   * set. Returns them to the default index-only
-   * state — does NOT auto-select, matching the
-   * file-level Include behaviour. Always invalidates
-   * L0 (no prompt) — same rationale as
-   * `_dispatchInclude`.
+   * Forwarder for the load-in-panel dispatcher. Tests
+   * call it directly with deliberately invalid panel
+   * names to verify the silent-drop branch (the public
+   * routing only ever passes 'left' or 'right').
    */
-  _dispatchIncludeAll(dirPath) {
-    const files = this._collectDescendantFilesFromPath(dirPath);
-    if (files.length === 0) return;
-    const next = new Set(this._excludedFiles);
-    for (const p of files) next.delete(p);
-    this._applyExclusion(
-      next, /* notifyServer */ true, /* invalidateL0 */ true,
-    );
+  _dispatchLoadInPanel(path, panel) {
+    return dispatchLoadInPanel(this, path, panel);
   }
 
   /**
@@ -2719,22 +1788,13 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   /**
-   * Check the result of an RPC call against the
-   * restricted-caller shape. Matches the helper inline-
-   * defined in `_sendSelectionToServer` and
-   * `_sendExclusionToServer` — extracted here so the
-   * four context-menu dispatchers don't duplicate the
-   * shape check. Older sites haven't been migrated;
-   * they're stable code paths that don't touch 8b's
-   * changes.
+   * Forwarder to the module helper. Used by
+   * pre-extraction call sites that haven't migrated
+   * to the module-level export — keeps the host
+   * surface stable across stages.
    */
   _isRestrictedError(result) {
-    return (
-      result &&
-      typeof result === 'object' &&
-      !Array.isArray(result) &&
-      result.error === 'restricted'
-    );
+    return isRestrictedError(result);
   }
 
   // ---------------------------------------------------------------
