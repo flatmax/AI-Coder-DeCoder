@@ -131,6 +131,27 @@ import {
   onInsertPath,
 } from './mentions.js';
 import {
+  onBranchMenuRequested,
+  onBranchSwitchRequested,
+} from './branch.js';
+import {
+  closeReviewGraphModal,
+  closeReviewSelector,
+  confirmStartReview,
+  onCommitInspectedFromGraph,
+  onCommitSelectedFromGraph,
+  onExitReview,
+  onGraphError,
+  onOpenReviewGraph,
+  onOpenReviewSelector,
+  onReviewBackdropClick,
+  onReviewEnded,
+  onReviewGraphBackdropClick,
+  onReviewStarted,
+  renderReviewGraphModal,
+  renderReviewSelectorModal,
+} from './review.js';
+import {
   applySelection,
   onFilesChanged,
   onSelectionChanged,
@@ -695,84 +716,15 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.revealFile(path);
   }
 
-  async _onReviewStarted(event) {
-    // Enter review mode. Store the full state dict and
-    // push to the picker so the banner appears. The
-    // backend's `start_review` has already cleared its
-    // own `_selected_files`, but we mirror the clear
-    // locally (defense-in-depth, per
-    // specs4/4-features/code-review.md) so the UI
-    // reflects the empty selection without waiting for
-    // the server's `filesChanged` broadcast.
-    //
-    // Detail shape matches backend's `get_review_state()`:
-    // `{active: true, branch, base_commit, branch_tip,
-    //   original_branch, commits, changed_files, stats}`.
-    const state = event.detail || {};
-    this._reviewState = state;
-    // Clear selection — review starts with a clean slate.
-    // Direct-update pattern (not `_applySelection` with
-    // `notifyServer=true`) because the server has
-    // already cleared on its side; round-tripping would
-    // be redundant.
-    this._selectedFiles = new Set();
-    const picker = this._picker();
-    if (picker) {
-      picker.reviewState = state;
-      picker.selectedFiles = new Set();
-      picker.requestUpdate();
-    }
-    const chat = this._chat();
-    if (chat) {
-      chat.selectedFiles = [];
-      chat.requestUpdate();
-    }
-    // Refresh file tree so the picker reflects the
-    // staged state produced by the soft reset. Wait
-    // for the fetch to settle before the auto-select
-    // pass below — it needs `_latestStatusData` to be
-    // populated with the review's staged files.
-    await this._loadFileTree();
-    // Auto-select every file the review touches so the
-    // user doesn't have to tick them individually to
-    // get diffs into the LLM's context. The review's
-    // soft-reset puts every branch-tip change into the
-    // staged set, which `_loadFileTree` mapped into
-    // `_latestStatusData.staged`. Reuse the same
-    // union-with-existing-selection logic that the
-    // first-load path uses — it handles the "expand
-    // ancestors so the files are visible" step too.
-    //
-    // We skip the `_initialAutoSelect` flag entirely
-    // here: that flag governs the first-ever tree load
-    // (so subsequent reloads don't undo user
-    // deselections). Review entry is a distinct event
-    // — the user explicitly asked to review, and every
-    // review starts from an empty selection cleared
-    // above — so re-applying the auto-select rule is
-    // expected, not a regression.
-    this._applyInitialAutoSelect();
+  // Review lifecycle bodies live in ./review.js.
+  // Forwarders preserve the bound-handler references
+  // wired in connectedCallback / disconnectedCallback.
+  _onReviewStarted(event) {
+    return onReviewStarted(this, event);
   }
 
   _onReviewEnded() {
-    // Exit review mode. Clear local state and push
-    // null to the picker so the banner disappears.
-    // Selection is NOT cleared here — the server's
-    // `end_review` doesn't touch `_selected_files`,
-    // and the user may want to continue with the
-    // files they had in review context. If the
-    // server's selection broadcast fires later, the
-    // normal `files-changed` handler picks it up.
-    this._reviewState = null;
-    const picker = this._picker();
-    if (picker) {
-      picker.reviewState = null;
-      picker.requestUpdate();
-    }
-    // Refresh file tree to reflect the restored
-    // post-review state (HEAD reattached, staging
-    // cleared).
-    this._loadFileTree();
+    return onReviewEnded(this);
   }
 
   /**
@@ -834,158 +786,24 @@ export class FilesTab extends RpcMixin(LitElement) {
     // right tab slot automatically.
   }
 
-  async _onExitReview() {
-    // User clicked the exit button on the review
-    // banner. Call the server's `end_review` RPC;
-    // the server broadcasts `reviewEnded` which
-    // comes back through our `_onReviewEnded`
-    // handler to do the UI cleanup. No optimistic
-    // local update — if the server rejects (e.g.
-    // non-localhost caller), the banner should stay
-    // visible so the user sees the error state.
-    if (!this.rpcConnected) return;
-    try {
-      const result = await this.rpcExtract(
-        'LLMService.end_review',
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      // Partial-exit case — server couldn't reattach
-      // the original branch. State was cleared on
-      // the server regardless; surface the error
-      // so the user knows git is in an unusual
-      // state.
-      if (result && result.status === 'partial' && result.error) {
-        this._showToast(
-          `Review exited with warning: ${result.error}`,
-          'warning',
-        );
-        return;
-      }
-      // Success — the server's `reviewEnded`
-      // broadcast will trigger `_onReviewEnded`.
-    } catch (err) {
-      console.error('[files-tab] end_review failed', err);
-      this._showToast(
-        `Failed to exit review: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _onExitReview() {
+    return onExitReview(this);
   }
 
   // ---------------------------------------------------------------
   // Branch switching
   // ---------------------------------------------------------------
+  //
+  // Bodies live in ./branch.js. Forwarders preserve
+  // the bound-handler references stored in the
+  // constructor.
 
-  /**
-   * Picker dispatched `branch-menu-requested` — the
-   * user clicked the branch pill. Fetch the full
-   * branch list (local + remote) and hand it back to
-   * the picker via `populateBranchMenu`. Errors
-   * surface as toasts but don't close the menu — the
-   * picker's "Loading…" state falls through to
-   * "No branches" which is still informative.
-   */
-  async _onBranchMenuRequested() {
-    if (!this.rpcConnected) return;
-    try {
-      const branches = await this.rpcExtract(
-        'Repo.list_all_branches',
-      );
-      const picker = this._picker();
-      if (picker) {
-        picker.populateBranchMenu(
-          Array.isArray(branches) ? branches : [],
-        );
-      }
-    } catch (err) {
-      console.error('[files-tab] list_all_branches failed', err);
-      this._showToast(
-        `Failed to load branches: ${err?.message || err}`,
-        'error',
-      );
-      const picker = this._picker();
-      if (picker) picker.populateBranchMenu([]);
-    }
+  _onBranchMenuRequested() {
+    return onBranchMenuRequested(this);
   }
 
-  /**
-   * Picker dispatched `branch-switch-requested` —
-   * the user picked a branch from the popover.
-   * Detail: `{name, is_remote}`. Dirty-tree check
-   * runs before the RPC so users get a precise
-   * toast rather than a generic git error, even
-   * though the backend also refuses dirty trees
-   * (belt-and-braces).
-   *
-   * On success we reload the file tree so the
-   * picker reflects the new branch. The backend's
-   * post-write callback fires `filesChanged`-adjacent
-   * behaviour via LLMService refreshes, but the tree
-   * RPC is cheap and a fresh call keeps the UI
-   * authoritative.
-   */
-  async _onBranchSwitchRequested(event) {
-    const name = event.detail?.name;
-    if (typeof name !== 'string' || !name) return;
-    if (!this.rpcConnected) return;
-    // Clean-tree gate. The backend also checks, but
-    // this produces a clearer toast with no RPC
-    // round-trip for the common dirty-tree case.
-    try {
-      const clean = await this.rpcExtract('Repo.is_clean');
-      if (!clean) {
-        this._showToast(
-          'Working tree has uncommitted changes. ' +
-            'Commit, stash, or discard them before ' +
-            'switching branches.',
-          'warning',
-        );
-        return;
-      }
-    } catch (err) {
-      // If the probe fails, defer to the backend's
-      // own check — don't block the switch on a
-      // probe failure.
-      console.warn('[files-tab] is_clean probe failed', err);
-    }
-    try {
-      const result = await this.rpcExtract(
-        'Repo.checkout_branch',
-        name,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        return;
-      }
-      if (result && typeof result === 'object' && result.error) {
-        this._showToast(
-          `Switch failed: ${result.error}`,
-          'error',
-        );
-        return;
-      }
-      const landedOn =
-        result && typeof result === 'object' && result.branch
-          ? result.branch
-          : name;
-      this._showToast(`Switched to ${landedOn}`, 'success');
-      await this._loadFileTree();
-    } catch (err) {
-      console.error('[files-tab] checkout_branch failed', err);
-      this._showToast(
-        `Switch failed: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _onBranchSwitchRequested(event) {
+    return onBranchSwitchRequested(this, event);
   }
 
   // Bodies live in ./selection.js. Host method names
@@ -1346,401 +1164,67 @@ export class FilesTab extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
   // Review selector modal
   // ---------------------------------------------------------------
+  //
+  // Bodies live in ./review.js. Forwarders preserve
+  // the host method names so the render template's
+  // `${this._renderReviewSelectorModal()}` call and
+  // any test hooks see a stable surface.
 
-  /**
-   * Handle the picker's `open-review-selector` event.
-   * Runs the clean-tree gate first so dirty working
-   * trees bail out with a clear message instead of
-   * producing a modal that leads to an RPC failure.
-   * Then opens the modal — the commit-graph component
-   * fetches its own data via the RPC call proxy.
-   */
-  async _onOpenReviewSelector() {
-    try {
-      const readiness = await this.rpcExtract(
-        'LLMService.check_review_ready',
-      );
-      if (readiness && readiness.clean === false) {
-        const msg = readiness.message
-          || 'Working tree must be clean to start a review.';
-        this._showToast(msg, 'warning');
-        return;
-      }
-    } catch (err) {
-      console.error('[files-tab] check_review_ready failed', err);
-      this._showToast(
-        `Review check failed: ${err?.message || err}`,
-        'error',
-      );
-      return;
-    }
-    this._reviewSelector = {
-      selected: null,
-      starting: false,
-    };
+  _onOpenReviewSelector() {
+    return onOpenReviewSelector(this);
   }
 
-  /**
-   * Commit-graph fired commit-selected — the user
-   * clicked a commit (optionally chose a branch via
-   * the disambiguation popover). Store the selection
-   * so the Start Review action bar can display the
-   * summary and fire start_review on confirm.
-   *
-   * Detail: `{commit, branch}`. `branch` may be null
-   * when no branch in the loaded history reaches the
-   * commit — the action bar handles that by
-   * disabling the Start button.
-   */
   _onCommitSelectedFromGraph(event) {
-    if (!this._reviewSelector) return;
-    const detail = event.detail || {};
-    if (!detail.commit) return;
-    this._reviewSelector = {
-      ...this._reviewSelector,
-      selected: {
-        commit: detail.commit,
-        branch: detail.branch || null,
-      },
-    };
+    return onCommitSelectedFromGraph(this, event);
   }
 
-  /**
-   * Graph fired graph-error — surface as a toast but
-   * keep the modal open so the user can retry or
-   * close it manually.
-   */
   _onGraphError(event) {
-    const message = event.detail?.message || 'Graph load failed';
-    this._showToast(`Commit graph: ${message}`, 'error');
+    return onGraphError(this, event);
   }
 
-  /**
-   * Close the modal — user clicked the backdrop, the
-   * close button, or pressed Escape. No RPC cleanup
-   * needed; an in-flight fetch's resolve will find
-   * `_reviewSelector` null and skip its update.
-   */
   _closeReviewSelector() {
-    this._reviewSelector = null;
+    return closeReviewSelector(this);
   }
 
-  /**
-   * Start a review using the currently-selected
-   * commit from the graph. The confirm button in the
-   * action bar triggers this.
-   *
-   * `selected.branch` may be null when the graph
-   * walk couldn't find any branch reaching the
-   * commit — the confirm button is disabled in that
-   * case so this method is only reachable when both
-   * fields are populated. Defensive guard kept
-   * anyway.
-   *
-   * Backend's `start_review(branch, base_commit)`
-   * accepts any commit SHA as the base — not just
-   * branch tips — so the user can scroll down the
-   * graph and pick an older commit to widen the
-   * review scope.
-   */
-  async _confirmStartReview() {
-    if (!this._reviewSelector) return;
-    const selected = this._reviewSelector.selected;
-    if (!selected || !selected.branch || !selected.commit) return;
-    const branch = selected.branch.name;
-    const baseCommit = selected.commit.sha;
-    if (typeof branch !== 'string' || !branch) return;
-    if (typeof baseCommit !== 'string' || !baseCommit) return;
-    this._reviewSelector = {
-      ...this._reviewSelector,
-      starting: true,
-    };
-    try {
-      const result = await this.rpcExtract(
-        'LLMService.start_review',
-        branch,
-        baseCommit,
-      );
-      if (this._isRestrictedError(result)) {
-        this._showToast(
-          result.reason || 'Restricted operation',
-          'warning',
-        );
-        if (this._reviewSelector) {
-          this._reviewSelector = {
-            ...this._reviewSelector,
-            starting: false,
-          };
-        }
-        return;
-      }
-      if (result && result.error) {
-        this._showToast(
-          `Start review failed: ${result.error}`,
-          'error',
-        );
-        if (this._reviewSelector) {
-          this._reviewSelector = {
-            ...this._reviewSelector,
-            starting: false,
-          };
-        }
-        return;
-      }
-      this._closeReviewSelector();
-    } catch (err) {
-      console.error('[files-tab] start_review failed', err);
-      this._showToast(
-        `Start review failed: ${err?.message || err}`,
-        'error',
-      );
-      if (this._reviewSelector) {
-        this._reviewSelector = {
-          ...this._reviewSelector,
-          starting: false,
-        };
-      }
-    }
+  _confirmStartReview() {
+    return confirmStartReview(this);
   }
 
   _onReviewBackdropClick(event) {
-    // Only close when the user clicks the backdrop
-    // itself — clicks that bubbled from inside the
-    // modal (buttons, rows) shouldn't close.
-    if (event.target === event.currentTarget) {
-      this._closeReviewSelector();
-    }
+    return onReviewBackdropClick(this, event);
   }
 
   _renderReviewSelectorModal() {
-    const state = this._reviewSelector;
-    if (!state) return '';
-    const selected = state.selected;
-    const starting = !!state.starting;
-    const canStart =
-      !!selected && !!selected.branch && !!selected.commit && !starting;
-    return html`
-      <div
-        class="review-modal-backdrop"
-        @click=${this._onReviewBackdropClick}
-      >
-        <div
-          class="review-modal"
-          role="dialog"
-          aria-label="Start code review"
-        >
-          <div class="review-modal-header">
-            <span class="review-modal-title">
-              🔍 Start code review
-            </span>
-            <button
-              class="review-modal-close"
-              title="Close"
-              aria-label="Close review selector"
-              @click=${this._closeReviewSelector}
-            >✕</button>
-          </div>
-          <div class="review-modal-hint">
-            Click a commit to select it as the review base.
-            The review will compare the chosen branch tip
-            against its merge-base with your current
-            branch (or main / master).
-          </div>
-          <ac-commit-graph
-            .rpcCall=${(method, ...args) => this.rpcExtract(method, ...args)}
-            @commit-selected=${this._onCommitSelectedFromGraph}
-            @graph-error=${this._onGraphError}
-          ></ac-commit-graph>
-          <div class="review-action-bar">
-            <div class="review-action-summary">
-              ${selected
-                ? html`
-                    Reviewing
-                    <strong>${selected.branch?.name || '(no branch)'}</strong>
-                    from base
-                    <strong>${selected.commit.short_sha
-                      || selected.commit.sha?.slice(0, 7)}</strong>
-                  `
-                : html`<em>Click a commit to select it as the review base.</em>`}
-            </div>
-            <button
-              class="review-start-btn"
-              ?disabled=${!canStart}
-              @click=${this._confirmStartReview}
-            >${starting ? 'Starting…' : 'Start review'}</button>
-          </div>
-        </div>
-      </div>
-    `;
+    return renderReviewSelectorModal(this);
   }
 
   // ---------------------------------------------------------------
   // Review history graph modal
   // ---------------------------------------------------------------
+  //
+  // Bodies live in ./review.js. Forwarders preserve
+  // the host method names so the render template's
+  // `${this._renderReviewGraphModal()}` call and any
+  // test hooks see a stable surface.
 
-  /**
-   * Open the review history graph modal. Fired when
-   * the picker's "View graph" button is clicked
-   * during an active review. No-op when review isn't
-   * active (defensive — the button is only rendered
-   * during review, but guard against a stale dispatch
-   * racing with an exit).
-   */
   _onOpenReviewGraph() {
-    if (!this._reviewState || !this._reviewState.active) {
-      return;
-    }
-    this._reviewGraphModal = {};
+    return onOpenReviewGraph(this);
   }
 
   _closeReviewGraphModal() {
-    this._reviewGraphModal = null;
+    return closeReviewGraphModal(this);
   }
 
   _onReviewGraphBackdropClick(event) {
-    if (event.target === event.currentTarget) {
-      this._closeReviewGraphModal();
-    }
+    return onReviewGraphBackdropClick(this, event);
   }
 
-  /**
-   * Route a commit-inspected event from the read-only
-   * graph to the diff viewer's ad-hoc panel. Shows
-   * the commit's diff against its first parent on
-   * the left, leaves the right panel with the current
-   * branch-tip content so the user can compare the
-   * commit's effect against their current view.
-   *
-   * Parent-diff is the conventional git-tool default
-   * (Sourcetree, GitKraken) for "what did this commit
-   * introduce?". A commit with no parent (root commit)
-   * degrades to an empty-left panel — the diff viewer
-   * shows the commit's full content as additions,
-   * which is visually accurate.
-   */
-  async _onCommitInspectedFromGraph(event) {
-    const commit = event.detail?.commit;
-    if (!commit || typeof commit.sha !== 'string') return;
-    if (!this.rpcConnected) return;
-    // Close the modal first so the diff viewer has focus
-    // and isn't competing with the backdrop. The fetch
-    // runs afterward and populates the panel when it
-    // lands.
-    this._closeReviewGraphModal();
-    try {
-      // Fetch the diff via git show. One round-trip;
-      // the backend doesn't have a dedicated "diff this
-      // commit" RPC but get_diff_to_branch's cousin
-      // pattern via Repo.get_file_content at the commit
-      // isn't suitable either (no native diff output).
-      // Quickest path: use Repo._run_git via a new
-      // helper is overkill for this feature — instead
-      // ask for the commit message + parent info and
-      // use Repo.get_staged_diff-style format via a
-      // simple get-commit-diff helper.
-      //
-      // Without a bespoke RPC, we fall back to
-      // `get_diff_to_branch(commit_sha)` which produces
-      // the diff between that commit and the working
-      // tree. That's not "this commit only" — it
-      // includes every change between the commit and
-      // now. Good enough for inspection during review
-      // (user is asking "what did this commit touch?"
-      // in the context of the feature branch), and
-      // keeps the feature shippable without a backend
-      // change.
-      const result = await this.rpcExtract(
-        'Repo.get_diff_to_branch',
-        commit.sha,
-      );
-      if (result && typeof result === 'object' && result.error) {
-        this._showToast(
-          `Commit inspect failed: ${result.error}`,
-          'warning',
-        );
-        return;
-      }
-      const diff =
-        result && typeof result === 'object'
-          ? result.diff || ''
-          : typeof result === 'string' ? result : '';
-      if (!diff) {
-        this._showToast(
-          'No diff available for that commit',
-          'info',
-        );
-        return;
-      }
-      const label = `commit ${commit.short_sha || commit.sha.slice(0, 7)}`;
-      window.dispatchEvent(
-        new CustomEvent('load-diff-panel', {
-          detail: {
-            content: diff,
-            panel: 'left',
-            label,
-          },
-          bubbles: false,
-        }),
-      );
-    } catch (err) {
-      console.error('[files-tab] commit-inspected failed', err);
-      this._showToast(
-        `Commit inspect failed: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _onCommitInspectedFromGraph(event) {
+    return onCommitInspectedFromGraph(this, event);
   }
 
   _renderReviewGraphModal() {
-    if (!this._reviewGraphModal) return '';
-    const state = this._reviewState || {};
-    // Build the highlight map from the current review
-    // state. Base is the merge-base (parent_commit),
-    // tip is the branch tip being reviewed.
-    const highlighted = {
-      base: state.parent_commit || null,
-      tip: state.branch_tip || null,
-    };
-    const branch = state.branch || '(unknown)';
-    const baseShort = (state.parent_commit || '').slice(0, 7);
-    const tipShort = (state.branch_tip || '').slice(0, 7);
-    return html`
-      <div
-        class="review-modal-backdrop"
-        @click=${this._onReviewGraphBackdropClick}
-      >
-        <div
-          class="review-modal"
-          role="dialog"
-          aria-label="Review history graph"
-        >
-          <div class="review-modal-header">
-            <span class="review-modal-title">
-              🔍 Review history: ${branch}
-            </span>
-            <button
-              class="review-modal-close"
-              title="Close"
-              aria-label="Close graph"
-              @click=${this._closeReviewGraphModal}
-            >✕</button>
-          </div>
-          <div class="review-modal-hint">
-            Amber ring = review base (${baseShort});
-            green ring = branch tip (${tipShort}).
-            Click any commit to see its diff in the left panel.
-          </div>
-          <ac-commit-graph
-            .rpcCall=${(method, ...args) => this.rpcExtract(method, ...args)}
-            .readOnly=${true}
-            .highlightedCommits=${highlighted}
-            includeRemote
-            @commit-inspected=${this._onCommitInspectedFromGraph}
-            @graph-error=${this._onGraphError}
-          ></ac-commit-graph>
-        </div>
-      </div>
-    `;
+    return renderReviewGraphModal(this);
   }
 }
 
