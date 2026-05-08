@@ -334,7 +334,7 @@ class TestModeRendering:
     """
 
     def test_code_mode_appears_inline(self, service) -> None:
-        """A code-mode agent renders as ``**id** (code)``."""
+        """A code-mode agent's mode segment surfaces inline."""
         from ac_dc.context_manager import Mode
 
         parent = service._default_scope()
@@ -350,10 +350,11 @@ class TestModeRendering:
             turn_id="t",
         )
         result = build_agent_descriptor(service)
-        assert "**frontend-trivial** (code)" in result
+        assert "**frontend-trivial**" in result
+        assert "mode: code" in result
 
     def test_doc_mode_appears_inline(self, service) -> None:
-        """A doc-mode agent renders as ``**id** (doc)``."""
+        """A doc-mode agent's mode segment surfaces inline."""
         parent = service._default_scope()
         block = AgentBlock(
             id="docs-update", task="update specs", mode="doc",
@@ -365,7 +366,8 @@ class TestModeRendering:
             turn_id="t",
         )
         result = build_agent_descriptor(service)
-        assert "**docs-update** (doc)" in result
+        assert "**docs-update**" in result
+        assert "mode: doc" in result
 
     def test_code_xref_mode_appears_inline(self, service) -> None:
         """``code+xref`` flattens to the joined string."""
@@ -380,7 +382,8 @@ class TestModeRendering:
             turn_id="t",
         )
         result = build_agent_descriptor(service)
-        assert "**cross-cutter** (code+xref)" in result
+        assert "**cross-cutter**" in result
+        assert "mode: code+xref" in result
 
     def test_doc_xref_mode_appears_inline(self, service) -> None:
         """``doc+xref`` flattens to the joined string."""
@@ -395,7 +398,8 @@ class TestModeRendering:
             turn_id="t",
         )
         result = build_agent_descriptor(service)
-        assert "**full-spectrum** (doc+xref)" in result
+        assert "**full-spectrum**" in result
+        assert "mode: doc+xref" in result
 
     def test_inherited_mode_renders_correctly(
         self, service
@@ -422,7 +426,8 @@ class TestModeRendering:
         )
         result = build_agent_descriptor(service)
         # Inherited mode visible in descriptor.
-        assert "**inheriter** (doc+xref)" in result
+        assert "**inheriter**" in result
+        assert "mode: doc+xref" in result
 
     def test_multiple_agents_show_independent_modes(
         self, service
@@ -451,8 +456,15 @@ class TestModeRendering:
             turn_id="t",
         )
         result = build_agent_descriptor(service)
-        assert "**alpha** (code)" in result
-        assert "**beta** (doc+xref)" in result
+        # Each agent's section carries its own mode in the
+        # descriptor's identity line. Locate each by id and
+        # verify the mode label appears between that id and
+        # the next agent's id.
+        idx_alpha = result.index("**alpha**")
+        idx_beta = result.index("**beta**")
+        assert idx_alpha < idx_beta
+        assert "mode: code" in result[idx_alpha:idx_beta]
+        assert "mode: doc+xref" in result[idx_beta:]
 
     def test_mode_renders_before_file_lines(
         self, service
@@ -485,9 +497,70 @@ class TestModeRendering:
             i for i, ln in enumerate(lines)
             if "**worker**" in ln
         )
-        assert "(code)" in lines[header_idx]
+        assert "mode: code" in lines[header_idx]
         # The symbol entry follows immediately, indented.
         assert lines[header_idx + 1].startswith("  - symbol:")
+
+
+class TestModelRendering:
+    """Per-agent model surfaces in the descriptor identity line.
+
+    The agent's ContextManager is constructed against
+    ``config.model`` at spawn time, and that value is what
+    the descriptor reports. Pinned per
+    :doc:`specs4/7-future/parallel-agents` § "Per-agent state
+    descriptor": the orchestrator routes work in part by
+    capability, and capability is gated by the model.
+    """
+
+    def test_model_field_present(self, service) -> None:
+        """Identity line carries ``model: {provider/model}``."""
+        parent = service._default_scope()
+        service._build_agent_scope(
+            block=_make_block("worker"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        result = build_agent_descriptor(service)
+        assert "**worker**" in result
+        # The fixture's config sets some model name; the
+        # exact value is config-driven, but the field
+        # label must surface verbatim.
+        assert "model: " in result
+        # And the descriptor's reported model matches the
+        # one the agent's ContextManager was actually
+        # constructed against.
+        agent_scope = service._agent_contexts["worker"]
+        agent_model = agent_scope.context.model
+        assert f"model: {agent_model}" in result
+
+    def test_model_and_mode_on_same_line(self, service) -> None:
+        """Both fields land on the agent's header line.
+
+        The descriptor's structure puts ``id``, ``model``,
+        and ``mode`` on one identity line, separated by a
+        dash and comma. File classification lines are
+        indented below.
+        """
+        parent = service._default_scope()
+        service._build_agent_scope(
+            block=AgentBlock(
+                id="dual", task="t", mode="code+xref",
+            ),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        result = build_agent_descriptor(service)
+        lines = result.split("\n")
+        header_idx = next(
+            i for i, ln in enumerate(lines)
+            if "**dual**" in ln
+        )
+        # Both fields share the header line.
+        assert "model: " in lines[header_idx]
+        assert "mode: code+xref" in lines[header_idx]
 
 
 # ---------------------------------------------------------------------------

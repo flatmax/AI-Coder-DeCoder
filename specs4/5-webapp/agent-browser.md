@@ -17,7 +17,9 @@ The currently-active tab is visually distinguished. Every input affordance on th
 
 ## Status LEDs
 
-The main tab's header carries a compact row of status LEDs — one dot per agent tab currently in the strip. The LEDs are a derived view of agent state, giving the user ambient awareness without forcing them to scan tab labels.
+The main tab's header carries a compact row of status LEDs — one dot for the main conversation plus one per agent tab currently in the strip. The LEDs are a derived view of conversation state, giving the user ambient awareness without forcing them to scan tab labels.
+
+The main-tab LED is always present (the row exists whenever the chat panel is mounted) and follows the same colour rules as agent LEDs. Its presence regardless of whether agents have spawned means the LED row is the canonical place to look for "which conversation is active right now" — clicking the main LED switches focus back to the main tab the same way an agent LED activates its tab.
 
 Each LED has three states:
 
@@ -31,7 +33,7 @@ Across turns within a session, an agent tab persists if the user does not close 
 
 ### Click and hover
 
-- Clicking a LED switches the active tab to that agent's tab — the same effect as clicking the tab itself, but the LED row is more compact and lives where the user's eyes already are when chatting in main.
+- Clicking a LED switches the active tab to that agent's tab — the same effect as clicking the tab itself, but the LED row is more compact and lives where the user's eyes already are when chatting in main. The tab strip also scrolls to reveal that tab's button if it was offscreen, so the LED row works as a navigation primitive even when many agents have pushed the active tab beyond the visible scroll window. Already-visible tabs do not jiggle — the scroll is a no-op when the target button is already on-screen.
 - Hovering a LED shows a tooltip with the agent's mode and current-state reason:
   - Cyan: `<agent-id> (<mode>): running`
   - Green: `<agent-id> (<mode>): completed (N edits applied)`
@@ -43,7 +45,7 @@ Across turns within a session, an agent tab persists if the user does not close 
 
 The LED row sits in the main tab header, distinct from but adjacent to the main tab's own label. When more than 4-5 agent tabs exist the row wraps onto a second line rather than truncating; the dots are small enough that even 8-10 fit naturally. There is no cap and no overflow indicator — every live agent tab gets a visible LED.
 
-The row is hidden entirely when the chat panel has no agent tabs. The main tab is then the only thing in the strip, and a row of zero LEDs would just be empty space.
+The row is always visible while the chat panel is mounted — at minimum it carries the main-tab LED. With no agent tabs, the row shows exactly one dot reflecting main-tab state.
 
 ## Tab Lifetime
 
@@ -184,6 +186,6 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 - The main LLM's synthesis is not auto-triggered. Users explicitly request it when they've heard enough from the agents.
 - Historical tabs are read-only. Past turns' ContextManagers are not reconstructed; the archive is sufficient for reading but not for continuing the conversation.
 - Turns without agents render exactly as today's chat. The tab strip still exists but contains only the Main tab.
-- The LED row in the main tab header is a derived view of agent tab state. LED count and lifetime track the agent tab strip exactly; closing a tab removes its LED, and there is no LED that outlives its tab.
+- The LED row in the main tab header is a derived view of conversation tab state. It always carries one LED for the main tab plus one per live agent tab. Closing an agent tab removes its LED; the main-tab LED is permanent for the chat panel's lifetime.
 - LED state is a pure function of the most recent `streamComplete` event for the agent plus `streamChunk` activity. No separate state machine, no acknowledgement gesture beyond closing the tab, no auto-fade or "seen" state.
-- Clicking a LED is identical in effect to clicking its tab. The navigation primitive is the same; the LED is just a more compact entry point in the main tab's header.
+- Clicking a LED activates its tab and scrolls the tab strip to make that tab's button visible. The activation primitive is shared with clicking the tab directly; the auto-scroll is specific to the LED entry point because users reaching for a LED have no guarantee the tab itself is visible.

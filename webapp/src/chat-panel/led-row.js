@@ -36,6 +36,40 @@ import { html } from 'lit';
 import { onTabClick } from './tabs.js';
 
 /**
+ * Scroll the tab strip so the button for `tabId` is
+ * visible. No-op when the strip isn't rendered (single-
+ * tab mode) or the button isn't found yet — the next
+ * render will lay it out, but we only need to scroll
+ * when the user actively jumps to a tab via its LED.
+ *
+ * Defers through `updateComplete` so any pending
+ * activation render (which may move the active class
+ * around) commits before we measure positions. The
+ * tab-strip-scroll element is the horizontal scroll
+ * container; `scrollIntoView` with inline:'nearest'
+ * scrolls the minimum amount needed, leaving the
+ * user's existing scroll position alone when the
+ * target is already visible.
+ */
+function scrollTabIntoView(panel, tabId) {
+  panel.updateComplete.then(() => {
+    const root = panel.shadowRoot;
+    if (!root) return;
+    const btn = root.querySelector(
+      `.tab-strip-scroll .tab-strip-tab[data-tab-id="${tabId}"]`,
+    );
+    if (!btn) return;
+    // Test environments (happy-dom / older jsdom) may
+    // not implement scrollIntoView. Guard so the LED
+    // click handler doesn't throw an unhandled
+    // rejection in those harnesses; real browsers
+    // always have it.
+    if (typeof btn.scrollIntoView !== 'function') return;
+    btn.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  });
+}
+
+/**
  * Derive the LED state for one agent tab.
  *
  * Streaming → cyan (flashing). Resting state reads
@@ -93,11 +127,13 @@ export function formatLedTooltip(agentId, mode, state, outcome) {
 /**
  * Render the LED row.
  *
- * Returns an empty template when only the main tab
- * exists. Otherwise produces one dot per non-main tab
- * in tab insertion order, mirroring the tab strip.
- * Click delegates to `onTabClick` so the LED is a
- * second entry point for tab activation.
+ * Always carries one dot for main plus one per agent
+ * tab (in tab insertion order, mirroring the strip).
+ * The row is permanent — even a fresh panel with no
+ * agents shows the main-tab LED so users can see at a
+ * glance whether the main thread is streaming, clean,
+ * or errored. Click delegates to `onTabClick` so the
+ * LED is a second entry point for tab activation.
  *
  * Wrapping: the row uses flex-wrap so 8+ agents flow
  * onto a second line rather than truncating, per spec.
@@ -105,26 +141,41 @@ export function formatLedTooltip(agentId, mode, state, outcome) {
  * indicator and no cap.
  */
 export function renderLedRow(panel) {
-  const tabs = Array.from(panel._tabs.keys()).filter(
-    (id) => id !== 'main',
-  );
+  // Always include the main tab. Agents follow in
+  // tab insertion order. The row is permanent — even
+  // a fresh panel with no agents shows a single dot
+  // for main so users can see at a glance whether
+  // the main thread is streaming, clean, or errored.
+  const tabs = Array.from(panel._tabs.keys());
   if (tabs.length === 0) {
     return html``;
   }
   return html`
-    <div class="led-row" role="group" aria-label="Agent status">
+    <div class="led-row" role="group" aria-label="Conversation status">
       ${tabs.map((tabId) => {
         const tab = panel._tabs.get(tabId);
         if (!tab) return html``;
-        const mode = panel._tabModes.get(tabId) || '';
+        const isMain = tabId === 'main';
+        // Main tab has no per-tab mode entry (mode for
+        // main is reflected in the action-bar toggle);
+        // agents carry an explicit mode in `_tabModes`.
+        const mode = isMain
+          ? ''
+          : panel._tabModes.get(tabId) || '';
         const state = getLedState(tab);
+        // Tooltip uses a friendlier label for main
+        // ("Main") instead of the raw tab id, since
+        // the literal string "main" is an internal
+        // identifier rather than user-facing copy.
+        const label = isMain ? 'Main' : tabId;
         const tooltip = formatLedTooltip(
-          tabId, mode, state, tab.lastEditOutcome,
+          label, mode, state, tab.lastEditOutcome,
         );
         const active = tabId === panel._activeTabId;
         const classes = [
           'led-dot',
           `led-${state}`,
+          isMain ? 'led-main' : '',
           active ? 'active' : '',
         ].filter(Boolean).join(' ');
         return html`
@@ -134,7 +185,10 @@ export function renderLedRow(panel) {
             data-led-state=${state}
             title=${tooltip}
             aria-label=${tooltip}
-            @click=${() => onTabClick(panel, tabId)}
+            @click=${() => {
+              onTabClick(panel, tabId);
+              scrollTabIntoView(panel, tabId);
+            }}
           ></button>
         `;
       })}

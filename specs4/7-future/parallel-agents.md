@@ -308,9 +308,10 @@ Implication for the chat panel: agent tabs persist across `new_session` with emp
 
 For the main LLM to orchestrate agent reuse — decide which existing agent to retask vs. spawn a fresh one — it needs a minimal summary of each live agent at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
 
-Each descriptor entry carries three fields:
+Each descriptor entry carries four fields:
 
 - **Identity** — the agent's id, the same string used in `🟧🟧🟧 AGENT` blocks to address it
+- **Model** — the provider-qualified id the agent's ContextManager speaks to (e.g. `anthropic/claude-sonnet-4-5`). Different agents can in principle run on different models; surfacing the model lets the orchestrator avoid routing a problem that needs a strong model onto a fast-cheap agent and vice versa. The model is fixed for the agent's lifetime (set when its ContextManager is constructed).
 - **Mode** — the agent's repo-view mode, one of `code`, `doc`, `code+xref`, `doc+xref`. Mirrors the two-axis configuration of the user-facing mode toggle (primary=code|doc; cross-reference=on|off). The orchestrator uses mode to route work appropriately: code-mode agents see symbol maps and are good targets for refactors; doc-mode agents see document outlines and are good targets for documentation edits; the `+xref` variants additionally see the secondary index (the other axis's structural summary), useful when an agent's task spans both code and docs.
 - **Files in context** — a list of `{path, depth}` entries, where `depth` distinguishes how deeply the agent has loaded the file. Three values:
   - `full` — the agent has the file's full text in its context (loaded into `file_context` either by user selection, edit-block auto-add, or file-create). The agent can reason about the file's exact content; the orchestrator can retask precise work onto this agent without a re-read penalty.
@@ -347,6 +348,7 @@ Consequences:
 Earlier drafts included more fields that turned out to be redundant, unhelpful, or actively harmful to retasking:
 
 - **Original task text** — task is turn-scoped; agent identity is not. Including the original brief implies the agent has a stable role, which discourages retasking. If the orchestrator wants to know what an agent did last, the per-turn archive is one RPC away.
+- **Per-agent provider/cost metadata** — provider name, region, per-token price. Routing on price is fragile (prices change without warning, and the orchestrator can't reason about budgets without knowing the user's overall envelope). The model name carries enough hint for capability-based routing; cost surfaces in the Context tab's session totals where the user can see and decide.
 - **Focus label / role description** — same problem amplified. A label like "frontend specialist" makes the orchestrator reluctant to send the agent to a backend task even when the agent's loaded files no longer match the label. Paths are the truth; labels lie as soon as the agent is retasked.
 - **Last-turn summary** — useful for review, not for routing. The orchestrator routing on "which agent already has these files open" doesn't care what the agent finished last.
 - **Cache warmth / last-active timestamp** — tracking liveness across turns adds maintenance cost (clock handling, restart semantics, what counts as "active") for a signal that doesn't change routing decisions. An agent either exists with files loaded or it doesn't; staleness is implicit in the path list (an agent with paths that have since been heavily edited will need to re-read them, but that's the apply pipeline's problem, not the descriptor's).

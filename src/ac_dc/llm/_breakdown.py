@@ -898,11 +898,38 @@ def get_context_breakdown(
         if "active" in c and "→" in c and "promoted" not in c
     ]
 
+    # Live-agent roster — id + model + mode for every
+    # scope in the registry. Surfaced in the Context tab's
+    # "Live agents" panel so the user can see the team
+    # composition at a glance, mirroring what
+    # ``build_agent_descriptor`` shows the orchestrator in
+    # its prompt. Always present (even when empty) so the
+    # frontend doesn't need a defensive check before
+    # iterating. Sorted alphabetically by id for
+    # deterministic output.
+    agents_roster: list[dict[str, Any]] = []
+    for agent_id in sorted(service._agent_contexts.keys()):
+        agent_scope = service._agent_contexts[agent_id]
+        agent_ctx = agent_scope.context
+        if agent_ctx is None:
+            continue
+        agent_mode = agent_ctx.mode.value
+        agent_xref = agent_ctx.cross_reference_enabled
+        mode_label = (
+            f"{agent_mode}+xref" if agent_xref else agent_mode
+        )
+        agents_roster.append({
+            "id": agent_id,
+            "model": getattr(agent_ctx, "model", "") or "",
+            "mode": mode_label,
+        })
+
     return {
         "scope": scope_label,
         "model": model,
         "mode": mode,
         "cross_ref_enabled": service._cross_ref_enabled,
+        "agents": agents_roster,
         "total_tokens": total_tokens,
         "max_input_tokens": max_input,
         "cache_hit_rate": cache_hit_rate,

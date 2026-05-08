@@ -465,6 +465,65 @@ export class ContextTab extends RpcMixin(LitElement) {
       color: #f59e0b;
     }
 
+    /* Live-agents roster — sits at the top of the Budget
+     * sub-view when at least one agent is registered.
+     * Compact row-per-agent presentation with id, mode,
+     * and model surfaced inline. The same trio shows in
+     * the orchestrator's prompt via build_agent_descriptor;
+     * keeping the visual layout close to the prompt
+     * shape makes "what does the LLM see" easy to verify
+     * by eye. */
+    .agents-roster {
+      margin-bottom: 1rem;
+      padding: 0.5rem 0.75rem;
+      background: rgba(22, 27, 34, 0.4);
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-radius: 6px;
+    }
+    .agents-roster-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 0.4rem;
+    }
+    .agents-roster-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      padding: 0.15rem 0;
+      font-size: 0.8125rem;
+    }
+    .agents-roster-id {
+      font-weight: 600;
+      color: var(--text-primary, #c9d1d9);
+      flex-shrink: 0;
+      max-width: 12rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .agents-roster-mode {
+      flex-shrink: 0;
+      font-size: 0.7rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 3px;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+    .agents-roster-model {
+      flex: 1;
+      min-width: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     /* Cache sub-view */
     .cache-actions {
       display: flex;
@@ -1250,6 +1309,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     const maxCat = Math.max(1, ...categories.map((c) => c.tokens));
 
     return html`
+      ${this._renderAgentsRoster(d)}
       <div class="budget-header">
         <div class="model-info">
           <strong>${d.model || '—'}</strong>
@@ -1402,6 +1462,52 @@ export class ContextTab extends RpcMixin(LitElement) {
             </div>
           `
         : ''}
+    `;
+  }
+
+  /**
+   * Render the live-agents roster — one row per agent
+   * scope in the registry showing id, model, and mode.
+   * Sourced from ``data.agents`` (populated by
+   * ``get_context_breakdown``); empty array means no
+   * agents have been spawned yet, in which case the
+   * whole section is suppressed so the Budget view
+   * stays compact for the common single-conversation
+   * case.
+   *
+   * The roster mirrors what ``build_agent_descriptor``
+   * shows the orchestrator in its prompt — same fields,
+   * same per-agent identity. Surfacing it here closes
+   * the gap "what does the LLM see about its team" vs.
+   * "what does the user see about its team".
+   */
+  _renderAgentsRoster(d) {
+    const agents = Array.isArray(d?.agents) ? d.agents : [];
+    if (agents.length === 0) return '';
+    return html`
+      <div class="agents-roster">
+        <div class="agents-roster-title">
+          🤖 Live agents (${agents.length})
+        </div>
+        ${agents.map(
+          (a) => html`
+            <div class="agents-roster-row">
+              <span class="agents-roster-id" title=${a.id}>
+                ${a.id}
+              </span>
+              <span class="agents-roster-mode">
+                ${a.mode}
+              </span>
+              <span
+                class="agents-roster-model"
+                title=${a.model || 'unknown model'}
+              >
+                ${a.model || '—'}
+              </span>
+            </div>
+          `,
+        )}
+      </div>
     `;
   }
 

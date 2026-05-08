@@ -593,19 +593,26 @@ def build_agent_descriptor(service: "LLMService") -> str:
     """Render the per-turn agent-state descriptor.
 
     Walks every live agent in ``service._agent_contexts`` and
-    builds a markdown block listing each agent's id, its
-    repo-view mode, and the paths it currently has loaded,
-    classified by depth.
+    builds a markdown block listing each agent's id, the
+    model it speaks to, its repo-view mode, and the paths
+    it currently has loaded, classified by depth.
 
-    Each entry's mode appears inline with the id as
-    ``**{id}** ({mode})`` where ``{mode}`` is one of
-    ``code``, ``doc``, ``code+xref``, ``doc+xref`` —
+    Each entry's identity line takes the shape
+    ``**{id}** — model: {model}, mode: {mode}`` where
+    ``{model}`` is the provider-qualified identifier the
+    agent's ContextManager was constructed with (e.g.
+    ``anthropic/claude-sonnet-4-5``) and ``{mode}`` is one
+    of ``code``, ``doc``, ``code+xref``, ``doc+xref`` —
     matching the four-string surface the orchestrator
     uses in spawn blocks. The orchestrator reads this to
     decide which agent is the right target for a given
     task: a code-mode agent is good for refactors, a
     doc-mode agent for documentation work, the ``+xref``
-    variants for tasks spanning both.
+    variants for tasks spanning both. The model hint
+    matters when agents run on heterogenous models —
+    retasking a cheap-fast agent for a problem that needs
+    a stronger model is a routing error the orchestrator
+    can avoid when it sees both.
 
     Three depth values per
     :doc:`specs4/7-future/parallel-agents` § "Per-agent state
@@ -664,18 +671,38 @@ def build_agent_descriptor(service: "LLMService") -> str:
 
     for agent_id in sorted_ids:
         scope = contexts[agent_id]
-        # Surface the agent's mode inline with its id so the
-        # orchestrator can route work appropriately. Agents
-        # without a ContextManager (defensive — shouldn't
-        # happen in practice) fall back to no mode hint.
-        mode_str = ""
+        # Surface the agent's identity (model + mode)
+        # inline with its id so the orchestrator can route
+        # work appropriately. Two pieces:
+        #
+        # - model — the provider-qualified id the agent
+        #   speaks to (e.g. ``anthropic/claude-sonnet-4-5``).
+        #   Different agents can in principle run on
+        #   different models; surfacing the model lets the
+        #   orchestrator avoid retasking a fast-cheap agent
+        #   onto a problem that needs a stronger model and
+        #   vice versa.
+        # - mode — the four-string surface ``code`` /
+        #   ``doc`` / ``code+xref`` / ``doc+xref``.
+        #
+        # Agents without a ContextManager (defensive —
+        # shouldn't happen in practice) get no
+        # parenthesised hint.
+        meta_parts: list[str] = []
         if scope.context is not None:
+            model = getattr(scope.context, "model", "") or ""
+            if model:
+                meta_parts.append(f"model: {model}")
             mode_str = _format_mode(
                 scope.context.mode,
                 scope.context.cross_reference_enabled,
             )
-        if mode_str:
-            lines.append(f"- **{agent_id}** ({mode_str})")
+            if mode_str:
+                meta_parts.append(f"mode: {mode_str}")
+        if meta_parts:
+            lines.append(
+                f"- **{agent_id}** — {', '.join(meta_parts)}"
+            )
         else:
             lines.append(f"- **{agent_id}**")
 

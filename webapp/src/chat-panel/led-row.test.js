@@ -175,43 +175,49 @@ describe('formatLedTooltip', () => {
 // ---------------------------------------------------------------
 
 describe('renderLedRow — visibility', () => {
-  it('main tab only → no row in DOM', async () => {
+  it('main tab only → row carries one main dot', async () => {
     const p = mountPanel();
     await settle(p);
-    expect(p.shadowRoot.querySelector('.led-row')).toBeNull();
+    const row = p.shadowRoot.querySelector('.led-row');
+    expect(row).not.toBeNull();
+    const dots = row.querySelectorAll('.led-dot');
+    expect(dots.length).toBe(1);
+    expect(dots[0].dataset.ledTabId).toBe('main');
   });
 
-  it('one agent tab → one dot', async () => {
+  it('one agent tab → main + agent dot', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     await settle(p);
     const row = p.shadowRoot.querySelector('.led-row');
     expect(row).not.toBeNull();
     const dots = row.querySelectorAll('.led-dot');
-    expect(dots.length).toBe(1);
+    expect(dots.length).toBe(2);
+    expect(dots[0].dataset.ledTabId).toBe('main');
+    expect(dots[1].dataset.ledTabId).toBe('a0');
   });
 
-  it('multiple agent tabs → one dot each, in insertion order', async () => {
+  it('multiple agent tabs → main + each agent in insertion order', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
     seedLabeledTabWithMode(p, 'a2', 'Agent 02', 'code+xref');
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots.length).toBe(3);
-    expect(dots[0].dataset.ledTabId).toBe('a0');
-    expect(dots[1].dataset.ledTabId).toBe('a1');
-    expect(dots[2].dataset.ledTabId).toBe('a2');
+    expect(dots.length).toBe(4);
+    expect(dots[0].dataset.ledTabId).toBe('main');
+    expect(dots[1].dataset.ledTabId).toBe('a0');
+    expect(dots[2].dataset.ledTabId).toBe('a1');
+    expect(dots[3].dataset.ledTabId).toBe('a2');
   });
 
-  it('main tab is never represented as an LED', async () => {
+  it('main dot carries the led-main marker class', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     await settle(p);
-    const ids = Array.from(
-      p.shadowRoot.querySelectorAll('.led-dot'),
-    ).map((d) => d.dataset.ledTabId);
-    expect(ids).not.toContain('main');
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[0].classList.contains('led-main')).toBe(true);
+    expect(dots[1].classList.contains('led-main')).toBe(false);
   });
 });
 
@@ -222,9 +228,10 @@ describe('renderLedRow — state classes', () => {
     p._tabs.get('a0').streaming = true;
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.classList.contains('led-cyan')).toBe(true);
-    expect(dot.dataset.ledState).toBe('cyan');
+    // dots[0] is main, dots[1] is the agent.
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].classList.contains('led-cyan')).toBe(true);
+    expect(dots[1].dataset.ledState).toBe('cyan');
   });
 
   it('clean outcome → green dot', async () => {
@@ -239,9 +246,9 @@ describe('renderLedRow — state classes', () => {
     };
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.classList.contains('led-green')).toBe(true);
-    expect(dot.dataset.ledState).toBe('green');
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].classList.contains('led-green')).toBe(true);
+    expect(dots[1].dataset.ledState).toBe('green');
   });
 
   it('error outcome → red dot', async () => {
@@ -256,9 +263,9 @@ describe('renderLedRow — state classes', () => {
     };
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.classList.contains('led-red')).toBe(true);
-    expect(dot.dataset.ledState).toBe('red');
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].classList.contains('led-red')).toBe(true);
+    expect(dots[1].dataset.ledState).toBe('red');
   });
 
   it('no outcome & not streaming defaults to cyan', async () => {
@@ -269,8 +276,8 @@ describe('renderLedRow — state classes', () => {
     tab.lastEditOutcome = null;
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.classList.contains('led-cyan')).toBe(true);
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].classList.contains('led-cyan')).toBe(true);
   });
 
   it('mixed states render independently', async () => {
@@ -293,33 +300,37 @@ describe('renderLedRow — state classes', () => {
     };
     p.requestUpdate();
     await settle(p);
+    // dots[0] is main; agents follow at indices 1..3.
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[0].dataset.ledState).toBe('cyan');
-    expect(dots[1].dataset.ledState).toBe('green');
-    expect(dots[2].dataset.ledState).toBe('red');
+    expect(dots[1].dataset.ledState).toBe('cyan');
+    expect(dots[2].dataset.ledState).toBe('green');
+    expect(dots[3].dataset.ledState).toBe('red');
   });
 });
 
 describe('renderLedRow — active marker', () => {
-  it('active tab dot gets active class', async () => {
+  it('active agent tab dot gets active class', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
     p._activeTabId = 'a1';
     await settle(p);
+    // dots[0] is main, dots[1] is a0, dots[2] is a1.
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
     expect(dots[0].classList.contains('active')).toBe(false);
-    expect(dots[1].classList.contains('active')).toBe(true);
+    expect(dots[1].classList.contains('active')).toBe(false);
+    expect(dots[2].classList.contains('active')).toBe(true);
   });
 
-  it('main active → no agent dot is active', async () => {
+  it('main active → main dot carries active marker', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
     expect(p._activeTabId).toBe('main');
     await settle(p);
     const actives = p.shadowRoot.querySelectorAll('.led-dot.active');
-    expect(actives.length).toBe(0);
+    expect(actives.length).toBe(1);
+    expect(actives[0].dataset.ledTabId).toBe('main');
   });
 });
 
@@ -330,9 +341,10 @@ describe('renderLedRow — tooltip wiring', () => {
     p._tabs.get('a0').streaming = true;
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.title).toBe('a0 (code+xref): running');
-    expect(dot.getAttribute('aria-label')).toBe(
+    // dots[0] is main, dots[1] is the agent.
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].title).toBe('a0 (code+xref): running');
+    expect(dots[1].getAttribute('aria-label')).toBe(
       'a0 (code+xref): running',
     );
   });
@@ -349,8 +361,8 @@ describe('renderLedRow — tooltip wiring', () => {
     };
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.title).toBe('a0 (doc): completed (4 edits applied)');
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].title).toBe('a0 (doc): completed (4 edits applied)');
   });
 
   it('error tab tooltip carries diagnostic', async () => {
@@ -365,8 +377,8 @@ describe('renderLedRow — tooltip wiring', () => {
     };
     p.requestUpdate();
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.title).toBe(
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].title).toBe(
       'a0 (doc+xref): a.py: anchor not found',
     );
   });
@@ -380,22 +392,43 @@ describe('renderLedRow — tooltip wiring', () => {
     p._tabs.get('a0').streaming = true;
     p.requestUpdate();
     await settle(p);
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[1].title).toBe('a0: running');
+  });
+
+  it('main dot tooltip uses Main label, not the raw id', async () => {
+    const p = mountPanel();
+    await settle(p);
     const dot = p.shadowRoot.querySelector('.led-dot');
-    expect(dot.title).toBe('a0: running');
+    expect(dot.dataset.ledTabId).toBe('main');
+    expect(dot.title).toBe('Main: running');
   });
 });
 
 describe('renderLedRow — click activates tab', () => {
-  it('clicking dot flips _activeTabId', async () => {
+  it('clicking agent dot flips _activeTabId', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
     expect(p._activeTabId).toBe('main');
     await settle(p);
+    // dots[0] is main, dots[1] is a0, dots[2] is a1.
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    dots[1].click();
+    dots[2].click();
     await settle(p);
     expect(p._activeTabId).toBe('a1');
+  });
+
+  it('clicking main dot returns focus to main', async () => {
+    const p = mountPanel();
+    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    p._activeTabId = 'a0';
+    await settle(p);
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    expect(dots[0].dataset.ledTabId).toBe('main');
+    dots[0].click();
+    await settle(p);
+    expect(p._activeTabId).toBe('main');
   });
 
   it('clicking already-active dot is a no-op', async () => {
@@ -403,8 +436,8 @@ describe('renderLedRow — click activates tab', () => {
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     p._activeTabId = 'a0';
     await settle(p);
-    const dot = p.shadowRoot.querySelector('.led-dot');
-    dot.click();
+    const dots = p.shadowRoot.querySelectorAll('.led-dot');
+    dots[1].click();
     await settle(p);
     expect(p._activeTabId).toBe('a0');
   });
@@ -417,7 +450,7 @@ describe('renderLedRow — click activates tab', () => {
 // ---------------------------------------------------------------
 
 describe('renderLedRow — direct call', () => {
-  it('returns empty template when only main tab', () => {
+  it('renders a main-only row when no agents exist', () => {
     const fakePanel = {
       _tabs: new Map([['main', { streaming: false }]]),
       _tabModes: new Map(),
@@ -425,8 +458,23 @@ describe('renderLedRow — direct call', () => {
     };
     const result = renderLedRow(fakePanel);
     expect(result).toBeTruthy();
-    // Lit template result — strings collection of just
-    // an empty fragment.
+    // The template carries the row wrapper; the dot
+    // for main goes in via a values slot and isn't
+    // visible in `.strings`. The wrapper's class
+    // attribute is present in the static text, which
+    // lets us distinguish "row rendered" from "empty
+    // fragment" without standing up a full DOM.
+    expect(result.strings.join('')).toContain('led-row');
+  });
+
+  it('returns truly empty template when _tabs is empty', () => {
+    const fakePanel = {
+      _tabs: new Map(),
+      _tabModes: new Map(),
+      _activeTabId: 'main',
+    };
+    const result = renderLedRow(fakePanel);
+    expect(result).toBeTruthy();
     expect(result.strings.join('')).toBe('');
   });
 });
