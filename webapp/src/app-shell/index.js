@@ -25,7 +25,7 @@ import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 
 import { SharedRpc } from '../rpc.js';
 import '../files-tab/index.js';
-import '../diff-viewer.js';
+import '../diff-viewer/index.js';
 import '../svg-viewer.js';
 import '../settings-tab.js';
 import '../context-tab.js';

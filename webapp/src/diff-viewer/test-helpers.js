@@ -247,7 +247,7 @@ vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
 // NOW import diff-viewer — after mocks are registered
 // ---------------------------------------------------------------------------
 
-import '../diff-viewer.js';
+import './index.js';
 import { _resetInstallGuard } from '../lsp-providers.js';
 import { _resetInstallGuard as _resetLinkGuard } from '../markdown-link-provider.js';
 // Grab a reference to the mocked monaco namespace so
