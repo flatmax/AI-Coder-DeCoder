@@ -80,7 +80,7 @@ The color progression (orange → yellow → green) makes block boundaries visua
 src/math.py
 🟧🟧🟧 EDIT
 def multiply(a, b):
-    return a + b  # BUG
+    return a * b
 🟨🟨🟨 REPL
 def multiply(a, b):
     return a * b
@@ -114,6 +114,7 @@ The entire old-text section is searched in the file as a **contiguous block of l
 5. **Merge adjacent or overlapping edits.** Edits apply top-to-bottom; a later edit's anchor must match the file as it looks after earlier edits in the same response. When regions overlap or abut, combine them into one block.
 6. **Close every block with `🟩🟩🟩 END`** — the full end marker includes the literal word `END`.
 7. **Don't move, rename, or delete files via edit blocks.** Suggest `git mv` or `git rm`.
+8. **Never wrap an edit block in a markdown code fence.** The block's own markers (`🟧🟧🟧 EDIT`, `🟨🟨🟨 REPL`, `🟩🟩🟩 END`) are the delimiters. Wrapping in ```` ``` ```` makes the parser see the fence line where it expects a file path, and the block is silently rendered as a syntax-highlighted code block instead of being applied. The file path goes flush-left on its own line, immediately before `🟧🟧🟧 EDIT`.
 
 ### Before You Write an Edit Block
 

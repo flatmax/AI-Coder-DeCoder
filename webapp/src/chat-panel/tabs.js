@@ -538,6 +538,106 @@ export function renderOverflowMenu(panel, tabs) {
  *   ``streaming`` flag so ``findTabForRequest``
  *   routes the child's chunks to the correct tab.
  */
+/**
+ * Rehydrate writable tabs from a ``list_live_agents()``
+ * RPC response. Called on ``onRpcReady`` after browser
+ * refresh or WebSocket reconnect.
+ *
+ * Per spec ``specs4/5-webapp/agent-browser.md`` § Refresh
+ * and Reconnect: tabs are writable (not historical) —
+ * the backend's ContextManager is still alive and can
+ * accept new messages. Per-tab UI state (input draft,
+ * scroll position, in-flight stream) is genuinely lost;
+ * conversation content is loaded separately via
+ * ``get_turn_archive``.
+ *
+ * Tab creation is idempotent — agents already present in
+ * ``_tabs`` (e.g. created by an earlier ``agentsSpawned``
+ * event in the same connection) are skipped. This means
+ * a stray ``agentsSpawned`` arriving after rehydration
+ * won't double-create.
+ *
+ * Each entry shape::
+ *
+ *     {id, mode, cross_reference_enabled, model,
+ *      turn_id, agent_idx}
+ *
+ * We do NOT seed an initial user message (unlike
+ * ``spawnAgentTabs`` which seeds the task text). The
+ * archive load handles message population.
+ *
+ * The selection list is left empty — the agent's actual
+ * file context lives on the backend, the frontend
+ * picker per-tab list is UI state that's lost across
+ * refresh. Users can read the tab's conversation and
+ * see which files the agent worked on; they don't need
+ * to redrive the picker checkboxes.
+ *
+ * @returns {Array<object>} entries that produced new tabs
+ *   (same shape as input, filtered to those that didn't
+ *   already exist). Caller uses this to drive archive loads.
+ */
+export function rehydrateAgentTabs(panel, agentEntries) {
+  if (!Array.isArray(agentEntries)) return [];
+  const created = [];
+  for (const entry of agentEntries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const tabId = entry.id;
+    if (typeof tabId !== 'string' || !tabId) continue;
+    if (tabId === 'main') continue;
+    if (panel._tabs.has(tabId)) continue;
+    const state = makeTabState();
+    panel._tabs.set(tabId, state);
+    panel._tabLabels.set(tabId, deriveAgentTabLabelFromEntry(entry));
+    if (typeof entry.mode === 'string' && entry.mode) {
+      panel._tabModes.set(tabId, entry.mode);
+    }
+    created.push(entry);
+  }
+  if (created.length > 0) {
+    panel.requestUpdate();
+  }
+  return created;
+}
+
+/**
+ * Derive a label for a rehydrated agent tab.
+ *
+ * Spawn-time tabs use ``deriveAgentTabLabel(idx, task)``
+ * which folds the first line of the task text into the
+ * label (e.g. ``Agent 02: refactor auth flow``). On
+ * rehydration we don't have the task text — it's the
+ * agent's first user message, persisted in the archive
+ * and loaded asynchronously. Rather than wait for the
+ * archive to land before rendering the tab, we use the
+ * agent's id as the label. This matches ``parseAgentTabId``
+ * tab-id semantics (the id IS the agent identifier).
+ *
+ * Falls back to ``Agent NN`` when the entry has an
+ * ``agent_idx`` and the id isn't human-readable enough
+ * to use directly. Heuristic: ids that look like
+ * positional fallbacks (``agent-00``, ``agent-01``) get
+ * the ``Agent NN`` treatment for visual consistency
+ * with spawn-time labels; descriptive ids
+ * (``frontend-chat``, ``streaming-pipeline``) appear
+ * verbatim.
+ */
+function deriveAgentTabLabelFromEntry(entry) {
+  const id = entry.id;
+  if (typeof id !== 'string' || !id) return 'Agent';
+  // Positional-fallback ids — recognise the ``agent-NN``
+  // pattern and render as ``Agent NN`` to match the
+  // spawn-time label style.
+  const positional = /^agent-(\d+)$/.exec(id);
+  if (positional) {
+    const idx = Number(positional[1]);
+    if (Number.isFinite(idx)) {
+      return `Agent ${String(idx).padStart(2, '0')}`;
+    }
+  }
+  return id;
+}
+
 export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
   if (typeof turnId !== 'string' || !turnId) return;
   if (!Array.isArray(agentBlocks)) return;

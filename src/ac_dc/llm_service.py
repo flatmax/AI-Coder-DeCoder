@@ -915,6 +915,18 @@ class LLMService:
         from ac_dc.llm._rpc_lifecycle import get_current_state
         return get_current_state(self)
 
+    def list_live_agents(self) -> list[dict[str, Any]]:
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.list_live_agents`.
+
+        Public RPC — the chat panel calls this on
+        ``onRpcReady`` to rehydrate writable agent tabs
+        after browser refresh or WebSocket reconnect. See
+        :doc:`specs4/5-webapp/agent-browser` § Refresh and
+        Reconnect.
+        """
+        from ac_dc.llm._rpc_lifecycle import list_live_agents
+        return list_live_agents(self)
+
     # ------------------------------------------------------------------
     # URL service RPC surface
     # ------------------------------------------------------------------

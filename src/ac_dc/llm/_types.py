@@ -180,3 +180,13 @@ class ConversationScope:
     selected_files: list[str] = field(default_factory=list)
     excluded_index_files: list[str] = field(default_factory=list)
     archival_append: ArchivalAppend | None = None
+    # Agent-scope only: positional index used for the
+    # on-disk archive file name (``agent-NN.jsonl``) and
+    # surfaced to ``list_live_agents`` so the frontend can
+    # filter ``get_turn_archive`` results to the matching
+    # agent. None for the main-conversation scope. Stable
+    # across retasking — once an agent is registered with
+    # ``agent_idx=N`` on its first spawn, that value is
+    # baked into its archival sink and reused for every
+    # retasked turn.
+    agent_idx: int | None = None

@@ -89,6 +89,7 @@ import {
   loadModeState,
   loadSnippets,
   onUpdated,
+  rehydrateLiveAgents,
   switchMode,
   toggleCrossRef,
 } from './events.js';
@@ -366,6 +367,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // requests — we're safe to call straight away.
     loadSnippets(this);
     loadModeState(this);
+    // Rehydrate live agent tabs from the backend's
+    // _agent_contexts registry. Per spec
+    // specs4/5-webapp/agent-browser.md § Refresh and
+    // Reconnect, the backend's agent registry survives
+    // browser refresh and WebSocket reconnect; the
+    // frontend tab strip does not, so onRpcReady is
+    // the recovery point.
+    rehydrateLiveAgents(this);
   }
 
   updated(changedProps) {

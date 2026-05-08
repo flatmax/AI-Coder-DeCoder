@@ -244,6 +244,93 @@ def get_current_state(service: "LLMService") -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Live-agent enumeration
+# ---------------------------------------------------------------------------
+
+
+def list_live_agents(
+    service: "LLMService",
+) -> list[dict[str, Any]]:
+    """Return metadata for every agent in ``_agent_contexts``.
+
+    Read-only enumeration of the backend's live agent
+    registry. Used by the chat panel on ``onRpcReady`` to
+    rehydrate writable tabs after browser refresh or
+    WebSocket reconnect — see
+    :doc:`specs4/5-webapp/agent-browser` § Refresh and
+    Reconnect.
+
+    One entry per registered agent::
+
+        {
+            "id": str,                       # LLM-chosen, == tab id
+            "mode": str,                     # 'code'|'doc'|'code+xref'|'doc+xref'
+            "cross_reference_enabled": bool,
+            "model": str,                    # provider-qualified
+            "turn_id": str | None,           # spawn turn (for archive lookup)
+            "agent_idx": int | None,         # archive-file index
+        }
+
+    The fields are exactly what the frontend needs to
+    reconstruct tabs and their child-request-id namespace
+    without reading any conversation content. Conversation
+    messages are loaded separately via
+    :func:`get_turn_archive` filtered to the matching
+    ``agent_idx``.
+
+    Sorted by id for deterministic output. Empty list when
+    no agents are registered (fresh session, or every agent
+    has been closed).
+
+    No localhost gate — read-only metadata. Non-localhost
+    collaborators get the same view; restricted operations
+    (closing, retasking) gate elsewhere.
+    """
+    contexts = service._agent_contexts
+    if not contexts:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for agent_id in sorted(contexts.keys()):
+        scope = contexts[agent_id]
+        cm = scope.context
+        if cm is None:
+            # Defensive — a registered scope without a
+            # ContextManager would be a bug elsewhere.
+            # Skip rather than crash the rehydration path.
+            continue
+        mode_str = _format_agent_mode(
+            cm.mode.value,
+            cm.cross_reference_enabled,
+        )
+        entries.append({
+            "id": agent_id,
+            "mode": mode_str,
+            "cross_reference_enabled": cm.cross_reference_enabled,
+            "model": getattr(cm, "model", "") or "",
+            "turn_id": getattr(cm, "turn_id", None),
+            "agent_idx": getattr(scope, "agent_idx", None),
+        })
+    return entries
+
+
+def _format_agent_mode(
+    mode_value: str,
+    cross_ref: bool,
+) -> str:
+    """Render ``(mode_value, cross_ref)`` as the four-string surface.
+
+    Mirrors :func:`ac_dc.llm._agents._format_mode` but takes
+    a string mode value rather than a Mode enum so callers
+    that read from the ContextManager don't need to import
+    the enum. ``mode_value`` is ``"code"`` or ``"doc"`` per
+    the Mode enum; the four-string surface adds ``+xref``
+    when cross-reference is on.
+    """
+    return f"{mode_value}+xref" if cross_ref else mode_value
+
+
+# ---------------------------------------------------------------------------
 # Mode + readiness
 # ---------------------------------------------------------------------------
 

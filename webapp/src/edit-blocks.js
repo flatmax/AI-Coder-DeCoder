@@ -204,6 +204,13 @@ export function segmentResponse(text) {
         } else if (stripped === '') {
           // Blank line between path and marker is tolerated.
           continue;
+        } else if (/^```/.test(stripped)) {
+          // Fence line between path and EDIT marker — the
+          // LLM wrapped its block in a code fence. Tolerate
+          // the opening fence so the block still parses;
+          // the closing fence after END is already handled
+          // by the lookahead at the end of 'reading-new'.
+          continue;
         } else if (isFilePath(stripped)) {
           // The "path" we held was actually a text line; the
           // real path candidate is this one. Push the old

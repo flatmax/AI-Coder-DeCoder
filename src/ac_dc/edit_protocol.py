@@ -638,6 +638,13 @@ class EditParser:
         if not stripped:
             # Blank line between path and marker — tolerated.
             return
+        if stripped.startswith("```"):
+            # Fence line between path and EDIT marker — the
+            # LLM wrapped its block in a markdown code fence.
+            # Tolerate the opening fence so the block still
+            # applies. The closing fence after END falls into
+            # SCANNING and is dropped harmlessly as prose.
+            return
         if _is_file_path(line):
             # Previous path was prose; new candidate.
             self._pending_path = line.strip()

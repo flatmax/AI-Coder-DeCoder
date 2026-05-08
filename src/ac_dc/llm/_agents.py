@@ -560,6 +560,7 @@ def build_agent_scope(
         session_id=parent_scope.session_id,
         selected_files=list(parent_scope.selected_files),
         archival_append=agent_context.archival_sink,
+        agent_idx=agent_idx,
     )
 
     # Register flat under the LLM-chosen id. Agents persist

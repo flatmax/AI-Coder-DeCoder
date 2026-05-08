@@ -641,6 +641,217 @@ export async function loadSnippets(panel) {
   }
 }
 
+/**
+ * Rehydrate live agent tabs from the backend's
+ * ``_agent_contexts`` registry. Called from
+ * ``onRpcReady`` so the chat panel reconstructs
+ * writable tabs after browser refresh or
+ * WebSocket reconnect.
+ *
+ * Per spec ``specs4/5-webapp/agent-browser.md``
+ * § Refresh and Reconnect — the backend's agent
+ * registry survives the websocket roundtrip;
+ * the frontend tab strip does not. ``onRpcReady``
+ * is the recovery point.
+ *
+ * Two-phase:
+ *
+ *   1. ``list_live_agents()`` — metadata only,
+ *      one entry per registered agent.
+ *      Synchronous tab creation (writable, empty
+ *      message list).
+ *   2. ``get_turn_archive(turn_id)`` per unique
+ *      turn — returns conversation content for
+ *      every agent in that turn. Filtered per
+ *      tab by ``agent_idx``.
+ *
+ * Tabs render immediately after phase 1 so the
+ * user sees the strip without waiting for
+ * archive loads. Conversation messages
+ * materialise as each archive call returns.
+ *
+ * Errors are logged but never surfaced as
+ * toasts — this runs on every connect and a
+ * transient failure shouldn't punish the user
+ * with a notification on every reload. An
+ * agent's tab without a populated message list
+ * still works: the user can reply, and the
+ * backend ContextManager has the full context.
+ */
+export async function rehydrateLiveAgents(panel) {
+  if (!panel.rpcConnected) return;
+  let entries;
+  try {
+    entries = await panel.rpcExtract(
+      'LLMService.list_live_agents',
+    );
+  } catch (err) {
+    const message = err?.message || '';
+    if (!message.includes('method not found')) {
+      console.error('[chat] list_live_agents failed', err);
+    }
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) return;
+
+  // Lazy import to avoid a tabs.js → events.js cycle.
+  const { rehydrateAgentTabs } = await import('./tabs.js');
+  const created = rehydrateAgentTabs(panel, entries);
+  if (created.length === 0) return;
+
+  // Group by turn_id so we make one get_turn_archive
+  // call per turn rather than per agent. Multiple
+  // agents from the same turn share an archive
+  // directory.
+  const byTurn = new Map();
+  for (const entry of created) {
+    const turnId = entry.turn_id;
+    if (typeof turnId !== 'string' || !turnId) continue;
+    if (!byTurn.has(turnId)) byTurn.set(turnId, []);
+    byTurn.get(turnId).push(entry);
+  }
+  for (const [turnId, turnEntries] of byTurn) {
+    loadAgentArchives(panel, turnId, turnEntries);
+  }
+}
+
+/**
+ * Load conversation content for every agent in a
+ * single turn.
+ *
+ * Fire-and-forget — this kicks off async work
+ * and returns. Each agent's message list
+ * populates as the archive call returns; Lit's
+ * reactive update pipeline handles the UI
+ * refresh.
+ *
+ * The archive RPC returns a flat list of
+ * messages across every agent in the turn, each
+ * record carrying ``agent_idx`` so we can split
+ * by tab. The shape of each record matches the
+ * main-store record schema from
+ * ``specs4/3-llm/history.md`` — ``role``,
+ * ``content``, optional ``images``, optional
+ * ``system_event``.
+ */
+async function loadAgentArchives(panel, turnId, entries) {
+  if (!panel.rpcConnected) return;
+  let archive;
+  try {
+    archive = await panel.rpcExtract(
+      'LLMService.get_turn_archive',
+      turnId,
+    );
+  } catch (err) {
+    console.error(
+      `[chat] get_turn_archive(${turnId}) failed`, err,
+    );
+    return;
+  }
+  if (!Array.isArray(archive)) return;
+
+  // Index records by agent_idx for fast filtering.
+  const byAgentIdx = new Map();
+  for (const record of archive) {
+    if (!record || typeof record !== 'object') continue;
+    const idx = record.agent_idx;
+    if (typeof idx !== 'number') continue;
+    if (!byAgentIdx.has(idx)) byAgentIdx.set(idx, []);
+    byAgentIdx.get(idx).push(record);
+  }
+
+  let panelDirty = false;
+  for (const entry of entries) {
+    const tabId = entry.id;
+    const idx = entry.agent_idx;
+    if (typeof idx !== 'number') continue;
+    const tab = panel._tabs.get(tabId);
+    if (!tab) continue;
+    const records = byAgentIdx.get(idx) || [];
+    if (records.length === 0) continue;
+    tab.messages = records.map((r) => {
+      const msg = { role: r.role, content: r.content ?? '' };
+      if (Array.isArray(r.images) && r.images.length > 0) {
+        msg.images = r.images;
+      }
+      if (r.system_event) msg.system_event = true;
+      return msg;
+    });
+    // Recompute lastEditOutcome from the persisted
+    // archive so the LED row resolves to green/red
+    // per spec § Refresh and Reconnect "What is
+    // genuinely lost" — cyan is never recovered, but
+    // green/red is recomputable.
+    tab.lastEditOutcome = computeOutcomeFromArchive(records);
+    panelDirty = true;
+  }
+  if (panelDirty) panel.requestUpdate();
+}
+
+/**
+ * Recompute a tab's last-completion outcome from its
+ * persisted archive records.
+ *
+ * Mirrors ``computeLastEditOutcome`` in streaming.js
+ * but reads from archive records rather than a fresh
+ * stream-complete payload. Two signals:
+ *
+ *   - The last assistant message — if it carries
+ *     edit results metadata with any failed entry,
+ *     the outcome is red.
+ *   - Stream-error metadata persisted on the
+ *     assistant message — also red.
+ *
+ * Otherwise green. Cyan (active stream) is never
+ * recovered across refresh per spec.
+ *
+ * Returns null when no assistant message exists yet
+ * (fresh agent that's only seen its initial user
+ * message). Null leaves the LED at its rest state
+ * rather than asserting a misleading green.
+ */
+function computeOutcomeFromArchive(records) {
+  let lastAssistant = null;
+  for (const r of records) {
+    if (r && r.role === 'assistant') lastAssistant = r;
+  }
+  if (!lastAssistant) return null;
+  const editResults = Array.isArray(lastAssistant.edit_results)
+    ? lastAssistant.edit_results
+    : [];
+  const error = lastAssistant.error;
+  let appliedCount = 0;
+  let firstFailure = null;
+  for (const r of editResults) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.status === 'applied') appliedCount += 1;
+    else if (r.status === 'failed' && !firstFailure) {
+      firstFailure = r;
+    }
+  }
+  if (error || firstFailure) {
+    let reason = 'archived failure';
+    if (error) {
+      reason = typeof error === 'string' ? error : 'stream failed';
+    } else if (firstFailure) {
+      const msg = firstFailure.message || '';
+      const file = firstFailure.file || '';
+      if (msg) reason = file ? `${file}: ${msg}` : msg;
+      else reason = firstFailure.error_type || 'edit failed';
+    }
+    return {
+      status: 'error',
+      appliedCount,
+      failureReason: reason,
+    };
+  }
+  return {
+    status: 'clean',
+    appliedCount,
+    failureReason: null,
+  };
+}
+
 // ---------------------------------------------------------------
 // Commit result
 // ---------------------------------------------------------------
