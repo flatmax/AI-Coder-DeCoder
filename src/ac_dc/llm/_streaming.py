@@ -46,6 +46,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import EditResult, parse_text
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm._helpers import (
@@ -296,15 +297,69 @@ async def stream_chat(
                 if valid_blocks:
                     # Fire agentsSpawned BEFORE the gather
                     # so the frontend creates tabs in time
-                    # to receive child streams.
-                    agent_block_payload = [
-                        {
+                    # to receive child streams. Each entry
+                    # carries the agent's resolved mode so
+                    # the LED-row tooltip can render
+                    # ``<id> (<mode>): running`` per spec
+                    # ``specs4/5-webapp/agent-browser.md``
+                    # § Status LEDs → Click and hover.
+                    # Mode resolution mirrors the
+                    # spawn-time logic in
+                    # :func:`_resolve_or_spawn_agent_scope`
+                    # — empty ``block.mode`` inherits from
+                    # the parent scope.
+                    from ac_dc.llm._agents import (
+                        _format_mode,
+                        _resolve_agent_mode,
+                    )
+                    parent_cm = scope.context
+                    parent_mode = (
+                        parent_cm.mode if parent_cm
+                        else Mode.CODE
+                    )
+                    parent_xref = (
+                        parent_cm.cross_reference_enabled
+                        if parent_cm else False
+                    )
+                    agent_block_payload = []
+                    for i, b in enumerate(valid_blocks):
+                        # Reuse existing agent's mode on
+                        # retask so the broadcast payload
+                        # matches the runtime scope. The
+                        # resolver may yet decide to skip
+                        # this block (mode mismatch); the
+                        # tab created from this payload
+                        # will then never receive child
+                        # chunks, but its tooltip stays
+                        # accurate to the existing agent.
+                        existing = (
+                            service._agent_contexts.get(b.id)
+                        )
+                        if (
+                            existing is not None
+                            and existing.context is not None
+                        ):
+                            mode_str = _format_mode(
+                                existing.context.mode,
+                                existing.context.cross_reference_enabled,
+                            )
+                        else:
+                            resolved_mode, resolved_xref = (
+                                _resolve_agent_mode(
+                                    b.mode,
+                                    parent_mode,
+                                    parent_xref,
+                                )
+                            )
+                            mode_str = _format_mode(
+                                resolved_mode, resolved_xref,
+                            )
+                        agent_block_payload.append({
                             "id": b.id,
                             "task": b.task,
                             "agent_idx": i,
-                        }
-                        for i, b in enumerate(valid_blocks)
-                    ]
+                            "mode": mode_str,
+                        })
                     await service._broadcast_event_async(
                         "agentsSpawned",
                         {

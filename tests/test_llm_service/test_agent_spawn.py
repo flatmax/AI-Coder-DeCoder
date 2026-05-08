@@ -545,6 +545,77 @@ class TestAgentDispatchScaffold:
         assert dispatch_logs == []
         assert recordings == []
 
+    async def test_agents_spawned_payload_carries_mode(
+        self,
+        service: LLMService,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+        event_cb: Any,
+    ) -> None:
+        """``agentsSpawned`` event carries each agent's resolved mode.
+
+        Per ``specs4/5-webapp/agent-browser.md`` § Status LEDs
+        → Click and hover, the LED-row tooltip needs each
+        agent's mode (``code`` / ``doc`` / ``code+xref`` /
+        ``doc+xref``) to render its hover string. The
+        broadcast payload must include this field at spawn
+        time so the frontend's tab-creation handler stores
+        it before any LED renders.
+
+        Mode resolution mirrors the spawn-time logic — empty
+        ``block.mode`` inherits from the orchestrator's
+        current scope. This test pins both an explicit mode
+        and an inherited one in a single decomposition.
+        """
+        from ac_dc.context_manager import Mode
+
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        # Force orchestrator into a known state so inherited
+        # mode is deterministic.
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(False)
+
+        # Two agents: one inherits, one explicit.
+        response = (
+            self._build_agent_block(
+                "explicit-doc", "doc work"
+            ).replace(
+                "🟩🟩🟩 AGEND",
+                "mode: doc+xref\n🟩🟩🟩 AGEND",
+            )
+            + "\n"
+            + self._build_agent_block(
+                "inherits", "code work"
+            )
+        )
+        fake_litellm.set_streaming_chunks([response])
+        event_cb.events.clear()
+
+        await service.chat_streaming(
+            request_id="r1", message="please decompose"
+        )
+        await asyncio.sleep(0.3)
+
+        # Find the agentsSpawned broadcast.
+        spawn_events = [
+            args for name, args in event_cb.events
+            if name == "agentsSpawned"
+        ]
+        assert len(spawn_events) == 1
+        payload = spawn_events[0][0]
+        assert payload["parent_request_id"] == "r1"
+        blocks_by_id = {
+            b["id"]: b for b in payload["agent_blocks"]
+        }
+        assert "explicit-doc" in blocks_by_id
+        assert "inherits" in blocks_by_id
+        # Explicit mode round-trips.
+        assert blocks_by_id["explicit-doc"]["mode"] == "doc+xref"
+        # Inherited mode reflects the orchestrator's CODE +
+        # cross_ref=False at spawn time.
+        assert blocks_by_id["inherits"]["mode"] == "code"
+
 
 class TestAgentSpawn:
     """Step 2 — per-agent scope construction and fan-out.
