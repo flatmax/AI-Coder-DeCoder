@@ -128,12 +128,16 @@ Provider settings, model selection, cache tuning.
 
 ```pseudo
 LlmConfig:
-    env: dict[string, string]        // Environment variables to inject on load
-    model: string                    // Primary model, e.g. "anthropic/claude-sonnet-4-20250514"
-    smaller_model: string            // Smaller model for commit messages, topic detection, summarization
-    smallerModel: string             // camelCase alias — accepted as fallback when snake_case absent
-    cache_min_tokens: int            // User-configurable minimum (default 1024)
-    cache_buffer_multiplier: float   // Default 1.1
+    env: dict[string, string]              // Environment variables to inject on load
+    model: string                          // Primary model, e.g. "anthropic/claude-sonnet-4-20250514"
+    smaller_model: string                  // Smaller model for commit messages, topic detection, summarization
+    smallerModel: string                   // camelCase alias — accepted as fallback when snake_case absent
+    cache_min_tokens: int                  // User-configurable minimum (default 1024)
+    cache_buffer_multiplier: float         // Default 1.1
+    request_timeout_seconds: float         // Streaming request wall-clock cap (default 300)
+    first_chunk_timeout_seconds: float     // Watchdog: time to first streamed chunk (default 60)
+    chunk_timeout_seconds: float           // Watchdog: max silence between chunks (default 120)
+    aux_request_timeout_seconds: float     // Aux non-streaming calls (default 60)
 ```
 
 **Field semantics:**
@@ -144,6 +148,12 @@ LlmConfig:
 - `smallerModel` — camelCase alias accepted for backwards compatibility with older configs. The accessor tries `smaller_model` first, falls back to `smallerModel` if absent.
 - `cache_min_tokens` — user override that can raise the cache target above the model's hardcoded minimum, but never below. Default 1024.
 - `cache_buffer_multiplier` — applied to the max of `cache_min_tokens` and the model's `min_cacheable_tokens`. Default 1.1 (10% headroom).
+- `request_timeout_seconds` — overall wall-clock timeout for streaming chat requests, passed to `litellm.completion` as its `timeout` kwarg. Catches stream-never-started cases. Users with very long reasoning workloads can raise this; values ≤ 0 fall back to the default.
+- `first_chunk_timeout_seconds` — watchdog enforced inside the streaming loop. Fires if the provider accepted the request but never started streaming. See `specs-reference/3-llm/streaming.md` § Streaming timeouts (three layers) for the watchdog mechanism.
+- `chunk_timeout_seconds` — inter-chunk watchdog. Reset on every received chunk. Default is generous because reasoning models can produce long quiet stretches between visible-text chunks.
+- `aux_request_timeout_seconds` — applied to commit-message generation, topic-boundary detection, and URL summarization. All three are non-streaming; the simple `timeout=` kwarg is sufficient.
+
+All four timeout values are read fresh on every LLM call (not snapshotted at construction time), so hot-reloading `llm.json` via the Settings RPC takes effect immediately.
 
 ### `app.json`
 

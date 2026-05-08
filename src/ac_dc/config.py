@@ -547,6 +547,103 @@ class ConfigManager:
         """
         return int(self.llm_config.get("cache_min_tokens", _DEFAULT_MIN_TOKENS))
 
+    # ------------------------------------------------------------------
+    # Network / streaming timeouts
+    # ------------------------------------------------------------------
+    #
+    # Three layers of protection against hung LLM calls:
+    #
+    # 1. ``request_timeout_seconds`` — overall wall-clock cap on the
+    #    full streaming request, passed to ``litellm.completion`` as
+    #    its ``timeout`` kwarg. Catches "stream never started" cases
+    #    (DNS hang, TLS handshake hang, slow start before first byte)
+    #    and acts as the absolute ceiling for total request time.
+    # 2. ``first_chunk_timeout_seconds`` — watchdog enforced inside
+    #    the streaming loop. If the provider accepted the request
+    #    but never starts streaming, this fires before the overall
+    #    timeout so the user gets their terminal back faster.
+    # 3. ``chunk_timeout_seconds`` — inter-chunk watchdog. Resets on
+    #    every received chunk. Catches "stream stalled mid-response"
+    #    (provider deadlock, network drop after handshake). Generous
+    #    default so legitimate reasoning pauses don't trigger it.
+    #
+    # Aux calls (commit message, topic detection, URL summarization)
+    # use a single ``aux_request_timeout_seconds`` since they're
+    # non-streaming — the total-call timeout is sufficient.
+
+    @property
+    def request_timeout_seconds(self) -> float:
+        """Overall wall-clock timeout for streaming chat requests.
+
+        Default 300s (5 minutes). Long enough for any legitimate
+        reasoning + answer combination on current models, short
+        enough that a hung connection clears in a tolerable window.
+        Users with very long reasoning workloads can raise this in
+        ``llm.json``.
+        """
+        try:
+            value = float(self.llm_config.get("request_timeout_seconds", 300))
+        except (TypeError, ValueError):
+            return 300.0
+        return value if value > 0 else 300.0
+
+    @property
+    def first_chunk_timeout_seconds(self) -> float:
+        """Watchdog timeout from request start to first chunk.
+
+        Default 60s. If the provider has accepted the request but
+        not emitted any chunk in this window, the watchdog closes
+        the stream and the request fails with a typed error. The
+        user's "Stop" button is the primary cancellation path for
+        legitimate long requests; this is the safety net for hung
+        sockets.
+        """
+        try:
+            value = float(
+                self.llm_config.get("first_chunk_timeout_seconds", 60)
+            )
+        except (TypeError, ValueError):
+            return 60.0
+        return value if value > 0 else 60.0
+
+    @property
+    def chunk_timeout_seconds(self) -> float:
+        """Inter-chunk watchdog timeout.
+
+        Default 120s. Resets on every received chunk. A stream
+        that goes silent for this long mid-response is treated as
+        hung. The default is generous because reasoning models can
+        produce long quiet stretches between visible-text chunks
+        while thinking; values much lower than 60s risk false
+        positives during legitimate reasoning.
+        """
+        try:
+            value = float(
+                self.llm_config.get("chunk_timeout_seconds", 120)
+            )
+        except (TypeError, ValueError):
+            return 120.0
+        return value if value > 0 else 120.0
+
+    @property
+    def aux_request_timeout_seconds(self) -> float:
+        """Timeout for auxiliary non-streaming LLM calls.
+
+        Default 60s. Applies to commit-message generation, topic
+        boundary detection, and URL summarization. All three
+        produce small structured outputs on the smaller/cheaper
+        model — 60s is plenty even on slow upstreams. A hung aux
+        call wedges an aux-executor thread but doesn't block the
+        chat path (which uses a separate executor).
+        """
+        try:
+            value = float(
+                self.llm_config.get("aux_request_timeout_seconds", 60)
+            )
+        except (TypeError, ValueError):
+            return 60.0
+        return value if value > 0 else 60.0
+
     @property
     def cache_buffer_multiplier(self) -> float:
         """Multiplier applied to the cache minimum to compute target.

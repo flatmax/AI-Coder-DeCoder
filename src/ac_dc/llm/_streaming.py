@@ -485,17 +485,38 @@ def run_completion_sync(
     which signals via ``was_cancelled``). It carries the
     diagnostic string when the LiteLLM call raised before
     streaming started — e.g., ``APIConnectionError`` from a
-    DNS hiccup or auth failure. The caller surfaces it via
-    ``result.error`` so the frontend's red-LED + error-card
-    path fires; without this signal, the error string would
-    land in ``full_content`` and the response would render
-    as a normal assistant message with a green LED.
+    DNS hiccup or auth failure, or when either watchdog
+    fires (no first chunk within
+    ``first_chunk_timeout_seconds``, or no chunk for
+    ``chunk_timeout_seconds`` mid-stream). The caller
+    surfaces it via ``result.error`` so the frontend's
+    red-LED + error-card path fires; without this signal,
+    the error string would land in ``full_content`` and the
+    response would render as a normal assistant message
+    with a green LED.
 
     ``reasoning`` is the per-request extended-thinking
     override. ``None`` falls through to the config default;
     ``True`` / ``False`` force the corresponding state. The
     resolved ``thinking`` kwarg is passed straight into
     ``litellm.completion``.
+
+    Three-layer timeout protection per
+    ``specs-reference/3-llm/streaming.md`` § Timeouts:
+
+    1. ``timeout=`` on ``litellm.completion`` itself —
+       overall wall-clock cap (default 300s).
+    2. First-chunk watchdog — a ``threading.Timer`` that
+       closes the stream if no chunk arrives within
+       ``first_chunk_timeout_seconds`` (default 60s).
+    3. Inter-chunk watchdog — same timer, reset on every
+       received chunk, fires after
+       ``chunk_timeout_seconds`` of silence (default 120s).
+
+    Watchdog fires call ``stream.close()`` on the stream
+    iterator. The blocked ``next()`` then raises, the
+    ``for`` loop exits, and we return whatever content
+    accumulated with a descriptive error.
     """
     empty_usage: dict[str, Any] = {
         "prompt_tokens": 0,
@@ -615,6 +636,10 @@ def run_completion_sync(
                 payload.get("budget_tokens", 0),
             )
 
+    request_timeout = service._config.request_timeout_seconds
+    first_chunk_timeout = service._config.first_chunk_timeout_seconds
+    chunk_timeout = service._config.chunk_timeout_seconds
+
     try:
         stream = litellm.completion(
             model=service._config.model,
@@ -622,6 +647,7 @@ def run_completion_sync(
             stream=True,
             stream_options={"include_usage": True},
             max_tokens=max_output,
+            timeout=request_timeout,
             **thinking_kwargs,
         )
     except Exception as exc:
@@ -650,44 +676,159 @@ def run_completion_sync(
     finish_reason: str | None = None
     cost_source: Any = stream
 
-    for chunk in stream:
-        if request_id in service._cancelled_requests:
-            was_cancelled = True
-            break
+    # ------------------------------------------------------------------
+    # Watchdog setup
+    # ------------------------------------------------------------------
+    #
+    # ``threading.Timer`` runs its callback on a separate thread when
+    # it expires. The callback closes the stream's underlying HTTP
+    # connection (best-effort — we try a few attribute paths because
+    # litellm's stream wrapper shape varies by provider). The blocked
+    # ``next()`` call inside the ``for`` loop then raises, the loop
+    # exits, and we surface a watchdog-fired error.
+    #
+    # ``watchdog_fired`` is the synchronisation primitive between the
+    # timer thread and the worker thread — using a list as a poor
+    # man's nonlocal-mutable-bool that's safe under the GIL.
+    import threading
 
-        try:
-            choices = chunk.choices
-            if choices:
-                delta = choices[0].delta
-                if delta and getattr(delta, "content", None):
-                    full_content += delta.content
-                    # Mirror into per-request accumulator.
-                    # GIL makes the dict write atomic for
-                    # string values; event-loop readers see
-                    # a consistent string.
-                    service._request_accumulators[request_id] = (
-                        full_content
-                    )
-                    # Fire chunk callback with FULL content.
-                    asyncio.run_coroutine_threadsafe(
-                        service._broadcast_event_async(
-                            "streamChunk",
-                            request_id,
-                            full_content,
-                        ),
-                        loop,
-                    )
-        except (AttributeError, IndexError):
-            pass  # malformed chunk — skip
+    watchdog_fired: list[str | None] = [None]
 
-        # finish_reason typically on the final chunk.
-        reason = _extract_finish_reason(chunk)
-        if reason is not None and finish_reason is None:
-            finish_reason = reason
+    def _close_stream_on_watchdog(reason: str) -> None:
+        """Force-close the stream when a watchdog fires.
 
-        chunk_usage = getattr(chunk, "usage", None)
-        if chunk_usage is not None:
-            usage = chunk_usage
+        Called from the timer thread. Sets the reason flag first
+        so the worker thread can distinguish a watchdog abort
+        from a normal end-of-stream when the iteration exits.
+        """
+        watchdog_fired[0] = reason
+        # Try the documented close paths in order. Different
+        # providers wrap the stream differently.
+        for attr_path in ("close", "response.close"):
+            try:
+                target: Any = stream
+                for part in attr_path.split("."):
+                    target = getattr(target, part, None)
+                    if target is None:
+                        break
+                if callable(target):
+                    target()
+                    return
+            except Exception:
+                # Best-effort — if the close path raises, the
+                # next iteration will raise too and we still
+                # exit the loop.
+                continue
+
+    # Arm the first-chunk watchdog before iteration begins.
+    timer = threading.Timer(
+        first_chunk_timeout,
+        _close_stream_on_watchdog,
+        args=(
+            f"no chunk received within {first_chunk_timeout:.0f}s "
+            "of request start",
+        ),
+    )
+    timer.daemon = True
+    timer.start()
+    first_chunk_seen = False
+
+    try:
+        for chunk in stream:
+            # Reset the watchdog on every chunk — but use the
+            # inter-chunk timeout from the second chunk onward.
+            # The first chunk uses the (typically shorter) first-
+            # chunk timeout.
+            timer.cancel()
+            if not first_chunk_seen:
+                first_chunk_seen = True
+            timer = threading.Timer(
+                chunk_timeout,
+                _close_stream_on_watchdog,
+                args=(
+                    f"no chunk for {chunk_timeout:.0f}s mid-stream",
+                ),
+            )
+            timer.daemon = True
+            timer.start()
+
+            if request_id in service._cancelled_requests:
+                was_cancelled = True
+                break
+
+            try:
+                choices = chunk.choices
+                if choices:
+                    delta = choices[0].delta
+                    if delta and getattr(delta, "content", None):
+                        full_content += delta.content
+                        # Mirror into per-request accumulator.
+                        # GIL makes the dict write atomic for
+                        # string values; event-loop readers see
+                        # a consistent string.
+                        service._request_accumulators[request_id] = (
+                            full_content
+                        )
+                        # Fire chunk callback with FULL content.
+                        asyncio.run_coroutine_threadsafe(
+                            service._broadcast_event_async(
+                                "streamChunk",
+                                request_id,
+                                full_content,
+                            ),
+                            loop,
+                        )
+            except (AttributeError, IndexError):
+                pass  # malformed chunk — skip
+
+            # finish_reason typically on the final chunk.
+            reason = _extract_finish_reason(chunk)
+            if reason is not None and finish_reason is None:
+                finish_reason = reason
+
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+    except Exception as exc:
+        # Iteration raised — either the watchdog closed the
+        # stream (in which case watchdog_fired is set) or the
+        # provider raised mid-stream for some other reason.
+        if watchdog_fired[0] is not None:
+            logger.warning(
+                "Stream watchdog fired: %s", watchdog_fired[0]
+            )
+            service._last_error_info = {
+                "error_type": "timeout",
+                "message": watchdog_fired[0],
+                "retry_after": None,
+                "status_code": None,
+                "provider": None,
+                "model": service._config.model,
+                "original_type": "WatchdogTimeout",
+            }
+            timer.cancel()
+            return (
+                full_content,
+                False,
+                None,
+                dict(empty_usage),
+                f"Stream timeout — {watchdog_fired[0]}",
+            )
+        # Mid-stream provider error.
+        logger.exception("Stream iteration raised")
+        service._last_error_info = _classify_litellm_error(
+            litellm, exc
+        )
+        timer.cancel()
+        return (
+            full_content,
+            False,
+            None,
+            dict(empty_usage),
+            f"Stream failed mid-response: {exc}",
+        )
+    finally:
+        timer.cancel()
 
     # Normalise usage into a plain dict for the return.
     request_usage = dict(empty_usage)

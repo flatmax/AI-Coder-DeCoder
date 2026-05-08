@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
+from typing import Any
 
 from ac_dc.url_service.detection import URLType
 from ac_dc.url_service.models import URLContent
@@ -273,6 +274,7 @@ def summarize(
     model: str,
     summary_type: SummaryType | None = None,
     user_text: str | None = None,
+    timeout: float | None = None,
 ) -> URLContent:
     """Generate a summary for ``content`` and return an updated record.
 
@@ -296,6 +298,14 @@ def summarize(
     user_text:
         Optional user prompt for auto-type selection. Ignored
         when ``summary_type`` is explicit.
+    timeout:
+        Optional wall-clock timeout in seconds for the
+        summarizer LLM call. Passed to ``litellm.completion``
+        as its ``timeout`` kwarg. Defaults to None (no client-
+        side timeout — relies on the provider's default).
+        Production callers should pass
+        ``config.aux_request_timeout_seconds``; tests pass
+        nothing.
 
     Returns
     -------
@@ -330,16 +340,20 @@ def summarize(
         )
         return _with_error_summary(content, effective_type)
 
+    completion_kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _SYSTEM_MESSAGE},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "max_tokens": _SUMMARY_MAX_TOKENS,
+    }
+    if timeout is not None:
+        completion_kwargs["timeout"] = timeout
+
     try:
-        response = litellm.completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_MESSAGE},
-                {"role": "user", "content": user_prompt},
-            ],
-            stream=False,
-            max_tokens=_SUMMARY_MAX_TOKENS,
-        )
+        response = litellm.completion(**completion_kwargs)
     except Exception as exc:
         logger.warning(
             "Summarization LLM call failed for %s: %s",

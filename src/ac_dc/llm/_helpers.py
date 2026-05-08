@@ -489,7 +489,9 @@ def _build_topic_detector(
         )
         try:
             # Non-streaming call — we want the full JSON response
-            # before parsing.
+            # before parsing. ``timeout=`` is the safety net for
+            # hung sockets; a healthy detector call returns in a
+            # few seconds.
             response = litellm.completion(
                 model=model,
                 messages=[
@@ -498,6 +500,7 @@ def _build_topic_detector(
                 ],
                 stream=False,
                 max_tokens=max_output,
+                timeout=config.aux_request_timeout_seconds,
             )
         except Exception as exc:
             # Classify for richer log output. Topic detection

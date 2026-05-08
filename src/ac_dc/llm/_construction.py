@@ -78,6 +78,7 @@ def build_url_service(service: "LLMService") -> URLService:
         cache=cache,
         smaller_model=service._config.smaller_model,
         symbol_index_cls=symbol_index_cls,
+        summarizer_timeout=service._config.aux_request_timeout_seconds,
     )
 
 
