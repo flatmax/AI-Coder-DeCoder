@@ -62,6 +62,126 @@ import {
 import { findTabForRequest, spawnAgentTabs } from './tabs.js';
 
 // ---------------------------------------------------------------
+// Last-completion outcome (LED row state)
+// ---------------------------------------------------------------
+
+/**
+ * Derive the LED-row outcome for one stream completion.
+ *
+ * Inputs are the raw fields from the completion result:
+ *
+ *   - ``error`` — string from ``result.error`` (truthy
+ *     means the stream itself failed; the response card
+ *     renders a typed error and the LED goes red).
+ *   - ``errorInfo`` — classified error dict from
+ *     ``result.error_info`` (provider message, error
+ *     type, model). Used to build a human-readable
+ *     failure reason when present.
+ *   - ``editResults`` — array of EditResult dicts. Each
+ *     carries ``status`` (``applied`` /
+ *     ``already_applied`` / ``failed`` / ``skipped`` /
+ *     ``not_in_context``) plus ``error_type`` and
+ *     ``message`` for failures.
+ *
+ * Returns the shape stored on ``tab.lastEditOutcome``:
+ *
+ *   - ``status: 'clean'`` — no stream error AND no
+ *     EditResult with status === 'failed'. The agent
+ *     finished cleanly (zero edits, all-applied, or any
+ *     mix of applied / already-applied / skipped /
+ *     not-in-context).
+ *   - ``status: 'error'`` — stream error OR at least one
+ *     failed EditResult. The LED goes red.
+ *
+ * ``appliedCount`` counts EditResults with
+ * ``status === 'applied'`` — the number of files the
+ * agent successfully wrote on this turn. Surfaced in
+ * the LED tooltip as ``completed (N edits applied)``.
+ *
+ * ``failureReason`` is null on clean outcomes; on
+ * errors it's a short diagnostic suitable for the LED
+ * tooltip:
+ *
+ *   - Stream error → the typed error label or
+ *     provider message
+ *   - Anchor not found / ambiguous → the first failed
+ *     EditResult's message
+ *
+ * No try/catch — every input is already a plain JSON
+ * value off the streamComplete payload.
+ */
+export function computeLastEditOutcome(
+  error, errorInfo, editResults,
+) {
+  const results = Array.isArray(editResults) ? editResults : [];
+  let appliedCount = 0;
+  let firstFailure = null;
+  for (const r of results) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.status === 'applied') {
+      appliedCount += 1;
+    } else if (r.status === 'failed' && !firstFailure) {
+      firstFailure = r;
+    }
+  }
+  if (error) {
+    // Stream-level error wins over edit failures —
+    // the response itself didn't complete, so any
+    // edit results are partial-at-best.
+    let reason;
+    if (
+      errorInfo
+      && typeof errorInfo === 'object'
+      && typeof errorInfo.message === 'string'
+      && errorInfo.message
+    ) {
+      reason = errorInfo.message;
+    } else {
+      reason = String(error);
+    }
+    return {
+      status: 'error',
+      appliedCount,
+      failureReason: reason,
+    };
+  }
+  if (firstFailure) {
+    const message = typeof firstFailure.message === 'string'
+      ? firstFailure.message
+      : '';
+    const errType = typeof firstFailure.error_type === 'string'
+      ? firstFailure.error_type
+      : '';
+    const file = typeof firstFailure.file === 'string'
+      ? firstFailure.file
+      : '';
+    // Prefer the message when present (it's already
+    // human-readable); fall back to "<errorType> in
+    // <file>" so the tooltip is at least informative.
+    let reason;
+    if (message) {
+      reason = file ? `${file}: ${message}` : message;
+    } else if (errType) {
+      reason = file
+        ? `${errType} in ${file}`
+        : errType;
+    } else {
+      reason = 'edit failed';
+    }
+    return {
+      status: 'error',
+      appliedCount,
+      failureReason: reason,
+    };
+  }
+  return {
+    status: 'clean',
+    appliedCount,
+    failureReason: null,
+  };
+}
+
+// ---------------------------------------------------------------
 // Stream chunk routing
 // ---------------------------------------------------------------
 
@@ -237,6 +357,14 @@ export function onStreamComplete(panel, event) {
       ? result.edit_results
       : undefined;
     const finishReason = result?.finish_reason || '';
+    // Compute the last-completion outcome for this
+    // tab. Drives the LED row's green/red state per
+    // spec ``specs4/5-webapp/agent-browser.md`` §
+    // Status LEDs. Cyan flashing is driven separately
+    // by the live `streaming` flag.
+    const lastEditOutcome = computeLastEditOutcome(
+      error, errorInfo, editResults,
+    );
     // Compose the assistant-card error body. Per
     // specs-reference/3-llm/streaming.md, classified
     // errors get a human-readable label + provider
@@ -275,6 +403,12 @@ export function onStreamComplete(panel, event) {
     if (!error && finishReason) {
       maybeShowFinishReasonToast(panel, finishReason);
     }
+    // Record the outcome for the LED row before
+    // resetting streaming state. The LED row reads
+    // this per tab via Map lookup; the requestUpdate
+    // calls below cover both the active-tab and
+    // inactive-tab render paths.
+    ownerTab.lastEditOutcome = lastEditOutcome;
     // Reset streaming state on the owning tab.
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';

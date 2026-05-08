@@ -147,6 +147,30 @@ export function makeTabState() {
     autoScroll: true,
     suppressNextPaste: false,
     activeMention: null,
+    // Last-completion outcome for this tab. Drives the
+    // LED row's green/red state for agent tabs (cyan
+    // flashing comes from the live `streaming` flag
+    // above, so `lastEditOutcome` only needs to record
+    // the post-stream resting state).
+    //
+    // Shape:
+    //   null — never streamed, or fresh stream in
+    //          flight. LEDs default to cyan flashing
+    //          while streaming, no LED at rest.
+    //   { status: 'clean', appliedCount, failureReason: null }
+    //   { status: 'error', appliedCount, failureReason }
+    //
+    // `appliedCount` is the count of EditResult entries
+    // with status === 'applied'. `failureReason` carries
+    // the human-readable diagnostic — provider error
+    // message, anchor-not-found, ambiguous, or the
+    // assimilation-failed marker. Per spec
+    // ``specs4/5-webapp/agent-browser.md`` § Status LEDs.
+    //
+    // Reset to null when a fresh stream starts on this
+    // tab so a previous failure doesn't show stale red
+    // on the next turn.
+    lastEditOutcome: null,
   };
 }
 

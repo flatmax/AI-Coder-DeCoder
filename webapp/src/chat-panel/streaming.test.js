@@ -4,6 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { computeLastEditOutcome } from './streaming.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -888,6 +889,321 @@ describe('ChatPanel agent tab spawning — defensive', () => {
 // ---------------------------------------------------------------------------
 // C2d — stale-tag error handling on chat_streaming resolution
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Last-completion outcome (LED row state, Scope B commit 3)
+// ---------------------------------------------------------------------------
+
+describe('computeLastEditOutcome — pure helper', () => {
+  it('clean run with no edits → clean / 0', () => {
+    const outcome = computeLastEditOutcome(null, null, undefined);
+    expect(outcome).toEqual({
+      status: 'clean',
+      appliedCount: 0,
+      failureReason: null,
+    });
+  });
+
+  it('all-applied edits → clean / count', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      { file: 'a.py', status: 'applied' },
+      { file: 'b.py', status: 'applied' },
+      { file: 'c.py', status: 'applied' },
+    ]);
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(3);
+    expect(outcome.failureReason).toBeNull();
+  });
+
+  it('mix of applied + already_applied + skipped → clean', () => {
+    // None of these statuses count as failures. The
+    // agent's edit pipeline ran and produced no error;
+    // already-applied / skipped / not-in-context are
+    // all benign.
+    const outcome = computeLastEditOutcome(null, null, [
+      { file: 'a.py', status: 'applied' },
+      { file: 'b.py', status: 'already_applied' },
+      { file: 'c.py', status: 'skipped' },
+      { file: 'd.py', status: 'not_in_context' },
+    ]);
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(1);
+  });
+
+  it('one failed edit → error / message', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      { file: 'a.py', status: 'applied' },
+      {
+        file: 'b.py',
+        status: 'failed',
+        error_type: 'anchor_not_found',
+        message: 'Old text not found',
+      },
+    ]);
+    expect(outcome.status).toBe('error');
+    expect(outcome.appliedCount).toBe(1);
+    expect(outcome.failureReason).toBe(
+      'b.py: Old text not found',
+    );
+  });
+
+  it('failure without message falls back to error_type', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      {
+        file: 'b.py',
+        status: 'failed',
+        error_type: 'ambiguous_anchor',
+        message: '',
+      },
+    ]);
+    expect(outcome.failureReason).toBe(
+      'ambiguous_anchor in b.py',
+    );
+  });
+
+  it('failure without file or error_type → generic', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      { status: 'failed' },
+    ]);
+    expect(outcome.failureReason).toBe('edit failed');
+  });
+
+  it('multiple failures → first one wins for tooltip', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      {
+        file: 'a.py',
+        status: 'failed',
+        message: 'first failure',
+      },
+      {
+        file: 'b.py',
+        status: 'failed',
+        message: 'second failure',
+      },
+    ]);
+    expect(outcome.failureReason).toContain('first failure');
+    expect(outcome.failureReason).not.toContain(
+      'second failure',
+    );
+  });
+
+  it('stream error wins over edit failures', () => {
+    // Stream-level error means the response is partial;
+    // any edit results are unreliable. Tooltip should
+    // reflect the stream error, not the (incidental)
+    // edit failure.
+    const outcome = computeLastEditOutcome(
+      'something broke',
+      { message: 'rate limit exceeded' },
+      [
+        {
+          file: 'a.py',
+          status: 'failed',
+          message: 'anchor missing',
+        },
+      ],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('rate limit exceeded');
+    // appliedCount still tracked — caller may want to
+    // show partial credit even on stream error.
+    expect(outcome.appliedCount).toBe(0);
+  });
+
+  it('stream error without errorInfo uses raw error', () => {
+    const outcome = computeLastEditOutcome(
+      'network died',
+      null,
+      undefined,
+    );
+    expect(outcome.failureReason).toBe('network died');
+  });
+
+  it('stream error with empty errorInfo.message falls back', () => {
+    // Defensive — classifier may produce an
+    // errorInfo dict with an empty message.
+    const outcome = computeLastEditOutcome(
+      'fallback string',
+      { message: '', error_type: 'unknown' },
+      undefined,
+    );
+    expect(outcome.failureReason).toBe('fallback string');
+  });
+
+  it('non-array editResults treated as empty', () => {
+    expect(
+      computeLastEditOutcome(null, null, null).appliedCount,
+    ).toBe(0);
+    expect(
+      computeLastEditOutcome(null, null, 'oops').appliedCount,
+    ).toBe(0);
+    expect(
+      computeLastEditOutcome(null, null, undefined)
+        .appliedCount,
+    ).toBe(0);
+  });
+
+  it('non-object entries skipped', () => {
+    const outcome = computeLastEditOutcome(null, null, [
+      null,
+      undefined,
+      'string',
+      42,
+      { file: 'a.py', status: 'applied' },
+    ]);
+    expect(outcome.appliedCount).toBe(1);
+    expect(outcome.status).toBe('clean');
+  });
+});
+
+describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
+  async function sendAndGetRequestId(panel, message = 'hi') {
+    const { vi } = await import('vitest');
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    return started.mock.calls[0][0];
+  }
+
+  it('clean completion → clean outcome on active tab', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'all done',
+        edit_results: [
+          { file: 'a.py', status: 'applied' },
+          { file: 'b.py', status: 'applied' },
+        ],
+      },
+    });
+    await settle(p);
+    const outcome = p._tabs.get('main').lastEditOutcome;
+    expect(outcome).not.toBeNull();
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(2);
+  });
+
+  it('failure → error outcome with diagnostic', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'tried',
+        edit_results: [
+          {
+            file: 'a.py',
+            status: 'failed',
+            error_type: 'anchor_not_found',
+            message: 'Old text not found',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    const outcome = p._tabs.get('main').lastEditOutcome;
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toContain('a.py');
+  });
+
+  it('stream error → error outcome', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        error: 'something broke',
+        error_info: { message: 'rate limit exceeded' },
+      },
+    });
+    await settle(p);
+    const outcome = p._tabs.get('main').lastEditOutcome;
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('rate limit exceeded');
+  });
+
+  it('inactive-tab completion writes to that tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    // Set up agent tab with its own in-flight request.
+    p._tabs.set('agent-0', p._makeTabState());
+    p._tabLabels.set('agent-0', 'Agent 0');
+    const agentTab = p._tabs.get('agent-0');
+    agentTab.streaming = true;
+    agentTab.currentRequestId = 'r-agent-1';
+    p.requestUpdate();
+    await settle(p);
+    // Active tab is still main.
+    expect(p._activeTabId).toBe('main');
+    pushEvent('stream-complete', {
+      requestId: 'r-agent-1',
+      result: {
+        response: 'agent done',
+        edit_results: [
+          { file: 'x.py', status: 'applied' },
+        ],
+      },
+    });
+    await settle(p);
+    expect(agentTab.lastEditOutcome).not.toBeNull();
+    expect(agentTab.lastEditOutcome.status).toBe('clean');
+    expect(agentTab.lastEditOutcome.appliedCount).toBe(1);
+    // Main tab's outcome is unaffected.
+    expect(p._tabs.get('main').lastEditOutcome).toBeNull();
+  });
+
+  it('initial state is null', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._tabs.get('main').lastEditOutcome).toBeNull();
+  });
+
+  it('outcome overwrites on subsequent completions', async () => {
+    const p = mountPanel();
+    let reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'first',
+        edit_results: [
+          {
+            file: 'a.py',
+            status: 'failed',
+            message: 'first failure',
+          },
+        ],
+      },
+    });
+    await settle(p);
+    expect(
+      p._tabs.get('main').lastEditOutcome.status,
+    ).toBe('error');
+    // Second turn — clean.
+    reqId = await sendAndGetRequestId(p, 'second');
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'second',
+        edit_results: [
+          { file: 'b.py', status: 'applied' },
+        ],
+      },
+    });
+    await settle(p);
+    expect(
+      p._tabs.get('main').lastEditOutcome.status,
+    ).toBe('clean');
+    expect(
+      p._tabs.get('main').lastEditOutcome.appliedCount,
+    ).toBe(1);
+  });
+});
 
 describe('ChatPanel stream-start error handling', () => {
   async function setupAgentTab(panel, tabId = 'frontend-trivial') {
