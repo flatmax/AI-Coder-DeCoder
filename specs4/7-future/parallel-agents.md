@@ -342,6 +342,7 @@ Consequences:
 - An agent that closes between turn N and turn N+1 simply disappears from turn N+1's descriptor with no special invalidation step
 - Compaction operates on the persisted history, which has no descriptors, so summarisation logic doesn't need to know about agent state
 - The descriptor is cheap to rebuild (path lists from the registry); rebuilding per turn is preferable to caching it, because caching invites staleness bugs after agent state changes
+- The descriptor surfaces in the Context tab's cache viewer as a synthetic `meta:agent_descriptor` row in the uncached tier (see [viewers-hud.md § Synthetic Meta Rows](../5-webapp/viewers-hud.md#synthetic-meta-rows)). The row is suppressed when no agents are registered. Click-to-view renders the same markdown block the orchestrator received, so the user can audit "what does the LLM see about its team" without reading the raw outgoing wire payload.
 
 ### What's deliberately omitted
 

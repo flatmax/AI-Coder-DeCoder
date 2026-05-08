@@ -405,6 +405,55 @@ def get_meta_block(
             "mode": service._context.mode.value,
         }
 
+    # meta:agent_descriptor — the per-turn agent-state
+    # descriptor that build_agent_descriptor injects into
+    # the outgoing user message at assembly time. Rebuilt
+    # fresh each call from the live registry; never
+    # persisted to history. Surfacing it here closes the
+    # gap between "what the LLM sees" and "what the cache
+    # viewer shows". Per
+    # specs4/7-future/parallel-agents.md § "Single-copy
+    # invariant — assembly-time injection".
+    if key == "meta:agent_descriptor":
+        from ac_dc.llm._agents import build_agent_descriptor
+        content = build_agent_descriptor(service)
+        if not content:
+            return {
+                "error": (
+                    "No live agents — descriptor would be "
+                    "empty this turn."
+                ),
+                "path": key,
+            }
+        return {
+            "path": key,
+            "content": content,
+            "mode": service._context.mode.value,
+        }
+
+    # meta:system_reminder — the system reminder text
+    # appended to the user prompt at assembly time. Read
+    # from config so changes via Settings are reflected
+    # immediately.
+    if key == "meta:system_reminder":
+        try:
+            content = service._config.get_system_reminder()
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "path": key,
+            }
+        if not content:
+            return {
+                "error": "System reminder is empty.",
+                "path": key,
+            }
+        return {
+            "path": key,
+            "content": content,
+            "mode": service._context.mode.value,
+        }
+
     return {
         "error": f"Unknown meta key: {key}",
         "path": key,
@@ -861,6 +910,53 @@ def get_context_breakdown(
                 "path": "Code review context",
                 "tokens": rv_tokens,
                 "type": "other",
+            })
+    # Agent descriptor — assembly-time injection rebuilt
+    # fresh per turn from the live registry. Only the
+    # main scope's breakdown gets this row; agent scopes
+    # don't see the descriptor in their own prompts (per
+    # spec, agents don't self-reference the registry), so
+    # surfacing it under an agent breakdown would
+    # mismatch what the LLM actually received. Suppressed
+    # when no agents are registered (descriptor is empty).
+    if scope is None:
+        try:
+            from ac_dc.llm._agents import (
+                build_agent_descriptor,
+            )
+            descriptor = build_agent_descriptor(service)
+        except Exception as exc:
+            descriptor = ""
+            logger.debug(
+                "Agent descriptor preview failed: %s", exc,
+            )
+        if descriptor:
+            ad_tokens = service._counter.count(descriptor)
+            if ad_tokens > 0:
+                uncached_contents.append({
+                    "name": "meta:agent_descriptor",
+                    "path": "Live-agent descriptor",
+                    "tokens": ad_tokens,
+                    "type": "other",
+                })
+    # System reminder — appended to the user prompt at
+    # assembly time. Read from config so the row reflects
+    # whatever the next request would actually carry.
+    try:
+        reminder = service._config.get_system_reminder()
+    except Exception as exc:
+        reminder = ""
+        logger.debug(
+            "System reminder preview failed: %s", exc,
+        )
+    if reminder:
+        sr_tokens = service._counter.count(reminder)
+        if sr_tokens > 0:
+            uncached_contents.append({
+                "name": "meta:system_reminder",
+                "path": "System reminder",
+                "tokens": sr_tokens,
+                "type": "system",
             })
     # Active files section — files in file context but not
     # graduated.

@@ -254,11 +254,22 @@ async def stream_chat(
             cancelled,
             finish_reason,
             request_usage,
+            completion_error,
         ) = await loop.run_in_executor(
             service._stream_executor,
             service._run_completion_sync,
             request_id, messages, loop, reasoning,
         )
+        # If the LiteLLM call raised before streaming
+        # started, ``run_completion_sync`` returns the
+        # diagnostic via the 5th tuple slot. Promote it to
+        # the local ``error`` so build_completion_result
+        # sets ``result.error`` and the frontend's red-LED
+        # path fires. Skip persistence + agent dispatch on
+        # this path — there's no real assistant response.
+        if completion_error is not None:
+            error = completion_error
+            full_content = ""
 
         # Persist assistant response.
         if full_content or cancelled:
@@ -461,14 +472,24 @@ def run_completion_sync(
     messages: list[dict[str, Any]],
     loop: asyncio.AbstractEventLoop,
     reasoning: bool | None = None,
-) -> tuple[str, bool, str | None, dict[str, Any]]:
+) -> tuple[str, bool, str | None, dict[str, Any], str | None]:
     """Blocking LLM call — runs in a worker thread.
 
     Returns ``(full_content, was_cancelled, finish_reason,
-    usage_dict)``. Schedules chunk callbacks onto the main
-    event loop via ``run_coroutine_threadsafe``. See
+    usage_dict, error)``. Schedules chunk callbacks onto the
+    main event loop via ``run_coroutine_threadsafe``. See
     :meth:`LLMService._run_completion_sync` for the full
     prose describing usage_dict's shape.
+
+    ``error`` is None on the happy path (including cancel,
+    which signals via ``was_cancelled``). It carries the
+    diagnostic string when the LiteLLM call raised before
+    streaming started — e.g., ``APIConnectionError`` from a
+    DNS hiccup or auth failure. The caller surfaces it via
+    ``result.error`` so the frontend's red-LED + error-card
+    path fires; without this signal, the error string would
+    land in ``full_content`` and the response would render
+    as a normal assistant message with a green LED.
 
     ``reasoning`` is the per-request extended-thinking
     override. ``None`` falls through to the config default;
@@ -490,10 +511,11 @@ def run_completion_sync(
     except ImportError:
         logger.error("litellm not available; streaming disabled")
         return (
-            "litellm is not installed on this server",
+            "",
             False,
             None,
             dict(empty_usage),
+            "litellm is not installed on this server",
         )
 
     # LiteLLM's recommended setting for the
@@ -607,11 +629,21 @@ def run_completion_sync(
         service._last_error_info = _classify_litellm_error(
             litellm, exc
         )
+        # Return the error via the 5th tuple slot, NOT in
+        # full_content. The caller threads this into
+        # ``result.error`` so the frontend's
+        # ``computeLastEditOutcome`` sees a stream-level
+        # error and renders the red LED + typed error card.
+        # Putting the error string in full_content would
+        # produce a normal assistant message with a green
+        # LED — silently mis-classifying a transport
+        # failure as a successful response.
         return (
-            f"LLM call failed: {exc}",
+            "",
             False,
             None,
             dict(empty_usage),
+            f"LLM call failed: {exc}",
         )
 
     usage: dict[str, Any] | None = None
@@ -727,7 +759,7 @@ def run_completion_sync(
                 finish_reason,
             )
 
-    return full_content, was_cancelled, finish_reason, request_usage
+    return full_content, was_cancelled, finish_reason, request_usage, None
 
 
 # ---------------------------------------------------------------------------
