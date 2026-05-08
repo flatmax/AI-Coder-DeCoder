@@ -126,10 +126,11 @@ Rendered as an indented diagram to avoid nesting the literal markers inside a fe
 
 **Why the end marker differs from the edit-block end marker.** An edit block closes with `🟩🟩🟩 END`. If an agent block used the same end marker, a parser scanning line-by-line would have to track which start marker opened the current block to decide what the end marker closes — brittle under malformed input and forces frontend and backend parsers to stay in lockstep on state tracking. A distinct agent end marker lets each parser match on the literal line: `🟩🟩🟩 END` closes edits, `🟩🟩🟩 AGEND` closes agents, no state disambiguation needed. An LLM response that interleaves both block types, or a document quoting both in the same code fence, cannot cause one marker to accidentally terminate the other's block.
 
-**Fields.** Body is a minimal YAML-ish payload of `key: value` pairs. Only two fields are defined:
+**Fields.** Body is a minimal YAML-ish payload of `key: value` pairs. Three fields are defined:
 
 - **`id`** — identifier the main LLM uses to reference this agent in subsequent review and synthesis. Scoped to the turn; unique within the turn's decomposition. Convention is `agent-N` (zero-indexed), but the parser accepts any string.
 - **`task`** — the initial prompt handed to the agent. One logical instruction in natural language; may span multiple lines until the end marker. The task should describe the goal, not enumerate file paths — the agent discovers files the same way the user's chat session does (symbol map, reference index, file mentions via edit blocks).
+- **`mode`** *(optional)* — the agent's repo-view mode, one of `code`, `doc`, `code+xref`, `doc+xref`. When omitted, the agent inherits the orchestrator's current mode at spawn time. The mode is fixed for the life of the agent; reusing a known id with a different `mode` field is rejected by the parser (the orchestrator must close and respawn the agent if it wants a different mode). This keeps each agent's StabilityTracker coherent — switching mode would invalidate every tier placement and burn the provider cache.
 
 Unknown keys are preserved in an `extras` dict for forward compatibility. When the spec gains a new field (e.g., sequencing dependencies, MCP server keys), old parser versions still surface the value rather than dropping it.
 
@@ -307,17 +308,18 @@ Implication for the chat panel: agent tabs persist across `new_session` with emp
 
 For the main LLM to orchestrate agent reuse — decide which existing agent to retask vs. spawn a fresh one — it needs a minimal summary of each live agent at the top of every main-conversation turn. The summary lives in the main LLM's prompt (injected as a block in the active user message, not the system prompt — per-turn injection means the descriptor reflects current state without burning cacheable system-prompt tokens when state changes).
 
-Each descriptor entry carries exactly two fields:
+Each descriptor entry carries three fields:
 
 - **Identity** — the agent's id, the same string used in `🟧🟧🟧 AGENT` blocks to address it
+- **Mode** — the agent's repo-view mode, one of `code`, `doc`, `code+xref`, `doc+xref`. Mirrors the two-axis configuration of the user-facing mode toggle (primary=code|doc; cross-reference=on|off). The orchestrator uses mode to route work appropriately: code-mode agents see symbol maps and are good targets for refactors; doc-mode agents see document outlines and are good targets for documentation edits; the `+xref` variants additionally see the secondary index (the other axis's structural summary), useful when an agent's task spans both code and docs.
 - **Files in context** — a list of `{path, depth}` entries, where `depth` distinguishes how deeply the agent has loaded the file. Three values:
   - `full` — the agent has the file's full text in its context (loaded into `file_context` either by user selection, edit-block auto-add, or file-create). The agent can reason about the file's exact content; the orchestrator can retask precise work onto this agent without a re-read penalty.
   - `symbol` — the agent has only the symbol-map summary for this file (in code mode, with cross-reference disabled or enabled). Structural awareness only; the agent will re-read the body if asked to edit it.
   - `doc` — the agent has only the document-index outline for this file (in doc mode, with cross-reference disabled or enabled). Heading and link structure only; same re-read implication.
 
-That's it. The orchestrator picks an agent for a new task by matching the task's affected files against each agent's loaded paths *and* depth — an agent already holding `webapp/src/chat-panel.js` at `full` depth is the cheapest target for an edit there; an agent with the same path at `symbol` depth would have to re-read it (still cheaper than a cold spawn, but more expensive than the warm one). Path-and-depth lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to reflect the new paths and depths on its next turn.
+That's it. The orchestrator picks an agent for a new task by matching the task's mode against the task's nature (code vs documentation work), and the task's affected files against each agent's loaded paths *and* depth — an agent already holding `webapp/src/chat-panel.js` at `full` depth is the cheapest target for an edit there; an agent with the same path at `symbol` depth would have to re-read it (still cheaper than a cold spawn, but more expensive than the warm one). Mode-and-path lists are factual and update automatically as agents work; they impose no commitment about what the agent is *for*, so retasking an agent into a completely different area is fine — its descriptor just shifts to reflect the new paths, depths, and (rarely) mode on its next turn.
 
-The descriptor builder reads each agent's `ContextManager.file_context` for `full` entries, then walks the agent's stability tracker for `file:`-prefixed entries (symbol map) and `doc:`-prefixed entries (doc index) to populate the `symbol` and `doc` lists. A path that appears at `full` depth is omitted from `symbol`/`doc` to avoid redundancy — the orchestrator only needs to know the deepest level the agent has loaded.
+The descriptor builder reads each agent's `ContextManager.mode` and `cross_reference_enabled` flag to derive the mode field, then reads the `ContextManager.file_context` for `full` entries, then walks the agent's stability tracker for `file:`-prefixed entries (symbol map) and `doc:`-prefixed entries (doc index) to populate the `symbol` and `doc` lists. A path that appears at `full` depth is omitted from `symbol`/`doc` to avoid redundancy — the orchestrator only needs to know the deepest level the agent has loaded.
 
 ### Single-copy invariant — assembly-time injection
 

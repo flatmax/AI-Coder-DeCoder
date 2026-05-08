@@ -15,6 +15,36 @@ Tab labels carry the agent index plus a short summary derived from the spawn blo
 
 The currently-active tab is visually distinguished. Every input affordance on the chat panel (textarea, send button, snippet drawer, file picker bindings) targets the active tab's conversation.
 
+## Status LEDs
+
+The main tab's header carries a compact row of status LEDs — one dot per agent tab currently in the strip. The LEDs are a derived view of agent state, giving the user ambient awareness without forcing them to scan tab labels.
+
+Each LED has three states:
+
+- **Flashing cyan** — the agent's stream is active. The agent's request ID is in the chat panel's active-agent-streams set; equivalently, `streamComplete` has not yet fired for this agent's current run.
+- **Solid green** — the agent's last `streamComplete` arrived without an `error` field, and every `EditResult` in the result reports success. The agent finished its work cleanly.
+- **Solid red** — at least one of: the agent's last `streamComplete` carried an `error` field, any `EditResult` has `status="failed"` (anchor not found, ambiguous, binary file, path traversal), or the agent threw during assimilation. The agent needs the user's attention.
+
+LED lifetime tracks the agent tab's lifetime exactly. When `agentsSpawned` adds a tab, the corresponding LED appears in flashing cyan. When the user closes the tab (close affordance → backend `closeAgentContext`), the LED disappears with it. There is no separate acknowledgement gesture — closing the tab is the acknowledgement.
+
+Across turns within a session, an agent tab persists if the user does not close it (per [Tab Lifetime](#tab-lifetime)). Its LED reflects the *latest* event for that agent: a green LED from turn 1 returns to flashing cyan when the orchestrator re-uses the same agent ID in turn 3, then resolves to green or red based on the new turn's outcome. A red LED from a previous turn stays red until either the agent re-runs (state updates to whatever the new run produces) or the tab is closed.
+
+### Click and hover
+
+- Clicking a LED switches the active tab to that agent's tab — the same effect as clicking the tab itself, but the LED row is more compact and lives where the user's eyes already are when chatting in main.
+- Hovering a LED shows a tooltip with the agent's mode and current-state reason:
+  - Cyan: `<agent-id> (<mode>): running`
+  - Green: `<agent-id> (<mode>): completed (N edits applied)`
+  - Red: `<agent-id> (<mode>): <diagnostic>` — the failure reason from the failed `EditResult`, the streaming `error` field, or `assimilation failed` for sibling exceptions
+
+`<mode>` is one of `code`, `doc`, `code+xref`, `doc+xref` — matching the orchestrator's per-agent state descriptor (see [parallel-agents.md — Per-agent state descriptor](../7-future/parallel-agents.md#per-agent-state-descriptor)). The tooltip is what turns a red LED from "something is wrong, go look" into "here is what is wrong, decide whether to click." It is essential for red but useful in all states.
+
+### Layout
+
+The LED row sits in the main tab header, distinct from but adjacent to the main tab's own label. When more than 4-5 agent tabs exist the row wraps onto a second line rather than truncating; the dots are small enough that even 8-10 fit naturally. There is no cap and no overflow indicator — every live agent tab gets a visible LED.
+
+The row is hidden entirely when the chat panel has no agent tabs. The main tab is then the only thing in the strip, and a row of zero LEDs would just be empty space.
+
 ## Tab Lifetime
 
 Three events end a tab's life:
@@ -154,3 +184,6 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 - The main LLM's synthesis is not auto-triggered. Users explicitly request it when they've heard enough from the agents.
 - Historical tabs are read-only. Past turns' ContextManagers are not reconstructed; the archive is sufficient for reading but not for continuing the conversation.
 - Turns without agents render exactly as today's chat. The tab strip still exists but contains only the Main tab.
+- The LED row in the main tab header is a derived view of agent tab state. LED count and lifetime track the agent tab strip exactly; closing a tab removes its LED, and there is no LED that outlives its tab.
+- LED state is a pure function of the most recent `streamComplete` event for the agent plus `streamChunk` activity. No separate state machine, no acknowledgement gesture beyond closing the tab, no auto-fade or "seen" state.
+- Clicking a LED is identical in effect to clicking its tab. The navigation primitive is the same; the LED is just a more compact entry point in the main tab's header.
