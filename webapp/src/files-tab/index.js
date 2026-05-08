@@ -84,10 +84,7 @@ import {
   _L0_EXCLUDE_PREF_ASK,
   _L0_EXCLUDE_PREF_KEY,
   _L0_EXCLUDE_PREF_NEVER,
-  _PICKER_COLLAPSED_KEY,
   _PICKER_COLLAPSED_WIDTH,
-  _PICKER_MIN_WIDTH,
-  _PICKER_WIDTH_KEY,
 } from './constants.js';
 import {
   _loadL0ExcludePref,
@@ -97,6 +94,28 @@ import {
   buildPrunedTree,
   flattenTreePaths,
 } from './helpers.js';
+import {
+  onFileClicked,
+  onFileSearchChanged,
+  onFileSearchScroll,
+  onFilterFromChat,
+} from './file-search.js';
+import {
+  onFileChipClick,
+  onFileChipsAddAll,
+  onFileMentionClick,
+  onInsertPath,
+} from './mentions.js';
+import {
+  detachSplitter,
+  maxPickerWidth as maxPickerWidthFromModule,
+  onSplitterDoubleClick,
+  onSplitterPointerDown,
+  onSplitterPointerMove,
+  onSplitterPointerUp,
+  saveCollapsed,
+  savePickerWidth,
+} from './splitter.js';
 import { FILES_TAB_STYLES } from './styles.js';
 
 export class FilesTab extends RpcMixin(LitElement) {
@@ -515,12 +534,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     // reload, tab switch under load), release the
     // document-scope listeners. Without this, pointermove
     // events continue firing into the detached handler.
-    document.removeEventListener(
-      'pointermove', this._onSplitterPointerMove,
-    );
-    document.removeEventListener(
-      'pointerup', this._onSplitterPointerUp,
-    );
+    detachSplitter(this);
     super.disconnectedCallback();
   }
 
@@ -1640,230 +1654,35 @@ export class FilesTab extends RpcMixin(LitElement) {
   // File clicks
   // ---------------------------------------------------------------
 
+  // Bodies live in ./file-search.js.
   _onFileClicked(event) {
-    // Picker emits `file-clicked` when the user clicks a
-    // file's name (not its checkbox). Normally this
-    // translates to a `navigate-file` window event so the
-    // viewer (Phase 3) opens the file.
-    //
-    // During file search, the picker shows a pruned tree
-    // of matching files and clicking a file should scroll
-    // the match overlay to that file rather than opening
-    // it. We route to the chat panel's
-    // scrollFileSearchToFile method instead.
-    const path = event.detail?.path;
-    if (!path) return;
-    if (this._fileSearchActive) {
-      event.stopPropagation();
-      const chat = this._chat();
-      if (chat && typeof chat.scrollFileSearchToFile === 'function') {
-        chat.scrollFileSearchToFile(path);
-      }
-      return;
-    }
-    window.dispatchEvent(
-      new CustomEvent('navigate-file', {
-        detail: { path },
-        bubbles: false,
-      }),
-    );
+    onFileClicked(this, event);
   }
 
-  /**
-   * Chat panel dispatched `file-search-changed` — mode
-   * entered, results updated, or mode exited. Swap the
-   * picker tree to a pruned view containing only files
-   * that have matches; on exit, restore the full tree and
-   * the user's previous expand state.
-   */
   _onFileSearchChanged(event) {
-    const active = !!event.detail?.active;
-    const results = Array.isArray(event.detail?.results)
-      ? event.detail.results
-      : [];
-    const prev = this._fileSearchActive;
-    this._fileSearchActive = active;
-    const picker = this._picker();
-    if (!picker) return;
-    if (!active) {
-      // Exiting file search mode. Restore picker state:
-      // first the expand-state snapshot (so the user's
-      // pre-search expansions come back), then the full
-      // tree. `setTree` during the pruned phase snapshotted;
-      // `restoreExpandedState` now installs the snapshot.
-      if (prev) {
-        picker.restoreExpandedState();
-        picker.tree = this._latestTree;
-        picker.selectedFiles = new Set(this._selectedFiles);
-        picker.requestUpdate();
-      }
-      return;
-    }
-    // Entering file search mode (or results refreshed).
-    // Build a pruned tree from the results. Empty results
-    // produce an empty root; the picker renders its empty-
-    // state placeholder.
-    const pruned = buildPrunedTree(results);
-    picker.setTree(pruned);
-    picker.expandAll();
-    picker.requestUpdate();
+    onFileSearchChanged(this, event);
   }
 
-  /**
-   * Chat panel dispatched `filter-from-chat` — the user
-   * typed `@pattern` in the chat textarea, or deleted/
-   * exited a prior mention. Forward the query to the
-   * picker's `setFilter` so the tree filters live as
-   * the user types.
-   *
-   * Edge-triggered on the chat side — we only receive
-   * this event when the mention state actually changes
-   * (entering, updating, or exiting). Empty query is a
-   * legitimate clearing signal.
-   *
-   * Defensive against missing detail or non-string
-   * query — silently drop malformed events rather than
-   * passing junk to the picker.
-   */
   _onFilterFromChat(event) {
-    const query = event?.detail?.query;
-    if (typeof query !== 'string') return;
-    const picker = this._picker();
-    if (!picker) return;
-    picker.setFilter(query);
+    onFilterFromChat(this, event);
   }
 
-  /**
-   * Chat panel dispatched `file-search-scroll` — the match
-   * overlay scrolled, and we should update the picker's
-   * focused-path highlight to show which file section is
-   * currently at the top of the visible area.
-   */
   _onFileSearchScroll(event) {
-    if (!this._fileSearchActive) return;
-    const filePath = event.detail?.filePath;
-    if (typeof filePath !== 'string' || !filePath) return;
-    const picker = this._picker();
-    if (!picker) return;
-    picker._focusedPath = filePath;
-    // Also ensure ancestor directories are expanded so the
-    // highlighted row is visible. The pruned tree was
-    // `expandAll()`d on entry so this is usually a no-op,
-    // but if the user collapsed a directory manually the
-    // focused row might be hidden.
-    const parts = filePath.split('/');
-    const next = new Set(picker._expanded);
-    let acc = '';
-    for (let i = 0; i < parts.length - 1; i += 1) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      next.add(acc);
-    }
-    picker._expanded = next;
+    onFileSearchScroll(this, event);
   }
 
-  /**
-   * Chat panel emits `file-mention-click` when the user
-   * clicks a `.file-mention` span inside a rendered
-   * assistant message. The event bubbles up through the
-   * shadow DOM boundary (composed: true) and reaches us
-   * via the `@file-mention-click` binding on `<ac-chat-panel>`
-   * in the template.
-   *
-   * Per specs4/5-webapp/file-picker.md "File Mention
-   * Selection": toggle the file's selection state AND
-   * navigate to it in the viewer. The two actions are
-   * independent — a user clicking a mention wants to see
-   * the file AND make it part of the next LLM request's
-   * context, regardless of whether they'd previously
-   * selected or deselected it.
-   */
+  // Body lives in ./mentions.js.
   _onFileMentionClick(event) {
-    const path = event.detail?.path;
-    if (typeof path !== 'string' || !path) return;
-    // Toggle — add if absent, remove if present. Goes
-    // through the same `_applySelection` path as a picker
-    // checkbox click, so the server is notified and the
-    // picker's prop is updated via the direct-update
-    // pattern.
-    const next = new Set(this._selectedFiles);
-    if (next.has(path)) {
-      next.delete(path);
-    } else {
-      next.add(path);
-    }
-    this._applySelection(next, /* notifyServer */ true);
-    // Navigation is independent of selection state. Both
-    // add and remove cases open the file in the viewer —
-    // the user clicked the mention, they want to see it.
-    window.dispatchEvent(
-      new CustomEvent('navigate-file', {
-        detail: { path },
-        bubbles: false,
-      }),
-    );
+    onFileMentionClick(this, event);
   }
 
-  /**
-   * Chat panel emits `file-chip-click` when the user
-   * clicks a chip in the "Files Referenced" summary
-   * section at the bottom of an assistant message. The
-   * chips toggle selection state but do NOT navigate —
-   * per specs4/5-webapp/chat.md, summary chips are for
-   * context management, distinct from inline prose
-   * mentions which also navigate. A user scanning the
-   * chip list to curate context shouldn't be yanked
-   * into the viewer on every click.
-   *
-   * The `navigate: false` field on the event detail is
-   * always set to false by the chat panel, but we
-   * preserve the check so a future dispatcher that
-   * wants navigation can flip the flag without changing
-   * the handler shape.
-   */
+  // Bodies live in ./mentions.js.
   _onFileChipClick(event) {
-    const path = event.detail?.path;
-    if (typeof path !== 'string' || !path) return;
-    const next = new Set(this._selectedFiles);
-    if (next.has(path)) {
-      next.delete(path);
-    } else {
-      next.add(path);
-    }
-    this._applySelection(next, /* notifyServer */ true);
-    // Navigate only when the dispatcher explicitly asks
-    // for it. Summary chips always pass navigate:false;
-    // this branch is here for symmetry and future use.
-    if (event.detail?.navigate === true) {
-      window.dispatchEvent(
-        new CustomEvent('navigate-file', {
-          detail: { path },
-          bubbles: false,
-        }),
-      );
-    }
+    onFileChipClick(this, event);
   }
 
-  /**
-   * Chat panel emits `file-chips-add-all` with a paths
-   * array when the user clicks "+ Add All (N)" in the
-   * file summary header. The chat panel has already
-   * filtered to unselected paths only, so we just add
-   * them all to the selection in one batch — a single
-   * `set_selected_files` RPC round-trip instead of N.
-   *
-   * Idempotent — if any of the paths are somehow
-   * already selected (race between render and click,
-   * unlikely but defensive), the Set add is a no-op
-   * for those entries.
-   */
   _onFileChipsAddAll(event) {
-    const paths = event.detail?.paths;
-    if (!Array.isArray(paths) || paths.length === 0) return;
-    const next = new Set(this._selectedFiles);
-    for (const path of paths) {
-      if (typeof path === 'string' && path) next.add(path);
-    }
-    this._applySelection(next, /* notifyServer */ true);
+    onFileChipsAddAll(this, event);
   }
 
   // ---------------------------------------------------------------
@@ -2168,67 +1987,9 @@ export class FilesTab extends RpcMixin(LitElement) {
     picker.beginDuplicate(path);
   }
 
-  /**
-   * Handle the picker's `insert-path` event — fired on
-   * middle-click of a file or directory row. Inserts
-   * the path into the chat panel's textarea at the
-   * current cursor position, padded with spaces so it
-   * doesn't jam against surrounding prose.
-   *
-   * On Linux, middle-click triggers the selection-
-   * buffer paste AFTER focus() is called. We set the
-   * chat panel's `_suppressNextPaste` flag BEFORE
-   * focus to pre-empt that paste — the flag is
-   * one-shot and clears in the paste handler, so a
-   * later intentional paste still works.
-   *
-   * Path padding:
-   *   - If cursor is preceded by non-whitespace, prepend a space
-   *   - If cursor is followed by non-whitespace, append a space
-   *
-   * Matches the pattern used by `_insertSnippet` on
-   * the chat panel side for snippet insertion.
-   */
+  // Body lives in ./mentions.js.
   _onInsertPath(event) {
-    const path = event.detail?.path;
-    if (typeof path !== 'string' || !path) return;
-    const chat = this._chat();
-    if (!chat) return;
-    // Find the textarea inside the chat panel's shadow
-    // DOM. Querying via the chat panel's shadowRoot
-    // respects encapsulation.
-    const ta = chat.shadowRoot?.querySelector('.input-textarea');
-    if (!ta) return;
-    // Compute surround-padding from the textarea's
-    // current state (not from any reactive property),
-    // so the insertion reflects exactly what the user
-    // sees.
-    const before = ta.value.slice(0, ta.selectionStart);
-    const after = ta.value.slice(ta.selectionEnd);
-    const prefix =
-      before.length > 0 && !/\s$/.test(before) ? ' ' : '';
-    const suffix =
-      after.length > 0 && !/^\s/.test(after) ? ' ' : '';
-    const insertion = `${prefix}${path}${suffix}`;
-    const next = `${before}${insertion}${after}`;
-    // Push through the chat panel's reactive state so
-    // the send-button enablement and auto-resize
-    // respond to the change. Direct textarea value
-    // assignment keeps cursor positioning accurate;
-    // Lit's next render reflects the reactive value.
-    chat._input = next;
-    ta.value = next;
-    const cursor = before.length + insertion.length;
-    ta.setSelectionRange(cursor, cursor);
-    // Set the suppression flag BEFORE focus — on Linux
-    // the focus() call triggers the selection-buffer
-    // auto-paste, which we need to swallow.
-    chat._suppressNextPaste = true;
-    ta.focus();
-    // Fire an input event so the auto-resize logic
-    // runs. The chat panel's _onInputChange handles
-    // this via the native input event.
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    onInsertPath(this, event);
   }
 
   /**
@@ -2980,154 +2741,38 @@ export class FilesTab extends RpcMixin(LitElement) {
   // Splitter — drag and double-click
   // ---------------------------------------------------------------
 
-  /**
-   * Maximum width the picker pane is allowed to reach.
-   * Computed from the host element's current width so it
-   * tracks window / dialog resizes. Callers read this at
-   * drag time rather than caching, so an ongoing drag
-   * respects a resize that happens mid-drag.
-   *
-   * Falls back to an arbitrary large value if the host
-   * isn't measurable yet (shouldn't happen in practice —
-   * the user can't drag a splitter that isn't rendered).
-   */
+  // Splitter handler bodies live in ./splitter.js. The
+  // bound forwarders below preserve the public method
+  // names (called from the constructor, render
+  // template, and disconnectedCallback) so external
+  // call sites don't change.
+
   _maxPickerWidth() {
-    const rect = this.getBoundingClientRect?.();
-    if (!rect || !rect.width) return 10000;
-    return Math.floor(rect.width / 2);
+    return maxPickerWidthFromModule(this);
   }
 
-  /**
-   * Begin a splitter drag. Snapshots the origin pointer
-   * X and the picker's current width, then attaches
-   * document-level pointermove / pointerup listeners so
-   * we track the drag even when the pointer leaves the
-   * splitter element itself.
-   *
-   * Skips non-primary buttons (right-click, middle-click)
-   * and expanded-from-collapsed edge cases where the
-   * drag base width would be meaningless — in collapsed
-   * mode the splitter is clickable but not draggable.
-   */
   _onSplitterPointerDown(event) {
-    if (event.button !== 0) return;
-    if (this._pickerCollapsed) return;
-    event.preventDefault();
-    this._splitterDrag = {
-      startX: event.clientX,
-      originWidth: this._pickerWidthPx,
-    };
-    document.addEventListener(
-      'pointermove', this._onSplitterPointerMove,
-    );
-    document.addEventListener(
-      'pointerup', this._onSplitterPointerUp,
-    );
+    onSplitterPointerDown(this, event);
   }
 
-  /**
-   * Pointer move during drag. Mutates the picker pane's
-   * inline width style directly rather than through the
-   * reactive property — Lit's render cycle is expensive
-   * enough that per-pointermove re-renders produce
-   * visible lag on slower machines. Commits to
-   * `_pickerWidthPx` on pointerup.
-   *
-   * Clamp to [_PICKER_MIN_WIDTH, host-width/2] so the
-   * picker never goes below the readable threshold or
-   * pushes the chat pane below half the dialog.
-   */
   _onSplitterPointerMove(event) {
-    if (!this._splitterDrag) return;
-    const dx = event.clientX - this._splitterDrag.startX;
-    const next = Math.max(
-      _PICKER_MIN_WIDTH,
-      Math.min(
-        this._maxPickerWidth(),
-        this._splitterDrag.originWidth + dx,
-      ),
-    );
-    const pane = this.shadowRoot?.querySelector('.picker-pane');
-    if (pane) {
-      pane.style.width = `${next}px`;
-    }
+    onSplitterPointerMove(this, event);
   }
 
-  /**
-   * Commit the drag. Reads the final width from the
-   * inline style (the pointermove path wrote there for
-   * smooth tracking) and writes it back to the reactive
-   * property so subsequent renders honour it. Persists
-   * to localStorage so the width survives a reload.
-   *
-   * Below-threshold drags (no pointermove fired between
-   * down and up, so the pane's inline style is still
-   * empty) skip the read and leave state unchanged.
-   */
   _onSplitterPointerUp() {
-    document.removeEventListener(
-      'pointermove', this._onSplitterPointerMove,
-    );
-    document.removeEventListener(
-      'pointerup', this._onSplitterPointerUp,
-    );
-    if (!this._splitterDrag) return;
-    this._splitterDrag = null;
-    const pane = this.shadowRoot?.querySelector('.picker-pane');
-    if (!pane) return;
-    const styleWidth = parseInt(pane.style.width, 10);
-    if (Number.isNaN(styleWidth)) return;
-    this._pickerWidthPx = styleWidth;
-    this._savePickerWidth();
+    onSplitterPointerUp(this);
   }
 
-  /**
-   * Toggle collapsed state on double-click. In collapsed
-   * mode the picker renders at _PICKER_COLLAPSED_WIDTH
-   * (just wide enough for an affordance glyph); the
-   * stored _pickerWidthPx is untouched so expanding
-   * restores the user's prior size.
-   *
-   * The first click of a double-click would normally
-   * start a drag via _onSplitterPointerDown. That drag
-   * is cancelled here because we null `_splitterDrag`
-   * and remove the document listeners — the second
-   * click's pointerdown would attach fresh listeners but
-   * the intervening double-click event fires first
-   * (browsers fire dblclick after the second mouseup).
-   */
   _onSplitterDoubleClick(event) {
-    event.preventDefault();
-    // Cancel any in-flight drag. The first click of the
-    // double-click opened a drag; we release its
-    // listeners so the state doesn't leak.
-    if (this._splitterDrag) {
-      document.removeEventListener(
-        'pointermove', this._onSplitterPointerMove,
-      );
-      document.removeEventListener(
-        'pointerup', this._onSplitterPointerUp,
-      );
-      this._splitterDrag = null;
-    }
-    this._pickerCollapsed = !this._pickerCollapsed;
-    this._saveCollapsed();
+    onSplitterDoubleClick(this, event);
   }
 
   _savePickerWidth() {
-    try {
-      localStorage.setItem(
-        _PICKER_WIDTH_KEY, String(this._pickerWidthPx),
-      );
-    } catch (_) {}
+    savePickerWidth(this);
   }
 
   _saveCollapsed() {
-    try {
-      localStorage.setItem(
-        _PICKER_COLLAPSED_KEY, String(this._pickerCollapsed),
-      );
-    } catch (_) {}
+    saveCollapsed(this);
   }
 
   // ---------------------------------------------------------------
