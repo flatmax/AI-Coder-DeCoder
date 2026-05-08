@@ -136,9 +136,36 @@ class TestIsFilePath:
     def test_known_extensionless_rakefile(self) -> None:
         assert _is_file_path("Rakefile") is True
 
-    def test_unknown_extensionless_rejected(self) -> None:
-        """Random words aren't paths."""
-        assert _is_file_path("something") is False
+    def test_extensionless_license_accepted(self) -> None:
+        """LICENSE is a bare-token candidate.
+
+        Pinned regression: the old implementation used a
+        hardcoded allowlist (Makefile, Dockerfile, ...) that
+        omitted conventional metadata files like LICENSE,
+        README, AUTHORS. An LLM emitting ``LICENSE\\n🟧🟧🟧 EDIT
+        \\n...\\n🟨🟨🟨 REPL\\n...\\n🟩🟩🟩 END`` would have its block
+        silently dropped because LICENSE wasn't in the list.
+
+        The current implementation accepts any single-token
+        word as a path candidate; the state machine's
+        EDIT-marker lookahead does the actual disambiguation.
+        """
+        assert _is_file_path("LICENSE") is True
+
+    def test_extensionless_readme_accepted(self) -> None:
+        assert _is_file_path("README") is True
+
+    def test_extensionless_word_accepted(self) -> None:
+        """Bare-token branch accepts any single word.
+
+        ``something`` on its own is a path candidate as far as
+        ``_is_file_path`` is concerned. The parser's
+        EDIT-marker lookahead is what decides whether the
+        candidate is a real path or stray prose — see
+        ``TestPathDetectionIntegration`` for the integrated
+        behaviour.
+        """
+        assert _is_file_path("something") is True
 
     def test_bare_dot_rejected(self) -> None:
         assert _is_file_path(".") is False
@@ -442,6 +469,39 @@ class TestPathDetectionIntegration:
         result = parse_text(text)
         assert len(result.blocks) == 1
         assert result.blocks[0].file_path == "src/c.py"
+
+    def test_bare_token_followed_by_edit_treated_as_path(self) -> None:
+        """A bare-word line directly before EDIT is the file path.
+
+        Pins the lookahead-disambiguation contract: if the LLM
+        emits ``LICENSE\\n🟧🟧🟧 EDIT\\n...``, the parser commits
+        ``LICENSE`` as the file path. The bare-token branch of
+        ``_is_file_path`` plus the state machine's EDIT lookahead
+        is what makes extensionless filenames like LICENSE,
+        README, AUTHORS work without a hardcoded allowlist.
+        """
+        text = _block("LICENSE", "old", "new")
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "LICENSE"
+
+    def test_bare_token_in_prose_recovers(self) -> None:
+        """A bare word in prose (no EDIT after) is harmless.
+
+        The state machine briefly enters EXPECT_EDIT then
+        resets to SCANNING when the next non-blank line isn't
+        an EDIT marker. No spurious blocks; no state stuck on
+        the wrong path.
+        """
+        text = (
+            "Done.\n"
+            "Now I'll edit the file:\n"
+            "\n"
+            + _block("src/foo.py", "old", "new")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "src/foo.py"
 
     def test_path_then_another_path_then_edit(self) -> None:
         """Path followed by another path: second wins."""

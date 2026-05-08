@@ -64,25 +64,12 @@ A line is treated as a file path when it meets ALL:
 2. Non-empty after trim
 3. Does NOT start with a comment prefix: `#`, `//`, `*`, `-`, `>`, triple-backtick
 4. Matches ONE of:
-   - Contains path separator `/` or `\`
+   - Contains path separator `/` or `\` (with no inner whitespace)
    - Matches `\.?[\w\-\.]+\.\w+` (filename with extension, including dotfiles like `.env.local`)
    - Matches `\.\w[\w\-\.]*` (dotfile without extension, like `.gitignore`)
-   - Is in the known extensionless-filename allowlist
+   - Matches `\w[\w\-\.]*` (bare extensionless token, no inner whitespace) — covers `LICENSE`, `Makefile`, `README`, `AUTHORS`, `MY-CUSTOM-FILE`, etc.
 
-### Known extensionless filenames (backend parser)
-
-| Name | Reason |
-|---|---|
-| `Makefile` | Build scripts |
-| `Dockerfile` | Container definitions |
-| `Vagrantfile` | VM definitions |
-| `Gemfile` | Ruby bundler |
-| `Rakefile` | Ruby build tasks |
-| `Procfile` | Process definitions |
-| `Brewfile` | Homebrew bundles |
-| `Justfile` | `just` command runner |
-
-Case-sensitive matching. Files named `makefile` (lowercase) would fail — matches real-world convention.
+The bare-token branch is intentionally permissive. Disambiguation between a real file path and a stray single-word line in prose is performed by the parser state machine's lookahead: a path candidate must be followed (after optional blank lines) by `🟧🟧🟧 EDIT`. A bare word in prose that isn't followed by an EDIT marker resets the state machine to `SCANNING` with no harm done. There is no hardcoded allowlist of extensionless filenames.
 
 ### Frontend vs backend detection divergence
 
@@ -94,7 +81,7 @@ The webapp's edit-block segmenter (`edit-blocks.js`) and the backend parser (`ed
 | Paths with `/` or `\` | ✓ | ✓ |
 | Filename with extension | ✓ | ✓ |
 | Dotfile without extension | ✓ | ✓ |
-| Extensionless allowlist (`Makefile`, `Dockerfile`, ...) | ✓ | ✗ (not recognized) |
+| Bare extensionless token (`LICENSE`, `Makefile`, ...) | ✓ | ✗ (uses smaller allowlist) |
 
 The frontend is simpler because its job is display-only — a `Makefile` edit block that fails to render as a visual block still applies correctly on the backend. The divergence is intentional; do not treat it as a bug to resolve.
 

@@ -91,8 +91,8 @@ The LLM must reproduce the marker characters exactly — no ASCII substitutions,
 - Path with separators (slash or backslash)
 - Filename with extension
 - Dotfile without extension
-- Known extensionless filenames (Makefile, Dockerfile, etc.)
-- Path appears immediately before start marker, with blank lines causing state reset
+- Bare extensionless tokens (LICENSE, Makefile, README, AUTHORS, ...) — single-word lines without inner whitespace
+- Path appears immediately before start marker, with blank lines causing state reset; the start marker on the next line is what disambiguates a path declaration from a stray bare-word line in prose
 
 ## Frontend vs Backend Path Detection
 

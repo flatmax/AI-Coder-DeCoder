@@ -179,24 +179,49 @@ _FILENAME_WITH_EXT = re.compile(r"^\.?[\w\-\.]+\.\w+$")
 # Matches ``.gitignore``, ``.env``, ``.dockerignore`` — dotfile
 # names without an extension. Single leading dot, then word
 # characters / dashes / dots. The leading dot is mandatory;
-# non-dotfile extensionless names are handled by the whitelist.
+# non-dotfile extensionless names are handled by ``_BARE_TOKEN``.
 _DOTFILE_NO_EXT = re.compile(r"^\.\w[\w\-\.]*$")
 
-# Extensionless filenames we recognise unconditionally. Covers the
-# build-tooling conventions users expect to be able to edit.
-_KNOWN_EXTENSIONLESS = frozenset({
-    "Makefile", "Dockerfile", "Vagrantfile",
-    "Gemfile", "Rakefile", "Procfile",
-    "Brewfile", "Justfile",
-})
-
+# Matches a bare extensionless token: word character first,
+# then word characters / dashes / dots. Covers ``LICENSE``,
+# ``Makefile``, ``README``, ``MY-CUSTOM-FILE``. The leading
+# character must be a word character (letter / digit /
+# underscore) — that excludes lines starting with punctuation
+# the prefix-rejector hasn't already caught. The state
+# machine's EDIT-marker lookahead disambiguates these from
+# prose.
+_BARE_TOKEN = re.compile(r"^\w[\w\-\.]*$")
 
 def _is_file_path(line: str) -> bool:
     """Return True if ``line`` looks like a repo-relative file path.
 
-    Authoritative Python-side heuristic. Matches the rules
-    in specs-reference/3-llm/edit-protocol.md § Frontend vs
-    backend detection divergence.
+    Authoritative Python-side heuristic. The state machine's
+    lookahead (path candidate → ``🟧🟧🟧 EDIT`` marker on the
+    next non-blank line) is what actually disambiguates path
+    declarations from prose; this function only needs to reject
+    obvious prose so the lookahead doesn't fire on random
+    sentences.
+
+    Accepts:
+
+    - Anything containing a path separator with no inner
+      whitespace (``src/foo.py``, ``a\\b\\c``).
+    - Filenames with an extension (``foo.py``, ``.env.local``).
+    - Dotfiles without an extension (``.gitignore``, ``.env``).
+    - Bare extensionless tokens of word characters with optional
+      dashes/dots (``LICENSE``, ``Makefile``, ``README``,
+      ``MY-CUSTOM-FILE``). The 🟧🟧🟧 EDIT marker on the next
+      line confirms the intent; if a single-word line is
+      followed by an EDIT marker, the LLM meant it as a path.
+
+    Rejects:
+
+    - Empty / whitespace-only lines.
+    - Lines longer than 200 characters (almost certainly prose).
+    - Lines starting with a prose / comment prefix
+      (``#``, ``//``, ``*``, ``-``, ``>``, code fence).
+    - Multi-token lines without a path separator
+      (``This is a sentence``).
     """
     # Defensive input-sanitisation. Empty-after-strip lines never
     # count; very long lines (200+ chars) are almost certainly
@@ -222,8 +247,14 @@ def _is_file_path(line: str) -> bool:
     # Dotfile without extension — ``.gitignore``, ``.env``.
     if _DOTFILE_NO_EXT.match(stripped):
         return True
-    # Known extensionless filenames.
-    if stripped in _KNOWN_EXTENSIONLESS:
+    # Bare extensionless token — must be a single token (no
+    # inner whitespace) of word characters / dashes / dots.
+    # Covers ``LICENSE``, ``Makefile``, ``README``, etc. without
+    # an allowlist. The 🟧🟧🟧 EDIT marker on the next line is
+    # what confirms the intent — a stray single-word line in
+    # prose won't be followed by an EDIT marker, so the
+    # state machine drops back to SCANNING harmlessly.
+    if " " not in stripped and _BARE_TOKEN.match(stripped):
         return True
     return False
 
