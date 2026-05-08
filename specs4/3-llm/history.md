@@ -79,6 +79,29 @@ Per-turn archive deletion is safe — no record in `history.jsonl` depends on th
 - Archives for turns whose main-store record has been deleted (manual cleanup, file corruption) are orphaned — safe to keep, safe to remove. The UI ignores archives with no corresponding main-store record.
 - Upgrading from a version without turn IDs is a no-op — new turns get IDs, old turns stay ID-less.
 - Historical records that carry an `assessor_reasoning` field (from an earlier draft of this spec that treated the assessor as a distinct role) are loaded as plain assistant messages; the extra field is ignored. No migration is required.
+- Records without `agent_blocks` (predating cross-turn agent reconstruction) load correctly; the per-turn agent affordance still works via `get_turn_archive(turn_id)`, but cross-turn views ("show me everything agent-X did") will skip those turns rather than guess at the id↔idx mapping.
+
+### Cross-Turn Agent Reconstruction
+
+The disk layout is keyed by a turn-local numeric `agent_idx` (`agent-00.jsonl`, `agent-01.jsonl`, …) — see [Agent Turn Archive](#agent-turn-archive). The orchestrator addresses agents by an LLM-chosen string `id` that is stable across turns (per [parallel-agents.md § Agent Reuse by ID](../7-future/parallel-agents.md#agent-reuse-by-id)). These two namespaces are intentionally separate:
+
+- `id` is identity — chosen by the orchestrator, used as the registry key in `_agent_contexts`, used as the tab id in the chat panel, and used to address agents in subsequent `🟧🟧🟧 AGENT` blocks.
+- `agent_idx` is per-turn storage routing — the integer position of the agent in that turn's spawn list, used to name the archive file and to derive child request IDs.
+
+`agent_idx` is **not stable across turns**. A reuse of `agent-backend` in turn 1 (where it was the first block, idx 0 → `agent-00.jsonl`) and again in turn 3 (where the orchestrator spawned `agent-frontend` first, making `agent-backend` idx 1 → `agent-01.jsonl`) writes to two different filenames. The mapping is turn-local.
+
+To make the across-turns view reconstructable without guessing, every assistant record that spawned agents persists an `agent_blocks` field — an ordered list of `{id, agent_idx}` entries, one per spawn block emitted in that turn. The order matches the spawn order (so `agent_blocks[N].agent_idx == N` in current implementations), but the field is stored verbatim rather than derived, so future schemes that decouple emission order from storage index remain compatible.
+
+Reconstruction algorithm for "show me everything agent-X did across the session":
+
+1. Scan the main store for assistant records carrying both `turn_id` and a non-empty `agent_blocks`.
+2. For each such record, look for an entry where `id == "agent-X"`. If found, note `(turn_id, agent_idx)`.
+3. Read each `(turn_id, agent_idx)` pair via `get_turn_archive(turn_id)` filtered to that index.
+4. Concatenate in turn order (chronological by user-message timestamp).
+
+The reconstruction is read-only; archives are not rewritten when the orchestrator retasks an agent under a new `agent_idx`. Turns without `agent_blocks` (legacy records, or turns that did not spawn agents) are skipped. Turns whose archive directory has been deleted (per [Disk Usage Monitoring](#disk-usage-monitoring)) are skipped without error.
+
+Filename safety is incidental: because `agent_idx` is numeric, arbitrary characters in `id` (hyphens, dots, mixed case) never reach the filesystem. A future implementation MUST NOT shortcut by using `id` as a filename — case-sensitivity differences across platforms and unrestricted character set would silently corrupt the archive.
 
 ## Message Schema
 
@@ -88,6 +111,7 @@ Per-turn archive deletion is safe — no record in `history.jsonl` depends on th
 - Role — user or assistant
 - Content — full text — for agent-mode assistant messages, this contains the main LLM's full output across all its internal calls within the turn (decomposition, review, iteration decisions, synthesis)
 - Optional: system event flag, image references (filenames in working-directory images folder), legacy image count (deprecated), files in context (user messages), files modified (assistant messages), edit results array, turn ID (every record in a session produced after turn IDs were introduced)
+- Optional on assistant records that spawned agents: `agent_blocks` — an ordered list of `{id, agent_idx}` entries, one per spawn block emitted in the turn. See [Cross-Turn Agent Reconstruction](#cross-turn-agent-reconstruction) below for why this is required
 
 Agent-mode and non-agent-mode assistant messages share the same schema. The only runtime signal distinguishing them is the presence of `.ac-dc4/agents/{turn_id}/` on disk.
 
@@ -226,3 +250,4 @@ Agent-mode and non-agent-mode assistant messages share the same schema. The only
 - Session restore reads only the main store; agent archives are load-on-demand for UI browsing
 - Archive directories are safe to delete at any time; removal of an archive never breaks main-store playback
 - The 1 GB disk-usage warning fires at most once per server lifetime; the user is never blocked from working, only informed
+- Agent identity (`id`, an arbitrary non-empty string) and per-turn archive routing (`agent_idx`, a non-negative integer assigned by spawn order within a turn) are separate namespaces. `agent_idx` is stable only within a turn; `id` is stable across the session. Cross-turn reconstruction relies on the `agent_blocks: [{id, agent_idx}, ...]` field persisted on each agent-spawning assistant record — never on filename heuristics or scanning archive contents
