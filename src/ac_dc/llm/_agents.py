@@ -501,8 +501,19 @@ def build_agent_descriptor(service: "LLMService") -> str:
     """Render the per-turn agent-state descriptor.
 
     Walks every live agent in ``service._agent_contexts`` and
-    builds a markdown block listing each agent's id and the
-    paths it currently has loaded, classified by depth.
+    builds a markdown block listing each agent's id, its
+    repo-view mode, and the paths it currently has loaded,
+    classified by depth.
+
+    Each entry's mode appears inline with the id as
+    ``**{id}** ({mode})`` where ``{mode}`` is one of
+    ``code``, ``doc``, ``code+xref``, ``doc+xref`` —
+    matching the four-string surface the orchestrator
+    uses in spawn blocks. The orchestrator reads this to
+    decide which agent is the right target for a given
+    task: a code-mode agent is good for refactors, a
+    doc-mode agent for documentation work, the ``+xref``
+    variants for tasks spanning both.
 
     Three depth values per
     :doc:`specs4/7-future/parallel-agents` § "Per-agent state
@@ -561,7 +572,20 @@ def build_agent_descriptor(service: "LLMService") -> str:
 
     for agent_id in sorted_ids:
         scope = contexts[agent_id]
-        lines.append(f"- **{agent_id}**")
+        # Surface the agent's mode inline with its id so the
+        # orchestrator can route work appropriately. Agents
+        # without a ContextManager (defensive — shouldn't
+        # happen in practice) fall back to no mode hint.
+        mode_str = ""
+        if scope.context is not None:
+            mode_str = _format_mode(
+                scope.context.mode,
+                scope.context.cross_reference_enabled,
+            )
+        if mode_str:
+            lines.append(f"- **{agent_id}** ({mode_str})")
+        else:
+            lines.append(f"- **{agent_id}**")
 
         full_paths, symbol_paths, doc_paths = _classify_agent_paths(scope)
 
