@@ -73,7 +73,7 @@
 import { LitElement, html } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
-import '../file-picker.js';
+import '../file-picker/index.js';
 import '../chat-panel/index.js';
 import { parseAgentTabId } from '../chat-panel/index.js';
 import '../commit-graph.js';

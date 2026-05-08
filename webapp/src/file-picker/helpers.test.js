@@ -17,7 +17,7 @@ import {
   fuzzyMatch,
   sortChildren,
   sortChildrenWithMode,
-} from '../file-picker.js';
+} from './index.js';
 import { dir, file, installCleanup, rootOf } from './test-helpers.js';
 
 installCleanup();

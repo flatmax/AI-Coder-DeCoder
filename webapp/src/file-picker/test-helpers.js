@@ -13,7 +13,7 @@ import { afterEach } from 'vitest';
 // custom element as a side effect. Every test file pulls in this
 // helpers module, so the registration happens exactly once per
 // shard regardless of which tests load first.
-import '../file-picker.js';
+import './index.js';
 
 /**
  * Build a minimal tree-node literal for a file.
