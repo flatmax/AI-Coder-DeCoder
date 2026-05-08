@@ -80,17 +80,12 @@ import '../commit-graph.js';
 
 import {
   EMPTY_TREE,
-  _L0_EXCLUDE_PREF_ALWAYS,
-  _L0_EXCLUDE_PREF_ASK,
-  _L0_EXCLUDE_PREF_KEY,
-  _L0_EXCLUDE_PREF_NEVER,
   _PICKER_COLLAPSED_WIDTH,
 } from './constants.js';
 import {
   _loadL0ExcludePref,
   _loadPickerCollapsed,
   _loadPickerWidth,
-  _saveL0ExcludePref,
   buildPrunedTree,
   flattenTreePaths,
 } from './helpers.js';
@@ -103,6 +98,20 @@ import {
   isRestrictedError,
   onContextMenuAction,
 } from './context-menu.js';
+import {
+  applyExclusion,
+  applyExclusionWithPrompt,
+  onExclusionChanged,
+  onL0DialogApplyNow,
+  onL0DialogBackdropClick,
+  onL0DialogCancel,
+  onL0DialogDefer,
+  onL0DialogKeyDown,
+  renderL0ExcludeDialog,
+  resetL0ExcludePref,
+  resolveL0ExcludeDialog,
+  sendExclusionToServer,
+} from './exclusion.js';
 import {
   onFileClicked,
   onFileSearchChanged,
@@ -122,6 +131,12 @@ import {
   onInsertPath,
 } from './mentions.js';
 import {
+  applySelection,
+  onFilesChanged,
+  onSelectionChanged,
+  sendSelectionToServer,
+} from './selection.js';
+import {
   detachSplitter,
   maxPickerWidth as maxPickerWidthFromModule,
   onSplitterDoubleClick,
@@ -132,6 +147,14 @@ import {
   savePickerWidth,
 } from './splitter.js';
 import { FILES_TAB_STYLES } from './styles.js';
+import {
+  applyInitialAutoSelect,
+  expandAncestorsOf,
+  loadFileTree,
+  onFilesModified,
+  onStateLoaded,
+  pushChildProps,
+} from './tree-loader.js';
 
 export class FilesTab extends RpcMixin(LitElement) {
   static properties = {
@@ -563,265 +586,26 @@ export class FilesTab extends RpcMixin(LitElement) {
   // ---------------------------------------------------------------
   // File tree loading
   // ---------------------------------------------------------------
+  //
+  // Bodies live in ./tree-loader.js. Host method names
+  // preserved as forwarders so intra-class call sites
+  // and tests (which read `_latestTree` etc. directly
+  // but invoke nothing here) keep working.
 
-  async _loadFileTree() {
-    // Two RPCs in parallel — tree and branch info. Both
-    // live on Repo. A branch-info failure doesn't block
-    // the tree from rendering (the picker degrades to no
-    // branch pill); a tree failure is fatal for this load
-    // because nothing useful is left to display.
-    let tree;
-    let branchResult;
-    try {
-      const [treeValue, branchValue] = await Promise.allSettled([
-        this.rpcExtract('Repo.get_file_tree'),
-        this.rpcExtract('Repo.get_current_branch'),
-      ]);
-      if (treeValue.status === 'rejected') throw treeValue.reason;
-      tree = treeValue.value;
-      branchResult =
-        branchValue.status === 'fulfilled' ? branchValue.value : null;
-      if (branchValue.status === 'rejected') {
-        // Log but don't toast — a missing branch pill is
-        // a minor regression compared to a broken tree.
-        console.warn(
-          '[files-tab] get_current_branch failed',
-          branchValue.reason,
-        );
-      }
-    } catch (err) {
-      console.error('[files-tab] get_file_tree failed', err);
-      this._showToast(
-        `Failed to load file tree: ${err?.message || err}`,
-        'error',
-      );
-      return;
-    }
-    // The repo returns the full shape documented in
-    // src/ac_dc/repo.py — `tree` is the nested node plus
-    // sibling arrays (modified, staged, etc.). Phase 2c uses
-    // only the `tree` field; Phase 2d will consume the status
-    // arrays for git badges.
-    //
-    // Direct-update pattern (see class docstring) — we write
-    // `picker.tree` directly and flip `_treeLoaded` AFTER, so
-    // our own re-render can't clobber the assignment. The
-    // template below binds `.tree` via a getter that reads
-    // from `_latestTree`, which we update here.
-    this._latestTree = tree?.tree || EMPTY_TREE;
-    // Build status data from the RPC's sibling arrays.
-    // Repo.get_file_tree returns `modified`, `staged`,
-    // `untracked`, `deleted` as path-string arrays and
-    // `diff_stats` as `{path: {added, removed}}`. We
-    // convert to Sets / Map here so the picker's per-row
-    // render stays O(1) per lookup rather than O(N) scans.
-    // Defensive — any missing / malformed field falls back
-    // to an empty collection so a partial response doesn't
-    // crash the picker.
-    this._latestStatusData = {
-      modified: new Set(
-        Array.isArray(tree?.modified) ? tree.modified : [],
-      ),
-      staged: new Set(
-        Array.isArray(tree?.staged) ? tree.staged : [],
-      ),
-      untracked: new Set(
-        Array.isArray(tree?.untracked) ? tree.untracked : [],
-      ),
-      deleted: new Set(
-        Array.isArray(tree?.deleted) ? tree.deleted : [],
-      ),
-      diffStats: new Map(
-        tree?.diff_stats && typeof tree.diff_stats === 'object'
-          ? Object.entries(tree.diff_stats)
-          : [],
-      ),
-    };
-    // Build branch info from the second RPC. Defensive —
-    // a null `branchResult` (RPC rejected or returned
-    // nothing) degrades to the "no branch pill" state.
-    // The tree's root node carries the repo name as
-    // `name`, so we thread that through for the root
-    // row's tooltip even when branch info isn't
-    // available.
-    const repoName =
-      typeof this._latestTree?.name === 'string'
-        ? this._latestTree.name
-        : '';
-    this._latestBranchInfo = {
-      branch:
-        typeof branchResult?.branch === 'string'
-          ? branchResult.branch
-          : null,
-      detached: branchResult?.detached === true,
-      sha:
-        typeof branchResult?.sha === 'string'
-          ? branchResult.sha
-          : null,
-      repoName,
-    };
-    // Derive the flat file list and push to the chat panel
-    // so file mentions in assistant output get wrapped. The
-    // chat panel's `repoFiles` prop short-circuits on empty
-    // input, so before the first load the cost is zero.
-    this._repoFiles = flattenTreePaths(this._latestTree);
-    // First-load auto-select — picks up every file with
-    // pending changes so the user doesn't have to re-tick
-    // what they were just working on. Runs exactly once
-    // per component lifetime; subsequent reloads do
-    // nothing here. The flag flip happens synchronously
-    // so a re-entrant reload during the RPC that got us
-    // here can't trigger double-auto-select.
-    if (this._initialAutoSelect) {
-      this._initialAutoSelect = false;
-      this._applyInitialAutoSelect();
-    }
-    // Reset the push flag — a fresh tree load means the
-    // children need fresh props, even if a previous load
-    // already pushed once. `updated()` will retry if the
-    // call below is too early in the lifecycle.
-    this._childPropsPushed = false;
-    this._pushChildProps();
-    this._treeLoaded = true;
+  _loadFileTree() {
+    return loadFileTree(this);
   }
 
-  /**
-   * Apply the first-load auto-selection rule: union every
-   * changed file (modified ∪ staged ∪ untracked ∪ deleted)
-   * with the existing selection, then expand the ancestor
-   * directories of every selected file so the user can
-   * see them in the tree.
-   *
-   * Union semantics (not replace) preserve any selection
-   * the server broadcast during startup — e.g., a prior
-   * session's state restored by `_restore_last_session`
-   * on the backend, or a collab host's selection received
-   * via `files-changed` before our first tree load.
-   *
-   * Called exactly once per component lifetime, by
-   * `_loadFileTree` after status data is built. The
-   * subsequent `_pushChildProps` call picks up the
-   * mutations and pushes them to the picker in a single
-   * render cycle.
-   */
   _applyInitialAutoSelect() {
-    const changed = new Set();
-    const sd = this._latestStatusData;
-    if (sd) {
-      if (sd.modified instanceof Set) {
-        for (const p of sd.modified) changed.add(p);
-      }
-      if (sd.staged instanceof Set) {
-        for (const p of sd.staged) changed.add(p);
-      }
-      if (sd.untracked instanceof Set) {
-        for (const p of sd.untracked) changed.add(p);
-      }
-      if (sd.deleted instanceof Set) {
-        for (const p of sd.deleted) changed.add(p);
-      }
-    }
-    if (changed.size === 0) {
-      // Nothing changed — no selection to union, no
-      // ancestors to expand. Skip entirely so the
-      // `_applySelection` short-circuit path isn't
-      // involved in the common "clean working tree"
-      // case.
-      return;
-    }
-    // Union with existing selection. If the union is
-    // strictly a superset of what we already have,
-    // _applySelection sends the new selection to the
-    // server; if it's equal (every changed file was
-    // already selected), the set-equality short-circuit
-    // inside _applySelection makes this a no-op.
-    const union = new Set(this._selectedFiles);
-    for (const p of changed) union.add(p);
-    this._applySelection(union, /* notifyServer */ true);
-    // Expand ancestor directories of every selected
-    // file so they're visible in the tree. The picker
-    // doesn't auto-expand on selection normally —
-    // selection state is independent of expansion — so
-    // we have to do it here.
-    this._expandAncestorsOf(union);
+    return applyInitialAutoSelect(this);
   }
 
-  /**
-   * Mark every ancestor directory of every path in
-   * `paths` as expanded in the picker. Mutates the
-   * picker's `_expanded` Set directly (same pattern as
-   * the file-search scroll handler). Called from
-   * `_applyInitialAutoSelect`; safe to call before the
-   * first `_pushChildProps` because it updates an
-   * internal-state Set that the picker consults on its
-   * next render.
-   */
   _expandAncestorsOf(paths) {
-    const picker = this._picker();
-    if (!picker) {
-      // Picker not mounted yet — defer. The first
-      // `_pushChildProps` retry through `updated()`
-      // will bring the picker into view, but the
-      // expansion state won't be re-derived there.
-      // Fall through to directly mutating the set we
-      // track pre-mount. The picker's default
-      // `_expanded` starts empty; we can't reach
-      // into it until it mounts, so in the rare
-      // mount-order case (picker not yet visible
-      // when auto-select runs) we just skip the
-      // expansion — the user can still reach the
-      // auto-selected files manually.
-      return;
-    }
-    const next = new Set(picker._expanded);
-    for (const path of paths) {
-      if (typeof path !== 'string' || !path) continue;
-      const parts = path.split('/');
-      let acc = '';
-      // Stop before the last part — that's the file
-      // itself, not a directory to expand.
-      for (let i = 0; i < parts.length - 1; i += 1) {
-        acc = acc ? `${acc}/${parts[i]}` : parts[i];
-        next.add(acc);
-      }
-    }
-    picker._expanded = next;
+    return expandAncestorsOf(this, paths);
   }
 
-  /**
-   * Push `tree` and `repoFiles` to child components.
-   *
-   * Called both from `_loadFileTree` (first-time populate)
-   * and from `updated` after the initial render (retry path
-   * for the race where RPC-ready fires before the template
-   * has committed and `this._chat()` returns null). The
-   * retry is guarded by `_childPropsPushed` so a successful
-   * push isn't redone on every subsequent update.
-   *
-   * Returns true when both children were reachable and
-   * received their props — the caller uses this to mark
-   * the push complete.
-   */
   _pushChildProps() {
-    const picker = this._picker();
-    const chat = this._chat();
-    if (!picker || !chat) {
-      // One or both children not mounted yet. `updated()`
-      // will retry after the first render commits.
-      return false;
-    }
-    picker.tree = this._latestTree;
-    picker.statusData = this._latestStatusData;
-    picker.branchInfo = this._latestBranchInfo;
-    picker.excludedFiles = new Set(this._excludedFiles);
-    picker.pinnedFiles = this._computePinnedFiles();
-    picker.activePath = this._activePath;
-    picker.reviewState = this._reviewState;
-    picker.requestUpdate();
-    chat.repoFiles = this._repoFiles;
-    chat.requestUpdate();
-    this._childPropsPushed = true;
-    return true;
+    return pushChildProps(this);
   }
 
   /**
@@ -829,17 +613,17 @@ export class FilesTab extends RpcMixin(LitElement) {
    *
    * The RPC-ready microtask hook can fire before Lit's
    * first `updateComplete` resolves, meaning
-   * `this._chat()` inside `_loadFileTree` returns null
-   * and the assignments are silently lost. The Phase 2c
-   * original code had this failure mode but it was
-   * masked because `repoFiles` was optional and nothing
-   * in the chat panel consumed it.
+   * `this._chat()` inside the tree-load returns null
+   * and the assignments are silently lost. The
+   * Phase 2c original code had this failure mode but
+   * it was masked because `repoFiles` was optional
+   * and nothing in the chat panel consumed it.
    *
    * Phase 2d's file summary section DOES consume
-   * `repoFiles`, so the silent drop became visible. The
-   * fix is to retry once the first render has happened
-   * — `updated()` always runs after commit, so by then
-   * `this._chat()` returns a real element.
+   * `repoFiles`, so the silent drop became visible.
+   * The fix is to retry once the first render has
+   * happened — `updated()` always runs after commit,
+   * so by then `this._chat()` returns a real element.
    */
   updated(changedProps) {
     super.updated?.(changedProps);
@@ -856,102 +640,24 @@ export class FilesTab extends RpcMixin(LitElement) {
   // Selection sync
   // ---------------------------------------------------------------
 
+  // Bodies live in ./selection.js (selection events) and
+  // ./tree-loader.js (state-loaded restore + reload
+  // trigger). Host method names preserved for the event
+  // bindings.
   _onSelectionChanged(event) {
-    // Picker emits this when the user toggles a checkbox or
-    // clicks a directory checkbox.
-    const incoming = event.detail?.selectedFiles;
-    if (!Array.isArray(incoming)) return;
-    this._applySelection(new Set(incoming), /* notifyServer */ true);
+    return onSelectionChanged(this, event);
   }
 
   _onFilesChanged(event) {
-    // Server broadcast — happens on another client's
-    // `set_selected_files`, on auto-add for not-in-context
-    // edits, and on our own `set_selected_files` call (the
-    // server echoes back). We treat the broadcast as
-    // authoritative: even for our own send, applying the
-    // echo is idempotent because `_applySelection` only
-    // mutates when the set actually changes.
-    const incoming = event.detail?.selectedFiles;
-    if (!Array.isArray(incoming)) return;
-    this._applySelection(
-      new Set(incoming),
-      /* notifyServer */ false,
-    );
+    return onFilesChanged(this, event);
   }
 
   _onStateLoaded(event) {
-    // AppShell dispatches `state-loaded` after every
-    // successful `get_current_state()` fetch — on initial
-    // connect and on every reconnect. Restore the server's
-    // authoritative selection and exclusion sets so a
-    // browser refresh preserves what the user had ticked,
-    // even when the working tree is clean (and thus
-    // `_applyInitialAutoSelect` wouldn't otherwise seed
-    // anything).
-    //
-    // Do NOT suppress the first-load auto-select. Per
-    // specs4/5-webapp/file-picker.md § Auto-Selection, the
-    // git-changed union must "merge with any server-
-    // provided selection … rather than replacing" it. The
-    // state-loaded snapshot typically arrives before the
-    // tree loads (AppShell's `_fetchCurrentState` fires on
-    // `setupDone`, before this component's `onRpcReady`
-    // microtask defers the tree RPC), so when
-    // `_applyInitialAutoSelect` runs on tree load it sees
-    // the server's selection already installed in
-    // `_selectedFiles` and unions the git-changed files on
-    // top. No extra ordering logic required.
-    const state = event?.detail;
-    if (!state || typeof state !== 'object') return;
-    const selected = state.selected_files;
-    if (Array.isArray(selected)) {
-      this._applySelection(
-        new Set(selected),
-        /* notifyServer */ false,
-      );
-    }
-    const excluded = state.excluded_index_files;
-    if (Array.isArray(excluded)) {
-      this._applyExclusion(
-        new Set(excluded),
-        /* notifyServer */ false,
-      );
-    }
-    // Restore review state so the picker's amber banner
-    // reappears after a browser refresh during an active
-    // review. Without this, the post-refresh UI looks
-    // identical to non-review mode even though git HEAD
-    // is detached at the merge-base — confusing, because
-    // the user has no affordance to exit review and
-    // recover their original branch.
-    //
-    // The backend's get_current_state includes the full
-    // review-state dict under the `review_state` key
-    // (matching get_review_state's shape); we mirror it
-    // into _reviewState and push to the picker via the
-    // same direct-update pattern the review-started
-    // handler uses.
-    const review =
-      state.review_state && typeof state.review_state === 'object'
-        ? state.review_state
-        : null;
-    if (review && review.active) {
-      this._reviewState = review;
-      const picker = this._picker();
-      if (picker) {
-        picker.reviewState = review;
-        picker.requestUpdate();
-      }
-    }
+    return onStateLoaded(this, event);
   }
 
-  _onFilesModified(_event) {
-    // Fires after commit / reset / any server-side file-tree
-    // mutation. Phase 2d will extend this for per-file
-    // invalidation when edit blocks land; for Phase 2c a full
-    // reload is fine.
-    this._loadFileTree();
+  _onFilesModified(event) {
+    return onFilesModified(this, event);
   }
 
   _onActiveFileChanged(event) {
@@ -1282,387 +988,48 @@ export class FilesTab extends RpcMixin(LitElement) {
     }
   }
 
+  // Bodies live in ./selection.js. Host method names
+  // preserved as forwarders — tests in
+  // selection-sync.test.js, init.test.js, etc. call
+  // _applySelection directly.
   _applySelection(newSelection, notifyServer) {
-    // Modified-file pin (cache-tiering invariant): a file
-    // with working-tree or staged changes cannot be
-    // deselected. Edited files pin into lower cache tiers
-    // (D27) and the picker should reflect their residency
-    // — letting the user uncheck them while they're still
-    // pinned would create a confusing split between "what
-    // the picker shows" and "what's actually in the
-    // prompt." If the incoming set drops any modified
-    // file, re-add it and toast the user.
-    //
-    // Only working-tree-modified and staged files pin.
-    // Untracked files were auto-added as a convenience
-    // (Increment 4 / first-load auto-select) and the user
-    // remains free to drop them. Deleted files have no
-    // content to pin, and the delete-cleanup paths need
-    // to keep working.
-    const sd = this._latestStatusData;
-    let pinnedReverted = false;
-    if (sd) {
-      const pinned = [];
-      for (const path of this._selectedFiles) {
-        if (newSelection.has(path)) continue;
-        if (sd.modified?.has(path) || sd.staged?.has(path)) {
-          pinned.push(path);
-        }
-      }
-      if (pinned.length > 0) {
-        const next = new Set(newSelection);
-        for (const p of pinned) next.add(p);
-        newSelection = next;
-        pinnedReverted = true;
-        const label =
-          pinned.length === 1
-            ? pinned[0]
-            : `${pinned.length} modified files`;
-        this._showToast(
-          `${label} cannot be removed from context while modified — commit or discard changes first.`,
-          'warning',
-        );
-      }
-    }
-    // Fast-path no-op when the set hasn't actually changed.
-    // Prevents loopback from the server broadcast doing
-    // another round-trip for our own update.
-    //
-    // Exception: when we just reverted a pinned-file
-    // removal, the corrected `newSelection` equals our
-    // current state — but the picker's optimistic local
-    // state still shows the unticked checkbox from the
-    // user's click. We must push the corrected selection
-    // to the picker (below) so the checkbox snaps back
-    // on. The server doesn't need notification because
-    // its state hasn't changed.
-    if (this._setsEqual(this._selectedFiles, newSelection)) {
-      if (pinnedReverted) {
-        const picker = this._picker();
-        if (picker) {
-          picker.selectedFiles = new Set(newSelection);
-          picker.requestUpdate();
-        }
-      }
-      return;
-    }
-    this._selectedFiles = newSelection;
-
-    // Direct-update pattern (load-bearing — see class
-    // docstring). Assign to child props then requestUpdate.
-    const picker = this._picker();
-    if (picker) {
-      picker.selectedFiles = new Set(newSelection);
-      picker.requestUpdate();
-    }
-    const chat = this._chat();
-    if (chat) {
-      // Chat panel in Phase 2b doesn't yet consume this
-      // prop; assigning now so Phase 2d's file-mention work
-      // sees a populated field without a refactor.
-      chat.selectedFiles = Array.from(newSelection);
-      chat.requestUpdate();
-    }
-
-    if (notifyServer) {
-      this._sendSelectionToServer(Array.from(newSelection));
-    }
+    return applySelection(this, newSelection, notifyServer);
   }
 
-  async _sendSelectionToServer(files) {
-    // Route by active tab: main → set_selected_files,
-    // agent tab → set_agent_selected_files(turn_id,
-    // agent_idx, files). parseAgentTabId returns null
-    // for 'main' or malformed IDs, in which case we use
-    // the main RPC path (the tab-as-main case).
-    //
-    // Per specs4/5-webapp/agent-browser.md § File Picker
-    // Scope: "A user granting a file to agent 2 doesn't
-    // affect the main LLM's context on the next turn."
-    // Without this dispatch, every selection change on
-    // any tab clobbers the main tab's server-side
-    // selection.
-    const agentTag = parseAgentTabId(this._activeTabId);
-    try {
-      let result;
-      if (agentTag) {
-        // agentTag IS the agent's LLM-chosen id —
-        // post-flat-identity refactor flattened the
-        // (turn_id, agent_idx) tuple into a single
-        // string keyed in the backend registry.
-        result = await this.rpcExtract(
-          'LLMService.set_agent_selected_files',
-          agentTag,
-          files,
-        );
-      } else {
-        result = await this.rpcExtract(
-          'LLMService.set_selected_files',
-          files,
-        );
-      }
-      // The server returns either an array of paths
-      // (success) or an error dict. `{error:
-      // "restricted", ...}` is collab-mode localhost gate.
-      // `{error: "agent not found"}` happens when the
-      // tab was closed server-side between the last tab
-      // switch and this selection change — treat it as a
-      // warning; the tab's local state is stale but the
-      // chat panel's close-tab flow will clean up
-      // eventually.
-      if (result && typeof result === 'object' && !Array.isArray(result)) {
-        if (result.error === 'restricted') {
-          this._showToast(
-            result.reason || 'Restricted operation',
-            'warning',
-          );
-        } else if (result.error === 'agent not found') {
-          this._showToast(
-            'Agent tab no longer available on server',
-            'warning',
-          );
-        }
-      }
-    } catch (err) {
-      console.error(
-        '[files-tab] set_selected_files failed', err,
-      );
-      this._showToast(
-        `Failed to update selection: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _sendSelectionToServer(files) {
+    return sendSelectionToServer(this, files);
   }
 
+  // Bodies live in ./exclusion.js. Host method names
+  // preserved as forwarders — tests in exclusion.test.js
+  // and per-tab.test.js call _applyExclusion /
+  // _applyExclusionWithPrompt directly, and
+  // resetL0ExcludePref is documented as part of the
+  // settings-tab integration surface.
   _onExclusionChanged(event) {
-    // Picker emits this when the user shift+clicks a file
-    // checkbox or a directory checkbox (the latter applies
-    // to every descendant file). The event carries an array
-    // of excluded paths; we update our authoritative state,
-    // push to the picker via direct-update, and notify the
-    // server.
-    //
-    // User-driven exclusion goes through the L0
-    // invalidation prompt — see `_applyExclusionWithPrompt`
-    // for the pref-driven dispatch. Pure removals (the
-    // user un-excluded a file via shift+click on an
-    // already-excluded entry) skip the prompt because
-    // there's nothing for the user to opt into.
-    const incoming = event.detail?.excludedFiles;
-    if (!Array.isArray(incoming)) return;
-    this._applyExclusionWithPrompt(new Set(incoming));
+    return onExclusionChanged(this, event);
   }
 
   _applyExclusion(newExcluded, notifyServer, invalidateL0 = false) {
-    // Fast-path no-op when the set hasn't actually changed.
-    // Prevents loopback from the server broadcast (when
-    // collab mode lands this for real) doing another
-    // round-trip for our own update.
-    if (this._setsEqual(this._excludedFiles, newExcluded)) return;
-    this._excludedFiles = newExcluded;
-    // Direct-update pattern (load-bearing — see class
-    // docstring). Assign to picker prop then requestUpdate.
-    const picker = this._picker();
-    if (picker) {
-      picker.excludedFiles = new Set(newExcluded);
-      picker.requestUpdate();
-    }
-    if (notifyServer) {
-      this._sendExclusionToServer(
-        Array.from(newExcluded),
-        invalidateL0,
-      );
-    }
+    return applyExclusion(
+      this, newExcluded, notifyServer, invalidateL0,
+    );
   }
 
-  /**
-   * Apply an exclusion with the L0-invalidation prompt.
-   *
-   * Wraps `_applyExclusion` for the user-driven exclusion
-   * paths: the picker's shift+click handler and the
-   * context-menu Exclude / Exclude-all actions. Inclusion
-   * paths skip this — they always pass `invalidateL0=true`
-   * directly because the user wants the file's structural
-   * block back in the map immediately.
-   *
-   * Behaviour driven by the stored preference:
-   *
-   * - 'always' → invalidate L0 immediately, no prompt
-   * - 'never' → defer L0 invalidation, no prompt
-   * - 'ask' (default) → open the dialog; user's choice
-   *   determines the flag and may also persist the
-   *   preference for next time
-   *
-   * Set-equality short-circuit happens BEFORE the prompt
-   * — there's no point asking about an exclusion change
-   * that's a no-op.
-   *
-   * The added-paths list is computed here so the dialog
-   * body can name what's being excluded ("foo.py" vs.
-   * "3 files in src/"). Empty list when the diff is a
-   * pure removal — shouldn't reach this method since
-   * removals are inclusions, but defensive against a
-   * future caller that passes a smaller set than the
-   * current one.
-   */
   _applyExclusionWithPrompt(nextExcluded) {
-    if (this._setsEqual(this._excludedFiles, nextExcluded)) return;
-    // Compute newly-excluded paths (set difference). If
-    // the diff has no additions, treat it as a plain
-    // exclusion-change call without prompt — there's
-    // nothing the user is opting into invalidating.
-    const addedPaths = [];
-    for (const p of nextExcluded) {
-      if (!this._excludedFiles.has(p)) addedPaths.push(p);
-    }
-    if (addedPaths.length === 0) {
-      this._applyExclusion(
-        nextExcluded, /* notifyServer */ true, /* invalidateL0 */ false,
-      );
-      return;
-    }
-    // Pref-driven dispatch.
-    if (this._l0ExcludePref === _L0_EXCLUDE_PREF_ALWAYS) {
-      this._applyExclusion(nextExcluded, true, true);
-      return;
-    }
-    if (this._l0ExcludePref === _L0_EXCLUDE_PREF_NEVER) {
-      this._applyExclusion(nextExcluded, true, false);
-      return;
-    }
-    // 'ask' — open the dialog. The pending exclusion
-    // sits in dialog state until the user picks; the
-    // user can also cancel, which discards the
-    // pending change entirely (the picker's optimistic
-    // state will reconcile on the next render via the
-    // direct-update path).
-    this._l0ExcludeDialog = {
-      nextExcluded,
-      addedPaths,
-    };
+    return applyExclusionWithPrompt(this, nextExcluded);
   }
 
-  /**
-   * Resolve an open L0-exclude dialog. Called by the
-   * three button handlers (Apply now, Defer, Cancel).
-   *
-   * `choice` is one of:
-   *   - 'invalidate' → apply with invalidateL0=true
-   *   - 'defer' → apply with invalidateL0=false
-   *   - 'cancel' → discard the pending exclusion
-   *
-   * `remember` is the "Don't ask again" checkbox state.
-   * Only meaningful for invalidate / defer choices —
-   * cancel never persists a preference.
-   *
-   * After resolving, the picker's checkbox state may be
-   * stale (the user shift-clicked, the picker
-   * optimistically updated, then the user cancelled).
-   * The direct-update inside `_applyExclusion` re-pushes
-   * the canonical `excludedFiles` Set, which causes the
-   * picker to re-render with the correct state.
-   */
   _resolveL0ExcludeDialog(choice, remember) {
-    const dialog = this._l0ExcludeDialog;
-    this._l0ExcludeDialog = null;
-    if (!dialog) return;
-    if (choice === 'cancel') {
-      // Re-push current excluded set to the picker so
-      // its visual state reconciles with the
-      // unchanged authoritative state. Without this,
-      // a shift-click that opened the dialog and was
-      // cancelled could leave the picker showing a
-      // ticked checkbox even though our set is
-      // unchanged.
-      const picker = this._picker();
-      if (picker) {
-        picker.excludedFiles = new Set(this._excludedFiles);
-        picker.requestUpdate();
-      }
-      return;
-    }
-    const invalidate = choice === 'invalidate';
-    if (remember) {
-      const pref = invalidate
-        ? _L0_EXCLUDE_PREF_ALWAYS
-        : _L0_EXCLUDE_PREF_NEVER;
-      this._l0ExcludePref = pref;
-      _saveL0ExcludePref(pref);
-    }
-    this._applyExclusion(dialog.nextExcluded, true, invalidate);
+    return resolveL0ExcludeDialog(this, choice, remember);
   }
 
-  /**
-   * Reset the stored L0-exclude preference back to
-   * 'ask'. Exposed so the Settings tab can offer a
-   * "reset preferences" affordance — users who picked
-   * "always" once and now want the dialog back have
-   * an escape hatch.
-   */
   resetL0ExcludePref() {
-    this._l0ExcludePref = _L0_EXCLUDE_PREF_ASK;
-    try {
-      localStorage.removeItem(_L0_EXCLUDE_PREF_KEY);
-    } catch (_) {}
+    return resetL0ExcludePref(this);
   }
 
-  async _sendExclusionToServer(files, invalidateL0 = false) {
-    // Same dispatch rule as _sendSelectionToServer. Per
-    // specs4/5-webapp/agent-browser.md § File Picker
-    // Scope: "Excluded-files state is also per-tab."
-    //
-    // `invalidateL0` flows through to the main-tab RPC
-    // as a third argument. Agent tabs don't accept it
-    // — agent ContextManagers share the orchestrator's
-    // L0 prefix per the parallel-agents design, so an
-    // agent-tab exclusion can't invalidate the
-    // orchestrator's L0 cache directly. (The
-    // orchestrator's own next L0-invalidation event
-    // refreshes when needed.) We silently drop the
-    // flag for agent tabs rather than raise — agent
-    // exclusions are still applied via the per-agent
-    // tracker; only the L0 refresh decision differs.
-    const agentTag = parseAgentTabId(this._activeTabId);
-    try {
-      let result;
-      if (agentTag) {
-        // agentTag IS the agent's LLM-chosen id —
-        // matches the backend's flat registry key.
-        result = await this.rpcExtract(
-          'LLMService.set_agent_excluded_index_files',
-          agentTag,
-          files,
-        );
-      } else {
-        result = await this.rpcExtract(
-          'LLMService.set_excluded_index_files',
-          files,
-          invalidateL0,
-        );
-      }
-      if (result && typeof result === 'object' && !Array.isArray(result)) {
-        if (result.error === 'restricted') {
-          this._showToast(
-            result.reason || 'Restricted operation',
-            'warning',
-          );
-        } else if (result.error === 'agent not found') {
-          this._showToast(
-            'Agent tab no longer available on server',
-            'warning',
-          );
-        }
-      }
-    } catch (err) {
-      console.error(
-        '[files-tab] set_excluded_index_files failed',
-        err,
-      );
-      this._showToast(
-        `Failed to update exclusion: ${err?.message || err}`,
-        'error',
-      );
-    }
+  _sendExclusionToServer(files, invalidateL0 = false) {
+    return sendExclusionToServer(this, files, invalidateL0);
   }
 
   // ---------------------------------------------------------------
@@ -1839,27 +1206,7 @@ export class FilesTab extends RpcMixin(LitElement) {
   // Helpers
   // ---------------------------------------------------------------
 
-  /**
-   * Build the set of paths that should be pinned to
-   * selection — files with working-tree or staged
-   * modifications. The picker uses this to suppress the
-   * native checkbox toggle on attempted deselection so
-   * Lit's reactive binding stays the source of truth.
-   * Untracked and deleted files are excluded — see the
-   * comment in `_applySelection` for the rationale.
-   */
-  _computePinnedFiles() {
-    const pinned = new Set();
-    const sd = this._latestStatusData;
-    if (!sd) return pinned;
-    if (sd.modified instanceof Set) {
-      for (const p of sd.modified) pinned.add(p);
-    }
-    if (sd.staged instanceof Set) {
-      for (const p of sd.staged) pinned.add(p);
-    }
-    return pinned;
-  }
+
 
   _picker() {
     return this.shadowRoot?.querySelector('ac-file-picker') || null;
@@ -1968,133 +1315,32 @@ export class FilesTab extends RpcMixin(LitElement) {
   // L0-exclude confirmation dialog
   // ---------------------------------------------------------------
 
-  /**
-   * Render the L0-exclude confirmation dialog when
-   * `_l0ExcludeDialog` is non-null. Three buttons:
-   *
-   *   - Apply now (primary) — invalidate L0
-   *     immediately, full cache rewrite
-   *   - Defer (secondary) — leave L0 cached as-is;
-   *     the next mode switch / cross-ref toggle /
-   *     manual rebuild / restart will refresh
-   *   - Cancel — discard the pending exclusion
-   *
-   * Plus a "Don't ask again" checkbox that persists
-   * the user's choice as the new default for both
-   * exclusion paths. Cancel doesn't persist
-   * anything — it's a "I changed my mind" gesture.
-   */
+  // L0 dialog rendering + button handlers live in
+  // ./exclusion.js. Forwarders preserve the host
+  // surface — the render template calls
+  // `${this._renderL0ExcludeDialog()}`.
   _renderL0ExcludeDialog() {
-    const dialog = this._l0ExcludeDialog;
-    if (!dialog) return '';
-    const count = dialog.addedPaths.length;
-    const target =
-      count === 1
-        ? dialog.addedPaths[0]
-        : `${count} files`;
-    return html`
-      <div
-        class="l0-dialog-backdrop"
-        @click=${this._onL0DialogBackdropClick}
-        @keydown=${this._onL0DialogKeyDown}
-      >
-        <div
-          class="l0-dialog"
-          role="dialog"
-          aria-label="Confirm L0 cache invalidation"
-          tabindex="0"
-          @click=${(e) => e.stopPropagation()}
-        >
-          <div class="l0-dialog-title">
-            Invalidate L0 cache?
-          </div>
-          <div class="l0-dialog-body">
-            Excluding <strong>${target}</strong> from the
-            index can either invalidate the L0 cache
-            immediately (a full cache rewrite — typically
-            100,000+ tokens) or leave the cached aggregate
-            map stale until the next L0-invalidating event
-            (mode switch, cross-reference toggle, manual
-            rebuild, restart).
-            <br /><br />
-            <strong>Apply now</strong> if you want the
-            exclusion to take effect on the next request
-            and don't mind the cache cost. <strong>Defer</strong>
-            if you'd rather not pay the cache cost yet —
-            the LLM may still see ${target} in the
-            structural map until the cache refreshes
-            naturally.
-          </div>
-          <label class="l0-dialog-remember">
-            <input
-              type="checkbox"
-              data-l0-remember
-            />
-            Don't ask again — remember this choice for
-            future exclusions
-          </label>
-          <div class="l0-dialog-actions">
-            <button
-              class="l0-dialog-btn cancel"
-              @click=${this._onL0DialogCancel}
-            >Cancel</button>
-            <button
-              class="l0-dialog-btn secondary"
-              @click=${this._onL0DialogDefer}
-            >Defer</button>
-            <button
-              class="l0-dialog-btn primary"
-              @click=${this._onL0DialogApplyNow}
-            >Apply now</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  /**
-   * Read the "Don't ask again" checkbox state from the
-   * rendered dialog. Returns false when the dialog
-   * isn't mounted or the checkbox can't be queried —
-   * defensive against a race between button click and
-   * dialog close.
-   */
-  _readL0DialogRememberFlag() {
-    const cb = this.shadowRoot?.querySelector(
-      '.l0-dialog input[data-l0-remember]',
-    );
-    return !!(cb && cb.checked);
+    return renderL0ExcludeDialog(this);
   }
 
   _onL0DialogApplyNow() {
-    const remember = this._readL0DialogRememberFlag();
-    this._resolveL0ExcludeDialog('invalidate', remember);
+    return onL0DialogApplyNow(this);
   }
 
   _onL0DialogDefer() {
-    const remember = this._readL0DialogRememberFlag();
-    this._resolveL0ExcludeDialog('defer', remember);
+    return onL0DialogDefer(this);
   }
 
   _onL0DialogCancel() {
-    // Cancel never persists a preference — the
-    // checkbox value is irrelevant.
-    this._resolveL0ExcludeDialog('cancel', false);
+    return onL0DialogCancel(this);
   }
 
   _onL0DialogBackdropClick(event) {
-    // Backdrop click = cancel. Same gesture as the
-    // review selector modal's backdrop click.
-    if (event.target === event.currentTarget) {
-      this._onL0DialogCancel();
-    }
+    return onL0DialogBackdropClick(this, event);
   }
 
   _onL0DialogKeyDown(event) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      this._onL0DialogCancel();
-    }
+    return onL0DialogKeyDown(this, event);
   }
 
   // ---------------------------------------------------------------
