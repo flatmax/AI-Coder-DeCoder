@@ -1166,78 +1166,515 @@ class TestAgentScopeMode:
         assert scope.context.mode == Mode.CODE
         assert scope.context.cross_reference_enabled is True
 
-    def test_mode_conflict_on_retask_raises(
+    def test_build_agent_scope_does_not_check_mode(
         self, service: LLMService
     ) -> None:
-        """Re-spawn with a different mode raises ValueError."""
-        parent = service._default_scope()
-        # First spawn: code mode.
-        first = self._make_block("frontend", mode="code")
-        service._build_agent_scope(
-            block=first,
-            agent_idx=0,
-            parent_scope=parent,
-            turn_id="t",
-        )
-        # Second spawn under same id but different mode.
-        conflicting = self._make_block("frontend", mode="doc")
-        with pytest.raises(ValueError, match="frontend"):
-            service._build_agent_scope(
-                block=conflicting,
-                agent_idx=0,
-                parent_scope=parent,
-                turn_id="t",
-            )
+        """``build_agent_scope`` is "always fresh" by contract.
 
-    def test_mode_match_on_retask_allowed(
-        self, service: LLMService
-    ) -> None:
-        """Re-spawn with the same mode is fine.
-
-        Today this still produces a fresh scope (the
-        retask-existing path isn't implemented). What
-        matters here is that NO ValueError is raised — the
-        conflict check is mode-specific, not "any second
-        spawn is rejected".
+        Mode-conflict rejection is a dispatch decision and
+        lives in :func:`_resolve_or_spawn_agent_scope`,
+        not :func:`build_agent_scope`. Direct calls to
+        ``build_agent_scope`` with a known id and a
+        different mode silently overwrite the registered
+        scope — the tests below pin this so a future
+        refactor that re-adds rejection here surfaces as
+        a test failure.
         """
         parent = service._default_scope()
-        first_block = self._make_block("frontend", mode="code")
-        service._build_agent_scope(
-            block=first_block,
-            agent_idx=0,
-            parent_scope=parent,
-            turn_id="t",
-        )
-        # Same mode → no raise.
-        same_mode = self._make_block("frontend", mode="code")
-        service._build_agent_scope(
-            block=same_mode,
-            agent_idx=0,
-            parent_scope=parent,
-            turn_id="t",
-        )
-
-    def test_xref_axis_conflict_also_rejected(
-        self, service: LLMService
-    ) -> None:
-        """Different cross-ref state alone is also a conflict."""
-        parent = service._default_scope()
-        first = self._make_block("agent-0", mode="code")
-        service._build_agent_scope(
+        first = self._make_block("frontend", mode="code")
+        first_scope = service._build_agent_scope(
             block=first,
             agent_idx=0,
             parent_scope=parent,
             turn_id="t",
         )
-        # Same primary but different xref axis.
-        conflicting = self._make_block("agent-0", mode="code+xref")
-        with pytest.raises(ValueError, match="agent-0"):
-            service._build_agent_scope(
-                block=conflicting,
+        # Different mode → still constructs, no raise.
+        conflicting = self._make_block("frontend", mode="doc")
+        second_scope = service._build_agent_scope(
+            block=conflicting,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        # The registry now points at the second scope —
+        # the first was overwritten. This is precisely
+        # the behaviour the dispatch layer guards against
+        # for the retask path.
+        assert second_scope is not first_scope
+        assert (
+            service._agent_contexts["frontend"] is second_scope
+        )
+
+
+class TestAgentRetaskDispatch:
+    """Lookup-or-spawn dispatch in :func:`spawn_agents_for_turn`.
+
+    Per ``specs4/7-future/parallel-agents.md`` § "Agent
+    Reuse by ID" — re-using a known agent id retasks the
+    existing agent, preserving its ContextManager, file
+    context, stability tracker, and provider-cache warmth.
+    A different id spawns a fresh agent. A known id with a
+    mismatched mode is skipped with a warning; the existing
+    agent stays in its current mode.
+
+    These tests exercise :func:`_resolve_or_spawn_agent_scope`
+    directly and through :func:`spawn_agents_for_turn` to
+    pin both the unit-level behaviour and the integration
+    with the spawn loop.
+    """
+
+    def _make_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do work",
+        mode: str = "",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task, mode=mode)
+
+    async def _drain_stub_invocations(
+        self, service: LLMService
+    ) -> list[dict[str, Any]]:
+        """Install a recorder for ``_agent_stream_impl``."""
+        recordings: list[dict[str, Any]] = []
+
+        async def _recorder(
+            request_id: str,
+            message: str,
+            files: list[str],
+            images: list[str],
+            excluded_urls: list[str] | None = None,
+            *,
+            scope: Any = None,
+            agent_key: str | None = None,
+        ) -> None:
+            recordings.append({
+                "request_id": request_id,
+                "message": message,
+                "scope": scope,
+                "agent_key": agent_key,
+            })
+
+        service._agent_stream_impl = _recorder
+        return recordings
+
+    # ---- _resolve_or_spawn_agent_scope unit tests ------------
+
+    def test_resolver_miss_returns_fresh_scope(
+        self, service: LLMService
+    ) -> None:
+        """Unknown id → fresh spawn via build_agent_scope."""
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        block = self._make_block("new-agent", mode="code")
+        scope = _resolve_or_spawn_agent_scope(
+            service,
+            block=block,
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t",
+        )
+        assert scope is not None
+        # Newly registered.
+        assert service._agent_contexts["new-agent"] is scope
+
+    def test_resolver_hit_same_mode_returns_existing(
+        self, service: LLMService
+    ) -> None:
+        """Known id + matching mode → reuse the existing scope.
+
+        The returned scope IS the same object as the one
+        constructed on the first call — preserving the
+        ContextManager, tracker, file context, and identity.
+        Provider cache warmth is preserved by virtue of the
+        same StabilityTracker remaining attached.
+        """
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        first_scope = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("frontend", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        # Plant some state on the existing scope so we can
+        # verify it's the SAME object on retask, not a fresh
+        # construction with matching shape.
+        first_scope.context.add_message("user", "first turn task")
+        first_scope.context.add_message("assistant", "first turn reply")
+
+        second_scope = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("frontend", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t2",
+        )
+        # Object identity — the SAME scope, not a clone.
+        assert second_scope is first_scope
+        assert second_scope.context is first_scope.context
+        assert second_scope.tracker is first_scope.tracker
+        # Conversation preserved.
+        history = second_scope.context.get_history()
+        assert any(
+            m.get("content") == "first turn task" for m in history
+        )
+        assert any(
+            m.get("content") == "first turn reply" for m in history
+        )
+
+    def test_resolver_hit_mode_mismatch_returns_none(
+        self, service: LLMService
+    ) -> None:
+        """Known id + different mode → None (skip)."""
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        first_scope = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("agent-0", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        result = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("agent-0", mode="doc"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t2",
+        )
+        assert result is None
+        # Existing scope untouched.
+        assert (
+            service._agent_contexts["agent-0"] is first_scope
+        )
+
+    def test_resolver_hit_xref_axis_mismatch_returns_none(
+        self, service: LLMService
+    ) -> None:
+        """Cross-ref axis difference alone is a mismatch."""
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("agent-0", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        result = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("agent-0", mode="code+xref"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t2",
+        )
+        assert result is None
+
+    def test_resolver_inherited_mode_matches(
+        self, service: LLMService
+    ) -> None:
+        """Empty block.mode → inherits orchestrator → matches.
+
+        An orchestrator emitting a bare ``id: foo`` block to
+        retask succeeds when its own mode hasn't drifted
+        since the agent's last spawn. The implicit
+        inheritance still has to match the agent's existing
+        mode.
+        """
+        from ac_dc.context_manager import Mode
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        # Orchestrator in code mode; agent spawned matching.
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(False)
+        parent = service._default_scope()
+        first = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        # Retask with bare id — empty mode inherits code.
+        second = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode=""),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t2",
+        )
+        assert second is first
+
+    def test_resolver_inherited_mode_mismatch(
+        self, service: LLMService
+    ) -> None:
+        """Orchestrator drift after spawn → inherited retask fails.
+
+        Agent spawned in code mode; orchestrator later
+        switches to doc mode; a bare retask block now
+        inherits doc, which doesn't match. Skipped.
+        """
+        from ac_dc.context_manager import Mode
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(False)
+        parent = service._default_scope()
+        _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        # Orchestrator drifts to doc mode.
+        service._context.set_mode(Mode.DOC)
+        new_parent = service._default_scope()
+        result = _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode=""),
+            agent_idx=0,
+            parent_scope=new_parent,
+            turn_id="t2",
+        )
+        assert result is None
+
+    def test_resolver_logs_warning_on_skip(
+        self, service: LLMService, caplog
+    ) -> None:
+        """Mode mismatch logs a WARNING with both modes named."""
+        import logging
+
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        caplog.clear()
+        with caplog.at_level(
+            logging.WARNING, logger="ac_dc.llm_service"
+        ):
+            _resolve_or_spawn_agent_scope(
+                service,
+                block=self._make_block("foo", mode="doc"),
                 agent_idx=0,
                 parent_scope=parent,
-                turn_id="t",
+                turn_id="t2",
             )
+        warnings = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        ]
+        assert any("foo" in w for w in warnings)
+        assert any(
+            "code" in w and "doc" in w for w in warnings
+        )
+
+    def test_resolver_logs_info_on_retask(
+        self, service: LLMService, caplog
+    ) -> None:
+        """Successful retask logs an INFO line for traceability."""
+        import logging
+
+        from ac_dc.llm._agents import (
+            _resolve_or_spawn_agent_scope,
+        )
+
+        parent = service._default_scope()
+        _resolve_or_spawn_agent_scope(
+            service,
+            block=self._make_block("foo", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        caplog.clear()
+        with caplog.at_level(
+            logging.INFO, logger="ac_dc.llm_service"
+        ):
+            _resolve_or_spawn_agent_scope(
+                service,
+                block=self._make_block("foo", mode="code"),
+                agent_idx=0,
+                parent_scope=parent,
+                turn_id="t2",
+            )
+        info_logs = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "Retasking" in rec.getMessage()
+        ]
+        assert len(info_logs) == 1
+        assert "foo" in info_logs[0]
+
+    # ---- spawn_agents_for_turn integration tests -------------
+
+    async def test_spawn_loop_skips_mode_conflict_block(
+        self, service: LLMService
+    ) -> None:
+        """Mode-mismatch block is skipped; siblings still dispatch."""
+        recordings = await self._drain_stub_invocations(service)
+        parent = service._default_scope()
+        # Pre-register an agent so the first block in the
+        # next spawn collides on mode.
+        from ac_dc.llm._agents import build_agent_scope
+
+        build_agent_scope(
+            service,
+            block=self._make_block("collider", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+
+        blocks = [
+            self._make_block("collider", mode="doc"),  # skipped
+            self._make_block("worker", mode="code"),  # dispatches
+        ]
+        await service._spawn_agents_for_turn(
+            agent_blocks=blocks,
+            parent_scope=parent,
+            parent_request_id="r-main",
+            turn_id="t2",
+        )
+        # Only the worker dispatches — collider was skipped.
+        assert len(recordings) == 1
+        assert recordings[0]["agent_key"] == "worker"
+
+    async def test_spawn_loop_retask_reuses_scope(
+        self, service: LLMService
+    ) -> None:
+        """Retask passes the existing scope to the stream impl."""
+        recordings = await self._drain_stub_invocations(service)
+        parent = service._default_scope()
+        from ac_dc.llm._agents import build_agent_scope
+
+        original = build_agent_scope(
+            service,
+            block=self._make_block("persistent", mode="code"),
+            agent_idx=0,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        await service._spawn_agents_for_turn(
+            agent_blocks=[
+                self._make_block(
+                    "persistent", mode="code", task="next task",
+                ),
+            ],
+            parent_scope=parent,
+            parent_request_id="r-main",
+            turn_id="t2",
+        )
+        assert len(recordings) == 1
+        # The scope passed to the stream impl IS the
+        # original — not a fresh construction.
+        assert recordings[0]["scope"] is original
+        # Task threading is unchanged (the resolver doesn't
+        # touch the message; _stream_chat appends it).
+        assert recordings[0]["message"] == "next task"
+
+    async def test_spawn_loop_fresh_id_spawns_fresh_scope(
+        self, service: LLMService
+    ) -> None:
+        """Unknown id under spawn loop → new scope registered."""
+        recordings = await self._drain_stub_invocations(service)
+        parent = service._default_scope()
+        await service._spawn_agents_for_turn(
+            agent_blocks=[
+                self._make_block("brand-new", mode="code"),
+            ],
+            parent_scope=parent,
+            parent_request_id="r-main",
+            turn_id="t1",
+        )
+        assert "brand-new" in service._agent_contexts
+        assert len(recordings) == 1
+        assert recordings[0]["scope"] is (
+            service._agent_contexts["brand-new"]
+        )
+
+    async def test_retask_preserves_archive_idx(
+        self, service: LLMService
+    ) -> None:
+        """Retasked agent writes to its ORIGINAL archive file.
+
+        The archival sink closes over agent_idx at
+        construction time. Retasking does NOT call
+        build_agent_context_manager, so the closure
+        retains the agent's first-spawn idx — the agent
+        keeps writing to the same agent-NN.jsonl across
+        turns.
+
+        Pinned because the spawn loop's per-turn agent_idx
+        (the positional index in agent_blocks) varies
+        between turns. If a future change accidentally
+        rebuilt the sink with the new agent_idx, the
+        archive would split into two files.
+        """
+        # Spawn first turn at agent_idx=2 (third block,
+        # though we only emit one — the index is what
+        # matters).
+        from ac_dc.llm._agents import build_agent_scope
+
+        parent = service._default_scope()
+        first_scope = build_agent_scope(
+            service,
+            block=self._make_block("sticky", mode="code"),
+            agent_idx=2,
+            parent_scope=parent,
+            turn_id="t1",
+        )
+        # Write a message via first-turn sink.
+        first_scope.context.add_message(
+            "user", "turn-1 task"
+        )
+        # Retask in second turn at a different positional
+        # idx.
+        await self._drain_stub_invocations(service)
+        await service._spawn_agents_for_turn(
+            agent_blocks=[
+                self._make_block(
+                    "sticky", mode="code",
+                    task="turn-2 task",
+                ),
+            ],
+            parent_scope=parent,
+            parent_request_id="r2",
+            turn_id="t2",
+        )
+        # The archive file for turn t1 carries idx=2; the
+        # context manager from the retask still writes
+        # there because the sink closure baked in idx=2.
+        archive_t1 = service._history_store.get_turn_archive("t1")
+        assert len(archive_t1) == 1
+        assert archive_t1[0]["agent_idx"] == 2
 
 
 class TestAgentExecutionEndToEnd:

@@ -180,33 +180,55 @@ async def spawn_agents_for_turn(
     """Fan out N agents under a single user turn.
 
     Each block has an LLM-chosen ``id`` (e.g.
-    ``"frontend-chat"``). The id is the registry key — re-using
-    a known id retasks an existing agent (preserving its
-    ContextManager, file context, tracker, and identity);
-    a new id spawns a fresh agent. See
-    :meth:`LLMService._spawn_agents_for_turn` for the full
-    prose.
+    ``"frontend-chat"``). The id is the registry key. The
+    dispatch on each block:
 
-    Each child request ID follows
-    ``{parent}-agent-{NN:02d}`` where NN is the block's
-    positional index — used only for stream routing on
-    the frontend, not for identity. All tasks run
-    concurrently via :func:`asyncio.gather` with
-    ``return_exceptions=True``. After gathering,
+    - **Hit + mode matches** — retask. Reuse the existing
+      scope; the task arrives as the next user message in
+      the agent's existing conversation. ContextManager,
+      file context, stability tracker, archival sink (with
+      its baked-in ``agent_idx``) are all preserved. Provider
+      cache stays warm.
+    - **Hit + mode mismatches** — skip with a warning. The
+      existing agent stays in its current mode; the
+      orchestrator's malformed decomposition is surfaced via
+      the log line. The agent isn't started for this turn.
+    - **Miss** — fresh spawn via :func:`build_agent_scope`.
+      A new ContextManager + tracker is constructed and
+      registered; the task drives the agent's first turn.
+
+    Each child request ID follows ``{parent}-agent-{NN:02d}``
+    where NN is the block's positional index in this turn's
+    spawn list — used only for stream routing on the
+    frontend, not for identity. The on-disk archive file
+    (``agent-NN.jsonl``) is keyed by the agent's ORIGINAL
+    ``agent_idx`` from its first spawn (baked into the
+    archival sink closure), so retasked agents continue to
+    write to the same archive file across turns.
+
+    All tasks run concurrently via :func:`asyncio.gather`
+    with ``return_exceptions=True``. After gathering,
     :func:`assimilate_agent_changes` folds per-agent file
     changes into the parent.
+
+    Per ``specs4/7-future/parallel-agents.md`` § "Agent
+    Reuse by ID".
     """
     if not agent_blocks:
         return
     tasks: list[asyncio.Task[Any]] = []
     for agent_idx, block in enumerate(agent_blocks):
-        agent_scope = build_agent_scope(
+        agent_scope = _resolve_or_spawn_agent_scope(
             service,
             block=block,
             agent_idx=agent_idx,
             parent_scope=parent_scope,
             turn_id=turn_id,
         )
+        if agent_scope is None:
+            # Mode-conflict skip. Logged inside the resolver.
+            # The block doesn't reach the LLM this turn.
+            continue
         child_request_id = (
             f"{parent_request_id}-agent-{agent_idx:02d}"
         )
@@ -233,6 +255,94 @@ async def spawn_agents_for_turn(
     await assimilate_agent_changes(
         service, agent_results, parent_scope
     )
+
+
+def _resolve_or_spawn_agent_scope(
+    service: "LLMService",
+    *,
+    block: AgentBlock,
+    agent_idx: int,
+    parent_scope: ConversationScope,
+    turn_id: str,
+) -> ConversationScope | None:
+    """Look up an existing agent or spawn a fresh one.
+
+    Returns the scope to stream into, or ``None`` when the
+    block should be skipped (mode conflict on retask).
+
+    Three cases per ``specs4/7-future/parallel-agents.md``
+    § "Agent Reuse by ID":
+
+    - **Hit, mode matches** — return the existing scope.
+      Caller proceeds to stream the new task into the same
+      ContextManager, which appends it as the next user
+      message in the agent's accumulated conversation.
+    - **Hit, mode mismatches** — log a warning and return
+      None. The orchestrator's malformed decomposition is
+      surfaced; the existing agent stays untouched.
+    - **Miss** — call :func:`build_agent_scope` to construct
+      a fresh ContextManager + tracker, register it, and
+      return the new scope.
+
+    Mode resolution for the comparison uses the same logic
+    as :func:`build_agent_scope` — empty ``block.mode``
+    inherits the orchestrator's current mode. So an
+    orchestrator that emits a bare ``id: foo`` block to
+    retask agent ``foo`` succeeds when its own mode hasn't
+    drifted since the agent's last spawn, and is rejected
+    when it has. That's the behaviour the spec wants:
+    inherited mode is implicit, but the implicit value
+    still has to match the existing agent.
+    """
+    existing = service._agent_contexts.get(block.id)
+    if existing is None or existing.context is None:
+        # Miss — fresh spawn.
+        return build_agent_scope(
+            service,
+            block=block,
+            agent_idx=agent_idx,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+
+    # Hit — validate mode against the existing scope.
+    parent_cm = parent_scope.context
+    parent_mode = parent_cm.mode if parent_cm else Mode.CODE
+    parent_cross_ref = (
+        parent_cm.cross_reference_enabled if parent_cm else False
+    )
+    resolved_mode, resolved_cross_ref = _resolve_agent_mode(
+        block.mode, parent_mode, parent_cross_ref,
+    )
+    existing_mode = existing.context.mode
+    existing_cross_ref = existing.context.cross_reference_enabled
+    if (
+        existing_mode != resolved_mode
+        or existing_cross_ref != resolved_cross_ref
+    ):
+        logger.warning(
+            "Agent %r already exists in mode %s; "
+            "cannot retask with mode %s. Skipping this "
+            "spawn block. The orchestrator must close the "
+            "existing agent and respawn to switch modes.",
+            block.id,
+            _format_mode(existing_mode, existing_cross_ref),
+            _format_mode(resolved_mode, resolved_cross_ref),
+        )
+        return None
+
+    # Hit + mode matches — retask. Return the existing scope
+    # unchanged. The caller's _agent_stream_impl will
+    # append block.task as the next user message in the
+    # agent's existing conversation and stream the response
+    # into the same ContextManager.
+    logger.info(
+        "Retasking agent %r (mode=%s) — preserving "
+        "ContextManager, file context, tracker.",
+        block.id,
+        _format_mode(existing_mode, existing_cross_ref),
+    )
+    return existing
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +490,18 @@ def build_agent_scope(
     into ``(Mode, cross_reference_enabled)`` and applied to
     the agent's ContextManager via the factory. An empty
     ``block.mode`` inherits both axes from
-    ``parent_scope.context``. Per
-    ``specs4/7-future/parallel-agents.md`` § "Agent-spawn
-    block format", the agent's mode is fixed for its
-    lifetime; if a known id is re-used with a different
-    mode, the spawn is rejected via :class:`ValueError` —
-    the orchestrator must close the existing agent and
-    re-spawn.
+    ``parent_scope.context``.
+
+    This function ALWAYS constructs a fresh scope and
+    overwrites any existing entry for ``block.id`` in the
+    registry. The retask-vs-fresh-spawn dispatch — and the
+    mode-conflict check that goes with it — lives in
+    :func:`spawn_agents_for_turn`, not here. Calling this
+    function directly when an entry for ``block.id`` already
+    exists will throw away the existing scope's
+    ContextManager, conversation history, file context, and
+    stability tracker. Most callers should use
+    :func:`spawn_agents_for_turn`.
     """
     if service._history_store is None:
         raise RuntimeError(
@@ -406,29 +521,6 @@ def build_agent_scope(
     resolved_mode, resolved_cross_ref = _resolve_agent_mode(
         block.mode, parent_mode, parent_cross_ref,
     )
-
-    # Mode-conflict check on retask. If a scope already
-    # exists for this id, its mode is fixed for its
-    # lifetime; a re-spawn with a different mode is a
-    # programming error in the orchestrator. Reject loudly
-    # so the user sees the malformed decomposition rather
-    # than silently getting a tracker mismatch on the next
-    # turn.
-    existing = service._agent_contexts.get(block.id)
-    if existing is not None and existing.context is not None:
-        existing_mode = existing.context.mode
-        existing_cross_ref = existing.context.cross_reference_enabled
-        if (
-            existing_mode != resolved_mode
-            or existing_cross_ref != resolved_cross_ref
-        ):
-            raise ValueError(
-                f"Agent {block.id!r} already exists in mode "
-                f"{_format_mode(existing_mode, existing_cross_ref)!r}; "
-                f"cannot retask with mode "
-                f"{_format_mode(resolved_mode, resolved_cross_ref)!r}. "
-                f"Close the existing agent and respawn."
-            )
 
     agent_context = build_agent_context_manager(
         turn_id=turn_id,
