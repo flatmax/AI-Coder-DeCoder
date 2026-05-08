@@ -7,6 +7,11 @@ The chat panel renders conversation messages, handles streaming display, manages
 - User cards may include image thumbnails
 - Assistant cards render markdown with syntax highlighting, math, edit blocks, and file mentions
 - System event cards (commit, reset, mode switch) use distinct styling — dashed border, muted color, "System" role label
+### Finish-Reason Badge Placement
+- Severity-split between top and bottom of the assistant card
+- Natural completions (`stop`, `end_turn`) — muted green ✓ badge in the bottom-left of the card, paired with the hover toolbar; fades in on mouse-enter alongside the copy/paste icons. Positive confirmation that the stream ended cleanly without competing with role label or body content for attention
+- Error/warning reasons (`length` truncation, `content_filter`, `tool_calls`, `function_call`, unknown) — badge inline with the role label at the top of the card, always visible. Users notice these before reading the body
+- Card reserves extra bottom padding when a natural badge is present so the absolute-positioned badge doesn't overlap the last line of content
 ## Streaming Display
 ### Chunk Processing
 - Chunks coalesced per animation frame — a pending variable stores the latest content; the frame callback reads and clears it before updating the streaming content property

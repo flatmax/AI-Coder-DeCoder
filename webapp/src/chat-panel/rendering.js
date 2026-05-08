@@ -655,8 +655,25 @@ export function renderMessage(panel, msg, index) {
   const images = Array.isArray(msg.images) ? msg.images : [];
   const toolbar = renderMessageToolbar(panel, msg);
   const highlightClass = isHighlighted ? ' search-highlight' : '';
-  const finishBadge =
-    msg.finishReason ? renderFinishBadge(msg.finishReason) : '';
+  // Split finish-reason placement by severity. Natural
+  // completions (stop / end_turn) are positive
+  // confirmation that the stream ended cleanly — they
+  // belong at the end of the response, where the eye
+  // lands when finished reading. Error/warning badges
+  // (truncation, content_filter, tool_calls) stay next
+  // to the role label at the top so users notice them
+  // before reading.
+  const isNaturalFinish =
+    msg.role === 'assistant' &&
+    !msg.system_event &&
+    (msg.finishReason === 'stop' || msg.finishReason === 'end_turn');
+  const topFinishBadge =
+    msg.finishReason && !isNaturalFinish
+      ? renderFinishBadge(msg.finishReason)
+      : '';
+  const bottomFinishBadge = isNaturalFinish
+    ? renderFinishBadge(msg.finishReason)
+    : '';
   // File summary section — settled assistant
   // messages only. The streaming card uses
   // renderStreamingMessage which doesn't call
@@ -673,19 +690,25 @@ export function renderMessage(panel, msg, index) {
     msg.role === 'assistant' && !msg.system_event
       ? renderEditSummary(panel, msg)
       : '';
+  const finishFooterClass = bottomFinishBadge
+    ? ' has-finish-footer'
+    : '';
   return html`
     <div
-      class="message-card ${roleClass}${highlightClass}"
+      class="message-card ${roleClass}${highlightClass}${finishFooterClass}"
       data-msg-index=${index}
     >
       <div class="message-toolbar top">${toolbar}</div>
-      <div class="role-label">${roleLabel}${finishBadge}</div>
+      <div class="role-label">${roleLabel}${topFinishBadge}</div>
       ${bodyHtml}
       ${images.length > 0
         ? renderMessageImages(panel, images)
         : ''}
       ${editSummary}
       ${fileSummary}
+      ${bottomFinishBadge
+        ? html`<div class="finish-reason-footer">${bottomFinishBadge}</div>`
+        : ''}
       <div class="message-toolbar bottom">${toolbar}</div>
     </div>
   `;

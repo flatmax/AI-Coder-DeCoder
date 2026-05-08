@@ -462,6 +462,36 @@ export const STYLES = css`
     opacity: 0.6;
   }
 
+  /* Footer slot for the natural-completion finish
+   * badge — anchored bottom-left, mirroring the
+   * bottom toolbar's bottom-right anchor. Sits at
+   * the same baseline as the copy/paste icons so
+   * the badge reads as a peer of the message
+   * actions rather than a separate row. Muted
+   * styling on the badge itself keeps it from
+   * competing with the role label or body content
+   * for attention.
+   *
+   * The card reserves bottom padding via the
+   * .has-finish-footer modifier so the absolute
+   * badge doesn't overlap the last line of body
+   * content. */
+  .message-card.has-finish-footer {
+    padding-bottom: 2rem;
+  }
+  .finish-reason-footer {
+    position: absolute;
+    left: 0.5rem;
+    bottom: 0.4rem;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .message-card:hover .finish-reason-footer {
+    opacity: 1;
+  }
+
   /* Message action toolbars — hover-only copy and paste
    * buttons, at top-right and bottom-right of each card.
    * Both ends because long messages might be partially
