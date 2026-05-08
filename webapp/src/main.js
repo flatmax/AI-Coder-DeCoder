@@ -17,7 +17,7 @@
 // the helpers in a sibling module keeps the shared surface
 // testable without loading the shell.
 
-import './app-shell.js';
+import './app-shell/index.js';
 import {
   DEFAULT_WS_PORT,
   getWebSocketPort,

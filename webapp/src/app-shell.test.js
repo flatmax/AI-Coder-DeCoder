@@ -133,7 +133,7 @@ import { SharedRpc } from './rpc.js';
 // but Rollup's SSR parser (used by vitest 2.x) rejects
 // top-level await in test files with "Expected a semicolon".
 
-import { AppShell } from './app-shell.js';
+import { AppShell } from './app-shell/index.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
