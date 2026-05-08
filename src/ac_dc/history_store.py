@@ -360,6 +360,7 @@ class HistoryStore:
         edit_results: list[dict[str, Any]] | None = None,
         system_event: bool = False,
         turn_id: str | None = None,
+        agent_blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append one message to the JSONL store.
 
@@ -411,6 +412,19 @@ class HistoryStore:
             yet adopted turn propagation — readers tolerate its
             absence and the chat panel simply does not offer
             the "show agents" affordance for records lacking it.
+        agent_blocks:
+            Optional ordered list of ``{id, agent_idx}`` entries
+            naming every agent the orchestrator spawned in this
+            turn. Persisted only on assistant records produced
+            by an agent-spawning turn. Per specs4/3-llm/history.md
+            § Cross-Turn Agent Reconstruction, the list lets a
+            future "show me everything agent-X did across the
+            session" view recover the per-turn id↔agent_idx
+            mapping without scanning archive contents. Omitted
+            from records whose turn did not spawn agents and
+            from records predating cross-turn reconstruction —
+            readers skip such records when filtering by agent
+            id rather than guessing at the mapping.
 
         Returns
         -------
@@ -465,6 +479,34 @@ class HistoryStore:
             record["files_modified"] = list(files_modified)
         if edit_results:
             record["edit_results"] = list(edit_results)
+        if agent_blocks:
+            # Defensive copy + per-entry filter so callers can't
+            # corrupt the persisted shape with extras like
+            # ``task`` (recoverable from the agent's own archive
+            # file) or stray non-string ids. The reconstruction
+            # algorithm only reads ``id`` and ``agent_idx``;
+            # persisting just those keeps records compact and
+            # the contract narrow.
+            persisted_blocks: list[dict[str, Any]] = []
+            for entry in agent_blocks:
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = entry.get("id")
+                entry_idx = entry.get("agent_idx")
+                if not isinstance(entry_id, str) or not entry_id:
+                    continue
+                if (
+                    not isinstance(entry_idx, int)
+                    or isinstance(entry_idx, bool)
+                    or entry_idx < 0
+                ):
+                    continue
+                persisted_blocks.append({
+                    "id": entry_id,
+                    "agent_idx": entry_idx,
+                })
+            if persisted_blocks:
+                record["agent_blocks"] = persisted_blocks
 
         # Append one line. Open in append-text mode; on POSIX
         # this is atomic for a single write call under the pipe

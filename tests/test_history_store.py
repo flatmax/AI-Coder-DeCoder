@@ -319,6 +319,204 @@ class TestAppendMetadata:
 
 
 # ---------------------------------------------------------------------------
+# agent_blocks — cross-turn reconstruction support
+# ---------------------------------------------------------------------------
+
+
+class TestAgentBlocksField:
+    """Cross-turn-reconstruction support — the ``agent_blocks`` field.
+
+    Per specs4/3-llm/history.md § Cross-Turn Agent
+    Reconstruction, every assistant record produced by a turn
+    that spawned agents persists an ordered list of
+    ``{id, agent_idx}`` entries — one per spawn block emitted.
+    Reconstruction code reads this to map an agent's stable
+    string ``id`` to that turn's local numeric ``agent_idx``,
+    which is what the on-disk archive layout
+    (``agent-NN.jsonl``) is keyed by.
+
+    Tests pin the persistence contract and the defensive
+    filtering — only well-shaped entries survive, malformed
+    callers can't poison the record.
+    """
+
+    def test_round_trip_single_block(
+        self, store: HistoryStore
+    ) -> None:
+        """One ``{id, agent_idx}`` entry persists and reads back."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(
+            sid, "assistant", "I delegated to agents.",
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "agent-backend", "agent_idx": 0},
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("agent_blocks") == [
+            {"id": "agent-backend", "agent_idx": 0},
+        ]
+
+    def test_round_trip_multiple_blocks_preserves_order(
+        self, store: HistoryStore
+    ) -> None:
+        """List order matches input order — caller's spawn order is the truth."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        blocks = [
+            {"id": "agent-frontend", "agent_idx": 0},
+            {"id": "agent-backend", "agent_idx": 1},
+            {"id": "agent-docs", "agent_idx": 2},
+        ]
+        store.append_message(
+            sid, "assistant", "decomposed",
+            turn_id=tid, agent_blocks=blocks,
+        )
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("agent_blocks") == blocks
+
+    def test_omitted_when_none(
+        self, store: HistoryStore
+    ) -> None:
+        """No agent_blocks → field absent from record.
+
+        Keeps non-agent-mode turns byte-identical to their
+        pre-cross-turn-reconstruction shape. The reconstruction
+        algorithm explicitly skips records without
+        ``agent_blocks``.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(sid, "assistant", "regular reply")
+        msgs = store.get_session_messages(sid)
+        assert "agent_blocks" not in msgs[0]
+
+    def test_omitted_when_empty_list(
+        self, store: HistoryStore
+    ) -> None:
+        """Empty list also omits the field.
+
+        Same shape as the other optional list fields (files,
+        edit_results) — empty and None both produce a clean
+        record.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "no agents",
+            agent_blocks=[],
+        )
+        msgs = store.get_session_messages(sid)
+        assert "agent_blocks" not in msgs[0]
+
+    def test_filters_extra_keys(
+        self, store: HistoryStore
+    ) -> None:
+        """Extra keys like ``task`` don't reach disk.
+
+        ``task`` lives on the in-flight completion result for
+        the streamComplete event (frontend tab labels), but the
+        reconstruction algorithm only reads ``id`` and
+        ``agent_idx``. Recording ``task`` here would duplicate
+        what the agent's own archive already stores as its
+        first user message. Persistence narrows to the two
+        contract fields.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "ok",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "task": "this should not persist",
+                    "extra": "neither should this",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        persisted = msgs[0].get("agent_blocks")
+        assert persisted == [
+            {"id": "agent-0", "agent_idx": 0},
+        ]
+
+    def test_filters_malformed_entries(
+        self, store: HistoryStore
+    ) -> None:
+        """Entries missing id or agent_idx are dropped silently.
+
+        Defensive against a future code path that builds the
+        list incorrectly. Better to drop bad entries than fail
+        the whole append.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "mixed",
+            agent_blocks=[
+                {"id": "agent-good", "agent_idx": 0},
+                {"id": "", "agent_idx": 1},  # empty id
+                {"agent_idx": 2},  # missing id
+                {"id": "agent-no-idx"},  # missing agent_idx
+                {"id": "agent-bad-idx", "agent_idx": -1},
+                {"id": "agent-bad-idx", "agent_idx": "0"},
+                "not-a-dict",
+                {"id": "agent-also-good", "agent_idx": 5},
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        persisted = msgs[0].get("agent_blocks")
+        assert persisted == [
+            {"id": "agent-good", "agent_idx": 0},
+            {"id": "agent-also-good", "agent_idx": 5},
+        ]
+
+    def test_all_malformed_omits_field(
+        self, store: HistoryStore
+    ) -> None:
+        """If filtering removes every entry, the field is omitted."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "all bad",
+            agent_blocks=[
+                {"id": ""},
+                "not-a-dict",
+                {"agent_idx": 0},
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        assert "agent_blocks" not in msgs[0]
+
+    def test_search_path_returns_records_with_agent_blocks(
+        self, store: HistoryStore
+    ) -> None:
+        """Search hits expose the field via the full-record path.
+
+        ``search_messages`` returns the preview shape, which
+        doesn't carry agent_blocks — but the assistant record
+        itself, fetched via ``get_session_messages``, does. Pin
+        the read-side contract so a future cross-turn view
+        scanning records via ``get_session_messages`` finds the
+        field as expected.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        store.append_message(
+            sid, "assistant", "delegating work",
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "agent-x", "agent_idx": 0},
+            ],
+        )
+        # The reconstruction algorithm scans full records,
+        # not search hits, so confirm full-record retrieval
+        # carries the field.
+        full = store.get_session_messages(sid)
+        assert full[0].get("agent_blocks") == [
+            {"id": "agent-x", "agent_idx": 0},
+        ]
+        assert full[0].get("turn_id") == tid
+
+
+# ---------------------------------------------------------------------------
 # Images
 # ---------------------------------------------------------------------------
 

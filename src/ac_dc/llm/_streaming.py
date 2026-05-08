@@ -271,11 +271,34 @@ async def stream_chat(
             error = completion_error
             full_content = ""
 
-        # Persist assistant response.
+        # Persist assistant response. If the orchestrator emitted
+        # any well-formed agent-spawn blocks, persist their
+        # ``{id, agent_idx}`` mapping so a future across-turns
+        # view can reconstruct each agent's full session
+        # transcript. Per specs4/3-llm/history.md § Cross-Turn
+        # Agent Reconstruction, the on-disk archive layout
+        # (``agent-NN.jsonl``) is keyed by the turn-local
+        # numeric ``agent_idx`` while orchestrator addressing is
+        # by stable string ``id``; ``agent_idx`` is NOT stable
+        # across turns, so we record the mapping at write time.
+        # Parsed twice (here and in build_completion_result) —
+        # the parser is pure and cheap, and avoiding the
+        # duplication would require reshaping the function
+        # signatures for marginal gain.
         if full_content or cancelled:
             content_to_store = full_content
             if cancelled and not content_to_store:
                 content_to_store = "[stopped]"
+            persisted_agent_blocks: list[dict[str, Any]] | None = None
+            if full_content and not cancelled:
+                _agent_parse = parse_text(full_content)
+                _entries = [
+                    {"id": b.id, "agent_idx": idx}
+                    for idx, b in enumerate(_agent_parse.agent_blocks)
+                    if b.valid
+                ]
+                if _entries:
+                    persisted_agent_blocks = _entries
             scope.context.add_message(
                 "assistant", content_to_store,
                 turn_id=turn_id,
@@ -286,6 +309,7 @@ async def stream_chat(
                     content_to_store,
                     session_id=scope.session_id,
                     turn_id=turn_id,
+                    agent_blocks=persisted_agent_blocks,
                 )
 
         # Agent-spawn dispatch. Only runs on the normal-

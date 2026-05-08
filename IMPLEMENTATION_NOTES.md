@@ -69,6 +69,25 @@ Completed layers and the decision log have been moved to [specs4/impl-history/](
 
 ## Decisions
 
+### D30 — `agent_blocks` persisted on orchestrator records to enable cross-turn reconstruction
+
+Per `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" (committed `bd79d93`), every assistant record produced by a turn that spawned agents persists an ordered list of `{id, agent_idx}` entries — one per spawn block emitted in that turn. The disk layout for agent archives is keyed by a turn-local numeric `agent_idx` (`agent-NN.jsonl`) while the orchestrator addresses agents by an LLM-chosen string `id`. The two namespaces are deliberately separate, and `agent_idx` is NOT stable across turns — a re-use of `agent-backend` in turn 1 (idx 0) and turn 3 (idx 1, because `agent-frontend` was spawned first) writes to two different filenames within their respective turn directories. Without persisting the per-turn id↔idx mapping, a "show me everything `agent-backend` did across the session" view has no way to find the right archive files except by guessing or by reading every archive's first message — both fragile.
+
+Implementation is small and fully forward-compatible:
+
+- `HistoryStore.append_message` accepts an optional `agent_blocks: list[dict[str, Any]] | None` parameter. The persisted shape is filtered to `[{id, agent_idx}, ...]` only — the in-flight completion result's `task` field is dropped from the on-disk record (recoverable from the agent's own archive file as its first user message). Defensive per-entry filtering rejects malformed entries silently rather than failing the append. Empty list and None both omit the field, matching the existing convention for other optional list fields (`files`, `edit_results`).
+- `_stream_chat` parses the orchestrator's response a second time at persistence-write time to compute the `[{id, agent_idx}]` summary, then threads it through `archival_append`. The parse is duplicated with `build_completion_result` (which builds the same summary for the streamComplete event); the parser is pure and cheap, and the duplication keeps both call sites self-contained without having to reshape function signatures.
+- Tests at two layers: `TestAgentBlocksField` in `test_history_store.py` pins the unit contract on `append_message` (round-trip, omission rules, defensive filtering); `TestAgentBlocksPersistence` in `test_agent_spawn.py` pins the end-to-end integration (real `_stream_chat`, real persistence, real `HistoryStore`).
+
+What this decision does NOT deliver:
+
+- No RPC to consume the persisted field. The reconstruction algorithm in the spec section is implementable today against the on-disk records, but no backend method or frontend affordance reads `agent_blocks` yet. The field is pure forward-compatibility infrastructure.
+- No frontend across-turns view. That's deferred to the agent-mode UI plan below.
+
+The decisive argument for shipping this immediately rather than waiting for the consuming UI: every agent-mode turn that runs without persisting `agent_blocks` becomes a permanent gap in the historical record — the per-turn view via `get_turn_archive` still works, but cross-turn filtering by id is impossible for those turns. The cost of landing now (small, pure addition, fully tested) is much lower than the cost of going back later to manually reconstruct the mapping for turns that ran during the gap.
+
+Spec authority: `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction (committed `bd79d93`). Ledger reference: `specs4/3-llm/history.md` § Backwards Compatibility — records without `agent_blocks` (predating this decision) load correctly; cross-turn views skip them rather than guess.
+
 ### D29 — `apply_llm_env` runs explicitly on cold start, not from `ConfigManager.__init__`
 
 Cold start was failing on the first LLM turn with provider-side errors that disappeared after any save in the LLM-config UI. Diagnosed to `main.run` constructing `ConfigManager` without ever calling `apply_llm_env`. The `env` dict in `llm.json` (typically `AWS_REGION`, `AWS_PROFILE`, or provider API keys) was dead config until the first `reload_llm_config` triggered the export. The first turn used whatever `os.environ` carried from the shell — frequently a stale `AWS_DEFAULT_REGION` or an inherited profile default — and providers rejected it.
@@ -418,9 +437,77 @@ Layers 0–4 complete. Layer 5 is substantially delivered — core interaction l
 
 1. **UI polish work plan** — delivered. All four commits shipped (viewer relayout on dialog/window resize, Alt+1..4 / Alt+M shortcuts, file picker left-panel resizer, specs4 docs catch-up for dialog chrome). See the dedicated plan section below.
 2. **Doc Convert tab — commit 6** — delivered. Scope identified post-Commit 5: clickable output paths in the summary view's progress rows. Before Commit 6, users finishing a conversion had to close the summary, switch to the Files tab, navigate to the output file, and click it — four clicks for the core post-conversion task ("review the diff"). Commit 6 upgrades successful progress rows' output-path text to a button element that dispatches `navigate-file` so the app shell routes to the diff viewer directly. Failed and skipped rows keep plain-text detail since there's no output to navigate to. Closes out the post-conversion workflow specs4/4-features/doc-convert.md describes end-to-end. The Doc Convert frontend is feature-complete.
-3. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
+3. **Agent-mode UI plan** — Increment A delivered (see D30 above and the dedicated plan section below). Increments B–E (live tabs, refresh rehydration, per-turn historical view, cross-turn view) are queued; B+C+D form the next coherent push when agent-mode UI work begins.
+4. **Collaboration UI — on pause.** Backend collab (Layer 4.4/4.5) is fully in place; the frontend surface (admission flow pending screen, admission toast, participant UI restrictions, connected-users indicator, collab popover with share link) is deliberately deferred. Revisit when someone actually wants to run a multi-client session; building the UI on spec without a real testing workflow would accumulate staleness.
 
 **Layer 6 (build & deployment) — on pause.** PyInstaller packaging, release workflow, Vite → webapp-dist bundling, and version baking are all deferred. The system needs more hardening at the application layer first — sharper edges in the existing features, deeper test coverage on the paths users actually exercise, and any latent correctness bugs surfaced in day-to-day use — before packaging cost becomes worth paying. Revisit after a hardening pass decides what's actually ready to ship. Related deferrals that land with Layer 6: the webapp-dist bundling rule (D7), the version-baking mechanism described in `specs4/6-deployment/build.md § Version Baking`, and the GitHub Actions release matrix described in `specs-reference/6-deployment/build.md § PyInstaller command — release build`.
+
+## Agent-mode UI plan
+
+The agent-mode foundation has shipped piecewise across Layers 3–5: edit-protocol marker tolerance (D20), `_stream_chat` ConversationScope refactor (D24), execution plane (D25), and now `agent_blocks` persistence (D30). What remains is the user-facing UI surface that consumes this infrastructure.
+
+Five increments, sequenced by value-vs-effort. Each is a standalone deliverable; together they realise the chat-panel-as-agent-browser model specs4/5-webapp/agent-browser.md describes.
+
+### ~~Increment A — `agent_blocks` persistence (no UI)~~ — delivered
+
+Backend-only foundation. Persists the per-turn `{id, agent_idx}` mapping on every orchestrator-spawned assistant record so future cross-turn reconstruction views can recover an agent's full session transcript without scanning archive contents. Zero user-visible change. Pure forward-compatibility — every agent-mode turn from this point forward is reconstructable.
+
+Delivered via `HistoryStore.append_message` accepting `agent_blocks`, `_stream_chat` parsing the response a second time at persistence-write time and threading the summary through `archival_append`. See D30 for the full rationale and `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction for the contract.
+
+### Increment B — Live agent tabs (current turn)
+
+The biggest piece. Implements specs4/5-webapp/agent-browser.md § "Tab Strip" and § "Streaming Routing" — the chat panel gains a tab strip with one "Main" tab plus one tab per agent the orchestrator spawned. Tabs appear when `agentsSpawned` fires, persist for the turn, and are interactive (user can switch tabs, watch agents stream, reply to an agent, grant a file via the picker while that agent's tab is active).
+
+Scope:
+- Tab strip in the chat panel; per-tab state slots keyed by `"main"` for the orchestrator and the agent's `id` for each agent (per agent-browser.md § Per-Tab State).
+- Per-tab streaming state — accumulated content keyed by request ID, where the request ID determines which tab the chunk belongs to. Child request IDs (`{parent}-agent-{NN}`) route to the matching agent tab.
+- `agentsSpawned` event handler that creates tabs BEFORE child streams start (per the spec's Tab Creation Ordering invariant — without this, fast-completing agents have their chunks dropped because no tab claims the child request ID yet).
+- `chat_streaming` RPC accepts an `agent_tag` parameter (already present in the backend) for routing user replies to agent tabs; frontend sets the tag based on the active tab.
+- File picker selection scope per tab — ticking a file while agent N's tab is active updates only agent N's selection (per agent-browser.md § File Picker Scope). Existing `set_agent_selected_files` RPC consumes this.
+- LED row in the main tab header (per agent-browser.md § Status LEDs) — one LED per live tab plus one for main, colour-coded to streaming/complete/error state, clicking activates the tab.
+- Close affordance per agent tab — calls `close_agent_context(agent_id)` RPC (already exists), which frees the ContextManager and stability tracker; archive file persists on disk.
+
+Why this is the highest-value next increment: agent mode is technically running now (Increment A persists the data, the backend executes agents in parallel), but a user has no way to interact with running agents. Their existence surfaces only as text in the orchestrator's narration. Increment B turns agent mode from "the LLM does work in the background" into "the user sees and interacts with their team."
+
+Estimated effort: substantial — comparable to the chat panel's original implementation. New components (tab strip, LED row), per-tab state machine in the chat panel, request ID routing, RPC integration on selection and close. Likely a multi-commit deliverable.
+
+### Increment C — Tab rehydration on refresh / reconnect
+
+Implements agent-browser.md § "Refresh and Reconnect". Browser refresh kills the chat panel's per-tab state, but the backend's `_agent_contexts` registry (in-memory, scoped to the server process) survives. On `onRpcReady`, the chat panel calls `list_live_agents()` (already exists as an RPC), gets metadata for every registered agent, and reconstructs writable tabs. Conversation content for each tab loads via `get_turn_archive(turn_id)` filtered to the matching `agent_idx`.
+
+Scope:
+- Frontend `list_live_agents()` call on `onRpcReady` (initial connect and post-reconnect).
+- Per-entry tab construction with the agent's `id` as the tab identifier — same code path as `agentsSpawned`-driven tab creation, just keyed off a different event.
+- Per-tab archive load via `get_turn_archive(turn_id)` filtered to the matching `agent_idx`.
+- Per-tab LED state recomputation from archive content (last assistant message has no error metadata + every persisted edit succeeded → green; otherwise red; cyan never recovers because the frontend can't subscribe mid-stream).
+
+Smaller than Increment B because it shares infrastructure: the tab construction code already exists from B, the RPCs already exist from the backend foundation work. Just a new entry point that invokes them.
+
+### Increment D — Per-turn historical view
+
+Implements agent-browser.md § "Historical Turns". Once the user starts a new agentic turn in the main tab, the previous turn's agent tabs leave the strip. Their archives remain on disk, readable via `get_turn_archive(turn_id)`. The UI affordance: scrolling the main chat back to a previous turn surfaces a "View agents (N)" affordance beneath that turn's assistant message; clicking it populates the tab strip with read-only tabs from the archive.
+
+Scope:
+- Affordance render on previous-turn assistant messages — checks for the existence of `.ac-dc4/agents/{turn_id}/` (the spec's "did this turn spawn agents?" signal) by reading the `turn_id` field on the message and calling `get_turn_archive` to count results.
+- Click handler that loads the archive and populates read-only tabs.
+- Read-only mode for tabs — input box disabled, no LED state changes, no `chat_streaming` calls (the ContextManager is gone).
+- Leaving the historical turn (scrolling away, clicking a newer turn) removes the read-only tabs.
+
+Independent of cross-turn reconstruction — this is the per-turn audit trail many users want without the cross-turn complexity.
+
+### Increment E — Cross-turn agent history view
+
+Implements the feature D30's `agent_blocks` persistence enables. UI affordance: a control on a live agent's tab (e.g., "show full history across all turns") that walks the main store, finds turns where that agent's `id` appears in `agent_blocks`, and presents a unified view. Or equivalently: a "filter by agent id" view in the history browser.
+
+Scope:
+- Backend RPC `get_agent_history(agent_id)` that scans `history.jsonl` for assistant records with non-empty `agent_blocks` containing the matching id, then for each match calls `get_turn_archive(turn_id)` filtered to that turn's `agent_idx`. Returns the concatenated record list in turn order (chronological by user-message timestamp).
+- Frontend affordance — exact UX TBD based on B-D usage. Could be a button on the agent tab, a filter in the history browser, or both.
+
+Highest-spec, lowest-volume use case. Defer until B-D are in real use; once you've used the per-turn view for a few weeks, you'll know exactly what cross-turn affordance is missing — and `agent_blocks` will already be in the JSONL waiting.
+
+### Delivery order
+
+Increment A delivered. B+C+D form the next coherent push (they share infrastructure: per-tab state, child request routing, archive loading). E follows once B-D have shipped and seen real use. Each B/C/D/E gets its own delivery-note section here when it lands, similar to the file-picker increment notes.
 
 ## UI polish work plan — complete
 

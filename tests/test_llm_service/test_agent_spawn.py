@@ -2074,6 +2074,278 @@ class TestAgentExecutionEndToEnd:
         assert files_changed == []
 
 
+class TestAgentBlocksPersistence:
+    """Orchestrator's assistant record persists ``agent_blocks``.
+
+    Per specs4/3-llm/history.md § Cross-Turn Agent
+    Reconstruction, every assistant record produced by a turn
+    that spawned agents records the per-turn ``{id, agent_idx}``
+    mapping. The end-to-end check: enable agent mode, run a
+    chat turn whose response contains agent blocks, and assert
+    the resulting JSONL record carries the field with the right
+    shape. Without this, the on-disk archive layout
+    (``agent-NN.jsonl``) loses the link back to the
+    LLM-chosen ``id`` and across-turns reconstruction breaks.
+
+    Companion to the unit-level tests in
+    :class:`tests.test_history_store.TestAgentBlocksField`
+    which pin :meth:`HistoryStore.append_message`'s persistence
+    contract directly. This class pins the integration —
+    ``_stream_chat`` actually threads the parsed agent-block
+    summary through to the archival sink with the right shape.
+    """
+
+    AGENT_MARK = "🟧🟧🟧 AGENT"
+    AGEND_MARK = "🟩🟩🟩 AGEND"
+
+    def _build_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something useful",
+    ) -> str:
+        return (
+            f"{self.AGENT_MARK}\n"
+            f"id: {agent_id}\n"
+            f"task: {task}\n"
+            f"{self.AGEND_MARK}\n"
+        )
+
+    def _enable_agents(self, config: ConfigManager) -> None:
+        app_path = config.config_dir / "app.json"
+        app_data = json.loads(app_path.read_text())
+        app_data.setdefault("agents", {})
+        app_data["agents"]["enabled"] = True
+        app_path.write_text(json.dumps(app_data))
+        config._app_config = None
+
+    def _install_recording_stub(
+        self, service: LLMService
+    ) -> list[dict[str, Any]]:
+        """Drop agent stream impl into a no-op recorder.
+
+        We don't care what the agents do here — the test
+        verifies what the ORCHESTRATOR persisted, not what
+        the agents did. Using the recording stub avoids
+        spinning up real agent streams (with their own
+        archive writes) which would clutter the assertion
+        path.
+        """
+        recordings: list[dict[str, Any]] = []
+
+        async def _recorder(
+            request_id: str,
+            message: str,
+            files: list[str],
+            images: list[str],
+            excluded_urls: list[str] | None = None,
+            *,
+            scope: Any = None,
+            agent_key: str | None = None,
+        ) -> None:
+            recordings.append({
+                "request_id": request_id,
+                "agent_key": agent_key,
+            })
+
+        service._agent_stream_impl = _recorder
+        return recordings
+
+    async def test_orchestrator_record_carries_agent_blocks(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Single-agent turn → record carries one entry."""
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        response = (
+            "Delegating:\n\n"
+            + self._build_agent_block(
+                "agent-backend", "refactor auth"
+            )
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="please decompose"
+        )
+        await asyncio.sleep(0.3)
+
+        # Find the assistant record in the main store.
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        assistants = [
+            m for m in msgs if m.get("role") == "assistant"
+        ]
+        assert assistants, "No assistant record persisted"
+        record = assistants[-1]
+        assert record.get("agent_blocks") == [
+            {"id": "agent-backend", "agent_idx": 0},
+        ]
+
+    async def test_multiple_agents_persist_in_order(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Multi-agent turn → entries match emission order.
+
+        The reconstruction algorithm reads
+        ``agent_blocks[N].agent_idx == N`` in current
+        implementations; pin that invariant so a future
+        refactor that decoupled emission order from storage
+        index would surface as a test failure.
+        """
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        response = (
+            self._build_agent_block("agent-frontend", "ui")
+            + "\n"
+            + self._build_agent_block("agent-backend", "api")
+            + "\n"
+            + self._build_agent_block("agent-docs", "readme")
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="decompose"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        assistants = [
+            m for m in msgs if m.get("role") == "assistant"
+        ]
+        record = assistants[-1]
+        assert record.get("agent_blocks") == [
+            {"id": "agent-frontend", "agent_idx": 0},
+            {"id": "agent-backend", "agent_idx": 1},
+            {"id": "agent-docs", "agent_idx": 2},
+        ]
+
+    async def test_invalid_blocks_filtered_from_persisted(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Malformed blocks don't reach the persisted record.
+
+        Mirrors the contract that
+        :class:`TestCompletionResultAgentBlocks` pins for the
+        in-flight completion result — the persisted shape
+        matches the dispatched shape, so a frontend
+        cross-turn-reconstruction view sees the same agents
+        the streaming pipeline actually ran.
+        """
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        invalid_no_task = (
+            f"{self.AGENT_MARK}\n"
+            f"id: agent-broken\n"
+            f"{self.AGEND_MARK}\n"
+        )
+        response = (
+            self._build_agent_block("agent-good", "real work")
+            + "\n"
+            + invalid_no_task
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="mixed"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        assistants = [
+            m for m in msgs if m.get("role") == "assistant"
+        ]
+        record = assistants[-1]
+        assert record.get("agent_blocks") == [
+            {"id": "agent-good", "agent_idx": 0},
+        ]
+
+    async def test_no_agent_blocks_field_when_no_agents(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Non-agent turn → record has no ``agent_blocks`` field.
+
+        Pinned because the reconstruction algorithm explicitly
+        skips records without the field. A non-agent turn that
+        accidentally persisted an empty list would still pass
+        the algorithm's gate but waste record bytes; ensuring
+        the field is omitted matches the pre-cross-turn-
+        reconstruction record shape exactly for non-agent
+        turns.
+        """
+        # No agent mode toggle — runs as a normal turn.
+        fake_litellm.set_streaming_chunks([
+            "Just a regular response.",
+        ])
+
+        await service.chat_streaming(
+            request_id="r1", message="hi"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        assistants = [
+            m for m in msgs if m.get("role") == "assistant"
+        ]
+        record = assistants[-1]
+        assert "agent_blocks" not in record
+
+    async def test_record_carries_turn_id_alongside_agent_blocks(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """``turn_id`` and ``agent_blocks`` co-located on the record.
+
+        The reconstruction algorithm needs both fields
+        together: ``turn_id`` to look up the archive directory
+        and ``agent_blocks`` to filter to the right
+        ``agent_idx`` within it.
+        """
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        response = self._build_agent_block(
+            "agent-0", "do work"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="please"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        assistants = [
+            m for m in msgs if m.get("role") == "assistant"
+        ]
+        record = assistants[-1]
+        # Both fields present.
+        assert "turn_id" in record
+        assert "agent_blocks" in record
+        # turn_id matches the format we expect.
+        assert record["turn_id"].startswith("turn_")
+
+
 class TestAgentAssimilation:
     """Step 4 — post-agent assimilation into the parent conversation.
 
