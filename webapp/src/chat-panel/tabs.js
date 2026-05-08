@@ -311,6 +311,7 @@ export function onTabClose(panel, tabId) {
   const wasActive = panel._activeTabId === tabId;
   panel._tabs.delete(tabId);
   panel._tabLabels.delete(tabId);
+  panel._tabModes.delete(tabId);
   // Switch to Main first (if the closed tab was
   // active) so the active-tab-changed event fires
   // with a valid target. Otherwise the render below
@@ -395,6 +396,14 @@ export function renderTabStrip(panel) {
           // aren't currently looking at.
           const tab = panel._tabs.get(tabId);
           const streaming = !!(tab && tab.streaming);
+          // Tooltip carries the agent's mode so users
+          // can disambiguate at a glance — two agents
+          // tasked with similar prose differ only in
+          // mode + cross-ref state. Main tab uses its
+          // bare label (mode is reflected in the
+          // action-bar toggle).
+          const mode = panel._tabModes?.get(tabId);
+          const tooltip = mode ? `${label} (${mode})` : label;
           return html`
             <button
               class="tab-strip-tab ${active ? 'active' : ''}"
@@ -403,7 +412,7 @@ export function renderTabStrip(panel) {
               aria-busy=${streaming}
               data-tab-id=${tabId}
               @click=${() => onTabClick(panel, tabId)}
-              title=${label}
+              title=${tooltip}
             >${streaming
               ? html`<span
                   class="tab-streaming-indicator"
@@ -460,12 +469,14 @@ export function renderOverflowMenu(panel, tabs) {
         const active = tabId === panel._activeTabId;
         const tab = panel._tabs.get(tabId);
         const streaming = !!(tab && tab.streaming);
+        const mode = panel._tabModes?.get(tabId);
+        const tooltip = mode ? `${label} (${mode})` : label;
         return html`
           <button
             class="tab-strip-overflow-item ${active ? 'active' : ''}"
             role="menuitem"
             data-tab-id=${tabId}
-            title=${label}
+            title=${tooltip}
             aria-busy=${streaming}
             @click=${() => onOverflowItemClick(panel, tabId)}
           >${streaming
@@ -570,6 +581,17 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
     panel._tabLabels.set(
       tabId, deriveAgentTabLabel(agentIdx, task),
     );
+    // Mode comes from the backend's resolved value in
+    // the agentsSpawned payload — empty block.mode on
+    // the orchestrator side has already been resolved
+    // to the inherited orchestrator mode. Defensive
+    // string check tolerates older backends that don't
+    // populate the field.
+    const blockMode =
+      typeof block.mode === 'string' ? block.mode : '';
+    if (blockMode) {
+      panel._tabModes.set(tabId, blockMode);
+    }
     anySpawned = true;
   }
   if (anySpawned) {

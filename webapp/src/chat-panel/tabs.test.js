@@ -10,6 +10,7 @@ import {
   publishFakeRpc,
   pushEvent,
   seedLabeledTab,
+  seedLabeledTabWithMode,
   seedTab,
   settle,
 } from './test-helpers.js';
@@ -986,6 +987,227 @@ describe('ChatPanel tab close — guards', () => {
     expect(() => p._onTabClose('')).not.toThrow();
     expect(() => p._onTabClose(42)).not.toThrow();
     expect(p._tabs.has('agent-0')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mode storage and tooltip enrichment (Scope B commit 2)
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel tab mode storage', () => {
+  it('_tabModes initialized as an empty Map', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(p._tabModes).toBeInstanceOf(Map);
+    expect(p._tabModes.size).toBe(0);
+  });
+
+  it('agentsSpawned populates _tabModes from payload', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('agents-spawned', {
+      turn_id: 'turn_001',
+      parent_request_id: 'r-main',
+      agent_blocks: [
+        {
+          id: 'frontend',
+          task: 'refactor auth',
+          agent_idx: 0,
+          mode: 'code',
+        },
+        {
+          id: 'docs',
+          task: 'update specs',
+          agent_idx: 1,
+          mode: 'doc+xref',
+        },
+      ],
+    });
+    await settle(p);
+    expect(p._tabModes.get('frontend')).toBe('code');
+    expect(p._tabModes.get('docs')).toBe('doc+xref');
+  });
+
+  it('payload without mode field leaves entry absent', async () => {
+    // Older backends that don't ship the mode field in
+    // the broadcast payload — the tab still spawns, just
+    // without a tooltip suffix.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('agents-spawned', {
+      turn_id: 'turn_001',
+      parent_request_id: 'r-main',
+      agent_blocks: [
+        { id: 'old-agent', task: 't', agent_idx: 0 },
+      ],
+    });
+    await settle(p);
+    expect(p._tabs.has('old-agent')).toBe(true);
+    expect(p._tabModes.has('old-agent')).toBe(false);
+  });
+
+  it('non-string mode value silently dropped', async () => {
+    // Defensive — a malformed payload mustn't crash the
+    // spawn handler.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('agents-spawned', {
+      turn_id: 'turn_001',
+      parent_request_id: 'r-main',
+      agent_blocks: [
+        { id: 'a', task: 't', agent_idx: 0, mode: 42 },
+        { id: 'b', task: 't', agent_idx: 1, mode: null },
+      ],
+    });
+    await settle(p);
+    expect(p._tabs.has('a')).toBe(true);
+    expect(p._tabs.has('b')).toBe(true);
+    expect(p._tabModes.has('a')).toBe(false);
+    expect(p._tabModes.has('b')).toBe(false);
+  });
+
+  it('closing a tab clears its mode entry', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTabWithMode(p, 'agent-0', 'Agent 00: t', 'code');
+    p.requestUpdate();
+    await settle(p);
+    expect(p._tabModes.has('agent-0')).toBe(true);
+    p._onTabClose('agent-0');
+    await settle(p);
+    expect(p._tabModes.has('agent-0')).toBe(false);
+  });
+
+  it('all four valid mode strings round-trip', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('agents-spawned', {
+      turn_id: 'turn_001',
+      parent_request_id: 'r-main',
+      agent_blocks: [
+        { id: 'c', task: 't', agent_idx: 0, mode: 'code' },
+        { id: 'd', task: 't', agent_idx: 1, mode: 'doc' },
+        {
+          id: 'cx', task: 't', agent_idx: 2, mode: 'code+xref',
+        },
+        {
+          id: 'dx', task: 't', agent_idx: 3, mode: 'doc+xref',
+        },
+      ],
+    });
+    await settle(p);
+    expect(p._tabModes.get('c')).toBe('code');
+    expect(p._tabModes.get('d')).toBe('doc');
+    expect(p._tabModes.get('cx')).toBe('code+xref');
+    expect(p._tabModes.get('dx')).toBe('doc+xref');
+  });
+});
+
+describe('ChatPanel tab tooltip enrichment', () => {
+  it('main tab tooltip is just the label', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 0');
+    p.requestUpdate();
+    await settle(p);
+    const mainBtn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="main"]',
+    );
+    expect(mainBtn.getAttribute('title')).toBe('Main');
+  });
+
+  it('agent tab without mode shows bare label', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTab(p, 'agent-0', 'Agent 00: refactor');
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(btn.getAttribute('title')).toBe(
+      'Agent 00: refactor',
+    );
+  });
+
+  it('agent tab with mode includes mode in tooltip', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTabWithMode(
+      p, 'agent-0', 'Agent 00: refactor', 'code',
+    );
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(btn.getAttribute('title')).toBe(
+      'Agent 00: refactor (code)',
+    );
+  });
+
+  it('cross-ref mode strings render verbatim in tooltip', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTabWithMode(
+      p, 'agent-0', 'Agent 00: span', 'doc+xref',
+    );
+    p.requestUpdate();
+    await settle(p);
+    const btn = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="agent-0"]',
+    );
+    expect(btn.getAttribute('title')).toBe(
+      'Agent 00: span (doc+xref)',
+    );
+  });
+
+  it('overflow menu items include mode in tooltip', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTabWithMode(
+      p, 'agent-0', 'Agent 00: refactor', 'code+xref',
+    );
+    p.requestUpdate();
+    await settle(p);
+    p.shadowRoot.querySelector('.tab-strip-overflow').click();
+    await settle(p);
+    const item = p.shadowRoot.querySelector(
+      '.tab-strip-overflow-item[data-tab-id="agent-0"]',
+    );
+    expect(item.getAttribute('title')).toBe(
+      'Agent 00: refactor (code+xref)',
+    );
+  });
+
+  it('mixed-mode tabs each show their own mode', async () => {
+    const p = mountPanel();
+    await settle(p);
+    seedLabeledTabWithMode(
+      p, 'a', 'Agent 00: a', 'code',
+    );
+    seedLabeledTabWithMode(
+      p, 'b', 'Agent 01: b', 'doc',
+    );
+    seedLabeledTabWithMode(
+      p, 'c', 'Agent 02: c', 'code+xref',
+    );
+    p.requestUpdate();
+    await settle(p);
+    const a = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="a"]',
+    );
+    const b = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="b"]',
+    );
+    const c = p.shadowRoot.querySelector(
+      '.tab-strip-tab[data-tab-id="c"]',
+    );
+    expect(a.getAttribute('title')).toBe('Agent 00: a (code)');
+    expect(b.getAttribute('title')).toBe('Agent 01: b (doc)');
+    expect(c.getAttribute('title')).toBe(
+      'Agent 02: c (code+xref)',
+    );
   });
 });
 

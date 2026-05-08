@@ -93,6 +93,23 @@ export function seedLabeledTab(panel, tabId, label) {
   }
 }
 
+/**
+ * Same as `seedLabeledTab` but also stores a mode string so
+ * the tab strip / overflow menu / LED tooltip render the
+ * full ``<label> (<mode>)`` form. Mode strings are one of
+ * ``code``, ``doc``, ``code+xref``, ``doc+xref`` (matching
+ * the backend's resolved values).
+ */
+export function seedLabeledTabWithMode(panel, tabId, label, mode) {
+  panel._tabs.set(tabId, panel._makeTabState());
+  if (typeof label === 'string' && label) {
+    panel._tabLabels.set(tabId, label);
+  }
+  if (typeof mode === 'string' && mode) {
+    panel._tabModes.set(tabId, mode);
+  }
+}
+
 afterEach(() => {
   while (_mounted.length) {
     const p = _mounted.pop();

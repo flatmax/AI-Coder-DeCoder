@@ -169,6 +169,18 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._tabLabels = new Map();
     this._tabLabels.set('main', 'Main');
 
+    // Per-agent mode strings — one of 'code', 'doc',
+    // 'code+xref', 'doc+xref'. Populated by
+    // spawnAgentTabs from the agentsSpawned payload's
+    // resolved mode field. Stable for the agent's
+    // lifetime (mode is fixed at spawn time per spec
+    // ``specs4/7-future/parallel-agents.md``).
+    // Surfaced in the tab strip tooltip and the LED
+    // row's hover state. Main tab has no entry — the
+    // orchestrator's mode is shown via the action-bar
+    // mode toggle, not via tooltip.
+    this._tabModes = new Map();
+
     // Overflow menu open state. Reactive (declared in
     // properties.js) rather than per-tab because it's a
     // UI-level dropdown — every tab sees the same menu.
