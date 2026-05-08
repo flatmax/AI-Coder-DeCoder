@@ -57,6 +57,34 @@ Three events end a tab's life:
 
 An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive and no new agentic turn has started. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
 
+### Refresh and Reconnect
+
+A browser refresh or WebSocket reconnect destroys and rebuilds the chat panel without ending the backend session. The backend's `_agent_contexts` registry is in-memory, scoped to the server process, and unaffected by frontend reload. Per [parallel-agents.md § Agent lifetime](../7-future/parallel-agents.md#agent-lifetime), live agents are part of the team until application exit; refresh is not application exit.
+
+The chat panel rehydrates live tabs at the same moment it loads main-conversation history:
+
+- On `onRpcReady` (initial connect or post-reconnect), the panel calls `list_live_agents()` (see [parallel-agents.md § Backend RPCs](../7-future/parallel-agents.md#backend-rpcs)). The response carries one entry per registered agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}`.
+- For each entry, the panel creates a writable tab keyed by the agent's `id` — the same key that would be used had the tab been created by an `agentsSpawned` event during the spawn turn. Tab creation is idempotent, so a subsequent `agentsSpawned` for the same id is a no-op.
+- For each tab, the panel calls `get_turn_archive(turn_id)` (filtered to the matching `agent_idx`) to populate the message list. The archive is the source of truth for conversation content; the live `ContextManager` accepts new messages from this point forward.
+- Tabs are **writable**, not read-only. The distinction from historical tabs (see [Historical Turns](#historical-turns)) is that live tabs target a `ContextManager` that is still alive on the backend. The user can reply, grant files via the picker while the tab is active, or close the tab to kill the agent — the same affordances available before refresh.
+
+What is genuinely lost across refresh:
+
+- Per-tab input draft (textarea content)
+- Per-tab scroll position within the message list
+- In-flight streaming buffer for any stream active at refresh time — backend continues streaming to the now-disconnected websocket; on reconnect, the partial response is recoverable only via the archive once `streamComplete` lands. The reconstructed tab opens at the bottom of the archive's last persisted message; the in-flight tail is not replayed
+- LED state computed from the most recent `streamComplete` event — recomputed from archive content on rehydration: green if the last persisted assistant message has no error metadata and every persisted edit succeeded, red otherwise. Cyan (active stream) is never recovered across refresh because the frontend cannot subscribe mid-stream
+
+What is preserved:
+
+- Agent identity (`id`)
+- Agent mode and cross-reference flag
+- Agent's full conversation as persisted to the archive
+- Agent's file context, file selection, stability tracker, and provider-cache warmth (all backend-resident)
+- The agent's tab badge if it had multiple iterations within the same turn (computed from archive content)
+
+If `list_live_agents()` returns an empty list (no agents currently registered), the chat panel renders only the Main tab. This is indistinguishable from a fresh session that has never spawned agents.
+
 ## Interaction
 
 Agents are conversational. If an agent needs something from the user, it emits a normal assistant message saying so — "I need to see `src/auth.py` to understand the current token flow" — and stops streaming. From the protocol's perspective this is indistinguishable from an agent that finished its work. The user sees the message in that agent's tab and decides what to do:
@@ -178,6 +206,7 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 
 - The chat panel is one component. Multiple tabs are additional per-tab state slots, not duplicated components.
 - Tab switching is pure UI — no backend notification, no tracker invalidation, no cache eviction.
+- Tab enumeration is NOT pure UI. The set of live tabs at any moment is a function of the backend's `_agent_contexts` registry, populated via `agentsSpawned` events during spawn turns and via `list_live_agents()` on `onRpcReady` after refresh or reconnect. The frontend never invents tabs and never persists tabs across refresh — it always asks the backend.
 - The Main tab's identifier is always `"main"`. Agent tab identifiers are the agent's LLM-chosen id directly. No overlap (the literal `"main"` is reserved), no parsing required to recover identity from the tab id.
 - Streaming is routed by request ID. A chunk's destination tab is determined before the chunk is applied — switching tabs mid-stream never routes chunks to the wrong conversation.
 - File picker selection is per-tab. Changing a tab's selection never affects another tab's ContextManager.

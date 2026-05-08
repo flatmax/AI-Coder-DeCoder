@@ -75,13 +75,16 @@ This gives the orchestrator's narration a structured shape: when the user reads 
 
 ### Backend RPCs
 
-The backend exposes one RPC to support historical browsing:
+The backend exposes two RPCs to support browsing:
 
 - `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
+- `list_live_agents()` — returns metadata for every agent currently registered in the backend's `_agent_contexts`. One entry per live agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}` — enough for the chat panel to reconstruct tabs (and their child request id namespace) without reading any conversation content. Archive content is fetched separately via `get_turn_archive` when the user activates the tab.
 
 No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and surfaces historical agent tabs.
 
 Archived conversations are NOT used during session restore. Session restore reads only `history.jsonl` and produces the same in-memory context as before — the user continues where they left off, seeing only their own conversation. Historical agent tabs are populated on demand via `get_turn_archive` when the user navigates to a previous turn, not eagerly at startup.
+
+`list_live_agents` is the rehydration path for browser refresh and reconnect. The chat panel calls it once on `onRpcReady` and creates a writable tab for every entry the backend reports. Tabs are writable (not read-only) because the backend's `ContextManager` is still alive and can accept new messages — the frontend per-tab state (input draft, scroll position, accumulated streaming buffer) is the only thing genuinely lost across refresh, and it is per-tab UI state that has never been persisted in any tab type. Conversation messages for a rehydrated tab are loaded via `get_turn_archive(turn_id)` filtered to the matching `agent_idx`.
 
 ## Core Principle: Anchor-Based Non-Overlapping Edits
 
@@ -297,6 +300,8 @@ IDs are arbitrary non-empty strings chosen by the orchestrator. The system promp
 ### Agent lifetime
 
 Agents linger for the life of the session and survive across user-initiated session resets. Once spawned, an agent's `ContextManager`, `StabilityTracker`, file context, file selection, and identity all persist. There is no idle timer, no explicit close block, and no garbage collection — agents stay on the sideline as part of the team until the application exits. The user manages agent population implicitly by directing the orchestrator (asking it to spawn new agents, retask existing ones, or leave them alone).
+
+Browser refresh and WebSocket reconnect do not end agent lifetime. The backend's `_agent_contexts` registry lives in the server process; the frontend chat panel is the only thing destroyed and rebuilt across refresh. On reconnect, the chat panel calls `list_live_agents()` and reconstructs writable tabs for every registered agent — see [agent-browser.md § Refresh and Reconnect](../5-webapp/agent-browser.md#refresh-and-reconnect). Per-tab UI state (input draft, scroll position, in-flight streaming buffer) is genuinely lost across refresh because it is frontend-only state that has never been persisted; everything backend-side (conversation, file context, tracker, identity) survives.
 
 `new_session` clears each agent's *chat history* — the per-agent conversation messages — but does NOT tear down the agent itself. The agent's `ContextManager` retains its file context, the `StabilityTracker` keeps its tier assignments and provider-cache state, and the agent remains addressable by its id for the next turn. This mirrors the main conversation's `new_session` behaviour: the main chat history is wiped, but the main `ContextManager` survives intact.
 
