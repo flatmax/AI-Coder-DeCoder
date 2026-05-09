@@ -17,9 +17,9 @@ The currently-active tab is visually distinguished. Every input affordance on th
 
 Each tab carries three inline affordances, all invisible by default and fading in on hover / active / focus:
 
-- **Streaming indicator** — small pulsing dot on the left of the label when the tab has an in-flight stream. Visible on every tab regardless of active state, so users see work happening on tabs they aren't currently viewing.
-- **📊 Context icon** — opens the Context overlay scoped to this tab's conversation. Always rendered (Main and every agent), since every conversation has its own breakdown to view. Clicking activates the tab AND switches the dialog to Context; clicking again on the already-active tab still re-opens Context, treating the icon as a "show me Context for this" gesture rather than a state toggle.
-- **✕ Close icon** — agent tabs only. Main is never closable. Closes the tab and frees the backend scope.
+- **📊 Context icon** — leftmost, before the label. Opens the Context overlay scoped to this tab's conversation. Always rendered (Main and every agent), since every conversation has its own breakdown to view. Clicking activates the tab AND switches the dialog to Context; clicking again on the already-active tab still re-opens Context, treating the icon as a "show me Context for this" gesture rather than a state toggle. Placed leftmost so it remains visible even when long agent labels truncate the right edge of the tab.
+- **Streaming indicator** — small pulsing dot between the context icon and the label when the tab has an in-flight stream. Visible on every tab regardless of active state, so users see work happening on tabs they aren't currently viewing.
+- **✕ Close icon** — rightmost, agent tabs only. Main is never closable. Closes the tab and frees the backend scope.
 
 The 📊 icon dispatches a bubbling `request-dialog-tab` event with `{tab: 'context'}` which the app shell catches and routes through `_switchTab`. The Context tab listens independently for `active-tab-changed` — that's the channel that drives its rescope, so the icon click and a normal tab click produce identical Context content for that tab.
 

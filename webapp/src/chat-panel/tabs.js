@@ -453,12 +453,7 @@ export function renderTabStrip(panel) {
               data-tab-id=${tabId}
               @click=${() => onTabClick(panel, tabId)}
               title=${tooltip}
-            >${streaming
-              ? html`<span
-                  class="tab-streaming-indicator"
-                  aria-hidden="true"
-                ></span>`
-              : ''}${label}<span
+            ><span
               class="tab-context"
               role="button"
               tabindex="0"
@@ -475,7 +470,12 @@ export function renderTabStrip(panel) {
                   onTabContextClick(panel, tabId);
                 }
               }}
-            >📊</span>${closable
+            >📊</span>${streaming
+              ? html`<span
+                  class="tab-streaming-indicator"
+                  aria-hidden="true"
+                ></span>`
+              : ''}${label}${closable
               ? html`<span
                   class="tab-close"
                   role="button"
