@@ -1,6 +1,6 @@
 # AC⚡DC — AI-assisted Code editing tool, De-Coder
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
-**Reimplementation in progress.** This tree is a clean-room rebuild of AC⚡DC against a new specification suite. The user-facing feature set below describes the target — individual features land layer by layer and are tracked in [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md).
+**Reimplementation in progress.** This tree is a clean-room rebuild of AC⚡DC against a new specification suite. The user-facing feature set below describes the target — individual features land layer by layer and are tracked in [`specs4/impl-history/work-log.md`](specs4/impl-history/work-log.md).
 
 ## Features
 
@@ -407,7 +407,7 @@ A `.ac-dc4/` directory is created at the repo root on first run and added to `.g
 | `doc_cache/` | Keyword-enriched document outline cache (mtime-keyed sidecars) |
 | `tex_preview/` | Transient TeX compilation working directory (cleaned on startup) |
 | `snippets.json` | Optional per-repo override of quick-insert snippets |
-The directory name is `.ac-dc4/` (not `.ac-dc/`) deliberately — this reimplementation coexists with the previous AC-DC on the same checkout without state collisions. See [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) decision D17.
+The directory name is `.ac-dc4/` (not `.ac-dc/`) deliberately — this reimplementation coexists with the previous AC-DC on the same checkout without state collisions. See [`specs4/impl-history/decisions.md`](specs4/impl-history/decisions.md) decision D17.
 ---
 ## Development
 ### Prerequisites
