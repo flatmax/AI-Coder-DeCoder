@@ -1,6 +1,6 @@
 # Release — PyInstaller binaries on merge from dev4b → master.
 #
-# Triggered automatically when a pull request from the `dev4b`
+# Triggered automatically when a pull request from the `dev4-agent`
 # branch is merged into `master`. Also exposes `workflow_dispatch`
 # for manual reruns. Never triggers on direct pushes to master or
 # merges from other branches.
@@ -46,7 +46,7 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
-       github.event.pull_request.head.ref == 'dev4b')
+       github.event.pull_request.head.ref == 'dev4-agent')
     strategy:
       fail-fast: false
       matrix:
