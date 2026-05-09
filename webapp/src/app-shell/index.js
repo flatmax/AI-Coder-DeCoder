@@ -528,6 +528,11 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'request-dialog-tab', this._onRequestDialogTab,
     );
+    this._onRequestDialogMinimize =
+      this._onRequestDialogMinimize.bind(this);
+    window.addEventListener(
+      'request-dialog-minimize', this._onRequestDialogMinimize,
+    );
   }
 
   disconnectedCallback() {
@@ -612,6 +617,11 @@ export class AppShell extends JRPCClient {
     if (this._onRequestDialogTab) {
       window.removeEventListener(
         'request-dialog-tab', this._onRequestDialogTab,
+      );
+    }
+    if (this._onRequestDialogMinimize) {
+      window.removeEventListener(
+        'request-dialog-minimize', this._onRequestDialogMinimize,
       );
     }
     if (this._reconnectTimer) {
@@ -1058,6 +1068,10 @@ export class AppShell extends JRPCClient {
     const tab = event?.detail?.tab;
     if (typeof tab !== 'string' || !tab) return;
     this._switchTab(tab);
+  }
+
+  _onRequestDialogMinimize() {
+    this._toggleMinimize();
   }
 
   // ---------------------------------------------------------------

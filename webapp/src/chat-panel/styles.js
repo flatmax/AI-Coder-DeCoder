@@ -38,19 +38,16 @@ export const STYLES = css`
     line-height: 1.5;
   }
 
-  /* Tab strip — D21 Phase B1 + B2. Renders above the
-   * messages area when multiple tabs exist. Hidden
-   * entirely in single-tab operation (the common
-   * case) so it doesn't consume vertical space
-   * users will never benefit from. Appears the
-   * moment a second tab spawns.
+  /* Tab strip — renders in normal flow at the top of
+   * the chat panel. Always rendered (even with just
+   * the Main tab) because the per-tab 📊 Context
+   * icon is the only path to the Context overlay,
+   * now that the dialog-level Context icon has been
+   * removed.
    *
-   * B2 adds horizontal overflow scrolling for when
-   * many agent tabs exceed the viewport width. The
-   * outer .tab-strip is a positioning context; the
-   * inner .tab-strip-scroll is the scrollable row
-   * of buttons, and .tab-strip-overflow is pinned
-   * at the right as an always-available direct-jump
+   * Inner .tab-strip-scroll is the scrollable row
+   * of buttons; .tab-strip-overflow is pinned at
+   * the right as an always-available direct-jump
    * affordance. */
   .tab-strip {
     flex-shrink: 0;
@@ -308,8 +305,43 @@ export const STYLES = css`
     align-items: center;
     gap: 0.35rem;
     padding: 0.3rem 0.75rem;
-    background: rgba(22, 27, 34, 0.4);
-    border-bottom: 1px solid rgba(240, 246, 252, 0.06);
+    background: rgba(22, 27, 34, 0.6);
+    border-bottom: 1px solid rgba(240, 246, 252, 0.1);
+    /* The LED row is the dialog drag handle now that
+     * the dialog header has been removed. The cursor
+     * signals affordance; pointerdown handler in
+     * dialog.js detects drag origin via the
+     * data-drag-handle attribute. Clicks on
+     * individual LED dots and right-side icons skip
+     * drag via the closest('button') guard. */
+    cursor: grab;
+  }
+  .dialog.dragging .led-row {
+    cursor: grabbing;
+  }
+  .led-row-spacer {
+    flex: 1;
+    min-width: 0.5rem;
+  }
+  .led-row-icon {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary, #8b949e);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    line-height: 1;
+    opacity: 0.7;
+    transition: opacity 120ms ease,
+      background 120ms ease,
+      color 120ms ease;
+  }
+  .led-row-icon:hover {
+    opacity: 1;
+    background: rgba(240, 246, 252, 0.08);
+    color: var(--text-primary, #c9d1d9);
   }
   .led-dot {
     flex-shrink: 0;

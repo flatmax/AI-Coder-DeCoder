@@ -102,8 +102,41 @@ export const APP_SHELL_STYLES = css`
     }
     .dialog.minimized .dialog-body,
     .dialog.minimized .reconnect-banner,
-    .dialog.minimized .compaction-bar {
+    .dialog.minimized .compaction-bar,
+    .dialog.minimized .convert-fab {
       display: none;
+    }
+    /* Convert FAB — floating button at bottom-left
+     * of the dialog. Replaces the dialog-header
+     * Convert icon. Hidden when the backend reports
+     * markitdown unavailable (the parent template
+     * gates rendering). */
+    .convert-fab {
+      position: absolute;
+      bottom: 0.75rem;
+      left: 0.75rem;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+      cursor: pointer;
+      font-size: 1.1rem;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 12;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      transition: background 120ms ease,
+        border-color 120ms ease,
+        transform 120ms ease;
+    }
+    .convert-fab:hover {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: var(--accent-primary, #58a6ff);
+      transform: scale(1.05);
     }
     .dialog.dragging,
     .dialog.resizing {
@@ -111,62 +144,6 @@ export const APP_SHELL_STYLES = css`
        * during a drag so the pointer tracks 1:1. */
       user-select: none;
       transition: none;
-    }
-    .dialog-header {
-      display: flex;
-      gap: 0.25rem;
-      padding: 0.5rem;
-      border-bottom: 1px solid rgba(240, 246, 252, 0.1);
-      align-items: center;
-      /* The header background (not its buttons) is the drag
-       * handle. Buttons override cursor:default. */
-      cursor: grab;
-    }
-    .dialog.dragging .dialog-header {
-      cursor: grabbing;
-    }
-    .dialog-header .tab-button {
-      cursor: pointer;
-    }
-    /* Tab groups — left group holds the conversational tabs
-     * (Chat, Context); right group holds icon-only utility
-     * tabs (Convert, Settings) and the minimize button.
-     * margin-left: auto on the right group pushes it to the
-     * far edge regardless of how many tabs are in either
-     * group. */
-    .dialog-header .tab-group-left {
-      display: flex;
-      gap: 0.25rem;
-      align-items: center;
-    }
-    .dialog-header .tab-group-right {
-      display: flex;
-      gap: 0.25rem;
-      align-items: center;
-      margin-left: auto;
-    }
-    /* Icon-only tab variant — no text label, square-ish hit
-     * area. Used for Settings and Convert in the right group;
-     * the icon alone carries the meaning, with title +
-     * aria-label providing accessible names. */
-    .dialog-header .tab-button.icon-only {
-      padding: 0.4rem 0.55rem;
-      font-size: 1rem;
-      line-height: 1;
-    }
-    .dialog-header .minimize-button {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-primary, #c9d1d9);
-      padding: 0.4rem 0.6rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.875rem;
-      opacity: 0.7;
-    }
-    .dialog-header .minimize-button:hover {
-      opacity: 1;
-      background: rgba(240, 246, 252, 0.05);
     }
 
 

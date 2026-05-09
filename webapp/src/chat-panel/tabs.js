@@ -397,17 +397,16 @@ export function onTabClose(panel, tabId) {
 // ---------------------------------------------------------------
 
 /**
- * Render the tab strip. Returns an empty template
- * when only the main tab exists — the strip consumes
- * vertical space, and users running single-agent
- * operation (the common case) shouldn't pay that
- * cost. The strip appears the moment a second tab
- * materialises.
+ * Render the tab strip. Always rendered — even with
+ * just the Main tab — because the strip carries the
+ * per-tab 📊 Context icon, which is the only path
+ * to the Context overlay now that the dialog-level
+ * icon has been removed. With the strip projected
+ * into the dialog header (via negative-top
+ * positioning), the single-Main-tab case takes no
+ * extra vertical real estate.
  */
 export function renderTabStrip(panel) {
-  if (panel._tabs.size <= 1) {
-    return '';
-  }
   // Iteration order of a Map is insertion order, so
   // 'main' comes first and agent tabs follow in
   // spawn order.

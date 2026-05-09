@@ -877,10 +877,16 @@ describe('ChatPanel agent tab spawning — tab creation', () => {
     expect(p._activeTabId).toBe('main');
   });
 
-  it('tab strip becomes visible after first spawn', async () => {
+  it('tab strip grows after first spawn', async () => {
+    // Strip is always present (per spec, the per-tab
+    // 📊 Context icon is the only path to the Context
+    // overlay). Spawning the first agent grows it from
+    // 1 button (Main) to 2 (Main + agent-0).
     const p = mountPanel();
     await settle(p);
-    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
+    ).toBe(1);
     const reqId = await startMainStream(p);
     pushEvent('stream-complete', {
       requestId: reqId,

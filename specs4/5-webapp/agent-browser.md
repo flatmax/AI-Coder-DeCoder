@@ -15,15 +15,12 @@ Tab labels carry the agent index plus a short summary derived from the spawn blo
 
 The currently-active tab is visually distinguished. Every input affordance on the chat panel (textarea, send button, snippet drawer, file picker bindings) targets the active tab's conversation.
 
-Each tab carries three inline affordances, all invisible by default and fading in on hover / active / focus:
+Each tab carries two inline affordances, all invisible by default and fading in on hover / active / focus:
 
 - **Streaming indicator** — small pulsing dot on the left of the label when the tab has an in-flight stream. Visible on every tab regardless of active state, so users see work happening on tabs they aren't currently viewing.
-- **📊 Context icon** — opens the dialog's Context overlay scoped to this tab's conversation. Always rendered (Main and every agent), since every conversation has its own breakdown to view. Clicking activates the tab AND switches the dialog to Context; clicking again on the already-active tab still re-opens Context, treating the icon as a "show me Context for this" gesture rather than a state toggle.
 - **✕ Close icon** — agent tabs only. Main is never closable. Closes the tab and frees the backend scope.
 
-The 📊 icon dispatches a bubbling `request-dialog-tab` event with `{tab: 'context'}` which the app shell catches and routes through `_switchTab`. The Context tab listens independently for `active-tab-changed` — that's the channel that drives its rescope, so the icon click and a normal tab click produce identical Context content for that tab.
-
-Rationale: with Chat removed from the dialog header tab bar (see [shell.md § Tab Bar Layout](shell.md#tab-bar-layout)), per-tab Context affordances become more important — the Context overlay is no longer "next to" the chat tabs visually, so each conversation needs its own discoverable path into its own breakdown. The icon's hover-only visibility keeps the strip uncluttered when users aren't reaching for it.
+There is no per-tab Context icon. The Context overlay is reached via the 📊 icon on the LED row's right edge (see [shell.md § Layout](shell.md#layout)) — clicking it opens Context scoped to whichever tab is currently active. This keeps the tab strip uncluttered: the Context entry point is one icon shared across all tabs, not N icons that fade in on hover.
 
 ## Status LEDs
 

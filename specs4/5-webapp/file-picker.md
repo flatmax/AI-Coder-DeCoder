@@ -37,6 +37,12 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 - Every row displays a native browser tooltip on hover
 - Format — full path and node name
 - Root node falls back to repo name
+## Toolbar Layout
+
+Top toolbar carries (left to right): three sort glyphs, ⚙️ Settings, then the git action group (📋 copy diff, 💾 commit, ⚠️ reset, 🔍 review when not active). Sort and git buttons are icon-only — text labels were dropped when the dialog header was removed and the picker toolbar absorbed Settings. Tooltips remain for discoverability.
+
+The Settings button dispatches `request-dialog-tab` with `{tab: 'settings'}`. This is the sole entry point to Settings now that the dialog header is gone.
+
 ## Sorting
 Three sort modes selectable via buttons in the filter bar:
 | Mode | Behavior |

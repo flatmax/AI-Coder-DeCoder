@@ -96,15 +96,34 @@ All dispatch to window-level custom events that the relevant child components li
 
 The dialog is a draggable, resizable foreground panel hosting the tab bar and tab bodies. It sits above the viewer background layer (z-index 10 vs 0–1) so it always renders on top regardless of what the viewer's internal positioning does. Left-docked by default; first drag or first bottom/corner resize undocks it into an explicit rectangle.
 
-### Tab Bar Layout
+### Layout
 
-The dialog header holds **only overlay tabs**, all rendered icon-only on a single right-aligned group: 📊 Context, 📄 Convert (when available), ⚙️ Settings, ▾ minimize. Chat is the **default body** — when no overlay tab is active, the chat panel is shown. There is no Chat button.
+The dialog has no header bar. The chat panel's existing rows — tab strip, then LED row, then message area — sit directly at the top of the dialog body.
 
-`margin-left: auto` on the right group keeps the controls pushed to the far edge regardless of viewport width and regardless of how many tabs are present (Convert is conditional).
+**Tab strip** (top of chat panel): Main + one per agent. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present, since closing the dialog header removed the alternative entry points to per-tab affordances.
 
-Rationale: Settings and Convert are infrequent destinations — Settings is touched once per config change, Convert is a one-shot task per document. Context is also occasional. Demoting all three to icon-only and treating Chat as the always-visible default reclaims horizontal space for the dialog body and removes a redundant "where am I" affordance — the user is on Chat unless they explicitly navigated elsewhere.
+**LED row** (immediately below the tab strip): the relief surface that doubles as the dialog drag handle and the home for utility icons.
 
-Returning to chat is via the **back arrow** rendered in each overlay tab's own header (see `context-tab.md`, `settings.md`, `doc-convert.md`). The back arrow dispatches a `request-dialog-tab` event with `{tab: 'files'}` (legacy storage key, retained for migration safety) which the shell catches and routes through `_switchTab`.
+- Left side: one LED dot per tab reflecting that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a LED activates the corresponding tab.
+- Right side: 📊 Context icon and ▾ minimize button. Both are flush-right, separated from the LEDs by a flex spacer.
+
+The **📊 Context icon** opens the Context overlay scoped to the active conversation. The Context tab listens for `active-tab-changed` and rescopes accordingly; clicking the icon dispatches `request-dialog-tab` with `{tab: 'context'}` and the shell flips dialogs without changing which chat tab is active.
+
+The **▾ minimize button** dispatches `request-dialog-minimize` which the shell routes through its existing minimize toggle.
+
+**Convert FAB**: floating circular button at bottom-left of the dialog. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
+
+**Settings**: lives in the file picker's top toolbar (a ⚙️ button between the sort glyphs and the git actions row). Clicking dispatches `request-dialog-tab` with `{tab: 'settings'}`.
+
+**Drag**: the dialog as a whole listens for pointerdown. Drag is initiated only when the pointer's `composedPath()` walks through an element with `data-drag-handle="true"` AND no button. Today only the LED row carries that attribute. This means:
+
+- Pointerdown on a LED dot, the Context icon, or the minimize button — the closest('button') guard short-circuits, no drag.
+- Pointerdown on the LED row's background — drag begins.
+- Pointerdown anywhere else in the dialog (tab strip buttons, message area, picker, etc.) — no drag, normal click handling.
+
+Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
+
+**Earlier attempt note**: an earlier iteration tried to keep a dialog header and project the chat tab strip up into it via absolute positioning. The strip rendered offscreen or behind the header due to shadow-DOM stacking-context constraints. The revised approach removes the header outright; tabs and LEDs sit at the top of the chat panel as normal flow, and utility icons relocate to the LED row's right edge or to FAB positions.
 
 ### Layout Modes
 

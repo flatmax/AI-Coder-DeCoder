@@ -35,21 +35,45 @@ export function getDialogRect(host) {
 }
 
 /**
- * Begin dragging from a header pointerdown. Skips when the
- * pointer is on a button inside the header — tab buttons
- * and the minimize button handle their own clicks.
+ * Begin dragging from a pointerdown on the dialog. The
+ * dialog header has been removed, so drag detection now
+ * walks the composed event path looking for an element
+ * with `data-drag-handle="true"`. Today that's the chat
+ * panel's LED row (the relief surface above the message
+ * list). Clicks on buttons inside that row — LEDs, the
+ * Context icon, the minimize button — skip drag because
+ * the closest('button') guard runs first.
+ *
+ * Listening at the dialog level means we don't have to
+ * pierce shadow DOM with explicit listener installation
+ * on every chat-panel mount. The composed pointerdown
+ * crosses the shadow boundary by default.
  */
 export function onHeaderPointerDown(host, event) {
   if (event.button !== 0) return;
-  // closest('button') lets a click anywhere on a button
-  // (including nested icons if we add them later) skip drag.
-  if (
-    event.target
-    && typeof event.target.closest === 'function'
-    && event.target.closest('button')
-  ) {
-    return;
+  // Skip drag if the pointer landed on a button (LEDs,
+  // Context icon, minimize button — anything interactive
+  // inside the drag-handle row).
+  const path = typeof event.composedPath === 'function'
+    ? event.composedPath()
+    : [event.target].filter(Boolean);
+  for (const el of path) {
+    if (!(el instanceof Element)) continue;
+    if (el.tagName === 'BUTTON') return;
   }
+  // Now confirm the pointer landed inside a marked drag
+  // handle. Without this check, pointerdowns on the
+  // message list, file picker, etc. would all start a
+  // drag.
+  let isHandle = false;
+  for (const el of path) {
+    if (!(el instanceof Element)) continue;
+    if (el.getAttribute && el.getAttribute('data-drag-handle') === 'true') {
+      isHandle = true;
+      break;
+    }
+  }
+  if (!isHandle) return;
   const rect = getDialogRect(host);
   if (!rect) return;
   host._drag = {

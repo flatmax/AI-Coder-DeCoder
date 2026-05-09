@@ -109,44 +109,21 @@ export function renderTemplate(host) {
     <div
       class="dialog ${host._undockedPos ? 'floating' : ''} ${host._minimized ? 'minimized' : ''}"
       style=${host._dialogInlineStyle()}
+      @pointerdown=${host._onHeaderPointerDown}
     >
       ${host.connectionState === 'disconnected' ? html`
         <div class="reconnect-banner">
           Reconnecting… (attempt ${host.reconnectAttempt})
         </div>
       ` : null}
-      <div
-        class="dialog-header"
-        @pointerdown=${host._onHeaderPointerDown}
-      >
-        <div class="tab-group-right">
-          <button
-            class="tab-button icon-only ${host.activeTab === 'context' ? 'active' : ''}"
-            @click=${() => host._switchTab('context')}
-            title="Context — token budget and cache tier viewer"
-            aria-label="Context"
-          >📊</button>
-          ${host._docConvertAvailable ? html`
-            <button
-              class="tab-button icon-only ${host.activeTab === 'doc-convert' ? 'active' : ''}"
-              @click=${() => host._switchTab('doc-convert')}
-              title="Convert documents to markdown"
-              aria-label="Convert"
-            >📄</button>
-          ` : null}
-          <button
-            class="tab-button icon-only ${host.activeTab === 'settings' ? 'active' : ''}"
-            @click=${() => host._switchTab('settings')}
-            title="Settings"
-            aria-label="Settings"
-          >⚙️</button>
-          <button
-            class="minimize-button"
-            title=${host._minimized ? 'Expand' : 'Minimize'}
-            @click=${host._toggleMinimize}
-          >${host._minimized ? '▴' : '▾'}</button>
-        </div>
-      </div>
+      ${host._docConvertAvailable ? html`
+        <button
+          class="convert-fab"
+          @click=${() => host._switchTab('doc-convert')}
+          title="Convert documents to markdown"
+          aria-label="Convert"
+        >📄</button>
+      ` : null}
       <div class="dialog-body">
         <div class="tab-panel ${host.activeTab === 'files' ? 'active' : ''}">
           <ac-files-tab></ac-files-tab>

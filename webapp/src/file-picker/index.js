@@ -598,7 +598,6 @@ export class FilePicker extends LitElement {
     };
     return html`
       <div class="sort-buttons">
-        <span class="label">Sort</span>
         ${button(
           SORT_MODE_NAME,
           'A',
@@ -614,9 +613,32 @@ export class FilePicker extends LitElement {
           '#',
           'Sort by size (click again to reverse)',
         )}
+        ${this._renderSettingsButton()}
         ${this._renderGitActions()}
       </div>
     `;
+  }
+
+  _renderSettingsButton() {
+    return html`
+      <button
+        type="button"
+        class="picker-settings-btn"
+        title="Settings"
+        aria-label="Open settings"
+        @click=${this._onSettingsButtonClick}
+      >⚙️</button>
+    `;
+  }
+
+  _onSettingsButtonClick() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'settings' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _renderGitActions() {
@@ -651,7 +673,6 @@ export class FilePicker extends LitElement {
         role="group"
         aria-label="Git actions"
       >
-        <span class="label">Git</span>
         <button
           class="picker-git-btn"
           title="Copy working-tree diff to clipboard"

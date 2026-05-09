@@ -20,22 +20,36 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('ChatPanel tab strip rendering', () => {
-  it('is hidden when only the main tab exists', async () => {
+  it('renders even when only the main tab exists', async () => {
+    // The strip is always rendered because the per-tab
+    // 📊 Context icon is the only path to the Context
+    // overlay — see specs4/5-webapp/shell.md § Tab Bar
+    // Layout. Single-tab mode shows just the Main tab.
     const p = mountPanel();
     await settle(p);
     const strip = p.shadowRoot.querySelector('.tab-strip');
-    expect(strip).toBeNull();
+    expect(strip).toBeTruthy();
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].getAttribute('data-tab-id')).toBe('main');
   });
 
-  it('appears when a second tab is added', async () => {
+  it('grows as agent tabs are added', async () => {
     const p = mountPanel();
     await settle(p);
-    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
+    ).toBe(1);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
     p.requestUpdate();
     await settle(p);
     const strip = p.shadowRoot.querySelector('.tab-strip');
     expect(strip).toBeTruthy();
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
+    ).toBe(2);
   });
 
   it('renders one button per tab in insertion order', async () => {
@@ -355,12 +369,16 @@ describe('ChatPanel tab strip overflow — structure', () => {
     expect(btn).toBeTruthy();
   });
 
-  it('overflow button is absent in single-tab mode', async () => {
+  it('overflow button is present in single-tab mode', async () => {
+    // Strip is always rendered, so the overflow button
+    // is too. Clicking it in single-tab mode opens a
+    // menu containing just the Main entry — harmless
+    // and consistent with the multi-tab behaviour.
     const p = mountPanel();
     await settle(p);
     expect(
       p.shadowRoot.querySelector('.tab-strip-overflow'),
-    ).toBeNull();
+    ).toBeTruthy();
   });
 
   it('overflow button carries aria attributes', async () => {
@@ -962,20 +980,29 @@ describe('ChatPanel tab close — behavior', () => {
     expect(p._tabs.has('agent-0')).toBe(false);
   });
 
-  it('strip disappears when last agent tab closes', async () => {
+  it('strip remains visible when last agent tab closes', async () => {
+    // Strip always renders. After closing the last
+    // agent tab, only Main remains in the strip.
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
     p.requestUpdate();
     await settle(p);
-    expect(p.shadowRoot.querySelector('.tab-strip')).toBeTruthy();
+    expect(
+      p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
+    ).toBe(2);
     p.shadowRoot
       .querySelector(
         '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
       )
       .click();
     await settle(p);
-    expect(p.shadowRoot.querySelector('.tab-strip')).toBeNull();
+    expect(p.shadowRoot.querySelector('.tab-strip')).toBeTruthy();
+    const buttons = p.shadowRoot.querySelectorAll(
+      '.tab-strip-tab',
+    );
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].getAttribute('data-tab-id')).toBe('main');
   });
 });
 
