@@ -701,6 +701,43 @@ Spec updates landing alongside this decision:
 
 Code change is one line in `src/ac_dc/main.py` between `ConfigManager` construction and `Settings` construction. No tests added — the existing `test_apply_llm_env_exports_variables` covers the helper; an integration test against `main.run` would require extracting a `_init_lightweight_services` helper since `main.run` itself opens sockets and starts servers. Filed as a follow-up if the cold-start path regresses.
 
+### D31 — Dialog header removed; tab strip absorbs drag-handle role; per-tab affordances replace dialog-level controls
+
+The chat-dialog layout originally had a dedicated header bar carrying the tab buttons (Files / Context / Settings / Convert), the mode toggle, and a minimize button. The header was the dialog's drag handle — pointerdown on the header (excluding buttons) initiated drag.
+
+Three iterations refined this:
+
+**Iteration 1 — collapse the header into the LED row.** Move the tab buttons, Context icon, and minimize button into the LED row at the top of the chat panel. Spec dialog header would shrink to just a thin strip carrying drag-handle semantics. Rejected after build: the LED row's height grew to accommodate the controls, defeating the goal of saving vertical space, and the mix of conversation-state dots with dialog-level controls produced a visually busy strip that didn't read as one cohesive thing.
+
+**Iteration 2 — split header concerns.** LEDs move below the textarea (compact horizontal strip, centered). Per-tab Context icon (📊) joins each tab button inline. Settings moves to the file picker's toolbar (alongside sort glyphs and git actions). Convert becomes a circular FAB at the dialog's bottom-left. Minimize starts as a top-right FAB. Tab strip becomes the drag handle via the `data-drag-handle="true"` attribute that the dialog's pointerdown handler walks `composedPath()` to find. The header is now empty and removable.
+
+The Context-tab refresh button overlap problem surfaced during integration: the top-right minimize FAB sat directly over the Context tab's existing refresh affordance. Symmetry argued for moving minimize to the same spatial location across all four dialog tabs (chat strip's right edge + each overlay tab's toolbar right edge) rather than picking a corner that worked for some tabs but not others.
+
+**Iteration 3 — the shipped layout.** Header gone entirely. Tab strip is the drag handle, sitting at the top of the chat panel with `data-drag-handle="true"`. Drag detection walks `composedPath()` for the attribute AND skips `tagName === 'BUTTON'` so clicks on tab buttons / overflow / minimize / Context icon don't initiate drag. Each overlay tab (Context, Settings, Convert) carries its own minimize button at the right edge of its toolbar — placement is consistent across all four tabs so muscle memory carries between them. Expand FAB at top-right shows ONLY when the dialog is minimized (the in-tab minimize buttons are hidden along with the dialog body, so the expand FAB is the only path back out).
+
+**Why drag-handle-by-attribute beat drag-handle-by-element.** The original "header is the drag handle" model bound a listener to a specific element. The new model walks `composedPath()` looking for any element with `data-drag-handle="true"`. This decouples drag semantics from the layout — when the LED row briefly carried the drag-handle role, it was one attribute set; when the tab strip absorbed it, the same attribute moved with no listener changes. Future layouts can declare new drag handles without touching the dialog's pointerdown logic.
+
+**LED strip placement and sizing.** Three rounds of tuning:
+
+1. Initially below the tab strip at the top — produced visual competition between the tab strip and the LED row for "is this dialog content or dialog chrome?"
+2. Moved below the input textarea, above the compaction-capacity bar. Spec language pinned in `agent-browser.md` § Layout.
+3. Tightened: compact 10/12px dots, 0.3rem gaps, near-zero padding, right-padded to center the dots under the textarea (not under the full input area, which includes the send column on the right). The visual goal — match the old layout's tight bottom strip — is achieved without giving up the LED row's content. Pure CSS tuning, no spec changes.
+
+**Convert FAB sizing.** Started at 36px circle to match the visual weight of the original header button. Reduced to 24px so the FAB sits inside the bottom thin strip rather than expanding the chat panel's vertical footprint. Same visual band as the LED dots and the compaction bar; the dialog's bottom edge feels close to the textarea like the old layout had.
+
+**Spec authority:**
+
+- `specs4/5-webapp/shell.md` § Layout pins: tab strip as drag handle, per-tab Context icon, minimize button right-edge convention across all four tabs, expand FAB only when minimized, Convert FAB at bottom-left, Settings via picker toolbar, drag-detection rules.
+- `specs4/5-webapp/agent-browser.md` § Layout pins LED strip position and centering.
+- `specs4/5-webapp/file-picker.md` § Toolbar Layout pins Settings + git actions in the picker toolbar.
+- `specs4/5-webapp/chat.md` § Action Bar pins git buttons in the picker, not the chat action bar.
+
+**What's NOT in this decision.** Pixel sizes, exact paddings, exact margins — those are presentation details the CSS owns. The decision covers the contractual shape (which controls live where, drag detection by attribute, minimize-symmetry across tabs). Future visual tuning that preserves the contract doesn't need a new decision entry.
+
+**Tests pinning the contract:** `webapp/src/chat-panel/tabs.test.js` — `'tab strip carries data-drag-handle="true"'` test pins the drag-handle attribute. `webapp/src/app-shell/dialog.test.js` — drag tests use `composedPath()` with synthetic drag-handle elements rather than querying for `.dialog-header` (which no longer exists). `webapp/src/chat-panel/led-row.test.js` — queries `.led-strip` (renamed from `.led-row` to match the rendered class).
+
+---
+
 ### D30 — `agent_blocks` persisted on orchestrator records to enable cross-turn reconstruction
 
 Per `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" (committed `bd79d93`), every assistant record produced by a turn that spawned agents persists an ordered list of `{id, agent_idx}` entries — one per spawn block emitted in that turn. The disk layout for agent archives is keyed by a turn-local numeric `agent_idx` (`agent-NN.jsonl`) while the orchestrator addresses agents by an LLM-chosen string `id`. The two namespaces are deliberately separate, and `agent_idx` is NOT stable across turns — a re-use of `agent-backend` in turn 1 (idx 0) and turn 3 (idx 1, because `agent-frontend` was spawned first) writes to two different filenames within their respective turn directories. Without persisting the per-turn id↔idx mapping, a "show me everything `agent-backend` did across the session" view has no way to find the right archive files except by guessing or by reading every archive's first message — both fragile.
