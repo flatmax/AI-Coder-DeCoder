@@ -1370,6 +1370,48 @@ export const STYLES = css`
     text-decoration: underline;
   }
 
+  /* View-agents affordance — small button below
+   * agentic-turn assistant messages that aren't
+   * the active turn. Visible only on hover by
+   * default to avoid visual noise on every
+   * agentic message; full opacity on focus so
+   * keyboard users can find it. */
+  .view-agents-affordance {
+    margin-top: 0.5rem;
+    opacity: 0.4;
+    transition: opacity 120ms ease;
+  }
+  .message-card:hover .view-agents-affordance,
+  .view-agents-affordance:focus-within {
+    opacity: 1;
+  }
+  .view-agents-button {
+    background: transparent;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    color: var(--text-secondary, #8b949e);
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+    font-family: inherit;
+    border-radius: 4px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    line-height: 1.3;
+    transition: background 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease;
+  }
+  .view-agents-button:hover {
+    background: rgba(240, 246, 252, 0.06);
+    border-color: rgba(240, 246, 252, 0.25);
+    color: var(--text-primary, #c9d1d9);
+  }
+  .view-agents-button:focus-visible {
+    outline: 2px solid var(--accent-primary, #58a6ff);
+    outline-offset: 2px;
+  }
+
   /* File summary section — renders below the assistant
    * message body, shows every file the message referenced
    * (via edit blocks or inline mentions) as a chip. The

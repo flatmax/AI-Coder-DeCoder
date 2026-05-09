@@ -55,7 +55,7 @@ import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderLedRow } from './led-row.js';
 import { renderTabStrip } from './tabs.js';
-import { _EXPERIMENTAL_ENABLED } from './helpers.js';
+import { _EXPERIMENTAL_ENABLED, parseAgentTabId } from './helpers.js';
 import {
   computeSearchMatches,
   onFileSearchNext,
@@ -721,6 +721,19 @@ export function renderMessage(panel, msg, index) {
     msg.role === 'assistant' && !msg.system_event
       ? renderEditSummary(panel, msg)
       : '';
+  // View-agents affordance for historical
+  // agentic turns. Per Increment D and
+  // specs4/5-webapp/agent-browser.md § Historical
+  // Turns — only renders when the message is from
+  // a previous turn (agent ids no longer in the
+  // live tab strip). The active turn's agents
+  // are already reachable via the tab strip
+  // itself, so a duplicate affordance would be
+  // noise.
+  const viewAgents =
+    msg.role === 'assistant' && !msg.system_event
+      ? renderViewAgentsAffordance(panel, msg)
+      : '';
   const finishFooterClass = bottomFinishBadge
     ? ' has-finish-footer'
     : '';
@@ -737,6 +750,7 @@ export function renderMessage(panel, msg, index) {
         : ''}
       ${editSummary}
       ${fileSummary}
+      ${viewAgents}
       ${bottomFinishBadge
         ? html`<div class="finish-reason-footer">${bottomFinishBadge}</div>`
         : ''}
@@ -1730,6 +1744,102 @@ export function renderFileSummary(panel, files) {
           `,
         )}
       </div>
+    </div>
+  `;
+}
+
+/**
+ * Render the "View agents (N)" affordance for
+ * historical agentic turns.
+ *
+ * Per spec specs4/5-webapp/agent-browser.md §
+ * Historical Turns — once a new agentic turn
+ * starts in the main tab, the previous turn's
+ * agent tabs leave the strip but their archives
+ * remain on disk. Scrolling back surfaces this
+ * affordance below the assistant message that
+ * spawned them; clicking it populates read-only
+ * tabs from the archive (commit 3 wires the
+ * handler).
+ *
+ * Visibility rules — returns empty when:
+ *
+ *   - Message lacks turn_id (pre-Increment-A
+ *     records, non-agentic turns)
+ *   - Message lacks agent_blocks (non-agentic
+ *     turns)
+ *   - agent_blocks is non-array or empty
+ *     (defensive — backend filters these out
+ *     before persistence per spec, but a stale
+ *     in-memory record might slip through)
+ *   - Every agent in agent_blocks is currently
+ *     live in the tab strip (the active turn —
+ *     duplicating the strip's own affordances
+ *     would be noise)
+ *
+ * The "currently live" check uses
+ * parseAgentTabId-style matching: each block's
+ * id is checked against panel._tabs directly,
+ * since tab IDs equal agent IDs under the
+ * flat-identity contract.
+ *
+ * Click dispatches `view-agents-requested` with
+ * `{turn_id, agent_blocks}` for commit 3 to
+ * handle. The bubbling event lets a future
+ * handler outside the chat panel intercept too,
+ * but commit 3 will install the handler at the
+ * panel level since that's where the tab strip
+ * lives.
+ */
+export function renderViewAgentsAffordance(panel, msg) {
+  if (!msg || msg.role !== 'assistant') return '';
+  const turnId = msg.turn_id;
+  if (typeof turnId !== 'string' || !turnId) return '';
+  const agentBlocks = msg.agent_blocks;
+  if (!Array.isArray(agentBlocks) || agentBlocks.length === 0) {
+    return '';
+  }
+  // Skip when every spawned agent is still live —
+  // the active-turn case. Reading the live tab
+  // map directly because parseAgentTabId would
+  // just return the same id; tab id IS agent id.
+  const liveTabs = panel._tabs;
+  let allLive = true;
+  for (const block of agentBlocks) {
+    const id = block?.id;
+    if (typeof id !== 'string' || !id) {
+      allLive = false;
+      break;
+    }
+    if (!liveTabs.has(id)) {
+      allLive = false;
+      break;
+    }
+  }
+  if (allLive) return '';
+  const count = agentBlocks.length;
+  const label = count === 1
+    ? 'View agent (1)'
+    : `View agents (${count})`;
+  return html`
+    <div class="view-agents-affordance">
+      <button
+        class="view-agents-button"
+        @click=${(e) => {
+          e.stopPropagation();
+          panel.dispatchEvent(
+            new CustomEvent('view-agents-requested', {
+              detail: { turn_id: turnId, agent_blocks: agentBlocks },
+              bubbles: true,
+              composed: true,
+            }),
+          );
+        }}
+        aria-label=${label}
+        title=${`Open archived tabs from this turn (turn ${turnId})`}
+      >
+        🤖 ${label}
+      </button>
     </div>
   `;
 }
