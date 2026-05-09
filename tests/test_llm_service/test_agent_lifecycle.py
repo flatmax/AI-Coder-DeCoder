@@ -221,47 +221,46 @@ class TestAgentContextRegistry:
         assert service._agent_contexts["worker"] is scope_v2
         assert service._agent_contexts["worker"] is not scope_v1
 
-    def test_new_session_preserves_agent_scopes(
+    def test_new_session_closes_all_live_agents(
         self,
         service: LLMService,
     ) -> None:
-        """new_session keeps the agent registry but clears each agent's history.
+        """new_session clears the agent registry entirely.
 
-        Per :doc:`specs4/7-future/parallel-agents` § Agent
-        lifetime: ``new_session`` clears each agent's chat
-        history but preserves its scope — the team stays
-        warm for the next conversation. Application exit is
-        the only event that drops scope objects.
+        Per the "Agents as first-class persistent entities"
+        plan (Increment 2 in IMPLEMENTATION_NOTES.md): the
+        new-session gesture means "the entire conversation
+        thread goes with it — including agents". This
+        supersedes the earlier "agents survive new_session"
+        policy that produced the "I clicked new session
+        and nothing happened" UX bug for users on agent
+        tabs.
+
+        Application exit and explicit close-tab clicks both
+        also free agents; new_session joins them as a third
+        teardown trigger.
         """
         parent_scope = service._default_scope()
-        scope_a = service._build_agent_scope(
+        service._build_agent_scope(
             block=self._make_agent_block("alpha"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_one",
         )
-        scope_b = service._build_agent_scope(
+        service._build_agent_scope(
             block=self._make_agent_block("beta"),
             agent_idx=1,
             parent_scope=parent_scope,
             turn_id="turn_one",
         )
-        # Seed each agent with a chat message so we can
-        # observe the history-clear behaviour.
-        scope_a.context.add_message("user", "first message")
-        scope_b.context.add_message("user", "first message")
-        assert len(scope_a.context.get_history()) == 1
-        assert len(scope_b.context.get_history()) == 1
+        assert "alpha" in service._agent_contexts
+        assert "beta" in service._agent_contexts
 
         result = service.new_session()
         assert "session_id" in result
 
-        # Scopes survive — same identity objects.
-        assert service._agent_contexts["alpha"] is scope_a
-        assert service._agent_contexts["beta"] is scope_b
-        # But each agent's chat history was wiped.
-        assert scope_a.context.get_history() == []
-        assert scope_b.context.get_history() == []
+        # All agent scopes gone.
+        assert service._agent_contexts == {}
 
     async def test_completion_result_carries_turn_id(
         self,

@@ -155,6 +155,272 @@ class TestNewSession:
 
 
 # ---------------------------------------------------------------------------
+# new_session closes live agents (Increment 2)
+# ---------------------------------------------------------------------------
+
+
+class TestNewSessionClosesAgents:
+    """new_session frees every agent scope and broadcasts.
+
+    Per the "Agents as first-class persistent entities" plan
+    (Increment 2 in IMPLEMENTATION_NOTES.md): the gesture
+    "start a new session" means the entire conversation
+    thread goes with it, including agents. The earlier
+    "agents survive new_session" policy left users on agent
+    tabs clicking the new-session button and seeing nothing
+    happen — fixed here by clearing _agent_contexts and
+    broadcasting agentClosed per agent so the frontend
+    dissolves the tabs.
+
+    Tests cover: empty-registry no-op, single-agent close,
+    multi-agent batch close, agentClosed event payload
+    shape, broadcast ordering (agentClosed before
+    sessionChanged), in-flight stream cancellation, and
+    the agents-not-found behaviour after teardown.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ):
+        from ac_dc.edit_protocol import AgentBlock
+
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_empty_registry_no_agent_close_events(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """No live agents → no agentClosed broadcasts.
+
+        Most sessions don't spawn agents. The
+        sessionChanged event still fires; agentClosed is
+        suppressed because there are no targets.
+        """
+        assert service._agent_contexts == {}
+        event_cb.events.clear()
+        service.new_session()
+        agent_closed = [
+            args for name, args in event_cb.events
+            if name == "agentClosed"
+        ]
+        assert agent_closed == []
+        # sessionChanged still fires.
+        assert any(
+            name == "sessionChanged"
+            for name, _ in event_cb.events
+        )
+
+    def test_single_agent_closed(
+        self,
+        service: LLMService,
+    ) -> None:
+        """One agent in registry → registry empty after new_session."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("solo"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_solo",
+        )
+        assert "solo" in service._agent_contexts
+
+        service.new_session()
+        assert service._agent_contexts == {}
+
+    def test_multiple_agents_all_closed(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Multi-agent registry empties wholesale."""
+        parent_scope = service._default_scope()
+        for name in ("alpha", "beta", "gamma", "delta"):
+            service._build_agent_scope(
+                block=self._make_agent_block(name),
+                agent_idx=0,
+                parent_scope=parent_scope,
+                turn_id="turn_many",
+            )
+        assert len(service._agent_contexts) == 4
+
+        service.new_session()
+        assert service._agent_contexts == {}
+
+    def test_agent_closed_event_per_agent(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """One agentClosed broadcast per cleared agent."""
+        parent_scope = service._default_scope()
+        for name in ("alpha", "beta", "gamma"):
+            service._build_agent_scope(
+                block=self._make_agent_block(name),
+                agent_idx=0,
+                parent_scope=parent_scope,
+                turn_id="turn_three",
+            )
+        event_cb.events.clear()
+        service.new_session()
+
+        agent_closed = [
+            args for name, args in event_cb.events
+            if name == "agentClosed"
+        ]
+        assert len(agent_closed) == 3
+        # Each payload carries the agent's id.
+        ids = sorted(payload[0]["agent_id"] for payload in agent_closed)
+        assert ids == ["alpha", "beta", "gamma"]
+
+    def test_agent_closed_payload_shape(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """agentClosed payload is {agent_id: str}.
+
+        Pin the shape so a future "helpful" addition (status
+        field, error field, etc.) trips the test rather than
+        silently breaking the frontend's tab-removal handler.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("only"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+        service.new_session()
+
+        agent_closed = [
+            args for name, args in event_cb.events
+            if name == "agentClosed"
+        ]
+        assert len(agent_closed) == 1
+        payload = agent_closed[0][0]
+        assert payload == {"agent_id": "only"}
+
+    def test_agent_closed_fires_before_session_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Order matters: agentClosed precedes sessionChanged.
+
+        sessionChanged triggers the chat panel to reload
+        main's empty history. If agentClosed events arrived
+        after, the agent tabs would briefly show as live
+        with empty histories before disappearing.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("first"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+        service.new_session()
+
+        names = [name for name, _ in event_cb.events]
+        first_closed = names.index("agentClosed")
+        first_session = names.index("sessionChanged")
+        assert first_closed < first_session
+
+    def test_clears_in_flight_agent_streams(
+        self,
+        service: LLMService,
+    ) -> None:
+        """_active_agent_streams cleared on new_session.
+
+        Per-agent single-stream guard. With agent scopes
+        gone, any in-flight slot entries are stale and
+        would block re-spawning a same-id agent in the
+        next session. Clearing the set is the simplest
+        cancel signal — the streaming loop checks it
+        per-chunk.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_active",
+        )
+        # Simulate an in-flight stream by populating the
+        # guard slot directly.
+        service._active_agent_streams.add("worker")
+        assert service._active_agent_streams == {"worker"}
+
+        service.new_session()
+        assert service._active_agent_streams == set()
+
+    def test_agent_unreachable_after_close(
+        self,
+        service: LLMService,
+    ) -> None:
+        """After new_session, agent ids return agent-not-found.
+
+        The frontend may still hold tab references for a
+        brief window before the agentClosed events are
+        processed. Any RPC call routed to a closed agent
+        in that window must fail cleanly with the same
+        error shape close_agent_context produces — keeps
+        the frontend's error surface uniform.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("ghost"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_ghost",
+        )
+        service.new_session()
+
+        result = service.set_agent_selected_files("ghost", [])
+        assert result == {"error": "agent not found"}
+
+    def test_archive_files_survive_close(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+    ) -> None:
+        """Per-turn archive files on disk are preserved.
+
+        Closing frees memory; the transcript stays readable
+        via get_turn_archive for any turn the agent
+        participated in. Mirrors close_agent_context's
+        archive-preservation contract.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("recorder"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_archived",
+        )
+        # Persist something via the scope's archival sink.
+        scope.context.add_message(
+            "assistant", "agent output here",
+        )
+        archive_file = (
+            repo_dir / ".ac-dc4" / "agents" / "turn_archived"
+            / "agent-00.jsonl"
+        )
+        assert archive_file.exists()
+
+        service.new_session()
+        # File survives.
+        assert archive_file.exists()
+        # And remains accessible via the public RPC.
+        archive = service.get_turn_archive("turn_archived")
+        assert len(archive) == 1
+
+
+# ---------------------------------------------------------------------------
 # Binary file rejection at sync time
 # ---------------------------------------------------------------------------
 

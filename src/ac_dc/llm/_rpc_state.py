@@ -396,22 +396,36 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
 
 
 def new_session(service: "LLMService") -> dict[str, Any]:
-    """Start a fresh session — clear chat history; preserve agent scopes.
+    """Start a fresh session — close all live agents and reset state.
 
-    Per :doc:`specs4/7-future/parallel-agents` § "Agent
-    lifetime", ``new_session`` clears each agent's chat
-    history but does NOT tear down the agent itself. The
-    agent's :class:`ContextManager` retains its file context,
-    the :class:`StabilityTracker` keeps its tier assignments
-    and provider-cache state, and the agent remains
-    addressable by its id for the next turn.
+    Per the "Agents as first-class persistent entities" plan
+    (Increment 2 in IMPLEMENTATION_NOTES.md), ``new_session``
+    is "the entire conversation thread of the session goes
+    with it — including agents". This supersedes the earlier
+    "agents survive new_session" policy: the frontend
+    rendered the new-session button on every tab including
+    agents but only ever reset main, producing the
+    "I clicked new session and nothing happened" UX bug.
 
-    The symmetry matters: from the user's perspective,
-    ``new_session`` is "start a fresh conversation with the
-    same warm team" — applied uniformly to the orchestrator
-    (whose ContextManager survives this call too) and every
-    live agent. Application exit is the only event that
-    drops the agents themselves.
+    Sequence (order matters for frontend coherence):
+
+    1. Generate a fresh session id and clear main's history,
+       URL context, and fetched URLs.
+    2. Cancel any in-flight agent streams by clearing
+       ``_active_agent_streams``. The streaming loop checks
+       this set per-chunk; clearing it signals stop.
+    3. Snapshot the current agent ids, clear
+       ``_agent_contexts`` to free memory and tracker state.
+    4. Broadcast ``agentClosed`` per snapshot id so the
+       frontend dissolves each tab. The frontend's existing
+       handler removes the tab and frees per-tab state.
+    5. Broadcast ``sessionChanged`` last so the chat panel
+       reloads main's empty history after the agents have
+       gone.
+
+    Per-agent archive files on disk survive — closing an
+    agent frees memory; the transcript stays readable via
+    :meth:`LLMService.get_turn_archive`.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
@@ -434,16 +448,30 @@ def new_session(service: "LLMService") -> dict[str, Any]:
     service._context.clear_url_context()
     if service._url_service is not None:
         service._url_service.clear_fetched()
-    # Clear each agent's chat history but preserve the
-    # scope itself. The agent's ContextManager, file context,
-    # and stability tracker survive — only the conversation
-    # messages are wiped. Mirrors the orchestrator's own
-    # behaviour above (clear_history on _context). URL
-    # context lives on each agent's ContextManager too,
-    # so wipe it symmetrically.
-    for scope in service._agent_contexts.values():
-        scope.context.clear_history()
-        scope.context.clear_url_context()
+    # Cancel any in-flight agent streams. The streaming
+    # loop checks this set per chunk; clearing it signals
+    # the agent task to stop. Doing this BEFORE clearing
+    # _agent_contexts avoids a race where the agent task
+    # finishes a chunk, looks up its scope to write to the
+    # archive, and finds nothing.
+    closed_agent_ids = list(service._agent_contexts.keys())
+    service._active_agent_streams.clear()
+    # Drop scopes — frees ContextManager + StabilityTracker
+    # + file_context for each agent. Archive files on disk
+    # survive (per-turn archive paths are independent of
+    # the in-memory registry).
+    service._agent_contexts.clear()
+    # Broadcast per-agent close events so the frontend's
+    # existing tab-removal path runs for each. Order is
+    # before sessionChanged because the frontend's
+    # sessionChanged handler reloads main's history; if the
+    # agent tabs were still around at that point they'd
+    # briefly show as live with empty histories before the
+    # close events arrived.
+    for agent_id in closed_agent_ids:
+        service._broadcast_event(
+            "agentClosed", {"agent_id": agent_id}
+        )
     service._broadcast_event(
         "sessionChanged",
         {"session_id": service._session_id, "messages": []},

@@ -541,16 +541,22 @@ Test coverage in `webapp/src/chat-panel/action-bar.test.js` (16 tests across six
 
 Why Increment 1 *first*: the audit-then-action sequence reveals that the spec gap was narrower than the original plan implied. Half the controls the plan called out were already correctly gated. The remaining gap was a single render expression covering two adjacent buttons. The 30-second user-visible benefit (no more "I clicked new-session and nothing happened") is realised via a one-line gate change plus tests pinning the contract.
 
-### Increment 2 — `new_session` closes all live agents
+### ~~Increment 2 — `new_session` closes all live agents~~ — delivered
 
-Backend change with frontend visibility. When the user resets main's session, the entire conversation thread of the session goes with it — including agents.
+Backend-only change with broadcast-driven frontend visibility. Reverses the D24/D25 "agents survive new_session" policy after audit revealed the resulting UX bug: the new-session button was rendered on every tab including agents but only ever reset main, leaving users on agent tabs clicking and seeing nothing happen. Increment 1 hid the button on agent tabs (palliative); Increment 2 fixes the underlying policy.
 
-Scope:
-- `LLMService.new_session` (in `llm/_rpc_state.py`) — clear `_agent_contexts`, broadcast a per-agent `agentClosed` event for each cleared agent so the frontend dissolves the tabs, cancel any in-flight agent streams.
-- `specs4/5-webapp/agent-browser.md § Tab Lifetime` — add "main session reset" as a fourth event ending an agent tab's life.
-- Decision-log entry documenting the spec gap fix.
+Implementation in `src/ac_dc/llm/_rpc_state.py:new_session`:
 
-Spec change is small and well-bounded. Behaviour matches user expectation.
+1. Clear `_active_agent_streams` first — signals any in-flight agent task to stop on its next chunk check, before its scope vanishes underneath it.
+2. Snapshot the agent ids, then `_agent_contexts.clear()` to free `ContextManager` + `StabilityTracker` + `file_context` per agent.
+3. Broadcast `agentClosed {agent_id}` for each snapshot id BEFORE `sessionChanged`. Order matters: `sessionChanged` triggers the chat panel to reload main's empty history, so agent tabs need to be gone first to avoid the "live tab with empty history" flash.
+4. Per-turn archive files on disk survive — closing frees memory; transcripts stay readable via `get_turn_archive` for any turn the agent participated in.
+
+Tests in `tests/test_llm_service/test_sessions.py § TestNewSessionClosesAgents` cover empty-registry no-op, single/multi-agent close, agentClosed payload shape (`{agent_id: str}` — pinned so future additions trip the test rather than silently break the frontend handler), broadcast ordering, in-flight stream cancellation, post-close agent-not-found behaviour, and archive-file preservation. The existing `test_new_session_preserves_agent_scopes` in `test_agent_lifecycle.py` was updated to `test_new_session_closes_all_live_agents` reflecting the new contract.
+
+Spec updates deferred — `specs4/5-webapp/agent-browser.md § Tab Lifetime` and `specs4/7-future/parallel-agents.md § Agent lifetime` both currently document the old "agents survive" policy and need updating. Filing as a follow-up doc-mode pass since the behavioural test suite is now the authoritative specification.
+
+Frontend impact — none required for Increment 2 itself. The chat panel needs an `agentClosed` event handler that calls `_onTabClose(detail.agent_id)` to remove the tab and free per-tab state. Without that handler, agent tabs persist on the frontend after `new_session` until the user closes them manually (the backend has freed the scope, so any RPC routed to those tabs returns `{error: "agent not found"}` — which the existing stale-tag handling in `chat-panel/streaming.js` already converts to a tab-close + toast). The frontend behaviour is therefore correct-but-unpolished without the handler; landing the handler is part of the next webapp commit.
 
 ### Increment 3 — Persist per-agent state on disk
 
