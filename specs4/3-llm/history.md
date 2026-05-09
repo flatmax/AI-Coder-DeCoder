@@ -89,7 +89,7 @@ The disk layout is keyed by a turn-local numeric `agent_idx` (`agent-00.jsonl`, 
 - `id` is identity — chosen by the orchestrator, used as the registry key in `_agent_contexts`, used as the tab id in the chat panel, and used to address agents in subsequent `🟧🟧🟧 AGENT` blocks.
 - `agent_idx` is per-turn storage routing — the integer position of the agent in that turn's spawn list, used to name the archive file and to derive child request IDs.
 
-`agent_idx` is **not stable across turns**. A reuse of `agent-backend` in turn 1 (where it was the first block, idx 0 → `agent-00.jsonl`) and again in turn 3 (where the orchestrator spawned `agent-frontend` first, making `agent-backend` idx 1 → `agent-01.jsonl`) writes to two different filenames. The mapping is turn-local.
+`agent_idx` is **not stable across turns**. A reuse of `agent-backend` in turn 1 (where it was the first block, idx 0 → `agent-00.jsonl`) and again in turn 3 (where the orchestrator spawned `agent-frontend` first, making `agent-backend` idx 1 → `agent-01.jsonl`) writes to two different filenames. The mapping is turn-local — descriptive ids stay stable across turns; positional indexes do not.
 
 To make the across-turns view reconstructable without guessing, every assistant record that spawned agents persists an `agent_blocks` field — an ordered list of `{id, agent_idx}` entries, one per spawn block emitted in that turn. The order matches the spawn order (so `agent_blocks[N].agent_idx == N` in current implementations), but the field is stored verbatim rather than derived, so future schemes that decouple emission order from storage index remain compatible.
 

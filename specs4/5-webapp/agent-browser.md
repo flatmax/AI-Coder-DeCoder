@@ -54,6 +54,8 @@ Four events end a tab's life:
 - **New agentic turn in the main tab.** The user sends a new message to the main LLM that triggers a fresh decomposition. The current turn's agent tabs fade out of the strip; their archives persist on disk. Accessible by scrolling the main chat back to the previous turn and interacting with it via the history browser (see [Historical Turns](#historical-turns) below).
 - **Explicit close.** Each agent tab has a close affordance. Closing an agent tab discards its `ContextManager` from memory (freeing any cached symbol map data it held, plus its stability tracker state). The archive file stays on disk. Equivalent to killing that agent — a subsequent LLM call for that tab is not possible because the ContextManager is gone. The user can still read the archive via history browsing.
 - **`new_session` on the main tab.** Clicking the new-session button (or invoking the corresponding RPC) closes every live agent in addition to clearing main's history. The backend frees each agent's ContextManager, stability tracker, and file context, then broadcasts `agentClosed {agent_id}` per agent before broadcasting `sessionChanged`. The frontend's `agent-closed` window-event handler routes each id through the same close path explicit-close uses — the tab disappears, per-tab UI state frees, and the archive stays on disk. From the user's perspective, "new session" is a single gesture that resets main and dismisses the entire agent team. Archives remain browsable via history.
+
+  This is asymmetric with main's own `new_session` behavior: main's `ContextManager` survives (only its history clears), while agents' ContextManagers are torn down entirely. The asymmetry reflects the asymmetry of intent — main is the user's primary conversation surface and persists for the application's lifetime; agents are turn-scoped collaborators the user spun up for a specific decomposition. A user starting a new session is most often signalling "I'm done with what these agents were helping me with"; preserving the team would force a follow-up close gesture per agent.
 - **Server shutdown.** All in-memory state is lost regardless of tab type. Archives on disk survive; the next server startup can show them via history browsing.
 
 An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive, no new agentic turn has started, and `new_session` has not been clicked. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
@@ -85,6 +87,47 @@ What is preserved:
 - The agent's tab badge if it had multiple iterations within the same turn (computed from archive content)
 
 If `list_live_agents()` returns an empty list (no agents currently registered), the chat panel renders only the Main tab. This is indistinguishable from a fresh session that has never spawned agents.
+
+### Session Load
+
+Loading a previous session via the history browser is a distinct rehydration trigger from refresh / reconnect. Refresh / reconnect rehydrates against the *current* backend session — agents already in `_agent_contexts` materialise as tabs. Session load *changes* the backend's notion of which session is current, then reconstructs the agents that participated in that session as new live scopes.
+
+The backend RPC `load_session_into_context(session_id)` does this work end-to-end (see [history.md § Session-Load Reconstruction](../3-llm/history.md#session-load-reconstruction)). Briefly:
+
+1. Main's history clears and reloads from `history.jsonl` filtered to the target session.
+2. The backend walks the loaded records for `agent_blocks` entries and groups them by agent id (latest record per id wins on retask).
+3. For each surviving id, the backend reads every relevant turn's archive, concatenates the messages chronologically, replays mode-change system events to arrive at the agent's final mode, builds a fresh `ContextManager` + `StabilityTracker`, and registers in `_agent_contexts`.
+4. `sessionChanged` fires first (the chat panel resets to the new session's main history). `agentsRehydrated` fires next, carrying only the just-reconstructed agent ids — agents already alive from the pre-load session are not re-broadcast.
+5. The frontend's `agents-rehydrated` handler calls `rehydrateLiveAgents(panel)` — the same path used after `onRpcReady` for refresh / reconnect. Tab creation is idempotent; existing tabs short-circuit.
+
+From the user's perspective, loading an old session restores not just the conversation but the team that was helping with it. Reconstructed agents are fully writable — the user can reply in their tabs, the orchestrator can retask them by id, the LED row reflects their state. Provider cache starts cold (the saved tracker's tier assignments aren't persisted; rebuilding from scratch is the only option), but everything else works.
+
+What does NOT survive session load:
+
+- Per-agent file selection (selections are ephemeral; even refresh today loses them)
+- Per-agent excluded-files state (same)
+- Provider-cache warmth (the rebuilt tracker has no tier placements)
+- Frontend per-tab UI state (input draft, scroll position) — same loss as refresh
+
+### Backend RPCs
+
+The chat panel consumes a small RPC surface for agent-related work:
+
+- `list_live_agents()` — one entry per registered agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}`. Called on `onRpcReady` for rehydration. Empty list when no agents are registered.
+- `get_agent_history(agent_id)` — full reconstructed conversation for a live agent, by reading from its ContextManager. Used to populate live tabs after refresh, reconnect, or session load. Returns the concatenation across every turn the agent participated in (which matters for session-reconstructed agents that span multiple turns). Empty list for unknown ids.
+- `get_turn_archive(turn_id)` — per-agent conversations for a single past turn, read from `.ac-dc4/agents/{turn_id}/`. Used for historical-tab population when scrolling the main chat back. Empty list when the directory doesn't exist.
+- `close_agent_context(agent_id)` — frees the agent's ContextManager, tracker, and file_context. Idempotent on unknown / already-closed ids. Localhost-only. Archive on disk survives.
+- `set_agent_selected_files(agent_id, files)` — per-agent file selection. Localhost-only. Filters non-existent paths against the repo. No `filesChanged` broadcast (per-tab state isn't shared across clients).
+- `set_agent_excluded_index_files(agent_id, files)` — per-agent index-exclusion list. Localhost-only. Drops matching `symbol:` / `doc:` / `file:` entries from the agent's tracker.
+- `switch_agent_mode(agent_id, mode)` — change an agent's mode (one of `code`, `doc`, `code+xref`, `doc+xref`). Localhost-only. Rejected mid-stream with `{error: "agent stream active"}`. Rebuilds the agent's StabilityTracker (every tier prefix invalidated by the new prompt + index combination), writes a mode-change system event to the archive (so session-load reconstruction can replay it), and broadcasts `agentModeChanged`.
+- `set_agent_cross_reference(agent_id, enabled)` — toggle cross-reference for an agent without changing primary mode. Same shape as `switch_agent_mode`: mid-stream rejection, tracker rebuild, archive event, broadcast.
+
+Server-push events the chat panel listens for:
+
+- `agentsSpawned {turn_id, parent_request_id, agent_blocks}` — fired immediately after the orchestrator's response is parsed and BEFORE child streams dispatch. Frontend creates tabs with their child request IDs pre-populated so chunks route correctly. See [streaming.md § Agents Spawned Event](../3-llm/streaming.md#agents-spawned-event) for the ordering invariant.
+- `agentsRehydrated {agent_ids}` — fired after `sessionChanged` on session load. Frontend re-runs `rehydrateLiveAgents` to materialise tabs for the just-reconstructed agents.
+- `agentClosed {agent_id}` — fired one per agent when `new_session` runs (before `sessionChanged`), or as a confirmation when the user closes an agent tab and the backend frees the scope. Frontend removes the tab and frees per-tab state.
+- `agentModeChanged {agent_id, mode, cross_reference_enabled}` — fired after a successful `switch_agent_mode` or `set_agent_cross_reference`. Frontend updates `_tabModes` and re-renders the toggle.
 
 ## Interaction
 
