@@ -351,9 +351,15 @@ export const STYLES = css`
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 0.35rem;
-    padding: 0.25rem 0;
-    margin-top: 0.25rem;
+    gap: 0.3rem;
+    /* Right padding mirrors the send-column width (4rem
+     * Send button + 0.5rem input-row gap) so the
+     * justify-content:center rule centers the dots
+     * underneath the textarea instead of underneath the
+     * full input area. */
+    padding: 0.1rem 4.5rem 0 0;
+    margin-top: 0;
+    line-height: 0;
   }
   .led-dot {
     flex-shrink: 0;
@@ -833,7 +839,7 @@ export const STYLES = css`
   .input-area {
     flex-shrink: 0;
     border-top: 1px solid rgba(240, 246, 252, 0.1);
-    padding: 0.75rem 1rem;
+    padding: 0.75rem 1rem 0.15rem;
     background: rgba(13, 17, 23, 0.6);
   }
   .action-bar {

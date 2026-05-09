@@ -113,16 +113,16 @@ export const APP_SHELL_STYLES = css`
      * gates rendering). */
     .convert-fab {
       position: absolute;
-      bottom: 0.75rem;
-      left: 0.75rem;
-      width: 36px;
-      height: 36px;
+      bottom: 0.35rem;
+      left: 0.5rem;
+      width: 24px;
+      height: 24px;
       border-radius: 50%;
       background: rgba(22, 27, 34, 0.95);
       border: 1px solid rgba(240, 246, 252, 0.2);
       color: var(--text-primary, #c9d1d9);
       cursor: pointer;
-      font-size: 1.1rem;
+      font-size: 0.8rem;
       line-height: 1;
       display: flex;
       align-items: center;
