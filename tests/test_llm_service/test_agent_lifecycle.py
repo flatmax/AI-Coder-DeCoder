@@ -2968,3 +2968,314 @@ class TestSessionLoadReconstruction:
         # Mode unchanged — the conversation message wasn't
         # an event.
         assert scope.context.mode == Mode.CODE
+
+    # ----- Commit 3 — agentsRehydrated broadcast -----
+
+    def test_load_session_broadcasts_agents_rehydrated(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Successful load fires agentsRehydrated with reconstructed ids.
+
+        Frontend uses the broadcast as the trigger to
+        materialise agent tabs in the chat panel after a
+        session load. Without it, the chat panel would
+        only learn about reconstructed agents at the next
+        onRpcReady (browser refresh) — defeating the
+        whole point of mid-session reconstruction.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "alpha", "agent_idx": 0, "mode": "code"},
+                {"id": "beta", "agent_idx": 1, "mode": "doc"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task a"}],
+                1: [{"role": "user", "content": "task b"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        payload = rehydrated[0][0]
+        assert sorted(payload["agent_ids"]) == [
+            "alpha", "beta",
+        ]
+
+    def test_rehydrated_fires_after_session_changed(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Order matters — sessionChanged before agentsRehydrated.
+
+        The chat panel's session-changed handler resets
+        message list and streaming state for the new
+        session. If agentsRehydrated arrived first, the
+        new agent tabs would briefly render against the
+        previous session's main-tab content before the
+        reset.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "solo", "agent_idx": 0, "mode": "code"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        names = [name for name, _ in event_cb.events]
+        first_session = names.index("sessionChanged")
+        first_rehydrate = names.index("agentsRehydrated")
+        assert first_session < first_rehydrate
+
+    def test_no_agents_no_rehydrated_broadcast(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Loading a non-agent session: no spurious broadcast.
+
+        agentsRehydrated only fires when at least one
+        agent was reconstructed. A session that never
+        spawned agents loads without firing — frontend
+        avoids a no-op rehydrate call.
+        """
+        sid = HistoryStore.new_session_id()
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+            turn_id=HistoryStore.new_turn_id(),
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert rehydrated == []
+        # sessionChanged still fires.
+        assert any(
+            name == "sessionChanged"
+            for name, _ in event_cb.events
+        )
+
+    def test_pre_existing_agents_excluded_from_rehydrated_payload(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Already-live agents don't appear in the broadcast.
+
+        The payload lists agents NEWLY registered by this
+        load, not the full registry. A user with live
+        agents in the current session who loads an old
+        session should see only the loaded session's
+        agents in the rehydrated event — the live agents
+        are already present on the frontend.
+        """
+        from ac_dc.edit_protocol import AgentBlock
+
+        # Pre-register a live agent to simulate an
+        # in-progress session.
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=AgentBlock(id="pre-existing", task="t"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_live",
+        )
+
+        # Now persist and load a different session.
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "from-archive",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        payload = rehydrated[0][0]
+        # Only the just-reconstructed id appears.
+        assert payload["agent_ids"] == ["from-archive"]
+        # Pre-existing agent still in registry but not in
+        # broadcast.
+        assert "pre-existing" in service._agent_contexts
+
+    def test_full_round_trip_two_service_instances(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Service A spawns + toggles; service B loads and reconstructs.
+
+        End-to-end integration test: service A persists an
+        agent through a real toggle, then a fresh service
+        B (same history store, simulating a server
+        restart) loads the session and reaches the same
+        final mode. Pins that the persistence layer +
+        reconstruction layer + replay layer compose
+        correctly.
+
+        Service A doesn't run real LLM calls — we
+        construct the agent scope directly and use the
+        switch_agent_mode RPC to write the archive event.
+        That's the path the real streaming pipeline would
+        take; bypassing the LLM call avoids fake-litellm
+        coordination for what is fundamentally a
+        persistence test.
+        """
+        from ac_dc.context_manager import Mode
+        from ac_dc.edit_protocol import AgentBlock
+
+        # Service A — spawns agent and toggles its mode.
+        cb_a = _RecordingEventCallback()
+        service_a = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=cb_a,
+            history_store=history_store,
+        )
+        sid = service_a.get_current_state()["session_id"]
+        tid = HistoryStore.new_turn_id()
+
+        # Persist the spawn-time record so reconstruction
+        # has agent_blocks to walk. In real operation this
+        # happens during _stream_chat's persistence step.
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="please decompose",
+            turn_id=tid,
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="delegating to agent worker",
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                    "cross_reference_enabled": False,
+                },
+            ],
+        )
+
+        # Build the agent scope on service A so the
+        # registry has it for switch_agent_mode to find.
+        parent_scope_a = service_a._default_scope()
+        scope_a = service_a._build_agent_scope(
+            block=AgentBlock(
+                id="worker", task="initial task",
+            ),
+            agent_idx=0,
+            parent_scope=parent_scope_a,
+            turn_id=tid,
+        )
+        # Seed the agent's first user message — the task
+        # text. In real operation _stream_chat does this
+        # as it begins streaming; the test bypasses
+        # _stream_chat to avoid fake-litellm coordination,
+        # so we drive the same persistence path directly
+        # via the scope's ContextManager.
+        scope_a.context.add_message("user", "initial task")
+        # Toggle to doc — writes the mode-change event to
+        # the archive.
+        result = service_a.switch_agent_mode("worker", "doc")
+        assert result["mode"] == "doc"
+
+        # Service B — fresh instance (same history store),
+        # simulates a server restart between sessions.
+        cb_b = _RecordingEventCallback()
+        service_b = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=cb_b,
+            history_store=history_store,
+        )
+        # Service B starts with no agents in its registry.
+        assert service_b._agent_contexts == {}
+
+        # Load the session — reconstruction reads from
+        # disk.
+        service_b.load_session_into_context(sid)
+
+        # Agent reconstructed with post-replay mode.
+        assert "worker" in service_b._agent_contexts
+        scope_b = service_b._agent_contexts["worker"]
+        assert scope_b.context.mode == Mode.DOC
+        # Initial spawn task plus the toggle's archive
+        # event are both in history.
+        contents = [
+            m.get("content")
+            for m in scope_b.context.get_history()
+        ]
+        assert "initial task" in contents
+        # Mode-change system event also present.
+        assert any(
+            "Mode changed" in (c or "")
+            for c in contents
+        )
+
+        # agentsRehydrated broadcast fired on service B.
+        rehydrated = [
+            args for name, args in cb_b.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        assert rehydrated[0][0]["agent_ids"] == ["worker"]

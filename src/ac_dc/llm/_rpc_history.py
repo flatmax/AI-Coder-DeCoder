@@ -149,7 +149,11 @@ def load_session_into_context(
     # returns. Keeping the LLM-facing context shape minimal
     # is the right tradeoff — agent_blocks doesn't belong
     # in the prompt's message history.
+    pre_existing_ids = set(service._agent_contexts.keys())
     _reconstruct_agents_from_session(service, session_id)
+    rehydrated_ids = sorted(
+        set(service._agent_contexts.keys()) - pre_existing_ids
+    )
 
     service._broadcast_event(
         "sessionChanged",
@@ -158,6 +162,20 @@ def load_session_into_context(
             "messages": messages,
         },
     )
+    # Per spec specs4/3-llm/history.md § Session-Load
+    # Reconstruction step 9: broadcast the reconstructed
+    # ids so the frontend can materialise tabs. Fired
+    # AFTER sessionChanged so the chat panel's session-
+    # changed handler (which clears the message list and
+    # resets streaming state) runs before the
+    # rehydration handler creates agent tabs. Reverse
+    # order would briefly show the new tabs against the
+    # old session's main-tab content.
+    if rehydrated_ids:
+        service._broadcast_event(
+            "agentsRehydrated",
+            {"agent_ids": rehydrated_ids},
+        )
     return {
         "session_id": session_id,
         "messages": messages,

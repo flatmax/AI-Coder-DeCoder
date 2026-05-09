@@ -66,6 +66,7 @@ export function bindEventHandlers(panel) {
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
   panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
+  panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
   panel._onSessionChanged = (e) => onSessionChanged(panel, e);
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
@@ -126,6 +127,9 @@ export function attachEventListeners(panel) {
   window.addEventListener('user-message', panel._onUserMessage);
   window.addEventListener('session-changed', panel._onSessionChanged);
   window.addEventListener('agents-spawned', panel._onAgentsSpawned);
+  window.addEventListener(
+    'agents-rehydrated', panel._onAgentsRehydrated,
+  );
   // D2 — chat-tab keyboard shortcuts. Alt+`
   // cycles to the next tab, Alt+Shift+` to the
   // previous. Installed at the document level
@@ -192,6 +196,9 @@ export function detachEventListeners(panel) {
   window.removeEventListener('user-message', panel._onUserMessage);
   window.removeEventListener('session-changed', panel._onSessionChanged);
   window.removeEventListener('agents-spawned', panel._onAgentsSpawned);
+  window.removeEventListener(
+    'agents-rehydrated', panel._onAgentsRehydrated,
+  );
   window.removeEventListener('state-loaded', panel._onStateLoaded);
   window.removeEventListener(
     'compaction-event',
@@ -857,6 +864,34 @@ export async function loadSnippets(panel) {
  * still works: the user can reply, and the
  * backend ContextManager has the full context.
  */
+/**
+ * Handle ``agents-rehydrated`` window events.
+ *
+ * Dispatched by the AppShell after the backend's
+ * :func:`load_session_into_context` reconstructs agent
+ * scopes from the session's archive. The detail carries
+ * ``{agent_ids: [...]}`` listing which ids the backend
+ * just registered, but the frontend doesn't need to
+ * filter — :func:`rehydrateLiveAgents` calls
+ * ``list_live_agents()`` and reconstructs every live
+ * agent's tab. Tabs already present from the prior
+ * connection are skipped idempotently.
+ *
+ * The ``session-changed`` handler runs before this one
+ * (per the broadcast order in
+ * :func:`load_session_into_context`), so by the time
+ * we materialise tabs the message list and streaming
+ * state have already been reset for the new session.
+ */
+export function onAgentsRehydrated(panel, event) {
+  // The detail's agent_ids is informational — the
+  // rehydrate path itself queries the backend. We don't
+  // gate on it (an empty list would skip the call but
+  // the handler still runs harmlessly through
+  // list_live_agents → empty entries → no tabs).
+  rehydrateLiveAgents(panel);
+}
+
 export async function rehydrateLiveAgents(panel) {
   if (!panel.rpcConnected) return;
   let entries;

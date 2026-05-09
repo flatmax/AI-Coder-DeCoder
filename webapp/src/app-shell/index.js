@@ -910,6 +910,23 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  agentsRehydrated(data) {
+    // Fired by the backend after load_session_into_context
+    // reconstructs agent scopes from the session's
+    // archive. Carries {agent_ids: [...]} so the chat
+    // panel can materialise tabs for the rehydrated
+    // agents. Distinct from agentsSpawned because the
+    // reconstructed scopes have full conversation history
+    // (loaded from get_turn_archive, not from a fresh
+    // spawn) — the frontend handler differs accordingly.
+    // See specs4/3-llm/history.md § Session-Load
+    // Reconstruction step 9.
+    window.dispatchEvent(
+      new CustomEvent('agents-rehydrated', { detail: data }),
+    );
+    return true;
+  }
+
   sessionChanged(data) {
     window.dispatchEvent(new CustomEvent('session-changed', { detail: data }));
     return true;
