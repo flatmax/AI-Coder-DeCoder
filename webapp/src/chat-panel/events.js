@@ -273,11 +273,29 @@ export function onSessionChanged(panel, event) {
     const images = Array.isArray(m.images)
       ? m.images
       : normalized.images;
+    // Preserve turn_id and agent_blocks from
+    // persisted records so the "View agents (N)"
+    // affordance in renderMessage (Increment D
+    // commit 3) can find them after a session
+    // reload. Both are optional; only assistant
+    // messages from agentic turns carry
+    // agent_blocks, and only records produced
+    // after Increment A carry turn_id.
+    const turnId =
+      typeof m.turn_id === 'string' && m.turn_id
+        ? m.turn_id
+        : null;
+    const agentBlocks =
+      Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0
+        ? m.agent_blocks
+        : null;
     return {
       role: m.role,
       content: normalized.content,
       ...(images.length > 0 ? { images } : {}),
       ...(m.system_event ? { system_event: true } : {}),
+      ...(turnId ? { turn_id: turnId } : {}),
+      ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
     };
   });
   panel._streaming = false;
@@ -330,11 +348,24 @@ export function onStateLoaded(panel, event) {
     const images = Array.isArray(m.images)
       ? m.images
       : normalized.images;
+    // Preserve turn_id and agent_blocks for the
+    // "View agents" affordance — same shape as
+    // onSessionChanged.
+    const turnId =
+      typeof m.turn_id === 'string' && m.turn_id
+        ? m.turn_id
+        : null;
+    const agentBlocks =
+      Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0
+        ? m.agent_blocks
+        : null;
     return {
       role: m.role,
       content: normalized.content,
       ...(images.length > 0 ? { images } : {}),
       ...(m.system_event ? { system_event: true } : {}),
+      ...(turnId ? { turn_id: turnId } : {}),
+      ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
     };
   });
   seedInputHistory(panel, msgs);
@@ -467,11 +498,25 @@ export function onCompactionEvent(panel, event) {
           const images = Array.isArray(m.images)
             ? m.images
             : normalized.images;
+          // Preserve turn_id and agent_blocks for
+          // the "View agents" affordance — same
+          // shape as onSessionChanged.
+          const turnId =
+            typeof m.turn_id === 'string' && m.turn_id
+              ? m.turn_id
+              : null;
+          const agentBlocks =
+            Array.isArray(m.agent_blocks) &&
+            m.agent_blocks.length > 0
+              ? m.agent_blocks
+              : null;
           return {
             role: m.role,
             content: normalized.content,
             ...(images.length > 0 ? { images } : {}),
             ...(m.system_event ? { system_event: true } : {}),
+            ...(turnId ? { turn_id: turnId } : {}),
+            ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
           };
         });
       }

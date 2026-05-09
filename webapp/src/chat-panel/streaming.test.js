@@ -115,6 +115,164 @@ describe('ChatPanel streaming events', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Increment D field threading — onStreamComplete
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel onStreamComplete threads agentic fields', () => {
+  async function sendAndGetRequestId(panel, message = 'hi') {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    return started.mock.calls[0][0];
+  }
+
+  it('settled assistant carries turn_id when present', async () => {
+    // Per spec specs4/5-webapp/agent-browser.md §
+    // Historical Turns — the "View agents (N)"
+    // affordance below an assistant message reads
+    // `msg.turn_id` to look up `get_turn_archive`.
+    // Without this thread-through, an agentic turn
+    // would render with no affordance even though
+    // the backend persisted the field.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'delegated',
+        turn_id: 'turn_abc',
+      },
+    });
+    await settle(p);
+    expect(p.messages[1].turn_id).toBe('turn_abc');
+  });
+
+  it('settled assistant carries agent_blocks when present', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'spawning',
+        turn_id: 'turn_abc',
+        agent_blocks: [
+          { id: 'frontend', task: 'ui', agent_idx: 0 },
+          { id: 'backend', task: 'api', agent_idx: 1 },
+        ],
+      },
+    });
+    await settle(p);
+    const msg = p.messages[1];
+    expect(msg.agent_blocks).toEqual([
+      { id: 'frontend', task: 'ui', agent_idx: 0 },
+      { id: 'backend', task: 'api', agent_idx: 1 },
+    ]);
+  });
+
+  it('non-agentic completion has no turn_id or agent_blocks', async () => {
+    // Pre-Increment-A turns and any non-agentic
+    // turn must produce a clean message shape.
+    // Optional-key omission keeps the rendered
+    // card unchanged for the common case.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'plain reply' },
+    });
+    await settle(p);
+    const msg = p.messages[1];
+    expect('turn_id' in msg).toBe(false);
+    expect('agent_blocks' in msg).toBe(false);
+  });
+
+  it('empty agent_blocks array is omitted from the message', async () => {
+    // Backend sends [] when no agents spawned —
+    // we shouldn't store the empty array because
+    // the renderer's affordance-visibility check
+    // is `agent_blocks?.length > 0`. Storing []
+    // wastes memory and gives renderers two
+    // ways to spell "no agents".
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'no agents',
+        turn_id: 'turn_abc',
+        agent_blocks: [],
+      },
+    });
+    await settle(p);
+    expect('agent_blocks' in p.messages[1]).toBe(false);
+    expect(p.messages[1].turn_id).toBe('turn_abc');
+  });
+
+  it('non-array agent_blocks is rejected defensively', async () => {
+    // A malformed payload mustn't crash or
+    // produce a phantom field. Drop silently —
+    // turn_id still rides through.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'malformed',
+        turn_id: 'turn_abc',
+        agent_blocks: 'not-an-array',
+      },
+    });
+    await settle(p);
+    expect('agent_blocks' in p.messages[1]).toBe(false);
+    expect(p.messages[1].turn_id).toBe('turn_abc');
+  });
+
+  it('empty-string turn_id is omitted', async () => {
+    // The factories generate non-empty strings,
+    // but defensive against a backend bug — empty
+    // string shouldn't produce a `turn_id` field
+    // that callers then fail to look up.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'ok', turn_id: '' },
+    });
+    await settle(p);
+    expect('turn_id' in p.messages[1]).toBe(false);
+  });
+
+  it('error-path completion still threads turn_id', async () => {
+    // Errored turns can still have spawned
+    // agents up to the failure point. The error
+    // message replaces the assistant content but
+    // turn_id should ride through so the
+    // archive affordance still works for
+    // partial turns.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        error: 'rate limit hit',
+        turn_id: 'turn_abc',
+      },
+    });
+    await settle(p);
+    expect(p.messages[1].turn_id).toBe('turn_abc');
+    // Error path doesn't carry agent_blocks (the
+    // backend skips spawn-block dispatch on
+    // error per `_streaming.py`), so omit
+    // defensively.
+    expect('agent_blocks' in p.messages[1]).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Chunk coalescing via rAF
 // ---------------------------------------------------------------------------
 

@@ -88,6 +88,105 @@ describe('ChatPanel session-changed event', () => {
     expect(p.messages[0].system_event).toBe(true);
     expect(p.messages[1].system_event).toBeUndefined();
   });
+
+  it('preserves turn_id from persisted records', async () => {
+    // Increment A persists turn_id on every
+    // record produced by an agentic turn. Session
+    // reload must thread it back so the historical
+    // "View agents" affordance works after refresh.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'spawn agents',
+          turn_id: 'turn_abc',
+        },
+        {
+          role: 'assistant',
+          content: 'delegated',
+          turn_id: 'turn_abc',
+        },
+        {
+          role: 'user',
+          content: 'pre-Increment-A record',
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages[0].turn_id).toBe('turn_abc');
+    expect(p.messages[1].turn_id).toBe('turn_abc');
+    expect('turn_id' in p.messages[2]).toBe(false);
+  });
+
+  it('preserves agent_blocks from persisted assistant records', async () => {
+    // Per spec specs4/3-llm/history.md § Cross-Turn
+    // Agent Reconstruction — assistant records that
+    // spawned agents persist the {id, agent_idx}
+    // mapping. Session reload threads it back so
+    // historical-turn UI can recover the right
+    // archive directories.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: 'delegated',
+          turn_id: 'turn_abc',
+          agent_blocks: [
+            { id: 'a0', agent_idx: 0 },
+            { id: 'a1', agent_idx: 1 },
+          ],
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages[1].agent_blocks).toEqual([
+      { id: 'a0', agent_idx: 0 },
+      { id: 'a1', agent_idx: 1 },
+    ]);
+  });
+
+  it('omits empty agent_blocks array on reload', async () => {
+    // Records that DO have the key but with an
+    // empty array (defensive against future
+    // backend changes) shouldn't surface a phantom
+    // affordance trigger.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'assistant',
+          content: 'no agents',
+          turn_id: 'turn_abc',
+          agent_blocks: [],
+        },
+      ],
+    });
+    await settle(p);
+    expect('agent_blocks' in p.messages[0]).toBe(false);
+    expect(p.messages[0].turn_id).toBe('turn_abc');
+  });
+
+  it('omits non-string turn_id defensively', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        { role: 'user', content: 'a', turn_id: 42 },
+        { role: 'user', content: 'b', turn_id: '' },
+        { role: 'user', content: 'c', turn_id: null },
+      ],
+    });
+    await settle(p);
+    expect('turn_id' in p.messages[0]).toBe(false);
+    expect('turn_id' in p.messages[1]).toBe(false);
+    expect('turn_id' in p.messages[2]).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -451,6 +550,52 @@ describe('ChatPanel compaction events — compaction stages', () => {
     await settle(p);
     expect(p.messages[0].system_event).toBe(true);
     expect(p.messages[1].system_event).toBeUndefined();
+  });
+
+  it('compacted preserves turn_id and agent_blocks', async () => {
+    // Compaction's truncate case keeps the
+    // verbatim window unchanged — including any
+    // agentic-turn metadata. The summarize case
+    // synthesises new summary messages without
+    // turn_id (correct — they didn't come from a
+    // turn). Both shapes round-trip cleanly here.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'ok' },
+    });
+    await settle(p);
+    pushEvent('compaction-event', {
+      requestId: reqId,
+      event: {
+        stage: 'compacted',
+        case: 'truncate',
+        messages: [
+          { role: 'user', content: 'pre-A record' },
+          {
+            role: 'user',
+            content: 'spawn',
+            turn_id: 'turn_late',
+          },
+          {
+            role: 'assistant',
+            content: 'delegated',
+            turn_id: 'turn_late',
+            agent_blocks: [
+              { id: 'a0', agent_idx: 0 },
+            ],
+          },
+        ],
+      },
+    });
+    await settle(p);
+    expect('turn_id' in p.messages[0]).toBe(false);
+    expect(p.messages[1].turn_id).toBe('turn_late');
+    expect(p.messages[2].turn_id).toBe('turn_late');
+    expect(p.messages[2].agent_blocks).toEqual([
+      { id: 'a0', agent_idx: 0 },
+    ]);
   });
 
   it('compaction_error emits error toast with backend detail', async () => {

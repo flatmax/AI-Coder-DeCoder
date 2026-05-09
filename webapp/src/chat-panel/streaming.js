@@ -373,10 +373,35 @@ export function onStreamComplete(panel, event) {
     const errorBody = error
       ? formatErrorBody(error, errorInfo)
       : null;
+    // Thread turn_id and agent_blocks onto the
+    // in-memory record so the "View agents (N)"
+    // affordance in renderMessage (Increment D
+    // commit 3) can find them. Without this,
+    // the wire-level fields persisted by
+    // Increment A never reach the message shape
+    // Lit renders. Both fields are optional and
+    // only present on assistant messages from
+    // agentic turns.
+    const turnId = result?.turn_id;
+    const agentBlocks = Array.isArray(result?.agent_blocks)
+      ? result.agent_blocks
+      : null;
+    const turnIdField =
+      typeof turnId === 'string' && turnId
+        ? { turn_id: turnId }
+        : {};
+    const agentBlocksField =
+      agentBlocks && agentBlocks.length > 0
+        ? { agent_blocks: agentBlocks }
+        : {};
     ownerTab.messages = [
       ...ownerTab.messages,
       error
-        ? { role: 'assistant', content: errorBody }
+        ? {
+            role: 'assistant',
+            content: errorBody,
+            ...turnIdField,
+          }
         : {
             role: 'assistant',
             content: finalContent,
@@ -388,6 +413,8 @@ export function onStreamComplete(panel, event) {
             // badge. Natural reasons render muted;
             // abnormal reasons render in amber/red.
             ...(finishReason ? { finishReason } : {}),
+            ...turnIdField,
+            ...agentBlocksField,
           },
     ];
     if (ownerIsActive) {
