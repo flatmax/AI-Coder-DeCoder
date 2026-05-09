@@ -173,6 +173,44 @@ export const STYLES = css`
     background: rgba(240, 246, 252, 0.15);
   }
 
+  /* Per-tab context icon — opens the Context overlay
+   * scoped to this tab's conversation. Same fade-in
+   * pattern as .tab-close: invisible by default,
+   * visible on tab hover / active state / focus.
+   * Sits to the left of the close button when both are
+   * present. The icon is purely an affordance — the
+   * tab's own click handler still activates the tab,
+   * and the close button still closes it; this icon
+   * adds a third gesture without taking space when
+   * the user isn't reaching for it. */
+  .tab-context {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 14px;
+    margin-left: 0.4rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    opacity: 0;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    line-height: 1;
+    padding: 0;
+    transition: opacity 100ms ease, background 100ms ease;
+  }
+  .tab-strip-tab:hover .tab-context,
+  .tab-strip-tab.active .tab-context,
+  .tab-context:focus-visible {
+    opacity: 0.7;
+  }
+  .tab-context:hover {
+    opacity: 1 !important;
+    background: rgba(88, 166, 255, 0.15);
+  }
+
   /* Overflow menu — three-dots button at the right
    * edge, always visible when the strip is visible
    * (at least 2 tabs). Clicking opens a dropdown

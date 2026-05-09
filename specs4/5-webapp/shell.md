@@ -98,14 +98,13 @@ The dialog is a draggable, resizable foreground panel hosting the tab bar and ta
 
 ### Tab Bar Layout
 
-The dialog header splits into two groups:
+The dialog header holds **only overlay tabs**, all rendered icon-only on a single right-aligned group: 📊 Context, 📄 Convert (when available), ⚙️ Settings, ▾ minimize. Chat is the **default body** — when no overlay tab is active, the chat panel is shown. There is no Chat button.
 
-- **Left group** — primary conversational tabs with text labels: 🗨 Chat, 📊 Context. These are where the user spends most of their time and benefit from explicit names.
-- **Right group** — utility tabs rendered icon-only (no text label) plus the minimize button: 📄 Convert (when available), ⚙️ Settings, ▾ minimize. The icons carry the meaning; `title` and `aria-label` attributes provide accessible names for tooltip and screen-reader users.
+`margin-left: auto` on the right group keeps the controls pushed to the far edge regardless of viewport width and regardless of how many tabs are present (Convert is conditional).
 
-The right group is pushed to the far edge with `margin-left: auto` on the group container rather than on individual buttons, so the layout stays correct regardless of how many tabs are in either group (e.g., when doc convert is unavailable and the Convert tab is omitted).
+Rationale: Settings and Convert are infrequent destinations — Settings is touched once per config change, Convert is a one-shot task per document. Context is also occasional. Demoting all three to icon-only and treating Chat as the always-visible default reclaims horizontal space for the dialog body and removes a redundant "where am I" affordance — the user is on Chat unless they explicitly navigated elsewhere.
 
-Rationale: Settings and Convert are infrequent destinations — Settings is touched once per config change, Convert is a one-shot task per document. Demoting them to icon-only on the right reclaims horizontal space for the conversational tabs and visually separates "where you work" from "what you configure".
+Returning to chat is via the **back arrow** rendered in each overlay tab's own header (see `context-tab.md`, `settings.md`, `doc-convert.md`). The back arrow dispatches a `request-dialog-tab` event with `{tab: 'files'}` (legacy storage key, retained for migration safety) which the shell catches and routes through `_switchTab`.
 
 ### Layout Modes
 
@@ -201,9 +200,15 @@ Rationale: mode is per-conversation in spirit (an agent could in principle inher
 
 ## Global Keyboard Shortcuts
 
-- Alt+1..4 switch tabs in visual left-to-right order: Chat, Context, Convert (when available), Settings. When doc convert is unavailable, Alt+3 maps to Settings and Alt+4 is unbound.
+- Alt+1 returns to Chat (the default body)
+- Alt+2 opens Context
+- Alt+3 opens Settings
+- Alt+4 opens Convert (when available; the keystroke is consumed but no-op when Convert is unavailable)
 - Alt+M toggles dialog minimize
 - Ctrl+Shift+F activates file search in the chat panel, prefilling from the current selection
+
+Alt+1 always returns to Chat regardless of which overlay is currently shown — same effect as clicking the back arrow. Alt+3 is fixed on Settings regardless of whether Convert is installed, so muscle memory survives stripped-down deployments.
+🟨🟨🟨 REPL
 
 ### Ctrl+Shift+F Selection Capture
 

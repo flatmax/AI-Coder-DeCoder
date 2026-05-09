@@ -180,6 +180,29 @@ export class ContextTab extends RpcMixin(LitElement) {
       border-bottom: 1px solid rgba(240, 246, 252, 0.1);
       background: rgba(22, 27, 34, 0.4);
     }
+    /* Back-arrow button — returns to the chat tab. With
+     * the dialog header's Chat button removed, this is
+     * the primary navigation affordance for leaving the
+     * Context view. Mirrors the equivalent button in
+     * the Settings and Convert tabs so the back-arrow
+     * affordance reads the same regardless of which
+     * overlay tab the user is in. */
+    .back-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .back-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
     .pill-toggle {
       display: flex;
       border: 1px solid rgba(240, 246, 252, 0.15);
@@ -1127,6 +1150,22 @@ export class ContextTab extends RpcMixin(LitElement) {
     } catch (_) {}
   }
 
+  /**
+   * Dispatch a request to the app shell to flip the
+   * active dialog tab back to the chat. The 'files' key
+   * is the legacy storage value — retained so existing
+   * persisted state stays valid across this UI change.
+   */
+  _goBackToChat() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _loadCacheExpanded() {
     try {
       const raw = localStorage.getItem(_CACHE_EXPANDED_KEY);
@@ -1224,6 +1263,12 @@ export class ContextTab extends RpcMixin(LitElement) {
   render() {
     return html`
       <div class="toolbar">
+        <button
+          class="back-btn"
+          title="Back to chat"
+          aria-label="Back to chat"
+          @click=${() => this._goBackToChat()}
+        >← Chat</button>
         <div class="pill-toggle">
           <button
             class="pill-btn ${this._subview === 'budget' ? 'active' : ''}"

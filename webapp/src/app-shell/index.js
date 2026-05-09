@@ -517,6 +517,17 @@ export class AppShell extends JRPCClient {
       'compaction-event', this._onCompactionStatusRefresh,
     );
     window.addEventListener('git-action', this._onGitAction);
+    // request-dialog-tab is fired by tab bodies (Context,
+    // Settings, Convert) when their back-arrow button is
+    // clicked. The shell flips the active dialog tab back
+    // to the chat (`files` key, retained from the legacy
+    // tab naming). Bubbling + composed so the event
+    // crosses the shadow root boundary from each tab
+    // component up to here.
+    this._onRequestDialogTab = this._onRequestDialogTab.bind(this);
+    window.addEventListener(
+      'request-dialog-tab', this._onRequestDialogTab,
+    );
   }
 
   disconnectedCallback() {
@@ -598,6 +609,11 @@ export class AppShell extends JRPCClient {
       'compaction-event', this._onCompactionStatusRefresh,
     );
     window.removeEventListener('git-action', this._onGitAction);
+    if (this._onRequestDialogTab) {
+      window.removeEventListener(
+        'request-dialog-tab', this._onRequestDialogTab,
+      );
+    }
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -1036,6 +1052,12 @@ export class AppShell extends JRPCClient {
       // localStorage can throw in private-browsing modes or
       // when quota is exhausted. Persistence is best-effort.
     }
+  }
+
+  _onRequestDialogTab(event) {
+    const tab = event?.detail?.tab;
+    if (typeof tab !== 'string' || !tab) return;
+    this._switchTab(tab);
   }
 
   // ---------------------------------------------------------------

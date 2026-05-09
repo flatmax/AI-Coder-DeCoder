@@ -131,6 +131,29 @@ export class SettingsTab extends RpcMixin(LitElement) {
       padding: 1rem;
     }
 
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .back-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .back-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
+
     .info-banner {
       background: rgba(22, 27, 34, 0.6);
       border: 1px solid rgba(240, 246, 252, 0.1);
@@ -727,8 +750,31 @@ export class SettingsTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Dispatch a request to the app shell to flip the
+   * active dialog tab back to the chat. Companion to
+   * the equivalent method in ContextTab and DocConvertTab.
+   */
+  _goBackToChat() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   render() {
     return html`
+      <div class="toolbar">
+        <button
+          class="back-btn"
+          title="Back to chat"
+          aria-label="Back to chat"
+          @click=${() => this._goBackToChat()}
+        >← Chat</button>
+      </div>
       ${this._info
         ? html`
             <div class="info-banner">

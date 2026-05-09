@@ -206,6 +206,32 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       overflow: hidden;
     }
 
+    .nav-bar {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+      background: rgba(22, 27, 34, 0.4);
+    }
+    .back-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8125rem;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .back-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
+
     .info-banner {
       background: rgba(22, 27, 34, 0.6);
       border-bottom: 1px solid rgba(240, 246, 252, 0.08);
@@ -963,18 +989,48 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     if (this._convertPhase === 'converting'
         || this._convertPhase === 'complete') {
       return html`
+        ${this._renderNavBar()}
         ${this._renderInfoBanner()}
         ${this._renderDirtyTreeBanner()}
         ${this._renderProgressView()}
       `;
     }
     return html`
+      ${this._renderNavBar()}
       ${this._renderInfoBanner()}
       ${this._renderDirtyTreeBanner()}
       ${this._renderToolbar()}
       ${this._renderFilterBar()}
       ${this._renderFileList()}
     `;
+  }
+
+  _renderNavBar() {
+    return html`
+      <div class="nav-bar">
+        <button
+          class="back-btn"
+          title="Back to chat"
+          aria-label="Back to chat"
+          @click=${() => this._goBackToChat()}
+        >← Chat</button>
+      </div>
+    `;
+  }
+
+  /**
+   * Dispatch a request to the app shell to flip the
+   * active dialog tab back to the chat. Companion to
+   * the equivalent method in ContextTab and SettingsTab.
+   */
+  _goBackToChat() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _renderDirtyTreeBanner() {

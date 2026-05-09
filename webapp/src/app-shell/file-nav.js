@@ -128,16 +128,21 @@ export function onGridKeyUp(host, event) {
  * on any keydown that isn't hitting the capture-phase
  * grid handler (Alt+Arrow is already consumed there).
  *
- *   Alt+1 → Files tab
+ *   Alt+1 → Chat (returns to default body from any overlay)
  *   Alt+2 → Context tab
  *   Alt+3 → Settings tab
- *   Alt+4 → Doc Convert tab (only when available — the
- *           tab button isn't rendered when markitdown
- *           isn't installed, and the stored preference
- *           migrates to 'files' if a user's last session
- *           was on doc-convert and they reconnected to
- *           a repo without it)
+ *   Alt+4 → Convert tab (when available — silently consumed
+ *           but no-op when Convert is unavailable)
  *   Alt+M → Toggle minimize
+ *
+ * Alt+1 acts as a "back to chat" shortcut equivalent to
+ * clicking the back arrow on whichever overlay is open.
+ *
+ * Alt+3 is fixed on Settings regardless of Convert
+ * availability — muscle memory shouldn't shift just because
+ * markitdown is or isn't installed. Alt+4 is the optional
+ * Convert slot.
+🟨🟨🟨 REPL
  *
  * Guards:
  *   - Skips when Ctrl / Meta / Shift are also held.
@@ -179,12 +184,13 @@ export function onGlobalKeyDown(host, event) {
   };
   const targetTab = tabMap[event.key];
   if (!targetTab) return;
-  // Gate Alt+4 on availability. The other tabs are
-  // always present.
+  // Gate Alt+4 on Convert availability — the tab isn't
+  // rendered when markitdown is missing, and switching
+  // to a hidden tab leaves the dialog body blank. Still
+  // consume the keystroke so a subsequent Alt+4 doesn't
+  // bubble to browser chrome (some Firefox builds use
+  // Alt+digit for tab switching at the chrome level).
   if (targetTab === 'doc-convert' && !host._docConvertAvailable) {
-    // Still consume the key so a subsequent Alt+4 press
-    // doesn't bubble to browser chrome. No-op tab switch
-    // below wouldn't help because we return early.
     event.preventDefault();
     return;
   }

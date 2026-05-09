@@ -161,6 +161,37 @@ export function onTabClick(panel, tabId) {
 }
 
 /**
+ * Click on a tab's inline 📊 context icon. Two effects:
+ *
+ *   1. Activate the tab (so the chat panel shows that
+ *      agent's transcript). Cheap when the tab is
+ *      already active — the setter short-circuits on
+ *      equal values.
+ *   2. Switch the dialog tab to Context via a bubbling
+ *      ``request-dialog-tab`` event the shell catches.
+ *      The Context tab listens for ``active-tab-changed``
+ *      independently, so the rescope happens through
+ *      that channel without a coupling here.
+ *
+ * Both effects fire on every click, even when the
+ * target tab is already active — re-clicking the icon
+ * on an already-active tab is a "show me Context for
+ * this conversation" gesture and should re-open the
+ * overlay if the user previously navigated away.
+ */
+export function onTabContextClick(panel, tabId) {
+  if (typeof tabId !== 'string' || !tabId) return;
+  panel._activeTabId = tabId;
+  panel.dispatchEvent(
+    new CustomEvent('request-dialog-tab', {
+      detail: { tab: 'context' },
+      bubbles: true,
+      composed: true,
+    }),
+  );
+}
+
+/**
  * Toggle the overflow menu open/closed. Attaches
  * capture-phase document listeners for outside-click
  * and Escape dismissal when opening; detaches them
@@ -428,7 +459,24 @@ export function renderTabStrip(panel) {
                   class="tab-streaming-indicator"
                   aria-hidden="true"
                 ></span>`
-              : ''}${label}${closable
+              : ''}${label}<span
+              class="tab-context"
+              role="button"
+              tabindex="0"
+              aria-label="Open Context for ${label}"
+              title="View this conversation's context (Budget + Cache)"
+              @click=${(e) => {
+                e.stopPropagation();
+                onTabContextClick(panel, tabId);
+              }}
+              @keydown=${(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onTabContextClick(panel, tabId);
+                }
+              }}
+            >📊</span>${closable
               ? html`<span
                   class="tab-close"
                   role="button"

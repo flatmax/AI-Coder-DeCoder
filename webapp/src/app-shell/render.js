@@ -119,17 +119,13 @@ export function renderTemplate(host) {
         class="dialog-header"
         @pointerdown=${host._onHeaderPointerDown}
       >
-        <div class="tab-group-left">
-          <button
-            class="tab-button ${host.activeTab === 'files' ? 'active' : ''}"
-            @click=${() => host._switchTab('files')}
-          >🗨 Chat</button>
-          <button
-            class="tab-button ${host.activeTab === 'context' ? 'active' : ''}"
-            @click=${() => host._switchTab('context')}
-          >📊 Context</button>
-        </div>
         <div class="tab-group-right">
+          <button
+            class="tab-button icon-only ${host.activeTab === 'context' ? 'active' : ''}"
+            @click=${() => host._switchTab('context')}
+            title="Context — token budget and cache tier viewer"
+            aria-label="Context"
+          >📊</button>
           ${host._docConvertAvailable ? html`
             <button
               class="tab-button icon-only ${host.activeTab === 'doc-convert' ? 'active' : ''}"
