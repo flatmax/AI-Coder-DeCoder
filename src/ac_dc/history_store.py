@@ -483,10 +483,21 @@ class HistoryStore:
             # Defensive copy + per-entry filter so callers can't
             # corrupt the persisted shape with extras like
             # ``task`` (recoverable from the agent's own archive
-            # file) or stray non-string ids. The reconstruction
-            # algorithm only reads ``id`` and ``agent_idx``;
-            # persisting just those keeps records compact and
-            # the contract narrow.
+            # file) or stray non-string ids. Required fields:
+            # ``id`` (non-empty string) and ``agent_idx``
+            # (non-negative int). Optional fields per Increment
+            # 3a (specs4 "Agents as first-class persistent
+            # entities" plan): ``mode`` (one of
+            # ``code``/``doc``/``code+xref``/``doc+xref``),
+            # ``cross_reference_enabled`` (bool), ``model``
+            # (provider-qualified id string). Optional fields
+            # round-trip when present and are silently dropped
+            # when malformed — the reconstruction algorithm
+            # tolerates absence (older records predating this
+            # extension load correctly).
+            valid_modes = {
+                "code", "doc", "code+xref", "doc+xref",
+            }
             persisted_blocks: list[dict[str, Any]] = []
             for entry in agent_blocks:
                 if not isinstance(entry, dict):
@@ -501,10 +512,40 @@ class HistoryStore:
                     or entry_idx < 0
                 ):
                     continue
-                persisted_blocks.append({
+                persisted: dict[str, Any] = {
                     "id": entry_id,
                     "agent_idx": entry_idx,
-                })
+                }
+                # Optional mode — defensive against unknown
+                # strings so a future mode value added on the
+                # write side can't corrupt records the read
+                # side doesn't recognise.
+                entry_mode = entry.get("mode")
+                if (
+                    isinstance(entry_mode, str)
+                    and entry_mode in valid_modes
+                ):
+                    persisted["mode"] = entry_mode
+                # Optional cross_reference_enabled — strict
+                # bool check rejects the int-coerced 0/1 case
+                # (Python's bool is a subclass of int but
+                # we want explicit bools on disk).
+                entry_xref = entry.get("cross_reference_enabled")
+                if isinstance(entry_xref, bool):
+                    persisted["cross_reference_enabled"] = (
+                        entry_xref
+                    )
+                # Optional model — provider-qualified id
+                # like ``anthropic/claude-sonnet-4-5``. Empty
+                # strings rejected (no useful information,
+                # just clutter).
+                entry_model = entry.get("model")
+                if (
+                    isinstance(entry_model, str)
+                    and entry_model
+                ):
+                    persisted["model"] = entry_model
+                persisted_blocks.append(persisted)
             if persisted_blocks:
                 record["agent_blocks"] = persisted_blocks
 

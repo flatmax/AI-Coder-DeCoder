@@ -292,11 +292,98 @@ async def stream_chat(
             persisted_agent_blocks: list[dict[str, Any]] | None = None
             if full_content and not cancelled:
                 _agent_parse = parse_text(full_content)
-                _entries = [
-                    {"id": b.id, "agent_idx": idx}
-                    for idx, b in enumerate(_agent_parse.agent_blocks)
-                    if b.valid
-                ]
+                # Per Increment 3a: persist each agent's resolved
+                # mode, cross-reference flag, and model alongside
+                # ``id`` and ``agent_idx``. Reconstruction
+                # (Increment 5) will rebuild a ContextManager per
+                # agent from the archive content; mode + xref
+                # determine which prompt to install, model
+                # determines which provider to address.
+                #
+                # Mode resolution mirrors the agentsSpawned
+                # broadcast logic in this same function: existing
+                # agents (retask) keep their current mode; fresh
+                # spawns resolve via _resolve_agent_mode against
+                # the orchestrator's current scope. Model comes
+                # from the agent's own ContextManager when
+                # known; falls back to the orchestrator's model
+                # for fresh spawns whose scope hasn't been built
+                # by this point in the function.
+                from ac_dc.llm._agents import (
+                    _format_mode,
+                    _resolve_agent_mode,
+                )
+                parent_cm = scope.context
+                parent_mode = (
+                    parent_cm.mode if parent_cm
+                    else None
+                )
+                parent_xref = (
+                    parent_cm.cross_reference_enabled
+                    if parent_cm else False
+                )
+                _entries: list[dict[str, Any]] = []
+                for idx, b in enumerate(_agent_parse.agent_blocks):
+                    if not b.valid:
+                        continue
+                    entry: dict[str, Any] = {
+                        "id": b.id,
+                        "agent_idx": idx,
+                    }
+                    # Resolve mode + xref. Reuse existing agent's
+                    # state on retask (per the same precedence
+                    # the agentsSpawned broadcast uses) so the
+                    # persisted record matches the runtime
+                    # scope.
+                    existing = (
+                        service._agent_contexts.get(b.id)
+                    )
+                    if (
+                        existing is not None
+                        and existing.context is not None
+                    ):
+                        agent_mode = existing.context.mode
+                        agent_xref = (
+                            existing.context.cross_reference_enabled
+                        )
+                    elif parent_mode is not None:
+                        agent_mode, agent_xref = (
+                            _resolve_agent_mode(
+                                b.mode,
+                                parent_mode,
+                                parent_xref,
+                            )
+                        )
+                    else:
+                        # No parent context — extremely
+                        # defensive; main path always has one.
+                        # Skip mode enrichment on this entry.
+                        agent_mode = None
+                        agent_xref = None
+                    if agent_mode is not None:
+                        entry["mode"] = _format_mode(
+                            agent_mode, bool(agent_xref),
+                        )
+                        entry["cross_reference_enabled"] = (
+                            bool(agent_xref)
+                        )
+                    # Model: agents inherit the orchestrator's
+                    # model today (no per-agent model override
+                    # exists in the spawn block format yet).
+                    # Read from config rather than the agent's
+                    # ContextManager — fresh-spawn scopes don't
+                    # exist yet at this persistence point.
+                    try:
+                        model = service._config.model
+                        if isinstance(model, str) and model:
+                            entry["model"] = model
+                    except Exception:
+                        # Defensive: a config read failure must
+                        # not block persistence. The reconstruction
+                        # path tolerates a missing model field
+                        # and falls back to the current config.
+                        pass
+                    _entries.append(entry)
                 if _entries:
                     persisted_agent_blocks = _entries
             scope.context.add_message(

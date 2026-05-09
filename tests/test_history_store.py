@@ -516,6 +516,345 @@ class TestAgentBlocksField:
         assert full[0].get("turn_id") == tid
 
 
+class TestAgentBlocksOptionalFields:
+    """Optional ``agent_blocks`` fields per Increment 3a.
+
+    Per the "Agents as first-class persistent entities" plan
+    in IMPLEMENTATION_NOTES.md, agent_blocks entries can
+    carry three optional fields beyond the required
+    {id, agent_idx} pair:
+
+    - ``mode`` — one of ``code``, ``doc``, ``code+xref``,
+      ``doc+xref``. Mirrors the orchestrator's UI mode toggle
+      (primary axis × cross-reference axis). Used by
+      Increment 5's reconstruction to install the right
+      system prompt when rebuilding the agent's
+      ContextManager.
+    - ``cross_reference_enabled`` — bool. Strictly speaking
+      redundant with ``mode`` (the ``+xref`` suffix encodes
+      it), but stored explicitly so reconstruction can read
+      one field rather than parsing the mode string.
+    - ``model`` — provider-qualified id like
+      ``anthropic/claude-sonnet-4-5``. Forward-compat for a
+      future per-agent model override; today every agent
+      inherits the orchestrator's model.
+
+    All three are optional. Missing fields are tolerated for
+    backwards-compatibility with records predating Increment
+    3a. Malformed values are silently dropped — better to
+    emit a record without the optional field than to fail
+    the whole append.
+    """
+
+    def test_optional_fields_round_trip(
+        self, store: HistoryStore
+    ) -> None:
+        """All four optional fields persist and read back."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "delegating",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "mode": "code+xref",
+                    "cross_reference_enabled": True,
+                    "model": "anthropic/claude-sonnet-4-5",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("agent_blocks") == [
+            {
+                "id": "agent-0",
+                "agent_idx": 0,
+                "mode": "code+xref",
+                "cross_reference_enabled": True,
+                "model": "anthropic/claude-sonnet-4-5",
+            },
+        ]
+
+    def test_partial_optional_fields_persist_only_present(
+        self, store: HistoryStore
+    ) -> None:
+        """Some fields supplied, others omitted — only present persist.
+
+        A caller that knows the mode but not the model (or
+        vice versa) gets a record carrying just what it knew.
+        Reconstruction tolerates missing fields by falling
+        back to the current orchestrator state.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "partial",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "mode": "doc",
+                    "cross_reference_enabled": False,
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        persisted = msgs[0].get("agent_blocks")
+        assert persisted == [
+            {
+                "id": "agent-0",
+                "agent_idx": 0,
+                "mode": "doc",
+                "cross_reference_enabled": False,
+            },
+        ]
+        # Model field omitted because it wasn't supplied.
+        assert "model" not in persisted[0]
+
+    def test_no_optional_fields_matches_pre_3a_shape(
+        self, store: HistoryStore
+    ) -> None:
+        """Bare {id, agent_idx} entry persists unchanged.
+
+        Backwards-compat invariant — D30 records without 3a
+        fields must continue to round-trip through the same
+        shape after 3a's filter changes.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "old shape",
+            agent_blocks=[
+                {"id": "agent-0", "agent_idx": 0},
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        assert msgs[0].get("agent_blocks") == [
+            {"id": "agent-0", "agent_idx": 0},
+        ]
+
+    def test_all_four_valid_modes_persist(
+        self, store: HistoryStore
+    ) -> None:
+        """Each of the four valid mode strings round-trips."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "all modes",
+            agent_blocks=[
+                {"id": "a", "agent_idx": 0, "mode": "code"},
+                {"id": "b", "agent_idx": 1, "mode": "doc"},
+                {
+                    "id": "c", "agent_idx": 2,
+                    "mode": "code+xref",
+                },
+                {
+                    "id": "d", "agent_idx": 3,
+                    "mode": "doc+xref",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        modes = [
+            entry["mode"]
+            for entry in msgs[0]["agent_blocks"]
+        ]
+        assert modes == [
+            "code", "doc", "code+xref", "doc+xref",
+        ]
+
+    def test_unknown_mode_dropped(
+        self, store: HistoryStore
+    ) -> None:
+        """Mode value not in the valid set is silently dropped.
+
+        Defensive against a future write-side change that
+        adds a mode value before the read-side knows about
+        it. The entry's other fields persist; just the
+        mode is missing — reconstruction falls back to
+        orchestrator default.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "bad mode",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "mode": "rust",  # not a real mode
+                    "model": "anthropic/claude-sonnet-4-5",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        persisted = msgs[0]["agent_blocks"][0]
+        # mode dropped, other fields kept.
+        assert "mode" not in persisted
+        assert persisted["id"] == "agent-0"
+        assert persisted["model"] == (
+            "anthropic/claude-sonnet-4-5"
+        )
+
+    def test_non_string_mode_dropped(
+        self, store: HistoryStore
+    ) -> None:
+        """Non-string mode values silently dropped."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "typed",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "mode": 42,
+                },
+                {
+                    "id": "agent-1",
+                    "agent_idx": 1,
+                    "mode": None,
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        for entry in msgs[0]["agent_blocks"]:
+            assert "mode" not in entry
+
+    def test_non_bool_cross_ref_dropped(
+        self, store: HistoryStore
+    ) -> None:
+        """cross_reference_enabled requires strict bool.
+
+        Python's bool is a subclass of int — naive
+        ``isinstance(x, int)`` would accept 0/1. The filter
+        uses strict ``isinstance(x, bool)`` which rejects
+        ints (including 0 and 1).
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "typed xref",
+            agent_blocks=[
+                {
+                    "id": "a",
+                    "agent_idx": 0,
+                    "cross_reference_enabled": 1,
+                },
+                {
+                    "id": "b",
+                    "agent_idx": 1,
+                    "cross_reference_enabled": "true",
+                },
+                {
+                    "id": "c",
+                    "agent_idx": 2,
+                    "cross_reference_enabled": None,
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        for entry in msgs[0]["agent_blocks"]:
+            assert "cross_reference_enabled" not in entry
+
+    def test_bool_cross_ref_persists_both_values(
+        self, store: HistoryStore
+    ) -> None:
+        """True and False both round-trip explicitly.
+
+        False is a legitimate value (cross-ref off). The
+        filter must not collapse both to "field omitted" —
+        explicit False distinguishes from "no preference".
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "explicit",
+            agent_blocks=[
+                {
+                    "id": "on",
+                    "agent_idx": 0,
+                    "cross_reference_enabled": True,
+                },
+                {
+                    "id": "off",
+                    "agent_idx": 1,
+                    "cross_reference_enabled": False,
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        entries = msgs[0]["agent_blocks"]
+        assert entries[0]["cross_reference_enabled"] is True
+        assert entries[1]["cross_reference_enabled"] is False
+
+    def test_empty_string_model_dropped(
+        self, store: HistoryStore
+    ) -> None:
+        """Empty model string adds no info, drop it."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "empty model",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "model": "",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        assert "model" not in msgs[0]["agent_blocks"][0]
+
+    def test_non_string_model_dropped(
+        self, store: HistoryStore
+    ) -> None:
+        """Non-string model values silently dropped."""
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "typed model",
+            agent_blocks=[
+                {
+                    "id": "agent-0",
+                    "agent_idx": 0,
+                    "model": ["claude"],
+                },
+                {
+                    "id": "agent-1",
+                    "agent_idx": 1,
+                    "model": 42,
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        for entry in msgs[0]["agent_blocks"]:
+            assert "model" not in entry
+
+    def test_required_fields_still_required(
+        self, store: HistoryStore
+    ) -> None:
+        """Optional fields don't relax the id/agent_idx contract.
+
+        An entry with optional fields but missing id or
+        agent_idx is still dropped entirely — the optional
+        fields don't promote a malformed entry to valid.
+        """
+        sid = HistoryStore.new_session_id()
+        store.append_message(
+            sid, "assistant", "still required",
+            agent_blocks=[
+                # Has mode but no id — drop entirely.
+                {
+                    "agent_idx": 0,
+                    "mode": "code",
+                    "model": "anthropic/claude-sonnet-4-5",
+                },
+                # Valid entry survives.
+                {
+                    "id": "real",
+                    "agent_idx": 1,
+                    "mode": "doc",
+                },
+            ],
+        )
+        msgs = store.get_session_messages(sid)
+        persisted = msgs[0].get("agent_blocks")
+        assert len(persisted) == 1
+        assert persisted[0]["id"] == "real"
+
+
 # ---------------------------------------------------------------------------
 # Images
 # ---------------------------------------------------------------------------

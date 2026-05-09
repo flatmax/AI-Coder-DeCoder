@@ -564,15 +564,31 @@ Forward-compatible foundation for Increments 4 and 5. Doesn't change runtime beh
 
 Two sub-changes:
 
-**3a — Extend `agent_blocks` with initial state.** The orchestrator's assistant record currently persists `{id, agent_idx}` per agent. Extend to `{id, agent_idx, mode, cross_reference_enabled, model}`. The fields capture the agent's spawn-time configuration. Backwards-compatible — older records without these fields are still readable and indicate "use defaults."
+#### ~~3a — Extend `agent_blocks` with initial state~~ — delivered
 
-**3b — Write per-agent mode-change events to the archive.** When per-agent mode toggles ship in Increment 4, each toggle writes a system-event message to the agent's `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` archive marking the transition. Reconstruction replays these events to arrive at the agent's final mode.
+The orchestrator's assistant record now persists per-agent state alongside identity. Extends D30's `{id, agent_idx}` shape with three optional fields:
+
+- `mode` — one of `code` / `doc` / `code+xref` / `doc+xref`. Captured at write time so reconstruction (Increment 5) installs the right system prompt when rebuilding the agent's ContextManager.
+- `cross_reference_enabled` — bool. Redundant with the mode string's `+xref` suffix but stored explicitly so reconstruction reads one field rather than parsing the mode. Future per-agent xref toggle (Increment 4) writes this directly.
+- `model` — provider-qualified id like `anthropic/claude-sonnet-4-5`. Today every agent inherits the orchestrator's model; field is forward-compat for a future per-agent override and ensures reconstruction routes an agent's continuation to the same provider it spawned against.
+
+Implementation in two places:
+
+1. **`HistoryStore.append_message`** (`src/ac_dc/history_store.py`) — `agent_blocks` filter extended to accept and round-trip the three new fields. Defensive validation: unknown mode strings dropped (so a future write-side mode value can't corrupt records the read-side doesn't recognise), strict bool check on cross-ref (rejects 0/1 ints), empty-string model dropped. Required `id` and `agent_idx` contract unchanged — optional fields don't promote malformed entries to valid.
+
+2. **`stream_chat`** (`src/ac_dc/llm/_streaming.py`) — persistence-write site builds the per-block summary with mode resolution mirroring the `agentsSpawned` broadcast path (existing agents on retask keep their current mode; fresh spawns resolve via `_resolve_agent_mode` against the orchestrator's scope). Model read from `service._config.model` rather than from the agent's ContextManager since fresh-spawn scopes don't exist yet at this persistence point. Defensive: a config read failure must not block persistence — reconstruction tolerates a missing model field.
+
+Tests: `TestAgentBlocksOptionalFields` in `test_history_store.py` pins the persistence contract (round-trip, partial fields, all four valid modes, defensive filtering for unknown/non-bool/non-string values, backwards-compat with pre-3a bare `{id, agent_idx}` shape). `TestAgentBlocksPersistence` in `test_agent_spawn.py` extended with four end-to-end tests through `_stream_chat`: explicit + inherited mode persist correctly, cross-ref flag both values round-trip, model field carries the orchestrator's config value, retasked agent persists the existing agent's mode (not the orchestrator's drifted mode).
+
+Backwards-compat: D30 records (bare `{id, agent_idx}`) load correctly; reconstruction tolerates absent fields by falling back to current orchestrator state. Records with the new fields load on systems that don't yet read them — JSON dict round-trips ignore unknown keys.
+
+#### 3b — Write per-agent mode-change events to the archive
+
+Lands with Increment 4. When per-agent mode toggles ship, each toggle writes a system-event message to the agent's `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` archive marking the transition. Reconstruction replays these events to arrive at the agent's final mode rather than relying solely on the spawn-time mode in `agent_blocks`.
 
 Scope:
-- `HistoryStore.append_message` — extend `agent_blocks` parameter shape.
-- `_stream_chat` — populate the extended fields when building the orchestrator's record.
 - `HistoryStore` — new `append_agent_system_event(turn_id, agent_idx, event_type, payload)` helper for mode-change events.
-- Tests pinning the on-disk shape and forward-compat with old records.
+- Tests pinning the on-disk shape.
 
 No frontend change. No reconstruction yet — just the data.
 

@@ -2157,7 +2157,17 @@ class TestAgentBlocksPersistence:
         config: ConfigManager,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Single-agent turn → record carries one entry."""
+        """Single-agent turn → record carries one entry.
+
+        Identity contract — the entry's ``id`` and
+        ``agent_idx`` match the spawn block. Optional
+        Increment 3a fields (mode / cross_reference_enabled /
+        model) may be present too; their values are pinned
+        by separate tests in this class. Asserting just the
+        identity fields here keeps this test focused on the
+        D30 reconstruction contract that 3a extends but
+        doesn't supersede.
+        """
         self._enable_agents(config)
         self._install_recording_stub(service)
         response = (
@@ -2181,9 +2191,11 @@ class TestAgentBlocksPersistence:
         ]
         assert assistants, "No assistant record persisted"
         record = assistants[-1]
-        assert record.get("agent_blocks") == [
-            {"id": "agent-backend", "agent_idx": 0},
-        ]
+        blocks = record.get("agent_blocks")
+        assert isinstance(blocks, list)
+        assert len(blocks) == 1
+        assert blocks[0]["id"] == "agent-backend"
+        assert blocks[0]["agent_idx"] == 0
 
     async def test_multiple_agents_persist_in_order(
         self,
@@ -2199,6 +2211,10 @@ class TestAgentBlocksPersistence:
         implementations; pin that invariant so a future
         refactor that decoupled emission order from storage
         index would surface as a test failure.
+
+        Asserting just the identity fields (id + agent_idx)
+        in declaration order — Increment 3a's optional
+        fields ride along but are covered by separate tests.
         """
         self._enable_agents(config)
         self._install_recording_stub(service)
@@ -2222,10 +2238,14 @@ class TestAgentBlocksPersistence:
             m for m in msgs if m.get("role") == "assistant"
         ]
         record = assistants[-1]
-        assert record.get("agent_blocks") == [
-            {"id": "agent-frontend", "agent_idx": 0},
-            {"id": "agent-backend", "agent_idx": 1},
-            {"id": "agent-docs", "agent_idx": 2},
+        blocks = record.get("agent_blocks")
+        assert isinstance(blocks, list)
+        assert len(blocks) == 3
+        identity = [(b["id"], b["agent_idx"]) for b in blocks]
+        assert identity == [
+            ("agent-frontend", 0),
+            ("agent-backend", 1),
+            ("agent-docs", 2),
         ]
 
     async def test_invalid_blocks_filtered_from_persisted(
@@ -2243,6 +2263,9 @@ class TestAgentBlocksPersistence:
         matches the dispatched shape, so a frontend
         cross-turn-reconstruction view sees the same agents
         the streaming pipeline actually ran.
+
+        Asserts on count and identity rather than full-equality
+        so Increment 3a's optional fields can ride along.
         """
         self._enable_agents(config)
         self._install_recording_stub(service)
@@ -2269,9 +2292,17 @@ class TestAgentBlocksPersistence:
             m for m in msgs if m.get("role") == "assistant"
         ]
         record = assistants[-1]
-        assert record.get("agent_blocks") == [
-            {"id": "agent-good", "agent_idx": 0},
-        ]
+        blocks = record.get("agent_blocks")
+        assert isinstance(blocks, list)
+        assert len(blocks) == 1
+        assert blocks[0]["id"] == "agent-good"
+        assert blocks[0]["agent_idx"] == 0
+        # The malformed "agent-broken" block is filtered out
+        # (no task field). Belt-and-braces — the count
+        # assertion above already proved this, but pinning
+        # the absence by id makes the test's intent explicit.
+        ids = [b["id"] for b in blocks]
+        assert "agent-broken" not in ids
 
     async def test_no_agent_blocks_field_when_no_agents(
         self,
@@ -2344,6 +2375,225 @@ class TestAgentBlocksPersistence:
         assert "agent_blocks" in record
         # turn_id matches the format we expect.
         assert record["turn_id"].startswith("turn_")
+
+    async def test_persisted_blocks_carry_resolved_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Increment 3a — ``mode`` field on each persisted entry.
+
+        Per the "Agents as first-class persistent entities"
+        plan, every agent_blocks entry persists the resolved
+        mode (``code``/``doc``/``code+xref``/``doc+xref``).
+        Forward-compat for Increment 5's reconstruction:
+        rebuilding an agent's ContextManager from the archive
+        needs to know which prompt to install. Mode resolution
+        mirrors the agentsSpawned broadcast path — empty
+        ``block.mode`` inherits orchestrator's mode.
+        """
+        from ac_dc.context_manager import Mode
+
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        # Force orchestrator into a known state so inherited
+        # mode is deterministic.
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(False)
+
+        # One block explicit, one inherits.
+        response = (
+            self._build_agent_block(
+                "explicit", "doc task"
+            ).replace(
+                "🟩🟩🟩 AGEND",
+                "mode: doc+xref\n🟩🟩🟩 AGEND",
+            )
+            + "\n"
+            + self._build_agent_block(
+                "inherits", "code task"
+            )
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="decompose"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        record = [
+            m for m in msgs if m.get("role") == "assistant"
+        ][-1]
+        blocks = record["agent_blocks"]
+        # Index by id for deterministic assertions.
+        by_id = {b["id"]: b for b in blocks}
+        assert by_id["explicit"]["mode"] == "doc+xref"
+        assert by_id["inherits"]["mode"] == "code"
+
+    async def test_persisted_blocks_carry_cross_reference_flag(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Increment 3a — ``cross_reference_enabled`` bool field.
+
+        Stored explicitly even though it's redundant with the
+        mode string's ``+xref`` suffix. Reconstruction reads
+        one field rather than parsing the mode string; future
+        UI affordances (per-agent xref toggle) write this
+        field directly.
+        """
+        from ac_dc.context_manager import Mode
+
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(False)
+
+        response = (
+            self._build_agent_block(
+                "with-xref", "task"
+            ).replace(
+                "🟩🟩🟩 AGEND",
+                "mode: code+xref\n🟩🟩🟩 AGEND",
+            )
+            + "\n"
+            + self._build_agent_block(
+                "without-xref", "task"
+            )
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="decompose"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        record = [
+            m for m in msgs if m.get("role") == "assistant"
+        ][-1]
+        by_id = {
+            b["id"]: b for b in record["agent_blocks"]
+        }
+        assert (
+            by_id["with-xref"]["cross_reference_enabled"]
+            is True
+        )
+        assert (
+            by_id["without-xref"]["cross_reference_enabled"]
+            is False
+        )
+
+    async def test_persisted_blocks_carry_model(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Increment 3a — ``model`` field on each persisted entry.
+
+        Today every agent inherits the orchestrator's model.
+        The field is forward-compat for a future per-agent
+        model override and lets reconstruction route an
+        agent's continuation to the same provider it was
+        spawned against (a model change between sessions
+        should not stomp older agents).
+        """
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+        response = self._build_agent_block(
+            "agent-0", "task"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r1", message="please"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        record = [
+            m for m in msgs if m.get("role") == "assistant"
+        ][-1]
+        block = record["agent_blocks"][0]
+        # Model matches the orchestrator's config.
+        assert block["model"] == config.model
+
+    async def test_retasked_agent_persists_existing_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        config: ConfigManager,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Retask of an existing agent → persisted mode is the agent's.
+
+        When the orchestrator re-addresses a known agent id,
+        the agent's existing ContextManager state is the
+        source of truth for mode — not the orchestrator's
+        current mode (which may have drifted since spawn).
+        Pin this so the persisted record matches the runtime
+        scope the retasked agent actually runs in.
+        """
+        from ac_dc.context_manager import Mode
+
+        self._enable_agents(config)
+        self._install_recording_stub(service)
+
+        # Pre-spawn an agent in code+xref mode, then drift
+        # the orchestrator's mode to doc.
+        from ac_dc.edit_protocol import AgentBlock
+        parent_scope = service._default_scope()
+        service._context.set_mode(Mode.CODE)
+        service._context.set_cross_reference_enabled(True)
+        service._build_agent_scope(
+            block=AgentBlock(
+                id="sticky", task="t1", mode="code+xref",
+            ),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_first",
+        )
+        # Orchestrator drifts.
+        service._context.set_mode(Mode.DOC)
+        service._context.set_cross_reference_enabled(False)
+
+        # Retask using an empty mode field (would inherit
+        # ``doc`` from orchestrator if this were a fresh
+        # spawn).
+        response = self._build_agent_block(
+            "sticky", "next iteration"
+        )
+        fake_litellm.set_streaming_chunks([response])
+
+        await service.chat_streaming(
+            request_id="r2", message="continue"
+        )
+        await asyncio.sleep(0.3)
+
+        sid = service._session_id
+        msgs = history_store.get_session_messages(sid)
+        record = [
+            m for m in msgs if m.get("role") == "assistant"
+        ][-1]
+        block = record["agent_blocks"][0]
+        # Persisted mode reflects the existing agent's
+        # state, NOT the orchestrator's current mode.
+        assert block["id"] == "sticky"
+        assert block["mode"] == "code+xref"
+        assert (
+            block["cross_reference_enabled"] is True
+        )
 
 
 class TestAgentAssimilation:
