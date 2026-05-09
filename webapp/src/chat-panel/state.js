@@ -171,6 +171,16 @@ export function makeTabState() {
     // tab so a previous failure doesn't show stale red
     // on the next turn.
     lastEditOutcome: null,
+    // Read-only flag for historical agent tabs (those
+    // populated via `view-agents-requested` from a
+    // previous turn). Per spec
+    // ``specs4/5-webapp/agent-browser.md`` § Tab
+    // Lifetime — read-only tabs disable the input box
+    // because the agent's `ContextManager` is gone
+    // server-side; users can read the archive but not
+    // continue the conversation. Live tabs default to
+    // false; only historical tabs flip this to true.
+    readOnly: false,
   };
 }
 

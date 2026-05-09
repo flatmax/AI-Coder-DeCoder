@@ -84,6 +84,21 @@ export async function send(panel) {
   if (!text && panel._pendingImages.length === 0) return;
   if (panel._streaming) return;
   if (!panel.rpcConnected) return;
+  // Read-only tab gate (Increment D commit 3) —
+  // historical agent tabs target a
+  // ``ContextManager`` that no longer exists on
+  // the backend. The user can read the archive
+  // but can't continue the conversation. Toast
+  // and bail; the input stays so the user can
+  // copy-paste it into a live tab if needed.
+  const activeTab = panel._tabs.get(panel._activeTabId);
+  if (activeTab && activeTab.readOnly) {
+    panel._emitToast(
+      'This is a historical archive — replies disabled. Switch to a live tab to send messages.',
+      'warning',
+    );
+    return;
+  }
 
   // Auto-exit file search mode on send — the user
   // is now composing a message, not scanning

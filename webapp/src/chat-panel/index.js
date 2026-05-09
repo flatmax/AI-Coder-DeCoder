@@ -352,9 +352,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     attachEventListeners(this);
+    // Listen for view-agents-requested events
+    // dispatched by the renderViewAgentsAffordance
+    // button. The event is composed + bubbles so
+    // it crosses the shadow boundary; we listen
+    // on the panel itself rather than on window
+    // so a future host outside the chat panel
+    // can intercept too. Bound in constructor by
+    // installTabHandlers.
+    this.addEventListener(
+      'view-agents-requested', this._onViewAgentsRequested,
+    );
   }
 
   disconnectedCallback() {
+    this.removeEventListener(
+      'view-agents-requested', this._onViewAgentsRequested,
+    );
     detachEventListeners(this);
     super.disconnectedCallback();
   }

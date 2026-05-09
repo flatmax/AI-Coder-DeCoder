@@ -261,9 +261,16 @@ export function render(panel) {
       <div class="input-row">
         <textarea
           class="input-textarea"
-          placeholder="Send a message… (Enter to send, Shift+Enter for newline)"
+          placeholder=${(() => {
+            const activeTab = panel._tabs.get(panel._activeTabId);
+            if (activeTab?.readOnly) {
+              return 'Historical archive — replies disabled';
+            }
+            return 'Send a message… (Enter to send, Shift+Enter for newline)';
+          })()}
           .value=${panel._input}
-          ?disabled=${!panel.rpcConnected}
+          ?disabled=${!panel.rpcConnected ||
+            panel._tabs.get(panel._activeTabId)?.readOnly}
           @input=${(e) => onInputChange(panel, e)}
           @keydown=${(e) => onInputKeyDown(panel, e)}
           @paste=${(e) => onInputPaste(panel, e)}
@@ -301,6 +308,7 @@ export function render(panel) {
             : html`<button
                 class="send-button"
                 ?disabled=${!panel.rpcConnected ||
+                panel._tabs.get(panel._activeTabId)?.readOnly ||
                 (!panel._input.trim() &&
                   panel._pendingImages.length === 0)}
                 @click=${() => send(panel)}

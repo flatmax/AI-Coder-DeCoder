@@ -1370,6 +1370,26 @@ export const STYLES = css`
     text-decoration: underline;
   }
 
+  /* Historical (read-only) tab styling. Tabs
+   * loaded from the archive via the View Agents
+   * affordance carry a muted appearance so users
+   * can distinguish them at a glance from live
+   * tabs. The 📜 prefix in the label is the
+   * primary signal; the dimmed background +
+   * border is the secondary one. Active state
+   * still uses the accent border so the user can
+   * see which historical tab they're reading. */
+  .tab-strip-tab.read-only {
+    opacity: 0.7;
+    font-style: italic;
+  }
+  .tab-strip-tab.read-only.active {
+    opacity: 1;
+    background: rgba(240, 246, 252, 0.06);
+    border-color: rgba(240, 246, 252, 0.25);
+    border-bottom-color: rgba(22, 27, 34, 0.6);
+  }
+
   /* View-agents affordance — small button below
    * agentic-turn assistant messages that aren't
    * the active turn. Visible only on hover by

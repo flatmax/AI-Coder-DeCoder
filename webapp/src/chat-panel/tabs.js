@@ -396,17 +396,27 @@ export function renderTabStrip(panel) {
           // aren't currently looking at.
           const tab = panel._tabs.get(tabId);
           const streaming = !!(tab && tab.streaming);
+          const readOnly = !!(tab && tab.readOnly);
           // Tooltip carries the agent's mode so users
           // can disambiguate at a glance — two agents
           // tasked with similar prose differ only in
           // mode + cross-ref state. Main tab uses its
           // bare label (mode is reflected in the
-          // action-bar toggle).
+          // action-bar toggle). Historical tabs append
+          // a hint that they're archive-only.
           const mode = panel._tabModes?.get(tabId);
-          const tooltip = mode ? `${label} (${mode})` : label;
+          const baseTooltip = mode ? `${label} (${mode})` : label;
+          const tooltip = readOnly
+            ? `${baseTooltip} — historical archive (read-only)`
+            : baseTooltip;
+          const cls = [
+            'tab-strip-tab',
+            active ? 'active' : '',
+            readOnly ? 'read-only' : '',
+          ].filter(Boolean).join(' ');
           return html`
             <button
-              class="tab-strip-tab ${active ? 'active' : ''}"
+              class=${cls}
               role="tab"
               aria-selected=${active}
               aria-busy=${streaming}
@@ -727,4 +737,259 @@ export function installTabHandlers(panel) {
     onOverflowKeyDown(panel, event);
   panel._onChatTabShortcut = (event) =>
     onChatTabShortcut(panel, event);
+  panel._onViewAgentsRequested = (event) =>
+    onViewAgentsRequested(panel, event);
+}
+
+// ---------------------------------------------------------------
+// Historical tab loading (Increment D commit 3)
+// ---------------------------------------------------------------
+
+/**
+ * Tab-id prefix for historical (read-only) agent
+ * tabs loaded from the archive. Distinct from the
+ * live-agent namespace so a future re-spawn of the
+ * same agent id doesn't collide — and distinct
+ * enough that ``parseAgentTabId`` could route on
+ * the prefix if cross-tab routing is ever added.
+ *
+ * Per spec ``specs4/5-webapp/agent-browser.md`` §
+ * Historical Turns: read-only tabs target a
+ * ``ContextManager`` that no longer exists on the
+ * backend, so they don't accept new messages.
+ */
+const _HISTORICAL_TAB_PREFIX = 'historical:';
+
+/**
+ * Build the tab ID for a historical agent.
+ *
+ * Format: ``historical:{turn_id}/{agent_id}``.
+ * The turn_id segment is included so multiple
+ * turns' archives can coexist in the strip
+ * without collision (which would happen if the
+ * same agent id was spawned in two different
+ * turns and the user clicked View Agents on
+ * both).
+ */
+function _historicalTabId(turnId, agentId) {
+  return `${_HISTORICAL_TAB_PREFIX}${turnId}/${agentId}`;
+}
+
+/**
+ * Check whether a tab id is a historical tab.
+ *
+ * Used by the input gate in send(), the tab
+ * strip's read-only badge, and the future
+ * scroll-away cleanup.
+ */
+export function isHistoricalTab(tabId) {
+  return (
+    typeof tabId === 'string' &&
+    tabId.startsWith(_HISTORICAL_TAB_PREFIX)
+  );
+}
+
+/**
+ * Clear all historical tabs from the strip.
+ *
+ * Called before each fresh load so the strip
+ * doesn't accumulate archives across multiple
+ * affordance clicks. Matches the spec's
+ * "scrolling away clears them" intent at click
+ * granularity (scroll-aware cleanup is a future
+ * enhancement).
+ *
+ * If the active tab was historical, switches
+ * back to main before deletion.
+ */
+function _clearHistoricalTabs(panel) {
+  const historical = [];
+  for (const tabId of panel._tabs.keys()) {
+    if (isHistoricalTab(tabId)) {
+      historical.push(tabId);
+    }
+  }
+  if (historical.length === 0) return;
+  // Switch to main before deletion so the
+  // active-tab transition fires cleanly. If the
+  // active tab is one we're about to delete, the
+  // setter would otherwise see ``_activeTabId``
+  // pointing at a missing key.
+  if (isHistoricalTab(panel._activeTabId)) {
+    panel._activeTabId = 'main';
+  }
+  for (const tabId of historical) {
+    panel._tabs.delete(tabId);
+    panel._tabLabels.delete(tabId);
+    panel._tabModes.delete(tabId);
+  }
+}
+
+/**
+ * Handle the ``view-agents-requested`` event.
+ *
+ * Per Increment D commit 3:
+ *
+ * 1. Identify the agent ids in ``event.detail.agent_blocks``
+ *    that are NOT currently live in the strip.
+ * 2. Fetch the archive via ``LLMService.get_turn_archive(turn_id)``.
+ * 3. Create one read-only tab per non-live agent,
+ *    populated with the archive's messages.
+ * 4. Activate the first newly-created tab.
+ *
+ * Errors surface as toasts; the strip stays
+ * unchanged so the user can retry. Empty archives
+ * (turn_id missing on disk, or every agent in
+ * agent_blocks already live) toast and no-op.
+ */
+async function onViewAgentsRequested(panel, event) {
+  const detail = event?.detail;
+  if (!detail || typeof detail !== 'object') return;
+  const turnId = detail.turn_id;
+  const agentBlocks = Array.isArray(detail.agent_blocks)
+    ? detail.agent_blocks
+    : null;
+  if (typeof turnId !== 'string' || !turnId) return;
+  if (!agentBlocks || agentBlocks.length === 0) return;
+
+  // Pre-filter: skip agent ids that are still
+  // live. Their content is already reachable via
+  // the strip; loading them again as historical
+  // tabs would duplicate the affordance for no
+  // gain.
+  const wantedAgentIds = new Set();
+  for (const block of agentBlocks) {
+    const id = block?.id;
+    if (typeof id !== 'string' || !id) continue;
+    if (panel._tabs.has(id)) continue; // still live
+    wantedAgentIds.add(id);
+  }
+  if (wantedAgentIds.size === 0) {
+    panel._emitToast(
+      'All agents from this turn are still active in the tab strip',
+      'info',
+    );
+    return;
+  }
+
+  // Fetch the archive. The RPC returns the union
+  // of every agent's messages from this turn —
+  // we filter to wantedAgentIds locally because
+  // the backend has no "filter by id" parameter
+  // (and shouldn't — the per-turn RPC is
+  // intentionally simple per spec).
+  let archive;
+  try {
+    archive = await panel.rpcExtract(
+      'LLMService.get_turn_archive',
+      turnId,
+    );
+  } catch (err) {
+    console.error(
+      '[chat] view-agents-requested: get_turn_archive failed',
+      err,
+    );
+    panel._emitToast(
+      `Failed to load archive: ${err?.message || err}`,
+      'error',
+    );
+    return;
+  }
+
+  if (!Array.isArray(archive) || archive.length === 0) {
+    panel._emitToast(
+      'No archive found for this turn — files may have been deleted',
+      'warning',
+    );
+    return;
+  }
+
+  // Build a lookup from agent_idx to archive
+  // entry, then map each wanted agent id back to
+  // its messages. The archive shape is
+  // ``[{agent_idx, messages}, ...]``; we need to
+  // pair each wanted id with the right entry by
+  // walking the original agent_blocks list.
+  const archiveByIdx = new Map();
+  for (const entry of archive) {
+    if (
+      entry &&
+      typeof entry.agent_idx === 'number'
+    ) {
+      archiveByIdx.set(entry.agent_idx, entry);
+    }
+  }
+
+  // Clear any prior historical tabs so each
+  // affordance click produces a clean strip.
+  _clearHistoricalTabs(panel);
+
+  // Spawn read-only tabs in spawn order so the
+  // strip mirrors the original layout.
+  const createdTabIds = [];
+  for (const block of agentBlocks) {
+    const id = block?.id;
+    const idx = block?.agent_idx;
+    if (typeof id !== 'string' || !id) continue;
+    if (!wantedAgentIds.has(id)) continue;
+    if (typeof idx !== 'number') continue;
+    const entry = archiveByIdx.get(idx);
+    if (!entry) continue; // archive entry missing
+
+    const tabId = _historicalTabId(turnId, id);
+    const state = makeTabState();
+    state.readOnly = true;
+    state.messages = Array.isArray(entry.messages)
+      ? entry.messages.map((m) => {
+          // Persisted records from the archive
+          // can carry the same fields the live
+          // path produces (role, content,
+          // images, system_event, edit_results
+          // for assistants). Pass them through
+          // so the rendering path treats
+          // historical messages identically to
+          // live ones.
+          const out = {
+            role: m.role,
+            content: m.content ?? '',
+          };
+          if (Array.isArray(m.images) && m.images.length > 0) {
+            out.images = m.images;
+          }
+          if (m.system_event) out.system_event = true;
+          if (Array.isArray(m.edit_results)) {
+            out.editResults = m.edit_results;
+          }
+          return out;
+        })
+      : [];
+
+    panel._tabs.set(tabId, state);
+    panel._tabLabels.set(tabId, `📜 ${id}`);
+    createdTabIds.push(tabId);
+  }
+
+  if (createdTabIds.length === 0) {
+    // Defensive — every wanted id failed to
+    // resolve an archive entry. Could happen if
+    // the backend returned a malformed shape;
+    // toast so the user knows the click did
+    // nothing.
+    panel._emitToast(
+      'Archive contained no readable conversations',
+      'warning',
+    );
+    return;
+  }
+
+  // Force a re-render so the strip picks up the
+  // new tabs (Map mutations don't trigger Lit's
+  // reactivity on their own — same pattern as
+  // spawnAgentTabs).
+  panel.requestUpdate();
+
+  // Activate the first newly-created tab so the
+  // user lands inside the conversation they
+  // clicked through to.
+  panel._activeTabId = createdTabIds[0];
 }
