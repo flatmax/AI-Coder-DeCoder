@@ -162,18 +162,56 @@ describe('AppShell dialog UI', () => {
       return dialog;
     }
 
-    it('ignores clicks on buttons inside the header', async () => {
+    /**
+     * Build a synthetic pointerdown event that
+     * `dialog.js`'s drag detector accepts. The
+     * detector walks `event.composedPath()` looking
+     * for an element carrying `data-drag-handle="true"`
+     * AND skipping any element whose `tagName` is
+     * `BUTTON`. We supply a tiny composedPath array
+     * with a fake handle element at the root.
+     *
+     * Tag-name filter check: returns a button-like
+     * element when `asButton` is true, so the
+     * detector's button-skip guard fires.
+     */
+    function makeHandleEvent({
+      shell, button = 0, clientX = 0, clientY = 0,
+      asButton = false,
+    }) {
+      const handle = document.createElement('div');
+      handle.setAttribute('data-drag-handle', 'true');
+      const target = asButton
+        ? document.createElement('button')
+        : handle;
+      // composedPath order: target, then ancestors.
+      // The handle is target itself when asButton is
+      // false; when asButton is true, the button
+      // sits inside the handle.
+      const path = asButton ? [target, handle] : [handle];
+      return {
+        button,
+        target,
+        clientX,
+        clientY,
+        composedPath: () => path,
+      };
+    }
+
+    it('ignores clicks on buttons inside the drag handle', async () => {
+      // The detector skips drags when any element
+      // in composedPath has tagName === 'BUTTON'.
+      // This guard keeps tab-button clicks (and the
+      // overflow / minimize buttons) from starting
+      // an accidental drag.
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const button = shell.shadowRoot.querySelector('.tab-button');
-      // Synthesize a pointerdown whose target is the button.
-      shell._onHeaderPointerDown({
-        button: 0,
-        target: button,
-        clientX: 10,
-        clientY: 10,
-      });
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, clientX: 10, clientY: 10, asButton: true,
+        }),
+      );
       expect(shell._drag).toBe(null);
     });
 
@@ -181,26 +219,40 @@ describe('AppShell dialog UI', () => {
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const header = shell.shadowRoot.querySelector('.dialog-header');
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, button: 2, clientX: 10, clientY: 10,
+        }),
+      );
+      expect(shell._drag).toBe(null);
+    });
+
+    it('ignores pointerdown outside any drag handle', async () => {
+      // Without a `data-drag-handle="true"` element
+      // in composedPath, the detector must NOT start
+      // a drag — pointerdowns on the message list,
+      // file picker, etc. shouldn't move the dialog.
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
+      const stray = document.createElement('div');
       shell._onHeaderPointerDown({
-        button: 2,  // right-click
-        target: header,
+        button: 0, target: stray,
         clientX: 10, clientY: 10,
+        composedPath: () => [stray],
       });
       expect(shell._drag).toBe(null);
     });
 
-    it('starts drag on header pointerdown (not on button)', async () => {
+    it('starts drag on drag-handle pointerdown', async () => {
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const header = shell.shadowRoot.querySelector('.dialog-header');
-      shell._onHeaderPointerDown({
-        button: 0,
-        target: header,
-        clientX: 100,
-        clientY: 20,
-      });
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, clientX: 100, clientY: 20,
+        }),
+      );
       expect(shell._drag).toBeTruthy();
       expect(shell._drag.mode).toBe('drag');
       expect(shell._drag.startX).toBe(100);
@@ -211,11 +263,11 @@ describe('AppShell dialog UI', () => {
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const header = shell.shadowRoot.querySelector('.dialog-header');
-      shell._onHeaderPointerDown({
-        button: 0, target: header,
-        clientX: 100, clientY: 20,
-      });
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, clientX: 100, clientY: 20,
+        }),
+      );
       // Move 2px — under the 5px threshold.
       shell._onPointerMove({ clientX: 102, clientY: 21 });
       shell._onPointerUp();
@@ -228,11 +280,11 @@ describe('AppShell dialog UI', () => {
       const dialog = stubRect(
         shell, { left: 0, top: 0, width: 500, height: 800 },
       );
-      const header = shell.shadowRoot.querySelector('.dialog-header');
-      shell._onHeaderPointerDown({
-        button: 0, target: header,
-        clientX: 100, clientY: 20,
-      });
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, clientX: 100, clientY: 20,
+        }),
+      );
       // Move well past threshold.
       shell._onPointerMove({ clientX: 150, clientY: 70 });
       // Stub the post-move rect to reflect the inline-style
@@ -255,12 +307,12 @@ describe('AppShell dialog UI', () => {
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const header = shell.shadowRoot.querySelector('.dialog-header');
       const removeSpy = vi.spyOn(document, 'removeEventListener');
-      shell._onHeaderPointerDown({
-        button: 0, target: header,
-        clientX: 100, clientY: 20,
-      });
+      shell._onHeaderPointerDown(
+        makeHandleEvent({
+          shell, clientX: 100, clientY: 20,
+        }),
+      );
       shell._onPointerUp();
       // Both pointermove and pointerup listeners removed.
       const calls = removeSpy.mock.calls.map((c) => c[0]);

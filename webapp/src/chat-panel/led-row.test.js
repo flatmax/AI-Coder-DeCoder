@@ -175,12 +175,12 @@ describe('formatLedTooltip', () => {
 // ---------------------------------------------------------------
 
 describe('renderLedRow — visibility', () => {
-  it('main tab only → row carries one main dot', async () => {
+  it('main tab only → strip carries one main dot', async () => {
     const p = mountPanel();
     await settle(p);
-    const row = p.shadowRoot.querySelector('.led-row');
-    expect(row).not.toBeNull();
-    const dots = row.querySelectorAll('.led-dot');
+    const strip = p.shadowRoot.querySelector('.led-strip');
+    expect(strip).not.toBeNull();
+    const dots = strip.querySelectorAll('.led-dot');
     expect(dots.length).toBe(1);
     expect(dots[0].dataset.ledTabId).toBe('main');
   });
@@ -189,9 +189,9 @@ describe('renderLedRow — visibility', () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     await settle(p);
-    const row = p.shadowRoot.querySelector('.led-row');
-    expect(row).not.toBeNull();
-    const dots = row.querySelectorAll('.led-dot');
+    const strip = p.shadowRoot.querySelector('.led-strip');
+    expect(strip).not.toBeNull();
+    const dots = strip.querySelectorAll('.led-dot');
     expect(dots.length).toBe(2);
     expect(dots[0].dataset.ledTabId).toBe('main');
     expect(dots[1].dataset.ledTabId).toBe('a0');
@@ -450,7 +450,7 @@ describe('renderLedRow — click activates tab', () => {
 // ---------------------------------------------------------------
 
 describe('renderLedRow — direct call', () => {
-  it('renders a main-only row when no agents exist', () => {
+  it('renders a main-only strip when no agents exist', () => {
     const fakePanel = {
       _tabs: new Map([['main', { streaming: false }]]),
       _tabModes: new Map(),
@@ -458,13 +458,13 @@ describe('renderLedRow — direct call', () => {
     };
     const result = renderLedRow(fakePanel);
     expect(result).toBeTruthy();
-    // The template carries the row wrapper; the dot
+    // The template carries the strip wrapper; the dot
     // for main goes in via a values slot and isn't
     // visible in `.strings`. The wrapper's class
     // attribute is present in the static text, which
-    // lets us distinguish "row rendered" from "empty
+    // lets us distinguish "strip rendered" from "empty
     // fragment" without standing up a full DOM.
-    expect(result.strings.join('')).toContain('led-row');
+    expect(result.strings.join('')).toContain('led-strip');
   });
 
   it('returns truly empty template when _tabs is empty', () => {

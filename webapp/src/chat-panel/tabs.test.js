@@ -224,6 +224,21 @@ describe('ChatPanel tab strip rendering', () => {
       expect(btn.getAttribute('role')).toBe('tab');
     }
   });
+
+  it('tab strip carries data-drag-handle="true"', async () => {
+    // The dialog's drag-detection logic walks the
+    // composedPath() looking for an element with
+    // this attribute — without it, pointerdowns on
+    // the strip's empty background fall through and
+    // the dialog can't be dragged. Spec contract:
+    // specs4/5-webapp/shell.md § Layout / Drag
+    // detection.
+    const p = mountPanel();
+    await settle(p);
+    const strip = p.shadowRoot.querySelector('.tab-strip');
+    expect(strip).toBeTruthy();
+    expect(strip.getAttribute('data-drag-handle')).toBe('true');
+  });
 });
 
 describe('ChatPanel tab strip interaction', () => {

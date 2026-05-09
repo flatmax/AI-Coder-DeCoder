@@ -106,12 +106,9 @@ The dialog has no header bar. The chat panel's tab strip sits directly at the to
 
 **Convert FAB**: floating circular button at the dialog's bottom-left. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
 
-**Minimize button**: ▾ button rendered in two parallel locations depending on which dialog tab is active.
+**Minimize button**: ▾ button rendered at the right edge of each dialog tab's toolbar — the chat panel's tab strip (after the overflow ⋯ menu), and each overlay tab's toolbar/nav-bar (Context, Settings, Convert). Right-edge placement is consistent across all four tabs so the affordance lives in the same spatial location regardless of which tab is active.
 
-- Chat tab (default): right edge of the tab strip, after the overflow ⋯ menu.
-- Context, Settings, Convert tabs: right of each overlay's `← Chat` back-arrow in its own toolbar/nav-bar.
-
-Both forms dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Two-location strategy: each dialog tab is a sibling tab-panel inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay tab is active. Each overlay carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button).
+All four dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Each tab carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button) — overlay tabs are sibling tab-panels inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay is active.
 
 **Expand FAB**: ▴ button at the dialog's top-right, rendered ONLY when the dialog is minimized. The minimized state hides the dialog body, so all in-tab minimize buttons are unreachable; the expand FAB takes over as the only way to restore the dialog.
 
