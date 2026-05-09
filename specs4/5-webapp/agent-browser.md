@@ -49,13 +49,14 @@ The row is always visible while the chat panel is mounted — at minimum it carr
 
 ## Tab Lifetime
 
-Three events end a tab's life:
+Four events end a tab's life:
 
 - **New agentic turn in the main tab.** The user sends a new message to the main LLM that triggers a fresh decomposition. The current turn's agent tabs fade out of the strip; their archives persist on disk. Accessible by scrolling the main chat back to the previous turn and interacting with it via the history browser (see [Historical Turns](#historical-turns) below).
 - **Explicit close.** Each agent tab has a close affordance. Closing an agent tab discards its `ContextManager` from memory (freeing any cached symbol map data it held, plus its stability tracker state). The archive file stays on disk. Equivalent to killing that agent — a subsequent LLM call for that tab is not possible because the ContextManager is gone. The user can still read the archive via history browsing.
+- **`new_session` on the main tab.** Clicking the new-session button (or invoking the corresponding RPC) closes every live agent in addition to clearing main's history. The backend frees each agent's ContextManager, stability tracker, and file context, then broadcasts `agentClosed {agent_id}` per agent before broadcasting `sessionChanged`. The frontend's `agent-closed` window-event handler routes each id through the same close path explicit-close uses — the tab disappears, per-tab UI state frees, and the archive stays on disk. From the user's perspective, "new session" is a single gesture that resets main and dismisses the entire agent team. Archives remain browsable via history.
 - **Server shutdown.** All in-memory state is lost regardless of tab type. Archives on disk survive; the next server startup can show them via history browsing.
 
-An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive and no new agentic turn has started. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
+An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive, no new agentic turn has started, and `new_session` has not been clicked. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
 
 ### Refresh and Reconnect
 
@@ -65,7 +66,7 @@ The chat panel rehydrates live tabs at the same moment it loads main-conversatio
 
 - On `onRpcReady` (initial connect or post-reconnect), the panel calls `list_live_agents()` (see [parallel-agents.md § Backend RPCs](../7-future/parallel-agents.md#backend-rpcs)). The response carries one entry per registered agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}`.
 - For each entry, the panel creates a writable tab keyed by the agent's `id` — the same key that would be used had the tab been created by an `agentsSpawned` event during the spawn turn. Tab creation is idempotent, so a subsequent `agentsSpawned` for the same id is a no-op.
-- For each tab, the panel calls `get_turn_archive(turn_id)` (filtered to the matching `agent_idx`) to populate the message list. The archive is the source of truth for conversation content; the live `ContextManager` accepts new messages from this point forward.
+- For each tab, the panel calls `get_agent_history(agent_id)` to populate the message list. This returns the agent's full reconstructed conversation from its `ContextManager` — for session-reconstructed agents, this is the concatenation across every turn the agent participated in, not just the latest one. The live `ContextManager` is the source of truth for conversation content from this point forward; new messages append normally.
 - Tabs are **writable**, not read-only. The distinction from historical tabs (see [Historical Turns](#historical-turns)) is that live tabs target a `ContextManager` that is still alive on the backend. The user can reply, grant files via the picker while the tab is active, or close the tab to kill the agent — the same affordances available before refresh.
 
 What is genuinely lost across refresh:

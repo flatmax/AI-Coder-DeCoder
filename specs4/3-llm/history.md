@@ -55,11 +55,12 @@ The archive is created lazily — only when a turn actually spawns agents. Turns
 
 Agent archives are surfaced through an extension of the chat panel itself (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The chat panel remains the vertical spine of the session — the user message / assistant response pairs the user already knows. When the active turn spawned agents, an agent region fans out alongside the chat with one column per agent.
 
-The backend exposes three RPCs to support this:
+The backend exposes four RPCs to support this:
 
-- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
-- `close_agent_context(turn_id, agent_idx)` — frees the agent's ContextManager, stability tracker, and file_context when the user closes an agent tab. The per-turn archive file on disk is preserved. Idempotent — closing a non-existent or already-closed agent returns a no-op status rather than raising. Localhost-only.
-- `set_agent_selected_files(turn_id, agent_idx, files)` — per-agent analogue of the main-tab file selection RPC. The frontend routes picker checkbox toggles here when an agent tab is active; the main-tab path is unchanged. Filters non-existent paths against the repo. Localhost-only.
+- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted). Used for browsing historical (read-only) views of a previous turn's agents.
+- `get_agent_history(agent_id)` — returns the live agent's full reconstructed conversation by reading from its ContextManager. For session-reconstructed agents that have participated in multiple turns, this returns the concatenation across every participating turn, not just the latest one. Used by the frontend's rehydration path to populate live agent tabs after browser refresh, reconnect, or session load. `get_turn_archive` is insufficient for this case because it only returns one turn's content; multi-turn agents would lose all but their most recent turn's messages from the user's view. Returns an empty list for unknown agent ids.
+- `close_agent_context(agent_id)` — frees the agent's ContextManager, stability tracker, and file_context when the user closes an agent tab. The per-turn archive file on disk is preserved. Idempotent — closing a non-existent or already-closed agent returns a no-op status rather than raising. Localhost-only.
+- `set_agent_selected_files(agent_id, files)` — per-agent analogue of the main-tab file selection RPC. The frontend routes picker checkbox toggles here when an agent tab is active; the main-tab path is unchanged. Filters non-existent paths against the repo. Localhost-only.
 
 No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and different turns become active.
 
@@ -100,6 +101,8 @@ Reconstruction algorithm for "show me everything agent-X did across the session"
 4. Concatenate in turn order (chronological by user-message timestamp).
 
 The reconstruction is read-only; archives are not rewritten when the orchestrator retasks an agent under a new `agent_idx`. Turns without `agent_blocks` (legacy records, or turns that did not spawn agents) are skipped. Turns whose archive directory has been deleted (per [Disk Usage Monitoring](#disk-usage-monitoring)) are skipped without error.
+
+The session-load path (see [Session-Load Reconstruction](#session-load-reconstruction)) runs this algorithm at load time, concatenating each agent's archive content into a fresh `ContextManager.history`. Subsequent reads of that history — via `get_agent_history(agent_id)` — return the full multi-turn conversation in a single call. The RPC is the surface the frontend consumes; callers do not re-walk `agent_blocks` themselves.
 
 Filename safety is incidental: because `agent_idx` is numeric, arbitrary characters in `id` (hyphens, dots, mixed case) never reach the filesystem. A future implementation MUST NOT shortcut by using `id` as a filename — case-sensitivity differences across platforms and unrestricted character set would silently corrupt the archive.
 
