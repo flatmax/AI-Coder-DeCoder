@@ -620,17 +620,42 @@ What 4a does NOT deliver: per-agent mode-change events being interleaved with no
 
 What 4a sets up for 4b: the RPC surface is stable, the broadcast event name (`agentModeChanged`) is fixed, and the frontend can route a single click to `switch_agent_mode` for combined transitions OR to `set_agent_cross_reference` for the overlay-only toggle. Same pattern as the main-tab segmented + overlay UI.
 
-#### 4b — Frontend: render mode toggle on agent tabs and route to per-agent RPCs
+#### ~~4b — Frontend: render mode toggle on agent tabs and route to per-agent RPCs~~ — delivered
 
-Reverse of Increment 1: the mode toggle now appears on agent tabs but routes differently. When `panel._activeTabId !== 'main'`, the toggle calls `switch_agent_mode` instead of `switch_mode`. Disabled while the agent's stream is active. Tooltip explains.
+Reverse of Increment 1's hide for the mode toggle group. The mode toggle now appears on every tab (main, agent, historical); the new-session and history buttons stay main-only because their semantics don't translate (see Increment 1 for the original gate).
 
-Scope:
-- `webapp/src/chat-panel/rendering.js` — render mode toggle on agent tabs (reversing Increment 1's hide for this specific button).
-- `webapp/src/app-shell/mode.js` — route to per-agent RPCs when active tab is an agent.
-- Tests covering the happy path, mid-stream rejection, descriptor update, archive event persistence (end-to-end via the RPC).
-- Spec updates: `specs4/5-webapp/agent-browser.md`, `system_agentic_appendix.md` (relax the "mode is fixed for the life of the agent" constraint with an explanation of how mid-session changes work).
+Implementation:
 
-After this lands, the user scenario works: select an agent, toggle xref on, the agent's effective mode changes immediately for the next turn, main sees the new mode in its context.
+- **`webapp/src/chat-panel/rendering.js`** — Extracted the existing inline toggle JSX into a new `renderModeToggle(panel)` helper. The helper resolves state via `_resolveActiveTabMode(panel)` which reads from `_mode` / `_crossRefEnabled` for main and from `_tabModes.get(activeTabId)` for agents. The combined mode strings (`code` / `doc` / `code+xref` / `doc+xref`) parse cleanly with `endsWith('+xref')` + `replace('+xref', '')`. Disabled rules baked into the helper:
+  - RPC disconnected → every tab disabled
+  - Main + non-localhost → disabled (collab participants can't switch host's mode)
+  - Agent + streaming → disabled (matches backend's mid-stream rejection in `LLMService.switch_agent_mode`)
+  - Historical (read-only) tab → disabled (the ContextManager no longer exists)
+  - Tooltips adapt: agent + streaming shows "Wait for the agent to finish before switching mode" rather than a generic mode description.
+
+- **`webapp/src/chat-panel/events.js`** — Split `switchMode` and `toggleCrossRef` into main / agent dispatchers. The exported entry points (`switchMode(panel, mode)` and `toggleCrossRef(panel)`) are still called from the rendered template; they now branch on `panel._activeTabId === 'main'` and route to `_switchMainMode` / `_switchAgentMode` (or the cross-ref equivalents). Agent dispatchers compute the combined mode string from `_tabModes` (preserving xref state across primary-axis switches) and call `LLMService.switch_agent_mode` / `LLMService.set_agent_cross_reference`. New `onAgentModeChanged(panel, event)` handler updates `_tabModes` and `requestUpdate()`s on the `agent-mode-changed` window event. Wired in `bindEventHandlers` / `attachEventListeners` / `detachEventListeners`.
+
+- **`webapp/src/app-shell/index.js`** — New `agentModeChanged(data)` server-push method. The backend's `LLMService.switch_agent_mode` and `set_agent_cross_reference` broadcast `agentModeChanged` per Increment 4a; the AppShell translates it to a window-level `agent-mode-changed` event so the chat panel's listener fires.
+
+- **`webapp/src/chat-panel/action-bar.test.js`** — Updated Increment 1's hide assertions for the mode toggle. The "on agent tab" describe block now asserts the mode toggle and cross-reference toggle are PRESENT (was: hidden). The historical-tab block now asserts the toggle renders but every button is `disabled`. New-session, history, and search-bar tests are unchanged — those gates are still correct.
+
+What 4b deliberately does NOT deliver:
+
+- **Optimistic UI updates.** Click → RPC → broadcast → re-render is the full loop. The user sees the new state on the broadcast, not on the click. Matches main's pattern. Without optimistic updates, a failing RPC (mid-stream rejection, restricted caller, network error) leaves the toggle in its actual state rather than briefly showing the user-attempted state then snapping back.
+
+- **Spec updates.** `specs4/5-webapp/agent-browser.md` should document the per-agent toggle; `src/ac_dc/config/system_agentic_appendix.md` should relax the "mode is fixed for the life of the agent" claim. Filed as a follow-up doc-mode pass — the behavioural test suite is now the authoritative spec for the mid-session mode-change behaviour.
+
+What the user can now do (the scenario from the original 4b plan):
+
+1. Spawn an agent in `code` mode (orchestrator's current mode at spawn time).
+2. Switch to the agent's tab. Click 🔀 (cross-ref toggle).
+3. Backend's `LLMService.set_agent_cross_reference` rebuilds the agent's tracker, archives the change, broadcasts `agentModeChanged`.
+4. Frontend updates `_tabModes` for that agent → re-renders the toggle in the active state → tab strip tooltip updates to `<id> (code+xref)`.
+5. Reply to the agent. The next LLM call assembles the agent's prompt with both indexes active.
+
+The orchestrator's prompt-time descriptor reads each agent's mode from the agent's live ContextManager (per Increment 4a's verification), so main sees the new mode in its context on its next turn — no additional plumbing needed.
+
+After 4b lands, Increment 5 (reconstruct agents on session-load) is the remaining piece. Increments 1–4 between them ship the full per-agent persistent-entity surface for the live session; Increment 5 makes that surface survive session restore.
 
 ### Increment 5 — Reconstruct agents on session-load
 

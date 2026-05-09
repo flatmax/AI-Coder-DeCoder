@@ -71,6 +71,7 @@ export function bindEventHandlers(panel) {
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
   panel._onModeOrReviewChanged = () => onModeOrReviewChanged(panel);
   panel._onModeChanged = (e) => onModeChanged(panel, e);
+  panel._onAgentModeChanged = (e) => onAgentModeChanged(panel, e);
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
 }
@@ -154,6 +155,9 @@ export function attachEventListeners(panel) {
   window.addEventListener('mode-changed', panel._onModeOrReviewChanged);
   window.addEventListener('mode-changed', panel._onModeChanged);
   window.addEventListener(
+    'agent-mode-changed', panel._onAgentModeChanged,
+  );
+  window.addEventListener(
     'review-started',
     panel._onModeOrReviewChanged,
   );
@@ -198,6 +202,9 @@ export function detachEventListeners(panel) {
     panel._onModeOrReviewChanged,
   );
   window.removeEventListener('mode-changed', panel._onModeChanged);
+  window.removeEventListener(
+    'agent-mode-changed', panel._onAgentModeChanged,
+  );
   window.removeEventListener(
     'review-started',
     panel._onModeOrReviewChanged,
@@ -581,14 +588,37 @@ export function onModeChanged(panel, event) {
 }
 
 /**
- * Switch primary mode via RPC. Backend
- * broadcasts mode-changed which our handler
- * picks up — don't mutate _mode optimistically.
+ * Switch primary mode via RPC.
+ *
+ * Routes by active tab — main targets the
+ * orchestrator's ContextManager via
+ * ``LLMService.switch_mode``; agent tabs target
+ * the per-agent ContextManager via
+ * ``LLMService.switch_agent_mode``. Per
+ * Increment 4b — per-agent mode is independent
+ * of the orchestrator's mode, so the toggle on
+ * an agent tab must NOT touch main's state.
+ *
+ * For main: backend broadcasts ``mode-changed``
+ * which our handler picks up. For agents: backend
+ * broadcasts ``agent-mode-changed`` which
+ * :func:`onAgentModeChanged` picks up.
+ *
+ * The optimistic-update path is the same in
+ * both cases — don't mutate local state, wait
+ * for the broadcast.
  */
 export async function switchMode(panel, mode) {
   if (mode !== 'code' && mode !== 'doc') return;
-  if (mode === panel._mode) return;
   if (!panel.rpcConnected) return;
+  if (panel._activeTabId === 'main') {
+    if (mode === panel._mode) return;
+    return _switchMainMode(panel, mode);
+  }
+  return _switchAgentMode(panel, mode);
+}
+
+async function _switchMainMode(panel, mode) {
   try {
     const result = await panel.rpcExtract(
       'LLMService.switch_mode', mode,
@@ -606,11 +636,63 @@ export async function switchMode(panel, mode) {
 }
 
 /**
- * Toggle cross-reference. Same backend-
- * authoritative pattern as `switchMode`.
+ * Per-agent mode switch.
+ *
+ * Sends the combined mode string (cross-ref
+ * suffix preserved) so the backend's single
+ * ``switch_agent_mode`` RPC sees both axes in
+ * one call. Reads the agent's current xref
+ * state from ``_tabModes`` to compute the new
+ * combined string — flipping primary axis to
+ * ``code`` while xref is on yields
+ * ``code+xref``, not ``code``.
+ *
+ * No-op when the new combined mode equals the
+ * current — saves a needless RPC and matches
+ * the backend's no-op short-circuit.
+ */
+async function _switchAgentMode(panel, mode) {
+  const agentId = panel._activeTabId;
+  const current = panel._tabModes?.get(agentId) || 'code';
+  const xref = current.endsWith('+xref');
+  const combined = xref ? `${mode}+xref` : mode;
+  if (combined === current) return;
+  try {
+    const result = await panel.rpcExtract(
+      'LLMService.switch_agent_mode', agentId, combined,
+    );
+    if (result && typeof result === 'object' && result.error) {
+      const reason = result.reason || result.error;
+      panel._emitToast(
+        `Agent mode switch failed: ${reason}`,
+        'warning',
+      );
+    }
+  } catch (err) {
+    panel._emitToast(
+      `Agent mode switch failed: ${err?.message || 'RPC error'}`,
+      'error',
+    );
+  }
+}
+
+/**
+ * Toggle cross-reference.
+ *
+ * Same routing pattern as :func:`switchMode`:
+ * main targets ``LLMService.set_cross_reference``,
+ * agent tabs target
+ * ``LLMService.set_agent_cross_reference``.
  */
 export async function toggleCrossRef(panel) {
   if (!panel.rpcConnected) return;
+  if (panel._activeTabId === 'main') {
+    return _toggleMainCrossRef(panel);
+  }
+  return _toggleAgentCrossRef(panel);
+}
+
+async function _toggleMainCrossRef(panel) {
   const next = !panel._crossRefEnabled;
   try {
     const result = await panel.rpcExtract(
@@ -629,6 +711,58 @@ export async function toggleCrossRef(panel) {
       'error',
     );
   }
+}
+
+async function _toggleAgentCrossRef(panel) {
+  const agentId = panel._activeTabId;
+  const current = panel._tabModes?.get(agentId) || 'code';
+  const next = !current.endsWith('+xref');
+  try {
+    const result = await panel.rpcExtract(
+      'LLMService.set_agent_cross_reference', agentId, next,
+    );
+    if (result && typeof result === 'object' && result.error) {
+      const reason = result.reason || result.error;
+      panel._emitToast(
+        `Agent cross-reference toggle failed: ${reason}`,
+        'warning',
+      );
+    }
+  } catch (err) {
+    panel._emitToast(
+      `Agent cross-reference toggle failed: ${err?.message || 'RPC error'}`,
+      'error',
+    );
+  }
+}
+
+/**
+ * Handle ``agent-mode-changed`` window events.
+ *
+ * Updates ``_tabModes`` for the affected agent
+ * and forces a re-render so the toggle reflects
+ * the new state. Detail shape is
+ * ``{agent_id, mode, cross_reference_enabled}``;
+ * we only need the first two — the boolean is
+ * already encoded in the mode string's
+ * ``+xref`` suffix.
+ *
+ * Defensive against unknown agent ids — a stale
+ * broadcast for an agent the user just closed
+ * is silently dropped (the tab no longer
+ * exists, so updating its mode would just
+ * leave a dangling map entry).
+ */
+export function onAgentModeChanged(panel, event) {
+  const detail = event?.detail;
+  if (!detail || typeof detail !== 'object') return;
+  const agentId = detail.agent_id;
+  const mode = detail.mode;
+  if (typeof agentId !== 'string' || !agentId) return;
+  if (typeof mode !== 'string' || !mode) return;
+  if (!panel._tabs.has(agentId)) return;
+  panel._tabModes.set(agentId, mode);
+  panel.requestUpdate();
 }
 
 /**

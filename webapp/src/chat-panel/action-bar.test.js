@@ -93,7 +93,11 @@ describe('ChatPanel action bar — tab-scoped visibility', () => {
       expect(btn).toBeFalsy();
     });
 
-    it('hides mode toggle (segmented code/doc)', async () => {
+    // Per Increment 4b: mode toggle is now shown on
+    // agent tabs and routes to per-agent RPCs. The
+    // toggle is the user-facing affordance for the
+    // per-agent mode switch capability.
+    it('shows mode toggle (segmented code/doc)', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
@@ -101,10 +105,10 @@ describe('ChatPanel action bar — tab-scoped visibility', () => {
       const toggle = panel.shadowRoot.querySelector(
         '.mode-toggle',
       );
-      expect(toggle).toBeFalsy();
+      expect(toggle).toBeTruthy();
     });
 
-    it('hides cross-reference toggle', async () => {
+    it('shows cross-reference toggle', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
@@ -112,7 +116,7 @@ describe('ChatPanel action bar — tab-scoped visibility', () => {
       const btn = panel.shadowRoot.querySelector(
         '.crossref-btn',
       );
-      expect(btn).toBeFalsy();
+      expect(btn).toBeTruthy();
     });
 
     it('still renders search bar', async () => {
@@ -142,7 +146,7 @@ describe('ChatPanel action bar — tab-scoped visibility', () => {
     // Read-only tabs (per Increment D — historical-turn
     // affordance) carry the same agent-id-shaped tab id
     // and are also non-main, so they inherit the same
-    // hide rules.
+    // hide rules for new-session and history.
     it('hides new-session button', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'historical:t_123/agent-0', 'Agent 0');
@@ -165,6 +169,31 @@ describe('ChatPanel action bar — tab-scoped visibility', () => {
         '.history-button',
       );
       expect(btn).toBeFalsy();
+    });
+
+    // Mode toggle renders but every button is
+    // disabled. The user can see what mode the agent
+    // ran in without having a path to mutate state
+    // that no longer exists. Per Increment 4b
+    // rendering rule.
+    it('shows mode toggle but disables all buttons', async () => {
+      const panel = mountPanel();
+      seedLabeledTab(
+        panel, 'historical:t_123/agent-0', 'Agent 0',
+      );
+      panel._tabs.get(
+        'historical:t_123/agent-0',
+      ).readOnly = true;
+      panel._activeTabId = 'historical:t_123/agent-0';
+      await settle(panel);
+      const toggle = panel.shadowRoot.querySelector(
+        '.mode-toggle',
+      );
+      expect(toggle).toBeTruthy();
+      const buttons = toggle.querySelectorAll('button');
+      for (const btn of buttons) {
+        expect(btn.disabled).toBe(true);
+      }
     });
   });
 

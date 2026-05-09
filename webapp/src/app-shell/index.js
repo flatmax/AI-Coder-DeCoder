@@ -885,6 +885,18 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  agentModeChanged(data) {
+    // Per-agent mode change broadcast (Increment 4a).
+    // Carries {agent_id, mode, cross_reference_enabled}.
+    // Re-dispatched as a window event so the chat
+    // panel's `_onAgentModeChanged` handler updates
+    // `_tabModes` and re-renders the toggle.
+    window.dispatchEvent(
+      new CustomEvent('agent-mode-changed', { detail: data }),
+    );
+    return true;
+  }
+
   agentsSpawned(data) {
     // Fired by the backend immediately after the main LLM
     // finishes and before spawning agents. Carries

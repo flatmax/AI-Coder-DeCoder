@@ -103,6 +103,112 @@ import {
 } from './urls.js';
 
 // ---------------------------------------------------------------
+// Mode toggle helper
+// ---------------------------------------------------------------
+
+/**
+ * Resolve the active tab's mode + cross-ref state.
+ *
+ * Main tab reads from ``_mode`` / ``_crossRefEnabled``
+ * (broadcast-driven from the orchestrator's
+ * ``mode-changed`` events). Agent tabs read from
+ * ``_tabModes`` (broadcast-driven from
+ * ``agent-mode-changed`` events). The two state
+ * sources are independent — switching mode on an
+ * agent tab does NOT touch main's state and vice
+ * versa.
+ *
+ * Returns ``{primary, xref}`` where ``primary`` is
+ * ``'code'`` or ``'doc'`` and ``xref`` is bool.
+ */
+function _resolveActiveTabMode(panel) {
+  if (panel._activeTabId === 'main') {
+    return {
+      primary: panel._mode,
+      xref: panel._crossRefEnabled,
+    };
+  }
+  const combined = panel._tabModes?.get(panel._activeTabId)
+    || 'code';
+  const xref = combined.endsWith('+xref');
+  const primary = combined.replace('+xref', '');
+  return { primary, xref };
+}
+
+/**
+ * Render the mode toggle.
+ *
+ * Always rendered when the chat panel is mounted —
+ * historical (read-only) tabs still benefit from
+ * seeing what mode the agent ran in, even though
+ * the toggle is disabled there.
+ *
+ * Disabled rules:
+ *   - RPC disconnected — every tab.
+ *   - Main tab: disabled when not localhost (collab
+ *     participants can't switch the host's mode).
+ *   - Agent tab: disabled while the agent is
+ *     streaming (matches the backend's mid-stream
+ *     rejection at ``LLMService.switch_agent_mode``).
+ *   - Historical agent tab: always disabled (the
+ *     ContextManager no longer exists).
+ */
+function renderModeToggle(panel) {
+  const { primary, xref } = _resolveActiveTabMode(panel);
+  const isMain = panel._activeTabId === 'main';
+  const tab = panel._tabs.get(panel._activeTabId);
+  const streaming = !!(tab && tab.streaming);
+  const readOnly = !!(tab && tab.readOnly);
+  const disabled = !panel.rpcConnected
+    || (isMain && !panel._isLocalhost)
+    || (!isMain && streaming)
+    || readOnly;
+  const codeTitle = isMain
+    ? 'Code mode — symbol index feeds context'
+    : streaming
+      ? 'Wait for the agent to finish before switching mode'
+      : 'Code mode — symbol index feeds this agent';
+  const docTitle = isMain
+    ? 'Document mode — doc index feeds context'
+    : streaming
+      ? 'Wait for the agent to finish before switching mode'
+      : 'Document mode — doc index feeds this agent';
+  const xrefTitle = streaming && !isMain
+    ? 'Wait for the agent to finish before toggling cross-reference'
+    : xref
+      ? 'Cross-reference ON — both indexes active (click to disable)'
+      : 'Cross-reference OFF — click to add the other index alongside';
+  return html`
+    <div class="mode-toggle" role="group"
+      aria-label="Context mode">
+      <div class="mode-segmented">
+        <button
+          class="mode-btn ${primary === 'code' ? 'active' : ''}"
+          ?disabled=${disabled}
+          title=${codeTitle}
+          aria-pressed=${primary === 'code'}
+          @click=${() => panel._switchMode('code')}
+        >💻</button>
+        <button
+          class="mode-btn ${primary === 'doc' ? 'active' : ''}"
+          ?disabled=${disabled}
+          title=${docTitle}
+          aria-pressed=${primary === 'doc'}
+          @click=${() => panel._switchMode('doc')}
+        >📄</button>
+      </div>
+      <button
+        class="crossref-btn ${xref ? 'active' : ''}"
+        ?disabled=${disabled}
+        title=${xrefTitle}
+        aria-pressed=${xref}
+        @click=${() => panel._toggleCrossRef()}
+      >🔀</button>
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------
 // Top-level render
 // ---------------------------------------------------------------
 
@@ -166,35 +272,7 @@ export function render(panel) {
       : ''}
     <div class="input-area">
       <div class="action-bar" role="toolbar">
-        ${panel._activeTabId === 'main'
-          ? html`<div class="mode-toggle" role="group" aria-label="Context mode">
-              <div class="mode-segmented">
-                <button
-                  class="mode-btn ${panel._mode === 'code' ? 'active' : ''}"
-                  ?disabled=${!panel.rpcConnected}
-                  title="Code mode — symbol index feeds context"
-                  aria-pressed=${panel._mode === 'code'}
-                  @click=${() => panel._switchMode('code')}
-                >💻</button>
-                <button
-                  class="mode-btn ${panel._mode === 'doc' ? 'active' : ''}"
-                  ?disabled=${!panel.rpcConnected}
-                  title="Document mode — doc index feeds context"
-                  aria-pressed=${panel._mode === 'doc'}
-                  @click=${() => panel._switchMode('doc')}
-                >📄</button>
-              </div>
-              <button
-                class="crossref-btn ${panel._crossRefEnabled ? 'active' : ''}"
-                ?disabled=${!panel.rpcConnected}
-                title=${panel._crossRefEnabled
-                  ? 'Cross-reference ON — both indexes active (click to disable)'
-                  : 'Cross-reference OFF — click to add the other index alongside'}
-                aria-pressed=${panel._crossRefEnabled}
-                @click=${() => panel._toggleCrossRef()}
-              >🔀</button>
-            </div>`
-          : ''}
+        ${renderModeToggle(panel)}
         <div class="action-group">
           ${_EXPERIMENTAL_ENABLED
             ? html`<button
