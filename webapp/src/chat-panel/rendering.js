@@ -217,7 +217,7 @@ export function render(panel) {
         </div>
         <div class="action-divider" aria-hidden="true"></div>
         ${renderSearchBar(panel)}
-        ${panel._searchMode === 'file'
+        ${panel._searchMode === 'file' || panel._activeTabId !== 'main'
           ? ''
           : html`
               <div class="action-divider" aria-hidden="true"></div>

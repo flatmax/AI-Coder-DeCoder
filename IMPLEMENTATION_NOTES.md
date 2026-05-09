@@ -448,6 +448,8 @@ The agent-mode foundation has shipped piecewise across Layers 3–5: edit-protoc
 
 Five increments, sequenced by value-vs-effort. Each is a standalone deliverable; together they realise the chat-panel-as-agent-browser model specs4/5-webapp/agent-browser.md describes.
 
+A separate plan — "Agents as first-class persistent entities" — sits below this one. It picks up where the UI plan ends, addressing the architectural gap that agent state currently doesn't survive session-reset or session-reload the way main's state does.
+
 ### ~~Increment A — `agent_blocks` persistence (no UI)~~ — delivered
 
 Backend-only foundation. Persists the per-turn `{id, agent_idx}` mapping on every orchestrator-spawned assistant record so future cross-turn reconstruction views can recover an agent's full session transcript without scanning archive contents. Zero user-visible change. Pure forward-compatibility — every agent-mode turn from this point forward is reconstructable.
@@ -506,6 +508,126 @@ Highest-spec, lowest-volume use case. Defer until B-D are in real use; once you'
 ### Delivery order
 
 Increments A, B, and C delivered. (B and C were marked "not started" in the original plan but a post-A audit found both already shipped — see their respective delivery-note sections.) D is the next concrete piece of work; it depends on B's tab construction infrastructure (which is in place). E follows once D has shipped and seen real use. Each remaining increment gets its own delivery-note section here when it lands.
+
+## Agents as first-class persistent entities
+
+The agent-mode UI plan above (A–E) makes agents *visible* in the chat panel — tabs, LEDs, archives, historical views. This plan addresses the orthogonal architectural gap: agents currently aren't *persistent* the way main's session is. Three concrete symptoms today:
+
+1. **Clicking "new session" doesn't reset agents.** The button is rendered on every tab including agents but only ever resets main. Confusing UX. Bug surfaced 2025-01.
+2. **Reloading an old session restores main's history but no agents.** Agent archives sit on disk untouched. Even though `agent_blocks` (per D30) records which agents participated in each turn, no code path uses that to reconstruct agents.
+3. **Mid-session per-agent mode changes are not supported.** The spec (system_agentic_appendix.md) explicitly says mode is fixed for the life of an agent. To change mode, the user must close the agent and respawn under a new id. This was a deliberate trade for simplicity — but it means a code-mode agent can't be promoted to code+xref to consult docs without losing its conversation history.
+
+The architectural shift: treat agents the way we treat main. Their mode can change. Their state persists across session-reset and session-reload. Reconstructing an agent from disk produces a live, writable ContextManager — same as main's session-reload behaviour.
+
+Five increments, ordered cheap-to-architectural so each commit ships a working improvement and the system stays internally consistent at every step. Each commit lands with tests; spec updates land with the commits that change behaviour.
+
+### ~~Increment 1 — Hide tab-scoped buttons that don't apply to agents~~ — delivered
+
+Pure UI fix, no backend, no spec change. The chat panel's action bar renders new-session, history-browser, mode toggle, cross-reference toggle, and snippet drawer on every tab. Several of those don't make sense on agent tabs.
+
+Audit of what was already gated and what wasn't, conducted on the live source:
+
+- **Mode toggle (code/doc segmented)** — already gated on `panel._activeTabId === 'main'` from earlier work. ✓ no change needed.
+- **Cross-reference toggle** — already gated on `panel._activeTabId === 'main'`. ✓ no change needed.
+- **New-session button (✨)** — was ungated. Calls `onNewSession` which clears main's session id and history. Wrong on agent tabs. Now gated.
+- **History button (📜)** — was ungated. Opens the history-browser modal which loads sessions over main's context. Wrong on agent tabs. Now gated.
+- **Reasoning toggle (🧠)** — deliberately left alone. Per-call setting that applies to whichever tab is sending; agents can benefit from reasoning too. The experimental flag still gates whether it renders at all.
+- **Snippet drawer button (✂️)** — deliberately left alone. Snippets are per-mode and useful on every conversation type.
+- **Search bar** — deliberately left alone. Works on every tab (message search within the active tab; file search globally).
+
+Implementation: extended the existing `panel._searchMode === 'file' || ...` gate around the new-session/history `action-group` to also include `panel._activeTabId !== 'main'`. Both buttons sit inside the same div and route through the same divider, so a single compound condition gates the whole group cleanly.
+
+Test coverage in `webapp/src/chat-panel/action-bar.test.js` (16 tests across six describe blocks): main-tab visibility for all four button groups, agent-tab hiding of the four hide-target buttons, search-bar and snippet-drawer survival on agents, read-only historical-tab hiding (inherits the same rules since the tab id isn't `'main'`), file-search mode preserving its pre-existing hide, compound gate behavior (file-search + agent both true), tab-switching reactivity in both directions, reasoning-toggle symmetric-rendering invariant (if it renders on main, it renders on agents — pins the deliberate non-gate).
+
+Why Increment 1 *first*: the audit-then-action sequence reveals that the spec gap was narrower than the original plan implied. Half the controls the plan called out were already correctly gated. The remaining gap was a single render expression covering two adjacent buttons. The 30-second user-visible benefit (no more "I clicked new-session and nothing happened") is realised via a one-line gate change plus tests pinning the contract.
+
+### Increment 2 — `new_session` closes all live agents
+
+Backend change with frontend visibility. When the user resets main's session, the entire conversation thread of the session goes with it — including agents.
+
+Scope:
+- `LLMService.new_session` (in `llm/_rpc_state.py`) — clear `_agent_contexts`, broadcast a per-agent `agentClosed` event for each cleared agent so the frontend dissolves the tabs, cancel any in-flight agent streams.
+- `specs4/5-webapp/agent-browser.md § Tab Lifetime` — add "main session reset" as a fourth event ending an agent tab's life.
+- Decision-log entry documenting the spec gap fix.
+
+Spec change is small and well-bounded. Behaviour matches user expectation.
+
+### Increment 3 — Persist per-agent state on disk
+
+Forward-compatible foundation for Increments 4 and 5. Doesn't change runtime behaviour today; lays the bytes that future reconstruction reads.
+
+Two sub-changes:
+
+**3a — Extend `agent_blocks` with initial state.** The orchestrator's assistant record currently persists `{id, agent_idx}` per agent. Extend to `{id, agent_idx, mode, cross_reference_enabled, model}`. The fields capture the agent's spawn-time configuration. Backwards-compatible — older records without these fields are still readable and indicate "use defaults."
+
+**3b — Write per-agent mode-change events to the archive.** When per-agent mode toggles ship in Increment 4, each toggle writes a system-event message to the agent's `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` archive marking the transition. Reconstruction replays these events to arrive at the agent's final mode.
+
+Scope:
+- `HistoryStore.append_message` — extend `agent_blocks` parameter shape.
+- `_stream_chat` — populate the extended fields when building the orchestrator's record.
+- `HistoryStore` — new `append_agent_system_event(turn_id, agent_idx, event_type, payload)` helper for mode-change events.
+- Tests pinning the on-disk shape and forward-compat with old records.
+
+No frontend change. No reconstruction yet — just the data.
+
+### Increment 4 — Per-agent mode toggle
+
+The user-visible feature you described. The mode toggle on an agent tab actually changes that agent's mode.
+
+Two parts:
+
+**4a — Backend: per-agent mode RPCs.**
+
+- `LLMService.switch_agent_mode(agent_id, mode)` — looks up the agent in `_agent_contexts`, swaps its ContextManager mode, rebuilds its stability tracker, writes a mode-change system event to the agent's archive (per 3b), broadcasts `agentModeChanged` so the frontend updates the tab's tooltip and the LED-row state.
+- `LLMService.set_agent_cross_reference(agent_id, enabled)` — same shape for cross-reference.
+- Both reject mid-stream changes (agent's tab shows flashing-cyan LED). Toast surfaces the reason.
+- Both update the descriptor that `build_agent_descriptor` injects into main's prompt — so the next time main runs, it sees the agent's new mode in its context. (This part is automatic if the descriptor reads from the agent's live ContextManager rather than a snapshot — verify.)
+
+**4b — Frontend: render mode toggle on agent tabs and route to per-agent RPCs.**
+
+Reverse of Increment 1: the mode toggle now appears on agent tabs but routes differently. When `panel._activeTabId !== 'main'`, the toggle calls `switch_agent_mode` instead of `switch_mode`. Disabled while the agent's stream is active. Tooltip explains.
+
+Scope:
+- New RPCs as above.
+- `webapp/src/chat-panel/rendering.js` — render mode toggle on agent tabs in Increment 4 (reversing Increment 1's hide for this specific button).
+- `webapp/src/app-shell/mode.js` — route to per-agent RPCs when active tab is an agent.
+- Tests covering the happy path, mid-stream rejection, descriptor update, archive event persistence.
+- Spec updates: `specs4/5-webapp/agent-browser.md`, `system_agentic_appendix.md` (relax the "mode is fixed for the life of the agent" constraint with an explanation of how mid-session changes work).
+
+After this lands, your scenario step 2 works: select an agent, toggle xref on, the agent's effective mode changes immediately for the next turn, main sees the new mode in its context.
+
+### Increment 5 — Reconstruct agents on session-load
+
+The capstone. Loading an old session restores not just main's history but every agent that participated, with their conversations and final modes intact.
+
+Scope:
+- `LLMService.load_session_into_context(session_id)` — after loading main's history, walk records for `agent_blocks` entries, group by `turn_id`, for each turn rebuild a ContextManager per agent: load the archive's message history, replay system-event mode-changes to arrive at the final mode, register the rebuilt ContextManager in `_agent_contexts`.
+- Reconstructed agents are **live and writable**, not read-only. Distinct from Increment D's historical-tab affordance (which is for read-only browsing of turns within the *current* session). A user reloading an old session can resume any of its agents — reply, mode-toggle, close, run another turn. Provider cache starts cold (the agent's stability tracker is rebuilt from scratch from the loaded history) but everything else works.
+- Frontend: rehydration happens automatically via the existing `list_live_agents()` path on `onRpcReady` post-load. Reconstructed agents are indistinguishable from agents that have been continuously alive — they show up as live tabs with full conversation history and current mode.
+- Per-agent selected-files / excluded-files: deferred. Those have always been ephemeral — even refresh today loses them. Adding their persistence is a separate small commit if it turns out to matter.
+
+Spec updates: `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" gets the reconstruction algorithm. `specs4/5-webapp/agent-browser.md § Tab Lifetime` adds session-load as a tab-creation event.
+
+After this lands, your scenarios 3 and 4 work: agent's history extends through direct-execution turns and reloads with that history intact.
+
+### Delivery order
+
+Increments 1 → 2 → 3 → 4 → 5. Each is a standalone commit (or small commit cluster). The chain dependency:
+
+- 1 unblocks visible UI work without committing to a backend strategy.
+- 2 fixes the immediate confusion you reported. Independent of 3+.
+- 3 lays bytes for 4 and 5. Doesn't change runtime behaviour, so it can ship without coordinated frontend work.
+- 4 needs 3a (initial mode persistence) and 3b (mode-change archive events) to be useful long-term. Without 3, mode changes work in-memory but vanish on reset. We could ship 4 without 3 but it'd be a half-feature.
+- 5 needs 3 fully, plus the rebuilt-tracker logic. The reconstruction code is the most novel part of the plan.
+
+Each increment gets its own delivery-note section here when it lands. Strike-through and commit hash, same convention as the agent-mode UI plan.
+
+### What this plan does NOT cover
+
+- **Per-agent selected-files / excluded-files persistence.** Currently lost on every refresh. Worth fixing eventually; not blocking the core "agents as first-class" shift. Separate small commit when needed.
+- **Per-agent model selection.** Could a user run agent-0 against Claude Opus and agent-1 against GPT-4? `agent_blocks` extension in 3a includes the model field for forward-compat, but no UI ships in this plan. Separate feature when desired.
+- **Cross-session agent migration.** Could the user pull an agent from session A into session B as a new conversation? No — sessions are isolation boundaries. Mixing agents across them isn't part of the model.
+- **Agent-to-agent communication.** Agents converse with the user (via their tab) and with the main LLM (via assimilation). Not with each other. Out of scope here, out of scope in `parallel-agents.md`.
 
 ## UI polish work plan — complete
 
