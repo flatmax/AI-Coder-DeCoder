@@ -657,45 +657,43 @@ The orchestrator's prompt-time descriptor reads each agent's mode from the agent
 
 After 4b lands, Increment 5 (reconstruct agents on session-load) is the remaining piece. Increments 1–4 between them ship the full per-agent persistent-entity surface for the live session; Increment 5 makes that surface survive session restore.
 
-### Increment 5 — Reconstruct agents on session-load
+### ~~Increment 5 — Reconstruct agents on session-load~~ — delivered
 
-The capstone. Loading an old session restores not just main's history but every agent that participated, with their conversations and final modes intact.
+Three commits across one session: backend reconstruction skeleton with spawn-time baseline (`2284b5b`), archive replay of mode-change events (`312828b`), and `agentsRehydrated` broadcast wiring through to the chat panel's tab-materialisation path (`5ebc844`).
 
-Specs landed alongside this entry: `specs4/3-llm/history.md § Session-Load Reconstruction` (the full nine-step algorithm with replay-from-archive as authoritative source) and `specs4/7-future/parallel-agents.md § Agent lifetime` (paragraph noting session-load as a reconstruction event symmetric with refresh / reconnect).
+The capstone. Loading an old session now restores not just main's history but every agent that participated — as live, writable scopes reachable via the agent-keyed RPC surface, with their final modes intact (mid-session toggles replayed from archive events) and their full conversation history pre-populated. Reconstructed agents are indistinguishable from agents that have been continuously alive since their first spawn turn — the user can reply, the orchestrator can retask them, the LED row reflects their state. Provider cache starts cold (the rebuilt StabilityTracker has no tier assignments) but everything else works.
 
-Replay strategy is **(b)** per spec: walk every `system_event: true` record in the agent's concatenated archive looking for `"Mode changed: {old} → {new}."` content, parse the trailing target, update running state. The spawn-time `agent_blocks` entry serves as the replay's starting baseline only — a mid-session toggle from `code` to `doc+xref` must reconstruct as `doc+xref`, not as `code`. Strategy (a) (use spawn-time mode without replay) would silently lose every retask toggle; rejected.
+Specs landed alongside the implementation: `specs4/3-llm/history.md § Session-Load Reconstruction` (the full nine-step algorithm with replay-from-archive as authoritative source) and `specs4/7-future/parallel-agents.md § Agent lifetime` (paragraph noting session-load as a reconstruction event symmetric with refresh / reconnect).
 
-Three-commit delivery plan, each landable independently with passing tests:
+Replay strategy is **(b)** per spec: walk every `system_event: true` record in the agent's concatenated archive looking for `"Mode changed: {old} → {new}."` content, parse the trailing target, update running state. The spawn-time `agent_blocks` entry serves as the replay's starting baseline only — a mid-session toggle from `code` to `doc+xref` reconstructs as `doc+xref`, not as `code`. Strategy (a) (use spawn-time mode without replay) was rejected because it would silently lose every retask toggle on session reload.
 
-**Commit 1 — Reconstruction skeleton with spawn-time baseline only.**
+Per-commit delivery record:
 
-- New `reconstruct_agent_scope(service, *, agent_id, turn_id, agent_idx, model, mode, cross_ref, archive_messages)` in `src/ac_dc/llm/_agents.py` — pure function mirroring `build_agent_scope` but without `parent_scope` (no orchestrator turn in flight at load time) and without mode resolution from a spawn block (caller supplies resolved mode). Builds ContextManager via `build_agent_context_manager`, populates history from `archive_messages`, builds fresh tracker, constructs scope, registers in `service._agent_contexts[agent_id]`.
-- New `_reconstruct_agents_from_session(service, messages)` in `src/ac_dc/llm/_rpc_history.py` — walks `messages` for assistant records carrying `turn_id` + `agent_blocks`, groups by `(agent_id)` keeping latest record per id (retask wins), for each surviving id fetches `get_turn_archive(turn_id)` filtered to that `agent_idx`, calls `reconstruct_agent_scope` with mode pulled from the spawn-time `agent_blocks` entry.
-- Wire into `load_session_into_context` between the history-set step and the `sessionChanged` broadcast. Idempotent against partial registration: if reconstruction raises on one agent, log and continue with the rest.
-- Tests in `tests/test_llm_service/test_agent_lifecycle.py` (new `TestSessionLoadReconstruction` class): empty session reconstructs no agents, single-agent session restores ContextManager and history, multi-agent single-turn session restores all, retask-within-session uses latest spawn record, missing archive directory skipped silently, missing `agent_blocks` field skipped silently, registered scope reachable via `set_agent_selected_files` post-load.
+**Commit 1 — Reconstruction skeleton with spawn-time baseline only** (`2284b5b`).
 
-After commit 1: agents reappear in `_agent_contexts` after session-load with their conversation history but with the spawn-time mode rather than the post-toggle mode. Known-wrong intermediate state per replay strategy.
+`reconstruct_agent_scope` in `src/ac_dc/llm/_agents.py` constructs a ContextManager via the existing `build_agent_context_manager` factory, pre-populates history from concatenated archive content, attaches a fresh StabilityTracker, and registers the scope in `service._agent_contexts[agent_id]`. `_reconstruct_agents_from_session` in `src/ac_dc/llm/_rpc_history.py` walks the session's full records (NOT the context-load shape, which strips `agent_blocks`), groups by agent id keeping the latest record per id (retask wins), concatenates archive content across every turn the id appeared in, and resolves mode from the latest spawn entry. Wired into `load_session_into_context` between the history-set step and the `sessionChanged` broadcast; idempotent against partial registration.
 
-**Commit 2 — Replay mode-change events on top of spawn-time baseline.**
+After Commit 1, agents reappeared in `_agent_contexts` after session-load with their conversation history but with the spawn-time mode rather than the post-toggle mode — known-wrong intermediate state per replay strategy.
 
-- New `_replay_mode_events(archive_messages, initial_mode, initial_xref)` in `src/ac_dc/llm/_agents.py` — pure function. Scans `archive_messages` in order for records with `system_event: true` and content starting with `"Mode changed: "`. Parses the format `"Mode changed: {old} → {new}."` (the format `_format_agent_mode` produces in `_rpc_state.py`'s `switch_agent_mode` and `set_agent_cross_reference`). Returns final `(Mode, cross_reference_enabled)`. Defensive: malformed events (no `→`, unrecognised mode string, missing terminator) are skipped without error, running state continues from prior record.
-- Update `reconstruct_agent_scope` to call `_replay_mode_events` before constructing the ContextManager. The scope's mode is the replay result, not the parameter.
-- Tests in `TestSessionLoadReconstruction`: spawn-then-toggle reconstructs as toggled mode, multiple sequential toggles reconstruct as final mode, malformed event skipped (subsequent valid events still apply), no events leaves baseline unchanged, cross-reference axis toggled independently of primary mode.
+**Commit 2 — Replay mode-change events on top of spawn-time baseline** (`312828b`).
 
-After commit 2: replay strategy (b) is the live behaviour. Agent reconstruction is authoritative.
+`_replay_mode_events` in `src/ac_dc/llm/_agents.py` walks `archive_messages` for `system_event: true` records whose content matches the strict format `"Mode changed: {old} → {new}."` produced by `switch_agent_mode` and `set_agent_cross_reference`. Each valid event advances running `(Mode, cross_ref)` state to the parsed target; malformed events skip without raising. `reconstruct_agent_scope` now calls the replay before constructing the ContextManager, so the scope's mode is the post-replay result, not the spawn-time baseline.
 
-**Commit 3 — Broadcast + frontend rehydration + integration test + delivery note.**
+The strict format (prefix + arrow + terminating period) is deliberate. A loose match like `"Mode changed: code → doc"` (no terminator) would tolerate writer-side regressions silently — pinning the exact format means a future change to the writer surfaces as a quietly-lost replay rather than continuing to "work" with subtly wrong state.
 
-- New `agentsRehydrated` event broadcast at the end of `load_session_into_context`, after `sessionChanged`. Payload `{agent_ids: [...]}` carrying the reconstructed ids. Distinct from `agentsSpawned` (which carries spawn-block content the chat panel uses to derive tab labels) — rehydration content is fetched separately by the frontend from `list_live_agents()` and `get_turn_archive(turn_id)`.
-- Frontend handler in `webapp/src/app-shell/index.js` (`agentsRehydrated` server-push method) re-dispatches as a window event. Chat panel handler in `webapp/src/chat-panel/events.js` calls the existing `rehydrateLiveAgents(panel)` (from Increment C) to materialise tabs from the now-populated registry. The rehydration path is identical to the post-`onRpcReady` path; the trigger is just earlier in the session-load sequence.
-- Integration test in `tests/test_llm_service/test_agent_lifecycle.py`: full round-trip — service A spawns agent, toggles mode, persists; fresh service B loads the same session, asserts agent reconstructed with toggled mode and full conversation, can issue another `chat_streaming` call routed via `agent_tag`.
-- Frontend test (defer to a follow-up commit if it adds friction — the backend behaviour is authoritative for this increment): chat panel test that simulates `session-loaded` followed by `agentsRehydrated` and asserts tabs render.
-- Strike Increment 5 in this notes file with commit hashes.
+**Commit 3 — `agentsRehydrated` broadcast + frontend wiring + integration test** (`5ebc844`).
 
-What this plan does NOT cover:
-- Per-agent selected-files / excluded-files — deferred (always ephemeral, even refresh loses them).
-- Reconstructing a session whose agents' archive files were partially deleted — remaining content reconstructs normally; deleted turns contribute nothing. Mode replay walks whatever archive exists.
+`load_session_into_context` captures `pre_existing_ids = set(_agent_contexts.keys())` before reconstruction, then broadcasts `agentsRehydrated` with the diff against the post-reconstruction registry — only the just-reconstructed ids appear in the payload, not the full registry. Pre-existing agents (from the current session, before the load) stay live but don't re-trigger frontend tab creation. Fired AFTER `sessionChanged` so the chat panel's session-changed handler (which clears messages + streaming state) runs first; reverse order would briefly render the new agent tabs against the old session's main-tab content.
+
+Frontend wiring: `agentsRehydrated` server-push method in `webapp/src/app-shell/index.js` re-dispatches as a window-level `agents-rehydrated` event. `onAgentsRehydrated` in `webapp/src/chat-panel/events.js` calls the existing `rehydrateLiveAgents(panel)` — same path Increment C uses on `onRpcReady` after a browser refresh. The frontend doesn't need to filter by id; `rehydrateLiveAgents` itself queries `list_live_agents()` and creates tabs idempotently.
+
+Integration test `test_full_round_trip_two_service_instances` runs the end-to-end loop: service A spawns an agent (registering the scope, persisting the spawn record with `agent_blocks`, seeding the agent's first user message via `scope.context.add_message`), toggles its mode (writing the mode-change archive event), then a fresh service B with the same history store (simulating a server restart) loads the session and reconstructs. Asserts the agent is in `service_b._agent_contexts`, mode is the post-replay value (Mode.DOC), conversation history contains both the initial task and the mode-change event, and `agentsRehydrated` fired on service B with the agent's id.
+
+What this delivery does NOT cover:
+- Per-agent selected-files / excluded-files reconstruction — deferred (always ephemeral, even refresh loses them today).
+- Reconstructing a session whose agents' archive files were partially deleted — remaining content reconstructs normally; deleted turns contribute nothing. Replay walks whatever archive content exists.
 - Cross-session agent migration — sessions remain isolation boundaries.
+- Frontend test for the `agents-rehydrated` → tab materialisation path. Backend behaviour is authoritative and covered by integration tests; the frontend handler is a one-line forwarder to the already-tested `rehydrateLiveAgents` path. Filed for a future commit if the manual UX exposes a regression.
 
 ### Delivery order
 
