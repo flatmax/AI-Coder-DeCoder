@@ -119,30 +119,37 @@ export function renderTemplate(host) {
         class="dialog-header"
         @pointerdown=${host._onHeaderPointerDown}
       >
-        <button
-          class="tab-button ${host.activeTab === 'files' ? 'active' : ''}"
-          @click=${() => host._switchTab('files')}
-        >🗨 Chat</button>
-        <button
-          class="tab-button ${host.activeTab === 'context' ? 'active' : ''}"
-          @click=${() => host._switchTab('context')}
-        >📊 Context</button>
-        <button
-          class="tab-button ${host.activeTab === 'settings' ? 'active' : ''}"
-          @click=${() => host._switchTab('settings')}
-        >⚙️ Settings</button>
-        ${host._docConvertAvailable ? html`
+        <div class="tab-group-left">
           <button
-            class="tab-button doc-convert-tab ${host.activeTab === 'doc-convert' ? 'active' : ''}"
-            @click=${() => host._switchTab('doc-convert')}
-            title="Convert documents to markdown"
-          >📄 Convert</button>
-        ` : null}
-        <button
-          class="minimize-button"
-          title=${host._minimized ? 'Expand' : 'Minimize'}
-          @click=${host._toggleMinimize}
-        >${host._minimized ? '▴' : '▾'}</button>
+            class="tab-button ${host.activeTab === 'files' ? 'active' : ''}"
+            @click=${() => host._switchTab('files')}
+          >🗨 Chat</button>
+          <button
+            class="tab-button ${host.activeTab === 'context' ? 'active' : ''}"
+            @click=${() => host._switchTab('context')}
+          >📊 Context</button>
+        </div>
+        <div class="tab-group-right">
+          ${host._docConvertAvailable ? html`
+            <button
+              class="tab-button icon-only ${host.activeTab === 'doc-convert' ? 'active' : ''}"
+              @click=${() => host._switchTab('doc-convert')}
+              title="Convert documents to markdown"
+              aria-label="Convert"
+            >📄</button>
+          ` : null}
+          <button
+            class="tab-button icon-only ${host.activeTab === 'settings' ? 'active' : ''}"
+            @click=${() => host._switchTab('settings')}
+            title="Settings"
+            aria-label="Settings"
+          >⚙️</button>
+          <button
+            class="minimize-button"
+            title=${host._minimized ? 'Expand' : 'Minimize'}
+            @click=${host._toggleMinimize}
+          >${host._minimized ? '▴' : '▾'}</button>
+        </div>
       </div>
       <div class="dialog-body">
         <div class="tab-panel ${host.activeTab === 'files' ? 'active' : ''}">

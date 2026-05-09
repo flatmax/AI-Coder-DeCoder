@@ -96,6 +96,17 @@ All dispatch to window-level custom events that the relevant child components li
 
 The dialog is a draggable, resizable foreground panel hosting the tab bar and tab bodies. It sits above the viewer background layer (z-index 10 vs 0–1) so it always renders on top regardless of what the viewer's internal positioning does. Left-docked by default; first drag or first bottom/corner resize undocks it into an explicit rectangle.
 
+### Tab Bar Layout
+
+The dialog header splits into two groups:
+
+- **Left group** — primary conversational tabs with text labels: 🗨 Chat, 📊 Context. These are where the user spends most of their time and benefit from explicit names.
+- **Right group** — utility tabs rendered icon-only (no text label) plus the minimize button: 📄 Convert (when available), ⚙️ Settings, ▾ minimize. The icons carry the meaning; `title` and `aria-label` attributes provide accessible names for tooltip and screen-reader users.
+
+The right group is pushed to the far edge with `margin-left: auto` on the group container rather than on individual buttons, so the layout stays correct regardless of how many tabs are in either group (e.g., when doc convert is unavailable and the Convert tab is omitted).
+
+Rationale: Settings and Convert are infrequent destinations — Settings is touched once per config change, Convert is a one-shot task per document. Demoting them to icon-only on the right reclaims horizontal space for the conversational tabs and visually separates "where you work" from "what you configure".
+
 ### Layout Modes
 
 Two mutually-exclusive modes:
@@ -190,7 +201,7 @@ Rationale: mode is per-conversation in spirit (an agent could in principle inher
 
 ## Global Keyboard Shortcuts
 
-- Alt+1..4 switch tabs (4 when doc convert is available)
+- Alt+1..4 switch tabs in visual left-to-right order: Chat, Context, Convert (when available), Settings. When doc convert is unavailable, Alt+3 maps to Settings and Alt+4 is unbound.
 - Alt+M toggles dialog minimize
 - Ctrl+Shift+F activates file search in the chat panel, prefilling from the current selection
 

@@ -128,8 +128,31 @@ export const APP_SHELL_STYLES = css`
     .dialog-header .tab-button {
       cursor: pointer;
     }
-    .dialog-header .doc-convert-tab {
+    /* Tab groups — left group holds the conversational tabs
+     * (Chat, Context); right group holds icon-only utility
+     * tabs (Convert, Settings) and the minimize button.
+     * margin-left: auto on the right group pushes it to the
+     * far edge regardless of how many tabs are in either
+     * group. */
+    .dialog-header .tab-group-left {
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
+    }
+    .dialog-header .tab-group-right {
+      display: flex;
+      gap: 0.25rem;
+      align-items: center;
       margin-left: auto;
+    }
+    /* Icon-only tab variant — no text label, square-ish hit
+     * area. Used for Settings and Convert in the right group;
+     * the icon alone carries the meaning, with title +
+     * aria-label providing accessible names. */
+    .dialog-header .tab-button.icon-only {
+      padding: 0.4rem 0.55rem;
+      font-size: 1rem;
+      line-height: 1;
     }
     .dialog-header .minimize-button {
       background: transparent;
@@ -140,10 +163,6 @@ export const APP_SHELL_STYLES = css`
       cursor: pointer;
       font-size: 0.875rem;
       opacity: 0.7;
-      margin-left: auto;
-    }
-    .dialog-header .doc-convert-tab ~ .minimize-button {
-      margin-left: 0;
     }
     .dialog-header .minimize-button:hover {
       opacity: 1;
