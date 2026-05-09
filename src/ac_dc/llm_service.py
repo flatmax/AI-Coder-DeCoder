@@ -1152,6 +1152,13 @@ class LLMService:
         from ac_dc.llm._rpc_history import get_turn_archive
         return get_turn_archive(self, turn_id)
 
+    def get_agent_history(
+        self, agent_id: str
+    ) -> list[dict[str, Any]]:
+        """Delegate to :func:`ac_dc.llm._rpc_history.get_agent_history`."""
+        from ac_dc.llm._rpc_history import get_agent_history
+        return get_agent_history(self, agent_id)
+
     def load_session_into_context(
         self, session_id: str
     ) -> dict[str, Any]:

@@ -37,7 +37,7 @@
 // one place to look when adding a new event.
 
 import { normalizeMessageContent } from '../image-utils.js';
-import { onChatTabShortcut } from './tabs.js';
+import { onChatTabShortcut, onTabClose } from './tabs.js';
 import {
   onAgentsSpawned,
   onStreamChunk,
@@ -67,6 +67,7 @@ export function bindEventHandlers(panel) {
   panel._onUserMessage = (e) => onUserMessage(panel, e);
   panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
   panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
+  panel._onAgentClosed = (e) => onAgentClosed(panel, e);
   panel._onSessionChanged = (e) => onSessionChanged(panel, e);
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
@@ -130,6 +131,7 @@ export function attachEventListeners(panel) {
   window.addEventListener(
     'agents-rehydrated', panel._onAgentsRehydrated,
   );
+  window.addEventListener('agent-closed', panel._onAgentClosed);
   // D2 — chat-tab keyboard shortcuts. Alt+`
   // cycles to the next tab, Alt+Shift+` to the
   // previous. Installed at the document level
@@ -199,6 +201,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener(
     'agents-rehydrated', panel._onAgentsRehydrated,
   );
+  window.removeEventListener('agent-closed', panel._onAgentClosed);
   window.removeEventListener('state-loaded', panel._onStateLoaded);
   window.removeEventListener(
     'compaction-event',
@@ -892,6 +895,45 @@ export function onAgentsRehydrated(panel, event) {
   rehydrateLiveAgents(panel);
 }
 
+/**
+ * Handle ``agent-closed`` window events.
+ *
+ * Dispatched by the AppShell when the backend frees an
+ * agent's scope server-side — currently from
+ * :func:`new_session` (which closes every live agent
+ * per Increment 2 of the "Agents as first-class
+ * persistent entities" plan) and from
+ * :func:`close_agent_context`.
+ *
+ * Detail shape: ``{agent_id: string}``. We route the id
+ * to :func:`onTabClose` which removes the tab from
+ * ``_tabs`` and ``_tabLabels``, switches to main if the
+ * closed tab was active, and frees per-tab UI state.
+ *
+ * Defensive against unknown ids — :func:`onTabClose`
+ * already short-circuits when the tab isn't in the
+ * registry. Defensive against malformed detail —
+ * non-string id silently skipped (matches the agent-
+ * mode-changed handler's defensive shape).
+ *
+ * Note that :func:`onTabClose` itself fires the close-
+ * agent-context RPC. That's a no-op when the backend
+ * has already freed the scope (the unknown-id branch
+ * returns ``{closed: false}``), so the round-trip is
+ * harmless even though it's redundant on this path.
+ * The alternative (gate the RPC call inside
+ * :func:`onTabClose`) would either require a new
+ * "from-broadcast" flag or a registry probe; neither
+ * pays for itself.
+ */
+export function onAgentClosed(panel, event) {
+  const detail = event?.detail;
+  if (!detail || typeof detail !== 'object') return;
+  const agentId = detail.agent_id;
+  if (typeof agentId !== 'string' || !agentId) return;
+  onTabClose(panel, agentId);
+}
+
 export async function rehydrateLiveAgents(panel) {
   if (!panel.rpcConnected) return;
   let entries;
@@ -913,93 +955,83 @@ export async function rehydrateLiveAgents(panel) {
   const created = rehydrateAgentTabs(panel, entries);
   if (created.length === 0) return;
 
-  // Group by turn_id so we make one get_turn_archive
-  // call per turn rather than per agent. Multiple
-  // agents from the same turn share an archive
-  // directory.
-  const byTurn = new Map();
+  // One get_agent_history call per rehydrated agent.
+  // Reads the agent's full reconstructed conversation
+  // from its ContextManager — for session-reconstructed
+  // agents that's the concatenation across every turn
+  // they participated in. The earlier per-turn approach
+  // (get_turn_archive(turn_id) filtered to agent_idx)
+  // only returned the latest turn's messages, so multi-
+  // turn agents lost all but their most recent turn
+  // from the rehydrated tab.
   for (const entry of created) {
-    const turnId = entry.turn_id;
-    if (typeof turnId !== 'string' || !turnId) continue;
-    if (!byTurn.has(turnId)) byTurn.set(turnId, []);
-    byTurn.get(turnId).push(entry);
-  }
-  for (const [turnId, turnEntries] of byTurn) {
-    loadAgentArchives(panel, turnId, turnEntries);
+    loadAgentHistory(panel, entry);
   }
 }
 
 /**
- * Load conversation content for every agent in a
- * single turn.
+ * Load full conversation history for one rehydrated
+ * agent.
  *
- * Fire-and-forget — this kicks off async work
- * and returns. Each agent's message list
- * populates as the archive call returns; Lit's
- * reactive update pipeline handles the UI
- * refresh.
+ * Fire-and-forget — kicks off the async fetch and
+ * returns. The tab's message list populates when the
+ * RPC resolves; Lit's reactive update pipeline
+ * handles the UI refresh.
  *
- * The archive RPC returns a flat list of
- * messages across every agent in the turn, each
- * record carrying ``agent_idx`` so we can split
- * by tab. The shape of each record matches the
- * main-store record schema from
- * ``specs4/3-llm/history.md`` — ``role``,
- * ``content``, optional ``images``, optional
- * ``system_event``.
+ * Uses ``get_agent_history`` rather than
+ * ``get_turn_archive`` so multi-turn agents (those
+ * that participated in several turns over the
+ * session, reconstructed via the session-load path)
+ * surface their full conversation, not just the
+ * latest turn's messages. The backend's reconstruction
+ * has already concatenated archive content across
+ * every participating turn into the agent's
+ * ContextManager; this RPC reads from there.
+ *
+ * Each record matches :class:`ContextManager`'s
+ * history shape — ``{role, content, ...}`` plus
+ * optional ``system_event``, ``images``, etc.
+ * (essentially the same shape ``get_turn_archive``
+ * records use, since the reconstruction path
+ * sources from those archives).
  */
-async function loadAgentArchives(panel, turnId, entries) {
+async function loadAgentHistory(panel, entry) {
   if (!panel.rpcConnected) return;
-  let archive;
+  const tabId = entry.id;
+  if (typeof tabId !== 'string' || !tabId) return;
+
+  let history;
   try {
-    archive = await panel.rpcExtract(
-      'LLMService.get_turn_archive',
-      turnId,
+    history = await panel.rpcExtract(
+      'LLMService.get_agent_history',
+      tabId,
     );
   } catch (err) {
     console.error(
-      `[chat] get_turn_archive(${turnId}) failed`, err,
+      `[chat] get_agent_history(${tabId}) failed`, err,
     );
     return;
   }
-  if (!Array.isArray(archive)) return;
+  if (!Array.isArray(history) || history.length === 0) return;
 
-  // Index records by agent_idx for fast filtering.
-  const byAgentIdx = new Map();
-  for (const record of archive) {
-    if (!record || typeof record !== 'object') continue;
-    const idx = record.agent_idx;
-    if (typeof idx !== 'number') continue;
-    if (!byAgentIdx.has(idx)) byAgentIdx.set(idx, []);
-    byAgentIdx.get(idx).push(record);
-  }
+  const tab = panel._tabs.get(tabId);
+  if (!tab) return;
 
-  let panelDirty = false;
-  for (const entry of entries) {
-    const tabId = entry.id;
-    const idx = entry.agent_idx;
-    if (typeof idx !== 'number') continue;
-    const tab = panel._tabs.get(tabId);
-    if (!tab) continue;
-    const records = byAgentIdx.get(idx) || [];
-    if (records.length === 0) continue;
-    tab.messages = records.map((r) => {
-      const msg = { role: r.role, content: r.content ?? '' };
-      if (Array.isArray(r.images) && r.images.length > 0) {
-        msg.images = r.images;
-      }
-      if (r.system_event) msg.system_event = true;
-      return msg;
-    });
-    // Recompute lastEditOutcome from the persisted
-    // archive so the LED row resolves to green/red
-    // per spec § Refresh and Reconnect "What is
-    // genuinely lost" — cyan is never recovered, but
-    // green/red is recomputable.
-    tab.lastEditOutcome = computeOutcomeFromArchive(records);
-    panelDirty = true;
-  }
-  if (panelDirty) panel.requestUpdate();
+  tab.messages = history.map((r) => {
+    const msg = { role: r.role, content: r.content ?? '' };
+    if (Array.isArray(r.images) && r.images.length > 0) {
+      msg.images = r.images;
+    }
+    if (r.system_event) msg.system_event = true;
+    return msg;
+  });
+  // Recompute lastEditOutcome from the loaded history
+  // so the LED row resolves to green/red per spec
+  // § Refresh and Reconnect "What is genuinely lost"
+  // — cyan is never recovered, but green/red is
+  // recomputable.
+  tab.lastEditOutcome = computeOutcomeFromArchive(history);
+  panel.requestUpdate();
 }
 
 /**

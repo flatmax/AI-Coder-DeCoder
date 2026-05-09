@@ -927,6 +927,30 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  agentClosed(data) {
+    // Fired by the backend when an agent's scope is freed
+    // server-side — currently from new_session (which
+    // clears every live agent per Increment 2 of the
+    // "Agents as first-class persistent entities" plan)
+    // and from close_agent_context. Carries
+    // {agent_id: str}. Re-dispatched as a window event
+    // so the chat panel removes the tab and frees per-
+    // tab state.
+    //
+    // Without this handler, agents would survive
+    // new_session in the UI even though the backend has
+    // freed their scope — a subsequent RPC routed to the
+    // stale tab would return {error: "agent not found"}
+    // and the chat panel's existing stale-tag handling
+    // would close the tab then. The proactive event makes
+    // the close immediate rather than waiting for the
+    // next user gesture.
+    window.dispatchEvent(
+      new CustomEvent('agent-closed', { detail: data }),
+    );
+    return true;
+  }
+
   sessionChanged(data) {
     window.dispatchEvent(new CustomEvent('session-changed', { detail: data }));
     return true;

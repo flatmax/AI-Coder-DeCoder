@@ -98,6 +98,51 @@ def get_turn_archive(
     return service._history_store.get_turn_archive(turn_id)
 
 
+def get_agent_history(
+    service: "LLMService",
+    agent_id: str,
+) -> list[dict[str, Any]]:
+    """Return a live agent's full reconstructed conversation.
+
+    Reads from the agent's ContextManager — the
+    authoritative in-memory copy of its conversation.
+    Distinct from :func:`get_turn_archive` which only
+    returns one turn's archive: this returns the agent's
+    full history across every turn it participated in,
+    which for a session-reconstructed agent is the
+    concatenated archive content from
+    :func:`reconstruct_agent_scope`.
+
+    Used by the frontend's rehydration path to populate
+    agent tabs with full conversation history after
+    session load. ``get_turn_archive`` would only return
+    the latest turn's content; multi-turn agents would
+    lose all but the most recent turn's messages from
+    the user's view.
+
+    Each message dict is the same shape
+    :meth:`ContextManager.get_history` returns —
+    ``{role, content, ...}`` plus optional fields
+    (``system_event``, ``images``, ``files``,
+    ``edit_results``, etc.). The frontend's
+    archive-loading path already handles this shape
+    (it's the same shape :func:`get_turn_archive`
+    records carry).
+
+    Returns an empty list when the agent id isn't
+    registered. The unknown-id case is silent rather
+    than an error because the frontend's rehydration
+    path runs against a list it just fetched via
+    :func:`list_live_agents` — by the time it iterates
+    and calls this method per agent, an agent may have
+    been closed (race window is narrow but real).
+    """
+    scope = service._agent_contexts.get(agent_id)
+    if scope is None or scope.context is None:
+        return []
+    return scope.context.get_history()
+
+
 # ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
