@@ -46,6 +46,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import EditResult, parse_text
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm._helpers import (
@@ -53,6 +54,7 @@ from ac_dc.llm._helpers import (
     _extract_finish_reason,
     _extract_response_cost,
     _resolve_max_output_tokens,
+    build_thinking_kwargs,
 )
 from ac_dc.llm._types import _URL_PER_MESSAGE_LIMIT
 
@@ -78,6 +80,7 @@ async def stream_chat(
     *,
     scope: "ConversationScope | None" = None,
     agent_key: str | None = None,
+    reasoning: bool | None = None,
 ) -> dict[str, Any]:
     """Background task — the actual streaming logic.
 
@@ -88,6 +91,11 @@ async def stream_chat(
     ``service._active_agent_streams``. See
     :meth:`LLMService._stream_chat` for the full prose
     describing every step.
+
+    ``reasoning`` carries the per-request extended-thinking
+    override forwarded by the chat_streaming RPC. ``None``
+    defers to ``config.reasoning_enabled``; ``True`` /
+    ``False`` force the corresponding state.
     """
     if scope is None:
         scope = service._default_scope()
@@ -139,6 +147,29 @@ async def stream_chat(
 
         # Persist user message BEFORE the LLM call. Mid-
         # stream crash preserves user intent.
+        #
+        # Images are intentionally NOT threaded into
+        # `_history` — only the text part of the user
+        # message is stored. The current turn's images
+        # reach the LLM via prompt assembly's
+        # `_build_user_message`, which constructs a
+        # multimodal content block list fresh from the
+        # `images` parameter every request. Subsequent
+        # turns therefore replay only the text.
+        #
+        # This is deliberate: images are expensive
+        # (~1.6K tokens each on Claude) and the assistant's
+        # textual response from the turn the image was sent
+        # almost always carries forward whatever was
+        # relevant about it. Keeping images in replayed
+        # history would multiply token cost on every
+        # downstream turn for no proportional gain.
+        #
+        # The history store DOES persist image refs
+        # (filenames under `.ac-dc/images/`) so the history
+        # browser can reconstruct the original message for
+        # display — that's a separate concern from what the
+        # LLM sees on subsequent turns.
         if scope.archival_append is not None:
             scope.archival_append(
                 "user",
@@ -223,17 +254,138 @@ async def stream_chat(
             cancelled,
             finish_reason,
             request_usage,
+            completion_error,
         ) = await loop.run_in_executor(
             service._stream_executor,
             service._run_completion_sync,
-            request_id, messages, loop,
+            request_id, messages, loop, reasoning,
         )
+        # If the LiteLLM call raised before streaming
+        # started, ``run_completion_sync`` returns the
+        # diagnostic via the 5th tuple slot. Promote it to
+        # the local ``error`` so build_completion_result
+        # sets ``result.error`` and the frontend's red-LED
+        # path fires. Skip persistence + agent dispatch on
+        # this path — there's no real assistant response.
+        if completion_error is not None:
+            error = completion_error
+            full_content = ""
 
-        # Persist assistant response.
+        # Persist assistant response. If the orchestrator emitted
+        # any well-formed agent-spawn blocks, persist their
+        # ``{id, agent_idx}`` mapping so a future across-turns
+        # view can reconstruct each agent's full session
+        # transcript. Per specs4/3-llm/history.md § Cross-Turn
+        # Agent Reconstruction, the on-disk archive layout
+        # (``agent-NN.jsonl``) is keyed by the turn-local
+        # numeric ``agent_idx`` while orchestrator addressing is
+        # by stable string ``id``; ``agent_idx`` is NOT stable
+        # across turns, so we record the mapping at write time.
+        # Parsed twice (here and in build_completion_result) —
+        # the parser is pure and cheap, and avoiding the
+        # duplication would require reshaping the function
+        # signatures for marginal gain.
         if full_content or cancelled:
             content_to_store = full_content
             if cancelled and not content_to_store:
                 content_to_store = "[stopped]"
+            persisted_agent_blocks: list[dict[str, Any]] | None = None
+            if full_content and not cancelled:
+                _agent_parse = parse_text(full_content)
+                # Per Increment 3a: persist each agent's resolved
+                # mode, cross-reference flag, and model alongside
+                # ``id`` and ``agent_idx``. Reconstruction
+                # (Increment 5) will rebuild a ContextManager per
+                # agent from the archive content; mode + xref
+                # determine which prompt to install, model
+                # determines which provider to address.
+                #
+                # Mode resolution mirrors the agentsSpawned
+                # broadcast logic in this same function: existing
+                # agents (retask) keep their current mode; fresh
+                # spawns resolve via _resolve_agent_mode against
+                # the orchestrator's current scope. Model comes
+                # from the agent's own ContextManager when
+                # known; falls back to the orchestrator's model
+                # for fresh spawns whose scope hasn't been built
+                # by this point in the function.
+                from ac_dc.llm._agents import (
+                    _format_mode,
+                    _resolve_agent_mode,
+                )
+                parent_cm = scope.context
+                parent_mode = (
+                    parent_cm.mode if parent_cm
+                    else None
+                )
+                parent_xref = (
+                    parent_cm.cross_reference_enabled
+                    if parent_cm else False
+                )
+                _entries: list[dict[str, Any]] = []
+                for idx, b in enumerate(_agent_parse.agent_blocks):
+                    if not b.valid:
+                        continue
+                    entry: dict[str, Any] = {
+                        "id": b.id,
+                        "agent_idx": idx,
+                    }
+                    # Resolve mode + xref. Reuse existing agent's
+                    # state on retask (per the same precedence
+                    # the agentsSpawned broadcast uses) so the
+                    # persisted record matches the runtime
+                    # scope.
+                    existing = (
+                        service._agent_contexts.get(b.id)
+                    )
+                    if (
+                        existing is not None
+                        and existing.context is not None
+                    ):
+                        agent_mode = existing.context.mode
+                        agent_xref = (
+                            existing.context.cross_reference_enabled
+                        )
+                    elif parent_mode is not None:
+                        agent_mode, agent_xref = (
+                            _resolve_agent_mode(
+                                b.mode,
+                                parent_mode,
+                                parent_xref,
+                            )
+                        )
+                    else:
+                        # No parent context — extremely
+                        # defensive; main path always has one.
+                        # Skip mode enrichment on this entry.
+                        agent_mode = None
+                        agent_xref = None
+                    if agent_mode is not None:
+                        entry["mode"] = _format_mode(
+                            agent_mode, bool(agent_xref),
+                        )
+                        entry["cross_reference_enabled"] = (
+                            bool(agent_xref)
+                        )
+                    # Model: agents inherit the orchestrator's
+                    # model today (no per-agent model override
+                    # exists in the spawn block format yet).
+                    # Read from config rather than the agent's
+                    # ContextManager — fresh-spawn scopes don't
+                    # exist yet at this persistence point.
+                    try:
+                        model = service._config.model
+                        if isinstance(model, str) and model:
+                            entry["model"] = model
+                    except Exception:
+                        # Defensive: a config read failure must
+                        # not block persistence. The reconstruction
+                        # path tolerates a missing model field
+                        # and falls back to the current config.
+                        pass
+                    _entries.append(entry)
+                if _entries:
+                    persisted_agent_blocks = _entries
             scope.context.add_message(
                 "assistant", content_to_store,
                 turn_id=turn_id,
@@ -244,6 +396,7 @@ async def stream_chat(
                     content_to_store,
                     session_id=scope.session_id,
                     turn_id=turn_id,
+                    agent_blocks=persisted_agent_blocks,
                 )
 
         # Agent-spawn dispatch. Only runs on the normal-
@@ -266,15 +419,69 @@ async def stream_chat(
                 if valid_blocks:
                     # Fire agentsSpawned BEFORE the gather
                     # so the frontend creates tabs in time
-                    # to receive child streams.
-                    agent_block_payload = [
-                        {
+                    # to receive child streams. Each entry
+                    # carries the agent's resolved mode so
+                    # the LED-row tooltip can render
+                    # ``<id> (<mode>): running`` per spec
+                    # ``specs4/5-webapp/agent-browser.md``
+                    # § Status LEDs → Click and hover.
+                    # Mode resolution mirrors the
+                    # spawn-time logic in
+                    # :func:`_resolve_or_spawn_agent_scope`
+                    # — empty ``block.mode`` inherits from
+                    # the parent scope.
+                    from ac_dc.llm._agents import (
+                        _format_mode,
+                        _resolve_agent_mode,
+                    )
+                    parent_cm = scope.context
+                    parent_mode = (
+                        parent_cm.mode if parent_cm
+                        else Mode.CODE
+                    )
+                    parent_xref = (
+                        parent_cm.cross_reference_enabled
+                        if parent_cm else False
+                    )
+                    agent_block_payload = []
+                    for i, b in enumerate(valid_blocks):
+                        # Reuse existing agent's mode on
+                        # retask so the broadcast payload
+                        # matches the runtime scope. The
+                        # resolver may yet decide to skip
+                        # this block (mode mismatch); the
+                        # tab created from this payload
+                        # will then never receive child
+                        # chunks, but its tooltip stays
+                        # accurate to the existing agent.
+                        existing = (
+                            service._agent_contexts.get(b.id)
+                        )
+                        if (
+                            existing is not None
+                            and existing.context is not None
+                        ):
+                            mode_str = _format_mode(
+                                existing.context.mode,
+                                existing.context.cross_reference_enabled,
+                            )
+                        else:
+                            resolved_mode, resolved_xref = (
+                                _resolve_agent_mode(
+                                    b.mode,
+                                    parent_mode,
+                                    parent_xref,
+                                )
+                            )
+                            mode_str = _format_mode(
+                                resolved_mode, resolved_xref,
+                            )
+                        agent_block_payload.append({
                             "id": b.id,
                             "task": b.task,
                             "agent_idx": i,
-                        }
-                        for i, b in enumerate(valid_blocks)
-                    ]
+                            "mode": mode_str,
+                        })
                     await service._broadcast_event_async(
                         "agentsSpawned",
                         {
@@ -350,7 +557,8 @@ async def stream_chat(
     if error is None and not cancelled:
         try:
             await service._post_response(
-                request_id, turn_id, scope
+                request_id, turn_id, scope,
+                request_usage=request_usage,
             )
         except Exception as exc:
             logger.exception(
@@ -374,14 +582,52 @@ def run_completion_sync(
     request_id: str,
     messages: list[dict[str, Any]],
     loop: asyncio.AbstractEventLoop,
-) -> tuple[str, bool, str | None, dict[str, Any]]:
+    reasoning: bool | None = None,
+) -> tuple[str, bool, str | None, dict[str, Any], str | None]:
     """Blocking LLM call — runs in a worker thread.
 
     Returns ``(full_content, was_cancelled, finish_reason,
-    usage_dict)``. Schedules chunk callbacks onto the main
-    event loop via ``run_coroutine_threadsafe``. See
+    usage_dict, error)``. Schedules chunk callbacks onto the
+    main event loop via ``run_coroutine_threadsafe``. See
     :meth:`LLMService._run_completion_sync` for the full
     prose describing usage_dict's shape.
+
+    ``error`` is None on the happy path (including cancel,
+    which signals via ``was_cancelled``). It carries the
+    diagnostic string when the LiteLLM call raised before
+    streaming started — e.g., ``APIConnectionError`` from a
+    DNS hiccup or auth failure, or when either watchdog
+    fires (no first chunk within
+    ``first_chunk_timeout_seconds``, or no chunk for
+    ``chunk_timeout_seconds`` mid-stream). The caller
+    surfaces it via ``result.error`` so the frontend's
+    red-LED + error-card path fires; without this signal,
+    the error string would land in ``full_content`` and the
+    response would render as a normal assistant message
+    with a green LED.
+
+    ``reasoning`` is the per-request extended-thinking
+    override. ``None`` falls through to the config default;
+    ``True`` / ``False`` force the corresponding state. The
+    resolved ``thinking`` kwarg is passed straight into
+    ``litellm.completion``.
+
+    Three-layer timeout protection per
+    ``specs-reference/3-llm/streaming.md`` § Timeouts:
+
+    1. ``timeout=`` on ``litellm.completion`` itself —
+       overall wall-clock cap (default 300s).
+    2. First-chunk watchdog — a ``threading.Timer`` that
+       closes the stream if no chunk arrives within
+       ``first_chunk_timeout_seconds`` (default 60s).
+    3. Inter-chunk watchdog — same timer, reset on every
+       received chunk, fires after
+       ``chunk_timeout_seconds`` of silence (default 120s).
+
+    Watchdog fires call ``stream.close()`` on the stream
+    iterator. The blocked ``next()`` then raises, the
+    ``for`` loop exits, and we return whatever content
+    accumulated with a descriptive error.
     """
     empty_usage: dict[str, Any] = {
         "prompt_tokens": 0,
@@ -397,11 +643,29 @@ def run_completion_sync(
     except ImportError:
         logger.error("litellm not available; streaming disabled")
         return (
-            "litellm is not installed on this server",
+            "",
             False,
             None,
             dict(empty_usage),
+            "litellm is not installed on this server",
         )
+
+    # LiteLLM's recommended setting for the
+    # Anthropic-thinking + tool-calls compatibility path:
+    # when prior assistant turns lack ``thinking_blocks``
+    # and the new turn enables ``thinking``, this flag lets
+    # LiteLLM gracefully drop the param rather than 400ing.
+    # See https://docs.litellm.ai/docs/reasoning_content §
+    # "Tool Calling with Reasoning". Set on every call so a
+    # fresh worker thread sees it; cheap and idempotent.
+    try:
+        litellm.modify_params = True
+    except AttributeError:
+        # Older LiteLLM versions may not expose the flag.
+        # The code path that needs it is the same one that
+        # produces 400s; users on those versions get the
+        # same behaviour they had before this feature.
+        pass
 
     full_content = ""
     was_cancelled = False
@@ -467,6 +731,26 @@ def run_completion_sync(
             file=_sys.stderr,
         )
 
+    thinking_kwargs = build_thinking_kwargs(
+        service._config, reasoning,
+    )
+    if thinking_kwargs:
+        # Log shape varies by model family — adaptive
+        # payloads carry no budget field, legacy ones do.
+        # See _build_thinking_payload for the dispatch.
+        payload = thinking_kwargs["thinking"]
+        if payload.get("type") == "adaptive":
+            logger.info("Reasoning enabled — adaptive effort")
+        else:
+            logger.info(
+                "Reasoning enabled — budget=%d tokens",
+                payload.get("budget_tokens", 0),
+            )
+
+    request_timeout = service._config.request_timeout_seconds
+    first_chunk_timeout = service._config.first_chunk_timeout_seconds
+    chunk_timeout = service._config.chunk_timeout_seconds
+
     try:
         stream = litellm.completion(
             model=service._config.model,
@@ -474,61 +758,188 @@ def run_completion_sync(
             stream=True,
             stream_options={"include_usage": True},
             max_tokens=max_output,
+            timeout=request_timeout,
+            **thinking_kwargs,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")
         service._last_error_info = _classify_litellm_error(
             litellm, exc
         )
+        # Return the error via the 5th tuple slot, NOT in
+        # full_content. The caller threads this into
+        # ``result.error`` so the frontend's
+        # ``computeLastEditOutcome`` sees a stream-level
+        # error and renders the red LED + typed error card.
+        # Putting the error string in full_content would
+        # produce a normal assistant message with a green
+        # LED — silently mis-classifying a transport
+        # failure as a successful response.
         return (
-            f"LLM call failed: {exc}",
+            "",
             False,
             None,
             dict(empty_usage),
+            f"LLM call failed: {exc}",
         )
 
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
     cost_source: Any = stream
 
-    for chunk in stream:
-        if request_id in service._cancelled_requests:
-            was_cancelled = True
-            break
+    # ------------------------------------------------------------------
+    # Watchdog setup
+    # ------------------------------------------------------------------
+    #
+    # ``threading.Timer`` runs its callback on a separate thread when
+    # it expires. The callback closes the stream's underlying HTTP
+    # connection (best-effort — we try a few attribute paths because
+    # litellm's stream wrapper shape varies by provider). The blocked
+    # ``next()`` call inside the ``for`` loop then raises, the loop
+    # exits, and we surface a watchdog-fired error.
+    #
+    # ``watchdog_fired`` is the synchronisation primitive between the
+    # timer thread and the worker thread — using a list as a poor
+    # man's nonlocal-mutable-bool that's safe under the GIL.
+    import threading
 
-        try:
-            choices = chunk.choices
-            if choices:
-                delta = choices[0].delta
-                if delta and getattr(delta, "content", None):
-                    full_content += delta.content
-                    # Mirror into per-request accumulator.
-                    # GIL makes the dict write atomic for
-                    # string values; event-loop readers see
-                    # a consistent string.
-                    service._request_accumulators[request_id] = (
-                        full_content
-                    )
-                    # Fire chunk callback with FULL content.
-                    asyncio.run_coroutine_threadsafe(
-                        service._broadcast_event_async(
-                            "streamChunk",
-                            request_id,
-                            full_content,
-                        ),
-                        loop,
-                    )
-        except (AttributeError, IndexError):
-            pass  # malformed chunk — skip
+    watchdog_fired: list[str | None] = [None]
 
-        # finish_reason typically on the final chunk.
-        reason = _extract_finish_reason(chunk)
-        if reason is not None and finish_reason is None:
-            finish_reason = reason
+    def _close_stream_on_watchdog(reason: str) -> None:
+        """Force-close the stream when a watchdog fires.
 
-        chunk_usage = getattr(chunk, "usage", None)
-        if chunk_usage is not None:
-            usage = chunk_usage
+        Called from the timer thread. Sets the reason flag first
+        so the worker thread can distinguish a watchdog abort
+        from a normal end-of-stream when the iteration exits.
+        """
+        watchdog_fired[0] = reason
+        # Try the documented close paths in order. Different
+        # providers wrap the stream differently.
+        for attr_path in ("close", "response.close"):
+            try:
+                target: Any = stream
+                for part in attr_path.split("."):
+                    target = getattr(target, part, None)
+                    if target is None:
+                        break
+                if callable(target):
+                    target()
+                    return
+            except Exception:
+                # Best-effort — if the close path raises, the
+                # next iteration will raise too and we still
+                # exit the loop.
+                continue
+
+    # Arm the first-chunk watchdog before iteration begins.
+    timer = threading.Timer(
+        first_chunk_timeout,
+        _close_stream_on_watchdog,
+        args=(
+            f"no chunk received within {first_chunk_timeout:.0f}s "
+            "of request start",
+        ),
+    )
+    timer.daemon = True
+    timer.start()
+    first_chunk_seen = False
+
+    try:
+        for chunk in stream:
+            # Reset the watchdog on every chunk — but use the
+            # inter-chunk timeout from the second chunk onward.
+            # The first chunk uses the (typically shorter) first-
+            # chunk timeout.
+            timer.cancel()
+            if not first_chunk_seen:
+                first_chunk_seen = True
+            timer = threading.Timer(
+                chunk_timeout,
+                _close_stream_on_watchdog,
+                args=(
+                    f"no chunk for {chunk_timeout:.0f}s mid-stream",
+                ),
+            )
+            timer.daemon = True
+            timer.start()
+
+            if request_id in service._cancelled_requests:
+                was_cancelled = True
+                break
+
+            try:
+                choices = chunk.choices
+                if choices:
+                    delta = choices[0].delta
+                    if delta and getattr(delta, "content", None):
+                        full_content += delta.content
+                        # Mirror into per-request accumulator.
+                        # GIL makes the dict write atomic for
+                        # string values; event-loop readers see
+                        # a consistent string.
+                        service._request_accumulators[request_id] = (
+                            full_content
+                        )
+                        # Fire chunk callback with FULL content.
+                        asyncio.run_coroutine_threadsafe(
+                            service._broadcast_event_async(
+                                "streamChunk",
+                                request_id,
+                                full_content,
+                            ),
+                            loop,
+                        )
+            except (AttributeError, IndexError):
+                pass  # malformed chunk — skip
+
+            # finish_reason typically on the final chunk.
+            reason = _extract_finish_reason(chunk)
+            if reason is not None and finish_reason is None:
+                finish_reason = reason
+
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+    except Exception as exc:
+        # Iteration raised — either the watchdog closed the
+        # stream (in which case watchdog_fired is set) or the
+        # provider raised mid-stream for some other reason.
+        if watchdog_fired[0] is not None:
+            logger.warning(
+                "Stream watchdog fired: %s", watchdog_fired[0]
+            )
+            service._last_error_info = {
+                "error_type": "timeout",
+                "message": watchdog_fired[0],
+                "retry_after": None,
+                "status_code": None,
+                "provider": None,
+                "model": service._config.model,
+                "original_type": "WatchdogTimeout",
+            }
+            timer.cancel()
+            return (
+                full_content,
+                False,
+                None,
+                dict(empty_usage),
+                f"Stream timeout — {watchdog_fired[0]}",
+            )
+        # Mid-stream provider error.
+        logger.exception("Stream iteration raised")
+        service._last_error_info = _classify_litellm_error(
+            litellm, exc
+        )
+        timer.cancel()
+        return (
+            full_content,
+            False,
+            None,
+            dict(empty_usage),
+            f"Stream failed mid-response: {exc}",
+        )
+    finally:
+        timer.cancel()
 
     # Normalise usage into a plain dict for the return.
     request_usage = dict(empty_usage)
@@ -600,7 +1011,7 @@ def run_completion_sync(
                 finish_reason,
             )
 
-    return full_content, was_cancelled, finish_reason, request_usage
+    return full_content, was_cancelled, finish_reason, request_usage, None
 
 
 # ---------------------------------------------------------------------------

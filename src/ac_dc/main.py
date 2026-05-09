@@ -288,6 +288,7 @@ async def run(
     preview: bool = False,
     verbose: bool = False,
     collab: bool = False,
+    experimental: bool = False,
 ) -> None:
     """Main entry point — runs the two-phase startup.
 
@@ -344,6 +345,19 @@ async def run(
 
     # Step 3: Initialize lightweight services
     config = ConfigManager(repo_root=repo_path)
+    # Export the env vars declared in llm.json into the
+    # process environment now, before any litellm completion
+    # is constructed. Without this, providers that read env
+    # at client-construction time (notably bedrock via boto3)
+    # pick up the shell's AWS_REGION / AWS_PROFILE rather
+    # than the values the user configured in the UI — and
+    # the first turn fails until the user saves llm.json
+    # (which triggers ConfigManager.reload_llm_config and
+    # finally exports the env). Calling apply_llm_env here
+    # rather than inside ConfigManager.__init__ keeps
+    # construction side-effect-free for tests and other
+    # non-runtime consumers.
+    config.apply_llm_env()
     settings = Settings(config)
     # DocConvert is constructed later (after event_callback is
     # defined) so progress events can flow to the browser.
@@ -598,6 +612,12 @@ async def run(
 
     # Step 8: Open browser
     url = f"http://localhost:{webapp_port}/?port={server_port}"
+    if experimental:
+        # Enables UI affordances flagged `locked: true` — e.g.
+        # the agentic coding toggle in settings. The webapp
+        # reads ?experimental=1 from window.location and
+        # treats it as a session-scoped override.
+        url += "&experimental=1"
     if not no_browser:
         webbrowser.open(url)
         logger.info("Browser opened: %s", url)

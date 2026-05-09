@@ -12,8 +12,8 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
-import { fuzzyMatch } from './file-picker.js';
-import { parseAgentTabId } from './chat-panel.js';
+import { fuzzyMatch } from './file-picker/index.js';
+import { parseAgentTabId } from './chat-panel/index.js';
 
 /** localStorage key for the active sub-view. */
 const _SUBVIEW_KEY = 'ac-dc-context-subview';
@@ -179,6 +179,29 @@ export class ContextTab extends RpcMixin(LitElement) {
       padding: 0.5rem 1rem;
       border-bottom: 1px solid rgba(240, 246, 252, 0.1);
       background: rgba(22, 27, 34, 0.4);
+    }
+    /* Back-arrow button — returns to the chat tab. With
+     * the dialog header's Chat button removed, this is
+     * the primary navigation affordance for leaving the
+     * Context view. Mirrors the equivalent button in
+     * the Settings and Convert tabs so the back-arrow
+     * affordance reads the same regardless of which
+     * overlay tab the user is in. */
+    .back-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .back-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
     }
     .pill-toggle {
       display: flex;
@@ -463,6 +486,65 @@ export class ContextTab extends RpcMixin(LitElement) {
     }
     .totals-value.cache-write {
       color: #f59e0b;
+    }
+
+    /* Live-agents roster — sits at the top of the Budget
+     * sub-view when at least one agent is registered.
+     * Compact row-per-agent presentation with id, mode,
+     * and model surfaced inline. The same trio shows in
+     * the orchestrator's prompt via build_agent_descriptor;
+     * keeping the visual layout close to the prompt
+     * shape makes "what does the LLM see" easy to verify
+     * by eye. */
+    .agents-roster {
+      margin-bottom: 1rem;
+      padding: 0.5rem 0.75rem;
+      background: rgba(22, 27, 34, 0.4);
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-radius: 6px;
+    }
+    .agents-roster-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary, #8b949e);
+      margin-bottom: 0.4rem;
+    }
+    .agents-roster-row {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
+      padding: 0.15rem 0;
+      font-size: 0.8125rem;
+    }
+    .agents-roster-id {
+      font-weight: 600;
+      color: var(--text-primary, #c9d1d9);
+      flex-shrink: 0;
+      max-width: 12rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .agents-roster-mode {
+      flex-shrink: 0;
+      font-size: 0.7rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 3px;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+    .agents-roster-model {
+      flex: 1;
+      min-width: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /* Cache sub-view */
@@ -1068,6 +1150,40 @@ export class ContextTab extends RpcMixin(LitElement) {
     } catch (_) {}
   }
 
+  /**
+   * Dispatch a request to the app shell to flip the
+   * active dialog tab back to the chat. The 'files' key
+   * is the legacy storage value — retained so existing
+   * persisted state stays valid across this UI change.
+   */
+  _goBackToChat() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Dispatch a request to the app shell to minimize
+   * the dialog. Companion to ``_goBackToChat``: the
+   * tab-strip minimize button isn't reachable when
+   * an overlay tab is active (the strip sits inside
+   * the chat panel which is a sibling tab-panel),
+   * so each overlay carries its own minimize
+   * affordance.
+   */
+  _minimizeDialog() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _loadCacheExpanded() {
     try {
       const raw = localStorage.getItem(_CACHE_EXPANDED_KEY);
@@ -1165,6 +1281,12 @@ export class ContextTab extends RpcMixin(LitElement) {
   render() {
     return html`
       <div class="toolbar">
+        <button
+          class="back-btn"
+          title="Back to chat"
+          aria-label="Back to chat"
+          @click=${() => this._goBackToChat()}
+        >← Chat</button>
         <div class="pill-toggle">
           <button
             class="pill-btn ${this._subview === 'budget' ? 'active' : ''}"
@@ -1211,6 +1333,12 @@ export class ContextTab extends RpcMixin(LitElement) {
           @click=${() => this._refresh()}
           title="Refresh"
         >↻</button>
+        <button
+          class="back-btn"
+          title="Minimize dialog"
+          aria-label="Minimize dialog"
+          @click=${() => this._minimizeDialog()}
+        >▾</button>
       </div>
       <div class="content">
         ${this._subview === 'budget'
@@ -1250,6 +1378,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     const maxCat = Math.max(1, ...categories.map((c) => c.tokens));
 
     return html`
+      ${this._renderAgentsRoster(d)}
       <div class="budget-header">
         <div class="model-info">
           <strong>${d.model || '—'}</strong>
@@ -1402,6 +1531,52 @@ export class ContextTab extends RpcMixin(LitElement) {
             </div>
           `
         : ''}
+    `;
+  }
+
+  /**
+   * Render the live-agents roster — one row per agent
+   * scope in the registry showing id, model, and mode.
+   * Sourced from ``data.agents`` (populated by
+   * ``get_context_breakdown``); empty array means no
+   * agents have been spawned yet, in which case the
+   * whole section is suppressed so the Budget view
+   * stays compact for the common single-conversation
+   * case.
+   *
+   * The roster mirrors what ``build_agent_descriptor``
+   * shows the orchestrator in its prompt — same fields,
+   * same per-agent identity. Surfacing it here closes
+   * the gap "what does the LLM see about its team" vs.
+   * "what does the user see about its team".
+   */
+  _renderAgentsRoster(d) {
+    const agents = Array.isArray(d?.agents) ? d.agents : [];
+    if (agents.length === 0) return '';
+    return html`
+      <div class="agents-roster">
+        <div class="agents-roster-title">
+          🤖 Live agents (${agents.length})
+        </div>
+        ${agents.map(
+          (a) => html`
+            <div class="agents-roster-row">
+              <span class="agents-roster-id" title=${a.id}>
+                ${a.id}
+              </span>
+              <span class="agents-roster-mode">
+                ${a.mode}
+              </span>
+              <span
+                class="agents-roster-model"
+                title=${a.model || 'unknown model'}
+              >
+                ${a.model || '—'}
+              </span>
+            </div>
+          `,
+        )}
+      </div>
     `;
   }
 

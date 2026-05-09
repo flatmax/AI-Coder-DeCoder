@@ -22,10 +22,15 @@ Governing spec: :doc:`specs4/3-llm/history`.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
+
+from ac_dc.context_manager import Mode
 
 if TYPE_CHECKING:
     from ac_dc.llm_service import LLMService
+
+logger = logging.getLogger("ac_dc.llm_service")
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +98,51 @@ def get_turn_archive(
     return service._history_store.get_turn_archive(turn_id)
 
 
+def get_agent_history(
+    service: "LLMService",
+    agent_id: str,
+) -> list[dict[str, Any]]:
+    """Return a live agent's full reconstructed conversation.
+
+    Reads from the agent's ContextManager — the
+    authoritative in-memory copy of its conversation.
+    Distinct from :func:`get_turn_archive` which only
+    returns one turn's archive: this returns the agent's
+    full history across every turn it participated in,
+    which for a session-reconstructed agent is the
+    concatenated archive content from
+    :func:`reconstruct_agent_scope`.
+
+    Used by the frontend's rehydration path to populate
+    agent tabs with full conversation history after
+    session load. ``get_turn_archive`` would only return
+    the latest turn's content; multi-turn agents would
+    lose all but the most recent turn's messages from
+    the user's view.
+
+    Each message dict is the same shape
+    :meth:`ContextManager.get_history` returns —
+    ``{role, content, ...}`` plus optional fields
+    (``system_event``, ``images``, ``files``,
+    ``edit_results``, etc.). The frontend's
+    archive-loading path already handles this shape
+    (it's the same shape :func:`get_turn_archive`
+    records carry).
+
+    Returns an empty list when the agent id isn't
+    registered. The unknown-id case is silent rather
+    than an error because the frontend's rehydration
+    path runs against a list it just fetched via
+    :func:`list_live_agents` — by the time it iterates
+    and calls this method per agent, an agent may have
+    been closed (race window is narrow but real).
+    """
+    scope = service._agent_contexts.get(agent_id)
+    if scope is None or scope.context is None:
+        return []
+    return scope.context.get_history()
+
+
 # ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
@@ -124,6 +174,32 @@ def load_session_into_context(
     service._context.clear_history()
     service._context.set_history(messages)
     service._session_id = session_id
+
+    # Reconstruct agents that participated in this session.
+    # Per spec specs4/3-llm/history.md § Session-Load
+    # Reconstruction: walk the session's full records for
+    # assistant entries carrying agent_blocks, group by
+    # agent id (latest record wins on retask), rebuild a
+    # live writable ContextManager per surviving id.
+    # Idempotent against partial registration — a single
+    # agent's reconstruction raising leaves the others
+    # reachable.
+    #
+    # Note: passes session_id rather than the loaded
+    # ``messages`` list because `get_session_messages_for_context`
+    # strips ``agent_blocks`` (it returns the minimal
+    # role/content/turn_id/images shape that feeds the
+    # ContextManager's history). Reconstruction needs the
+    # full record shape, which `get_session_messages`
+    # returns. Keeping the LLM-facing context shape minimal
+    # is the right tradeoff — agent_blocks doesn't belong
+    # in the prompt's message history.
+    pre_existing_ids = set(service._agent_contexts.keys())
+    _reconstruct_agents_from_session(service, session_id)
+    rehydrated_ids = sorted(
+        set(service._agent_contexts.keys()) - pre_existing_ids
+    )
+
     service._broadcast_event(
         "sessionChanged",
         {
@@ -131,10 +207,245 @@ def load_session_into_context(
             "messages": messages,
         },
     )
+    # Per spec specs4/3-llm/history.md § Session-Load
+    # Reconstruction step 9: broadcast the reconstructed
+    # ids so the frontend can materialise tabs. Fired
+    # AFTER sessionChanged so the chat panel's session-
+    # changed handler (which clears the message list and
+    # resets streaming state) runs before the
+    # rehydration handler creates agent tabs. Reverse
+    # order would briefly show the new tabs against the
+    # old session's main-tab content.
+    if rehydrated_ids:
+        service._broadcast_event(
+            "agentsRehydrated",
+            {"agent_ids": rehydrated_ids},
+        )
     return {
         "session_id": session_id,
         "messages": messages,
     }
+
+
+def _reconstruct_agents_from_session(
+    service: "LLMService",
+    session_id: str,
+) -> None:
+    """Rebuild agent scopes from a just-loaded session's records.
+
+    Per spec specs4/3-llm/history.md § Session-Load
+    Reconstruction (steps 2-8). Fetches the session's full
+    records via :meth:`HistoryStore.get_session_messages`
+    (NOT the context-shape via
+    ``get_session_messages_for_context`` — that strips the
+    ``agent_blocks`` field) and walks them for assistant
+    records carrying both ``turn_id`` and a non-empty
+    ``agent_blocks``. Groups by agent ``id`` — when the
+    orchestrator retasked the same id across multiple
+    turns, the latest record's ``agent_blocks`` entry wins
+    as the spawn-time baseline; earlier turns contribute
+    archive content but not mode state.
+
+    For each surviving id:
+
+    1. Read ``get_turn_archive(turn_id)`` filtered to the
+       agent's ``agent_idx`` for every turn the id appeared
+       in. Concatenate in chronological order.
+    2. Resolve mode + cross_ref from the latest
+       ``agent_blocks`` entry (Commit 1 baseline; Commit 2
+       will replay archive system events on top).
+    3. Call :func:`reconstruct_agent_scope` to build the
+       ContextManager + tracker and register in
+       ``service._agent_contexts``.
+
+    Defensive: a single agent's reconstruction raising
+    leaves the others reachable. Errors are logged at
+    WARNING and the loop continues.
+
+    Records predating Increment A (no ``turn_id``,
+    no ``agent_blocks``) are silently skipped — sessions
+    saved before agent persistence existed cannot
+    reconstruct agents and shouldn't fail to load.
+    """
+    if service._history_store is None:
+        return
+
+    # Fetch the FULL records, not the context-load shape.
+    # The context-load shape strips agent_blocks; we need
+    # the persisted-record shape that preserves it.
+    messages = service._history_store.get_session_messages(
+        session_id
+    )
+
+    # Walk messages building (id → latest record info).
+    # Order matters: later records overwrite earlier ones,
+    # so the final dict carries the latest spawn record per
+    # id. We also collect (id → list of (turn_id,
+    # agent_idx)) so step 4 of the spec algorithm can
+    # concatenate archive content from every turn.
+    latest_record_by_id: dict[str, dict[str, Any]] = {}
+    turn_appearances_by_id: dict[
+        str, list[tuple[str, int]]
+    ] = {}
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        turn_id = msg.get("turn_id")
+        agent_blocks = msg.get("agent_blocks")
+        if not isinstance(turn_id, str) or not turn_id:
+            continue
+        if (
+            not isinstance(agent_blocks, list)
+            or not agent_blocks
+        ):
+            continue
+        for entry in agent_blocks:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = entry.get("id")
+            agent_idx = entry.get("agent_idx")
+            if (
+                not isinstance(agent_id, str)
+                or not agent_id
+            ):
+                continue
+            if (
+                not isinstance(agent_idx, int)
+                or isinstance(agent_idx, bool)
+                or agent_idx < 0
+            ):
+                continue
+            # Latest record wins on retask. Each iteration
+            # overwrites the previous; final state after the
+            # walk is per-id latest.
+            latest_record_by_id[agent_id] = {
+                "turn_id": turn_id,
+                "agent_idx": agent_idx,
+                "mode": entry.get("mode"),
+                "cross_reference_enabled": entry.get(
+                    "cross_reference_enabled"
+                ),
+                "model": entry.get("model"),
+            }
+            turn_appearances_by_id.setdefault(
+                agent_id, []
+            ).append((turn_id, agent_idx))
+
+    if not latest_record_by_id:
+        return
+
+    # Reconstruct each surviving id. A single agent failing
+    # to reconstruct must not block the rest — hence
+    # per-agent try/except.
+    for agent_id, latest in latest_record_by_id.items():
+        try:
+            _reconstruct_one_agent(
+                service,
+                agent_id=agent_id,
+                latest=latest,
+                turn_appearances=(
+                    turn_appearances_by_id[agent_id]
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to reconstruct agent %r on "
+                "session-load: %s. Skipping; other agents "
+                "continue.",
+                agent_id,
+                exc,
+            )
+
+
+def _reconstruct_one_agent(
+    service: "LLMService",
+    *,
+    agent_id: str,
+    latest: dict[str, Any],
+    turn_appearances: list[tuple[str, int]],
+) -> None:
+    """Reconstruct one agent across all turns it participated in.
+
+    Helper extracted so the per-agent path is small enough
+    to read end-to-end. Raises on failure; the caller
+    catches and logs.
+    """
+    # Lazy import to avoid a cycle: _agents imports from
+    # _types which is fine, but _rpc_history pulling _agents
+    # at module top would create a longer chain.
+    from ac_dc.llm._agents import reconstruct_agent_scope
+
+    # Step 4: concatenate archive messages across every turn
+    # the agent appeared in, in chronological order.
+    # turn_appearances was built by walking messages in
+    # chronological order, so it's already sorted.
+    concatenated: list[dict[str, Any]] = []
+    for turn_id, agent_idx in turn_appearances:
+        archive = service._history_store.get_turn_archive(turn_id)
+        if not archive:
+            # Archive directory missing or empty — turn
+            # contributes nothing. Continue with whatever
+            # other turns produced.
+            continue
+        # archive shape: list of {agent_idx, messages}
+        for entry in archive:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("agent_idx") != agent_idx:
+                continue
+            entry_messages = entry.get("messages")
+            if isinstance(entry_messages, list):
+                concatenated.extend(entry_messages)
+
+    # Resolve mode + cross_ref from the latest record's
+    # agent_blocks entry. This is the spawn-time baseline
+    # per Commit 1; Commit 2 will replay archive system
+    # events on top of this.
+    mode_str = latest.get("mode")
+    if isinstance(mode_str, str) and mode_str == "doc":
+        mode = Mode.DOC
+    elif (
+        isinstance(mode_str, str)
+        and mode_str.startswith("doc")
+    ):
+        # "doc+xref" → doc mode with xref on
+        mode = Mode.DOC
+    else:
+        # "code", "code+xref", missing, or unrecognised →
+        # default to CODE. The spec's defensive contract:
+        # records predating Increment 3a have no mode
+        # field; reconstruction should still succeed.
+        mode = Mode.CODE
+
+    # cross_reference_enabled has two possible sources:
+    # explicit bool field (Increment 3a), or inferred from
+    # the mode string's "+xref" suffix. Strict bool check
+    # rejects truthy ints — matches the persistence-side
+    # validation in HistoryStore.append_message.
+    xref_field = latest.get("cross_reference_enabled")
+    if isinstance(xref_field, bool):
+        cross_ref = xref_field
+    elif (
+        isinstance(mode_str, str)
+        and mode_str.endswith("+xref")
+    ):
+        cross_ref = True
+    else:
+        cross_ref = False
+
+    reconstruct_agent_scope(
+        service,
+        agent_id=agent_id,
+        turn_id=latest["turn_id"],
+        agent_idx=latest["agent_idx"],
+        model=latest.get("model"),
+        mode=mode,
+        cross_ref=cross_ref,
+        archive_messages=concatenated,
+    )
 
 
 def get_history_status(service: "LLMService") -> dict[str, Any]:

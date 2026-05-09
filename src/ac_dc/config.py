@@ -547,6 +547,103 @@ class ConfigManager:
         """
         return int(self.llm_config.get("cache_min_tokens", _DEFAULT_MIN_TOKENS))
 
+    # ------------------------------------------------------------------
+    # Network / streaming timeouts
+    # ------------------------------------------------------------------
+    #
+    # Three layers of protection against hung LLM calls:
+    #
+    # 1. ``request_timeout_seconds`` — overall wall-clock cap on the
+    #    full streaming request, passed to ``litellm.completion`` as
+    #    its ``timeout`` kwarg. Catches "stream never started" cases
+    #    (DNS hang, TLS handshake hang, slow start before first byte)
+    #    and acts as the absolute ceiling for total request time.
+    # 2. ``first_chunk_timeout_seconds`` — watchdog enforced inside
+    #    the streaming loop. If the provider accepted the request
+    #    but never starts streaming, this fires before the overall
+    #    timeout so the user gets their terminal back faster.
+    # 3. ``chunk_timeout_seconds`` — inter-chunk watchdog. Resets on
+    #    every received chunk. Catches "stream stalled mid-response"
+    #    (provider deadlock, network drop after handshake). Generous
+    #    default so legitimate reasoning pauses don't trigger it.
+    #
+    # Aux calls (commit message, topic detection, URL summarization)
+    # use a single ``aux_request_timeout_seconds`` since they're
+    # non-streaming — the total-call timeout is sufficient.
+
+    @property
+    def request_timeout_seconds(self) -> float:
+        """Overall wall-clock timeout for streaming chat requests.
+
+        Default 300s (5 minutes). Long enough for any legitimate
+        reasoning + answer combination on current models, short
+        enough that a hung connection clears in a tolerable window.
+        Users with very long reasoning workloads can raise this in
+        ``llm.json``.
+        """
+        try:
+            value = float(self.llm_config.get("request_timeout_seconds", 300))
+        except (TypeError, ValueError):
+            return 300.0
+        return value if value > 0 else 300.0
+
+    @property
+    def first_chunk_timeout_seconds(self) -> float:
+        """Watchdog timeout from request start to first chunk.
+
+        Default 60s. If the provider has accepted the request but
+        not emitted any chunk in this window, the watchdog closes
+        the stream and the request fails with a typed error. The
+        user's "Stop" button is the primary cancellation path for
+        legitimate long requests; this is the safety net for hung
+        sockets.
+        """
+        try:
+            value = float(
+                self.llm_config.get("first_chunk_timeout_seconds", 60)
+            )
+        except (TypeError, ValueError):
+            return 60.0
+        return value if value > 0 else 60.0
+
+    @property
+    def chunk_timeout_seconds(self) -> float:
+        """Inter-chunk watchdog timeout.
+
+        Default 120s. Resets on every received chunk. A stream
+        that goes silent for this long mid-response is treated as
+        hung. The default is generous because reasoning models can
+        produce long quiet stretches between visible-text chunks
+        while thinking; values much lower than 60s risk false
+        positives during legitimate reasoning.
+        """
+        try:
+            value = float(
+                self.llm_config.get("chunk_timeout_seconds", 120)
+            )
+        except (TypeError, ValueError):
+            return 120.0
+        return value if value > 0 else 120.0
+
+    @property
+    def aux_request_timeout_seconds(self) -> float:
+        """Timeout for auxiliary non-streaming LLM calls.
+
+        Default 60s. Applies to commit-message generation, topic
+        boundary detection, and URL summarization. All three
+        produce small structured outputs on the smaller/cheaper
+        model — 60s is plenty even on slow upstreams. A hung aux
+        call wedges an aux-executor thread but doesn't block the
+        chat path (which uses a separate executor).
+        """
+        try:
+            value = float(
+                self.llm_config.get("aux_request_timeout_seconds", 60)
+            )
+        except (TypeError, ValueError):
+            return 60.0
+        return value if value > 0 else 60.0
+
     @property
     def cache_buffer_multiplier(self) -> float:
         """Multiplier applied to the cache minimum to compute target.
@@ -704,6 +801,90 @@ class ConfigManager:
                 section.get("keywords_max_doc_freq", 0.6)
             ),
         }
+
+    @property
+    def reasoning_config(self) -> dict[str, Any]:
+        """Reasoning / extended-thinking section with defaults.
+
+        Drives the ``thinking`` kwarg passed to
+        ``litellm.completion``. Two fields:
+
+        - ``enabled`` — config-level default for whether
+          reasoning is on. The frontend's per-request toggle
+          (``reasoning`` arg to ``chat_streaming``) layers on
+          top of this; when the request explicitly opts in
+          or out, the per-request value wins. When the
+          request leaves it unspecified, the config default
+          applies.
+        - ``budget_tokens`` — token budget for the model's
+          hidden deliberation. Anthropic's parameter shape;
+          LiteLLM translates to ``reasoning_effort`` for
+          OpenAI-shaped providers automatically. Default
+          10000 matches the rough "medium effort" mapping.
+
+        Aux LLM calls (commit message generation, topic
+        detection) read this config but explicitly opt out
+        — see :mod:`ac_dc.llm._helpers` § ``build_thinking_kwargs``.
+        Reasoning on a JSON-structured task wastes tokens
+        without improving output.
+
+        Spec: ``specs4/7-future/reasoning.md`` § Recommended
+        Shape — Commit A.
+        """
+        section = self.app_config.get("reasoning", {})
+        if not isinstance(section, dict):
+            section = {}
+        try:
+            budget = int(section.get("budget_tokens", 10000))
+        except (TypeError, ValueError):
+            budget = 10000
+        if budget <= 0:
+            budget = 10000
+        # Effort levels — LiteLLM's standardised cross-provider
+        # param. Anthropic's adaptive-thinking models (Opus 4.5+,
+        # Haiku 4.5+, Sonnet 4.5+) use this rather than a token
+        # budget; LiteLLM translates to ``output_config.effort``
+        # for those backends. Unknown values fall back to
+        # "medium" rather than raising — config typos shouldn't
+        # crash startup.
+        effort_raw = section.get("effort", "medium")
+        if not isinstance(effort_raw, str):
+            effort_raw = "medium"
+        effort = effort_raw.strip().lower()
+        if effort not in ("low", "medium", "high"):
+            effort = "medium"
+        return {
+            "enabled": bool(section.get("enabled", False)),
+            "budget_tokens": budget,
+            "effort": effort,
+        }
+
+    @property
+    def reasoning_enabled(self) -> bool:
+        """Convenience — config-level reasoning default.
+
+        Hot path readers (the streaming pipeline) use this
+        rather than unpacking ``reasoning_config`` on every
+        turn. Defaults to False — reasoning is opt-in.
+        """
+        return self.reasoning_config["enabled"]
+
+    @property
+    def reasoning_budget_tokens(self) -> int:
+        """Convenience — configured reasoning budget (legacy models)."""
+        return self.reasoning_config["budget_tokens"]
+
+    @property
+    def reasoning_effort(self) -> str:
+        """Convenience — configured reasoning effort (adaptive models).
+
+        One of ``"low"``, ``"medium"``, ``"high"``. Used by adaptive-
+        thinking models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) where
+        a token budget isn't accepted. LiteLLM translates this to
+        the per-provider field (``output_config.effort`` for
+        Anthropic).
+        """
+        return self.reasoning_config["effort"]
 
     @property
     def agents_config(self) -> dict[str, Any]:

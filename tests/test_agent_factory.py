@@ -2,9 +2,10 @@
 
 Scope: the :func:`build_agent_context_manager` function —
 input validation, ContextManager wiring (turn_id, archival_sink,
-model_name, repo, config forwarding), archival-sink closure
-behaviour (persistence to the archive, extras routing), and
-integration with a real :class:`HistoryStore`.
+model_name, repo, config forwarding, mode + cross-reference),
+archival-sink closure behaviour (persistence to the archive,
+extras routing), and integration with a real
+:class:`HistoryStore`.
 
 Strategy:
 
@@ -25,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from ac_dc.agent_factory import build_agent_context_manager
-from ac_dc.context_manager import ContextManager
+from ac_dc.context_manager import ContextManager, Mode
 from ac_dc.history_store import HistoryStore
 
 
@@ -240,6 +241,108 @@ class TestConstruction:
         # Independent state.
         a0.add_message("user", "agent 0 message")
         assert a0.get_history() != a1.get_history()
+
+
+# ---------------------------------------------------------------------------
+# Mode and cross-reference forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestModeAndCrossReference:
+    """Mode and cross-reference state thread to the ContextManager."""
+
+    def test_default_mode_is_code(
+        self, history_store: HistoryStore
+    ) -> None:
+        """Omitting mode → CODE (matches user-facing default)."""
+        cm = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+        )
+        assert cm.mode == Mode.CODE
+
+    def test_default_cross_reference_false(
+        self, history_store: HistoryStore
+    ) -> None:
+        """Omitting cross_reference_enabled → False."""
+        cm = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+        )
+        assert cm.cross_reference_enabled is False
+
+    def test_mode_doc_forwarded(
+        self, history_store: HistoryStore
+    ) -> None:
+        cm = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+            mode=Mode.DOC,
+        )
+        assert cm.mode == Mode.DOC
+
+    def test_cross_reference_true_forwarded(
+        self, history_store: HistoryStore
+    ) -> None:
+        cm = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+            cross_reference_enabled=True,
+        )
+        assert cm.cross_reference_enabled is True
+
+    def test_doc_xref_combination(
+        self, history_store: HistoryStore
+    ) -> None:
+        """The four-axis combinations all wire correctly."""
+        cm = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+            mode=Mode.DOC,
+            cross_reference_enabled=True,
+        )
+        assert cm.mode == Mode.DOC
+        assert cm.cross_reference_enabled is True
+
+    def test_independent_agents_isolate_mode(
+        self, history_store: HistoryStore
+    ) -> None:
+        """Two agents in different modes don't bleed into each other."""
+        a_code = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=0,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+            mode=Mode.CODE,
+            cross_reference_enabled=False,
+        )
+        a_doc = build_agent_context_manager(
+            turn_id="t",
+            agent_idx=1,
+            model_name="anthropic/claude-sonnet-4-5",
+            history_store=history_store,
+            mode=Mode.DOC,
+            cross_reference_enabled=True,
+        )
+        assert a_code.mode == Mode.CODE
+        assert a_code.cross_reference_enabled is False
+        assert a_doc.mode == Mode.DOC
+        assert a_doc.cross_reference_enabled is True
+        # Mutating one's mode doesn't affect the other.
+        a_code.set_mode(Mode.DOC)
+        assert a_doc.mode == Mode.DOC  # was already
+        a_doc.set_cross_reference_enabled(False)
+        assert a_code.cross_reference_enabled is False  # unchanged
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,12 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 - Every row displays a native browser tooltip on hover
 - Format — full path and node name
 - Root node falls back to repo name
+## Toolbar Layout
+
+Top toolbar carries (left to right): three sort glyphs, ⚙️ Settings, then the git action group (📋 copy diff, 💾 commit, ⚠️ reset, 🔍 review when not active). Sort and git buttons are icon-only — text labels were dropped when the dialog header was removed and the picker toolbar absorbed Settings. Tooltips remain for discoverability.
+
+The Settings button dispatches `request-dialog-tab` with `{tab: 'settings'}`. This is the sole entry point to Settings now that the dialog header is gone.
+
 ## Sorting
 Three sort modes selectable via buttons in the filter bar:
 | Mode | Behavior |
@@ -97,6 +103,13 @@ Files have three context states controlled via the picker checkbox:
 ### Backend Coordination
 - Excluded files set stored server-side via the excluded-files RPC, persisted in session state
 - Removed from the stability tracker, excluded from map generation, skipped in active items, excluded from tier recomputation
+
+### Binary File Selection
+- The picker accepts binary file selection (xlsx, pdf, png, zip, etc.) at click time — selection-time rejection would require an 8KB read per click and would surprise users with checkboxes that refuse to stay set
+- At turn start, `sync_file_context` detects the binary content (the repo layer raises on null-byte detection) and acts on three channels: trims the file from the scope's selected list, broadcasts `filesChanged` with the trimmed selection, and broadcasts `binaryFilesSkipped` listing the dropped paths
+- The picker receives `filesChanged` and clears the checkbox; the shell receives `binaryFilesSkipped` and renders a toast naming the rejected files with a Doc Convert hint. The user sees both signals — the checkbox clears, and the toast explains why
+- After running Doc Convert, the user selects the produced sibling markdown. Re-selecting the original binary file is allowed (and would just trigger the same drop again — the system never accumulates broken state)
+- The LLM never sees the binary file's bytes
 
 ### L0 Invalidation Prompt
 - User-driven exclusion (shift+click on a file checkbox, or the context-menu Exclude / Exclude all action) opens a confirmation dialog asking whether to invalidate L0 immediately or defer until the next L0-invalidating event. Invalidation forces a full cache rewrite; deferring leaves the excluded file visible in the cached aggregate map until the next routine invalidation event (mode switch, cross-reference toggle, manual rebuild, application restart)

@@ -75,6 +75,16 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - System prompts read fresh from files; concatenated at assembly time — edits to prompt files (e.g. `system.md`, `system_extra.md`) take effect on next LLM request without any explicit reload
 - Snippets loaded on request with two-location fallback: repo-local first, then app config directory
 
+### Env-var export timing
+
+The `env` dict in `llm.json` is exported into the process environment via `apply_llm_env`. This must happen before any code path that constructs an LLM provider client — provider SDKs (notably AWS boto3 used by Bedrock) typically read environment variables at client-construction time and cache them on the client instance.
+
+The contract: `apply_llm_env` runs on cold start (before any service that may invoke litellm is constructed) and again on every `reload_llm_config` call.
+
+`ConfigManager.__init__` deliberately does NOT call `apply_llm_env`. Construction stays free of process-state side effects so tests, settings inspection, and other non-runtime consumers can build a `ConfigManager` without rewriting `os.environ`. The cold-start entry point (`main.run`) is responsible for the first call, immediately after constructing the config manager and before any provider-touching service is built.
+
+Skipping this call on cold start produces a confusing failure mode: the first LLM request fails with the provider's "wrong region" / "wrong credentials" error because the SDK fell through to the shell environment or default profile; saving any change in the LLM-config UI then triggers `reload_llm_config`, which finally exports the env, and the *next* request succeeds. The cold-start call is what prevents this.
+
 ### System Prompt Refresh on App-Config Reload
 
 Some prompt composition depends on app-config values rather than prompt files. The agent-mode toggle (`agents.enabled`) is the canonical example — flipping it changes whether `get_system_prompt()` appends the agentic appendix.

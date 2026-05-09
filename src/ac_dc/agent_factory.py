@@ -60,7 +60,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ac_dc.context_manager import ContextManager
+from ac_dc.context_manager import ContextManager, Mode
 
 if TYPE_CHECKING:
     from ac_dc.history_store import HistoryStore
@@ -93,6 +93,8 @@ def build_agent_context_manager(
     cache_target_tokens: int | None = None,
     compaction_config: dict[str, Any] | None = None,
     system_prompt: str = "",
+    mode: Mode = Mode.CODE,
+    cross_reference_enabled: bool = False,
 ) -> ContextManager:
     """Construct an agent ContextManager wired to the archive.
 
@@ -144,15 +146,37 @@ def build_agent_context_manager(
         Initial system prompt text. Agents typically receive a
         task-specific prompt composed by the spawning code;
         defaults to empty.
+    mode:
+        The agent's primary mode (CODE or DOC). Drives which
+        index (symbol vs doc) feeds the agent's prompt. Set
+        on the constructed ContextManager via
+        :meth:`~ContextManager.set_mode` immediately after
+        construction so the mode is visible to subsequent
+        prompt assembly. Defaults to CODE — the safe pick
+        when callers don't specify, matching the user-facing
+        default.
+    cross_reference_enabled:
+        Whether cross-reference mode is active for this
+        agent. Stored on the ContextManager via
+        :meth:`~ContextManager.set_cross_reference_enabled`.
+        When True, the agent's prompt assembly includes the
+        secondary index (the opposite-mode structural map)
+        in addition to the primary. Mode is fixed for the
+        agent's lifetime per
+        ``specs4/7-future/parallel-agents.md`` — switching
+        mode mid-conversation would burn the StabilityTracker's
+        provider cache.
 
     Returns
     -------
     ContextManager
-        A ready-to-use agent ContextManager with ``turn_id`` and
-        ``archival_sink`` set. The returned instance carries no
-        external lifecycle obligations — callers that construct
-        it don't need to register it anywhere; letting it fall
-        out of scope is a legitimate cleanup path.
+        A ready-to-use agent ContextManager with ``turn_id``,
+        ``archival_sink``, ``mode``, and
+        ``cross_reference_enabled`` set. The returned instance
+        carries no external lifecycle obligations — callers
+        that construct it don't need to register it anywhere;
+        letting it fall out of scope is a legitimate cleanup
+        path.
 
     Raises
     ------
@@ -214,7 +238,7 @@ def build_agent_context_manager(
             **named,
         )
 
-    return ContextManager(
+    cm = ContextManager(
         model_name=model_name,
         repo=repo,
         cache_target_tokens=cache_target_tokens,
@@ -223,3 +247,13 @@ def build_agent_context_manager(
         turn_id=turn_id,
         archival_sink=_sink,
     )
+    # Apply the agent's mode + cross-reference state. Done
+    # here rather than in the ContextManager constructor
+    # because the constructor predates per-agent mode and
+    # adding kwargs would force every existing caller (the
+    # main user-facing ContextManager) to grow new arguments
+    # for behaviour they don't use. The setter pair is the
+    # documented public API for switching mode anyway.
+    cm.set_mode(mode)
+    cm.set_cross_reference_enabled(cross_reference_enabled)
+    return cm

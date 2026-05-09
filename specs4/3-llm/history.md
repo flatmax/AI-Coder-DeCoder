@@ -55,11 +55,12 @@ The archive is created lazily — only when a turn actually spawns agents. Turns
 
 Agent archives are surfaced through an extension of the chat panel itself (see [agent-browser.md](../5-webapp/agent-browser.md) for the UI spec). The chat panel remains the vertical spine of the session — the user message / assistant response pairs the user already knows. When the active turn spawned agents, an agent region fans out alongside the chat with one column per agent.
 
-The backend exposes three RPCs to support this:
+The backend exposes four RPCs to support this:
 
-- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted).
-- `close_agent_context(turn_id, agent_idx)` — frees the agent's ContextManager, stability tracker, and file_context when the user closes an agent tab. The per-turn archive file on disk is preserved. Idempotent — closing a non-existent or already-closed agent returns a no-op status rather than raising. Localhost-only.
-- `set_agent_selected_files(turn_id, agent_idx, files)` — per-agent analogue of the main-tab file selection RPC. The frontend routes picker checkbox toggles here when an agent tab is active; the main-tab path is unchanged. Filters non-existent paths against the repo. Localhost-only.
+- `get_turn_archive(turn_id)` — returns the per-agent conversations for a single turn. Reads from `.ac-dc4/agents/{turn_id}/`. Returns an empty result when the directory does not exist (turn did not spawn agents, or archive was deleted). Used for browsing historical (read-only) views of a previous turn's agents.
+- `get_agent_history(agent_id)` — returns the live agent's full reconstructed conversation by reading from its ContextManager. For session-reconstructed agents that have participated in multiple turns, this returns the concatenation across every participating turn, not just the latest one. Used by the frontend's rehydration path to populate live agent tabs after browser refresh, reconnect, or session load. `get_turn_archive` is insufficient for this case because it only returns one turn's content; multi-turn agents would lose all but their most recent turn's messages from the user's view. Returns an empty list for unknown agent ids.
+- `close_agent_context(agent_id)` — frees the agent's ContextManager, stability tracker, and file_context when the user closes an agent tab. The per-turn archive file on disk is preserved. Idempotent — closing a non-existent or already-closed agent returns a no-op status rather than raising. Localhost-only.
+- `set_agent_selected_files(agent_id, files)` — per-agent analogue of the main-tab file selection RPC. The frontend routes picker checkbox toggles here when an agent tab is active; the main-tab path is unchanged. Filters non-existent paths against the repo. Localhost-only.
 
 No separate `list_turns` RPC is required. Turn metadata is already part of the main history store (every record carries `turn_id`), and the chat panel's existing history-load path returns the records in order. `get_turn_archive` is called lazily as the user scrolls the chat and different turns become active.
 
@@ -79,6 +80,53 @@ Per-turn archive deletion is safe — no record in `history.jsonl` depends on th
 - Archives for turns whose main-store record has been deleted (manual cleanup, file corruption) are orphaned — safe to keep, safe to remove. The UI ignores archives with no corresponding main-store record.
 - Upgrading from a version without turn IDs is a no-op — new turns get IDs, old turns stay ID-less.
 - Historical records that carry an `assessor_reasoning` field (from an earlier draft of this spec that treated the assessor as a distinct role) are loaded as plain assistant messages; the extra field is ignored. No migration is required.
+- Records without `agent_blocks` (predating cross-turn agent reconstruction) load correctly; the per-turn agent affordance still works via `get_turn_archive(turn_id)`, but cross-turn views ("show me everything agent-X did") will skip those turns rather than guess at the id↔idx mapping.
+
+### Cross-Turn Agent Reconstruction
+
+The disk layout is keyed by a turn-local numeric `agent_idx` (`agent-00.jsonl`, `agent-01.jsonl`, …) — see [Agent Turn Archive](#agent-turn-archive). The orchestrator addresses agents by an LLM-chosen string `id` that is stable across turns (per [parallel-agents.md § Agent Reuse by ID](../7-future/parallel-agents.md#agent-reuse-by-id)). These two namespaces are intentionally separate:
+
+- `id` is identity — chosen by the orchestrator, used as the registry key in `_agent_contexts`, used as the tab id in the chat panel, and used to address agents in subsequent `🟧🟧🟧 AGENT` blocks.
+- `agent_idx` is per-turn storage routing — the integer position of the agent in that turn's spawn list, used to name the archive file and to derive child request IDs.
+
+`agent_idx` is **not stable across turns**. A reuse of `agent-backend` in turn 1 (where it was the first block, idx 0 → `agent-00.jsonl`) and again in turn 3 (where the orchestrator spawned `agent-frontend` first, making `agent-backend` idx 1 → `agent-01.jsonl`) writes to two different filenames. The mapping is turn-local — descriptive ids stay stable across turns; positional indexes do not.
+
+To make the across-turns view reconstructable without guessing, every assistant record that spawned agents persists an `agent_blocks` field — an ordered list of `{id, agent_idx}` entries, one per spawn block emitted in that turn. The order matches the spawn order (so `agent_blocks[N].agent_idx == N` in current implementations), but the field is stored verbatim rather than derived, so future schemes that decouple emission order from storage index remain compatible.
+
+Reconstruction algorithm for "show me everything agent-X did across the session":
+
+1. Scan the main store for assistant records carrying both `turn_id` and a non-empty `agent_blocks`.
+2. For each such record, look for an entry where `id == "agent-X"`. If found, note `(turn_id, agent_idx)`.
+3. Read each `(turn_id, agent_idx)` pair via `get_turn_archive(turn_id)` filtered to that index.
+4. Concatenate in turn order (chronological by user-message timestamp).
+
+The reconstruction is read-only; archives are not rewritten when the orchestrator retasks an agent under a new `agent_idx`. Turns without `agent_blocks` (legacy records, or turns that did not spawn agents) are skipped. Turns whose archive directory has been deleted (per [Disk Usage Monitoring](#disk-usage-monitoring)) are skipped without error.
+
+The session-load path (see [Session-Load Reconstruction](#session-load-reconstruction)) runs this algorithm at load time, concatenating each agent's archive content into a fresh `ContextManager.history`. Subsequent reads of that history — via `get_agent_history(agent_id)` — return the full multi-turn conversation in a single call. The RPC is the surface the frontend consumes; callers do not re-walk `agent_blocks` themselves.
+
+Filename safety is incidental: because `agent_idx` is numeric, arbitrary characters in `id` (hyphens, dots, mixed case) never reach the filesystem. A future implementation MUST NOT shortcut by using `id` as a filename — case-sensitivity differences across platforms and unrestricted character set would silently corrupt the archive.
+
+### Session-Load Reconstruction
+
+Loading a previous session via `load_session_into_context(session_id)` reconstructs not just main's history but every agent that participated. Reconstructed agents are **live and writable** — their `ContextManager` accepts new messages, the orchestrator can retask them, the user can reply in their tab — distinct from the historical-tab affordance (read-only browsing of turns within the *current* session) which targets a `ContextManager` that no longer exists.
+
+Reconstruction algorithm:
+
+1. Load main's messages via `get_session_messages_for_context(session_id)`. Clear and set history on the main `ContextManager` as today.
+2. Walk the loaded messages for assistant records carrying both `turn_id` and a non-empty `agent_blocks`. For each entry, note `(turn_id, id, agent_idx, mode, cross_reference_enabled, model)`.
+3. When an `id` appears in multiple turns (orchestrator retasked the same agent across the session), the *latest* record wins — its `agent_blocks` entry is the spawn-time baseline for that agent's reconstruction. Earlier turns contribute archive content but not mode state.
+4. For each surviving `(turn_id, id, agent_idx)` triple, read `get_turn_archive(turn_id)` filtered to that index. Concatenate messages from every turn the agent participated in, in chronological order (turn-by-turn by user-message timestamp).
+5. **Replay mode-change system events** on top of the spawn-time baseline. Each `switch_agent_mode` / `set_agent_cross_reference` call writes a `system_event: true` record to the archive with content `"Mode changed: {old} → {new}."`. Walk the concatenated message list in order; for each matching record, parse the target mode and update the running state. The final state after replay is the agent's mode at session-save time.
+6. Construct a fresh `ContextManager` via `build_agent_context_manager`, with mode set to the replay result. Pre-populate its history with the concatenated archive messages.
+7. Construct a fresh `StabilityTracker` (cache starts cold — the saved tracker's tier assignments aren't persisted, and rebuilding from scratch produces a coherent starting state for the next turn).
+8. Register the new `ConversationScope` in `service._agent_contexts[id]`.
+9. Broadcast `agentsRehydrated` carrying the reconstructed agent ids. The frontend's handler calls `list_live_agents()` to materialise tabs, identical to the post-`onRpcReady` rehydration path.
+
+Replay-from-archive (step 5) is the authoritative source of truth for an agent's current mode, not the spawn-time baseline alone. An agent spawned in `code` mode and then toggled to `doc+xref` mid-session must reconstruct as `doc+xref`. Without replay, every retasked agent would silently revert to its spawn-time mode on session reload — a data-loss-feeling bug. The spawn-time baseline serves only as the starting state for the replay.
+
+Mode-change events that fail to parse (malformed content, unrecognised mode strings) are skipped; the running state continues from the previous record. A turn whose archive directory was deleted contributes nothing — the agent's reconstruction proceeds with whatever archive content remains, mode replay still works on the surviving records.
+
+Per-agent file selections, file context, and cache warmth are NOT reconstructed. Selections have always been ephemeral — even a refresh today loses them. The cache rebuilds naturally as the agent runs its next turn.
 
 ## Message Schema
 
@@ -88,6 +136,7 @@ Per-turn archive deletion is safe — no record in `history.jsonl` depends on th
 - Role — user or assistant
 - Content — full text — for agent-mode assistant messages, this contains the main LLM's full output across all its internal calls within the turn (decomposition, review, iteration decisions, synthesis)
 - Optional: system event flag, image references (filenames in working-directory images folder), legacy image count (deprecated), files in context (user messages), files modified (assistant messages), edit results array, turn ID (every record in a session produced after turn IDs were introduced)
+- Optional on assistant records that spawned agents: `agent_blocks` — an ordered list of `{id, agent_idx}` entries, one per spawn block emitted in the turn. See [Cross-Turn Agent Reconstruction](#cross-turn-agent-reconstruction) below for why this is required
 
 Agent-mode and non-agent-mode assistant messages share the same schema. The only runtime signal distinguishing them is the presence of `.ac-dc4/agents/{turn_id}/` on disk.
 
@@ -226,3 +275,4 @@ Agent-mode and non-agent-mode assistant messages share the same schema. The only
 - Session restore reads only the main store; agent archives are load-on-demand for UI browsing
 - Archive directories are safe to delete at any time; removal of an archive never breaks main-store playback
 - The 1 GB disk-usage warning fires at most once per server lifetime; the user is never blocked from working, only informed
+- Agent identity (`id`, an arbitrary non-empty string) and per-turn archive routing (`agent_idx`, a non-negative integer assigned by spawn order within a turn) are separate namespaces. `agent_idx` is stable only within a turn; `id` is stable across the session. Cross-turn reconstruction relies on the `agent_blocks: [{id, agent_idx}, ...]` field persisted on each agent-spawning assistant record — never on filename heuristics or scanning archive contents

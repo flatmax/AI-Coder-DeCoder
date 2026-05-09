@@ -915,6 +915,18 @@ class LLMService:
         from ac_dc.llm._rpc_lifecycle import get_current_state
         return get_current_state(self)
 
+    def list_live_agents(self) -> list[dict[str, Any]]:
+        """Delegate to :func:`ac_dc.llm._rpc_lifecycle.list_live_agents`.
+
+        Public RPC — the chat panel calls this on
+        ``onRpcReady`` to rehydrate writable agent tabs
+        after browser refresh or WebSocket reconnect. See
+        :doc:`specs4/5-webapp/agent-browser` § Refresh and
+        Reconnect.
+        """
+        from ac_dc.llm._rpc_lifecycle import list_live_agents
+        return list_live_agents(self)
+
     # ------------------------------------------------------------------
     # URL service RPC surface
     # ------------------------------------------------------------------
@@ -1139,6 +1151,13 @@ class LLMService:
         """Delegate to :func:`ac_dc.llm._rpc_history.get_turn_archive`."""
         from ac_dc.llm._rpc_history import get_turn_archive
         return get_turn_archive(self, turn_id)
+
+    def get_agent_history(
+        self, agent_id: str
+    ) -> list[dict[str, Any]]:
+        """Delegate to :func:`ac_dc.llm._rpc_history.get_agent_history`."""
+        from ac_dc.llm._rpc_history import get_agent_history
+        return get_agent_history(self, agent_id)
 
     def load_session_into_context(
         self, session_id: str
@@ -1436,6 +1455,24 @@ class LLMService:
             self, agent_id, files
         )
 
+    def switch_agent_mode(
+        self,
+        agent_id: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.switch_agent_mode`."""
+        from ac_dc.llm._rpc_state import switch_agent_mode
+        return switch_agent_mode(self, agent_id, mode)
+
+    def set_agent_cross_reference(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_cross_reference`."""
+        from ac_dc.llm._rpc_state import set_agent_cross_reference
+        return set_agent_cross_reference(self, agent_id, enabled)
+
     # ------------------------------------------------------------------
     # Conversation scope construction
     # ------------------------------------------------------------------
@@ -1559,6 +1596,7 @@ class LLMService:
         images: list[str] | None = None,
         excluded_urls: list[str] | None = None,
         agent_tag: str | None = None,
+        reasoning: bool | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_streaming.chat_streaming`."""
         from ac_dc.llm._rpc_streaming import chat_streaming
@@ -1570,6 +1608,7 @@ class LLMService:
             images,
             excluded_urls,
             agent_tag,
+            reasoning,
         )
 
     @staticmethod
@@ -1610,6 +1649,7 @@ class LLMService:
         *,
         scope: ConversationScope | None = None,
         agent_key: str | None = None,
+        reasoning: bool | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._streaming.stream_chat`.
 
@@ -1623,11 +1663,15 @@ class LLMService:
         — the main-conversation caller (``chat_streaming`` via
         ``ensure_future``) doesn't await the return value and
         ignores it.
+
+        ``reasoning`` is forwarded into the LiteLLM call —
+        per-request override for extended-thinking mode.
         """
         from ac_dc.llm._streaming import stream_chat
         return await stream_chat(
             self, request_id, message, files, images,
             excluded_urls, scope=scope, agent_key=agent_key,
+            reasoning=reasoning,
         )
 
     async def _detect_and_fetch_urls(
@@ -1684,10 +1728,13 @@ class LLMService:
         request_id: str,
         messages: list[dict[str, Any]],
         loop: asyncio.AbstractEventLoop,
+        reasoning: bool | None = None,
     ) -> tuple[str, bool, str | None, dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._streaming.run_completion_sync`."""
         from ac_dc.llm._streaming import run_completion_sync
-        return run_completion_sync(self, request_id, messages, loop)
+        return run_completion_sync(
+            self, request_id, messages, loop, reasoning=reasoning,
+        )
 
     def _accumulate_usage(self, usage: Any) -> None:
         """Delegate to :func:`ac_dc.llm._streaming.accumulate_usage`."""
@@ -1756,15 +1803,21 @@ class LLMService:
         from ac_dc.llm._breakdown import print_init_hud
         print_init_hud(self)
 
-    def _print_post_response_hud(self) -> None:
+    def _print_post_response_hud(
+        self,
+        request_usage: dict[str, Any] | None = None,
+    ) -> None:
         """Delegate to :func:`ac_dc.llm._breakdown.print_post_response_hud`.
 
         Internal-only method; called from ``_post_response``
         after every completed chat turn to print the
-        three-section terminal HUD to stderr.
+        five-section terminal HUD to stderr. ``request_usage``
+        is forwarded so the HUD can render a "Last Request"
+        section alongside cumulative "Session Totals". None
+        on cancelled/error paths suppresses that section.
         """
         from ac_dc.llm._breakdown import print_post_response_hud
-        print_post_response_hud(self)
+        print_post_response_hud(self, request_usage)
 
     # ------------------------------------------------------------------
     # Context breakdown (RPC)
@@ -1867,10 +1920,21 @@ class LLMService:
         request_id: str,
         turn_id: str,
         scope: ConversationScope | None = None,
+        request_usage: dict[str, Any] | None = None,
     ) -> None:
-        """Delegate to :func:`ac_dc.llm._lifecycle.post_response`."""
+        """Delegate to :func:`ac_dc.llm._lifecycle.post_response`.
+
+        ``request_usage`` carries the provider's normalised
+        token counts for the request that just completed, so
+        the terminal HUD can render a "Last Request" section
+        alongside session totals. None on cancelled / error
+        paths.
+        """
         from ac_dc.llm._lifecycle import post_response
-        await post_response(self, request_id, turn_id, scope)
+        await post_response(
+            self, request_id, turn_id, scope,
+            request_usage=request_usage,
+        )
 
     def _update_stability(
         self,

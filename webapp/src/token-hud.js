@@ -12,7 +12,7 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
-import { parseAgentTabId } from './chat-panel.js';
+import { parseAgentTabId } from './chat-panel/index.js';
 
 /** Auto-hide delay (ms). */
 const _AUTO_HIDE_MS = 8000;
@@ -978,6 +978,30 @@ export class TokenHud extends RpcMixin(LitElement) {
     // reasoning vs. visible response. E.g. "Completion:
     // 5.7K, Reasoning: 4.0K" means the visible response was
     // ~1.7K tokens and the model spent 4K reasoning.
+    // Cache rows are persistent (rendered even when zero)
+    // so the user gets a stable row pattern turn-to-turn.
+    // Matches the Reasoning row's treatment — a zero value
+    // is informative ("this provider didn't cache anything
+    // for this request") rather than noise. Without
+    // persistence, sessions that mix cached and uncached
+    // requests would have rows appearing and disappearing,
+    // which makes the HUD harder to scan.
+    //
+    // Cache Hit % — cache_read / prompt × 100. What
+    // fraction of this request's input came from cache.
+    // Distinct from ROI (read vs write); this answers "how
+    // much input did we save by caching". Suppressed when
+    // prompt is zero (avoid divide-by-zero) — renders "—"
+    // so the row pattern stays stable.
+    const hitPct = u.prompt > 0
+      ? (u.cacheRead / u.prompt) * 100
+      : null;
+    const hitLabel = hitPct === null
+      ? '—'
+      : `${hitPct.toFixed(1)}%`;
+    const hitColor = hitPct === null
+      ? ''
+      : hitPct >= 50 ? 'green' : hitPct >= 20 ? 'yellow' : '';
     return html`
       <div class="request-grid">
         <span class="req-label">Prompt</span>
@@ -989,18 +1013,21 @@ export class TokenHud extends RpcMixin(LitElement) {
           class="req-value"
           title="Hidden reasoning tokens (subset of Completion). Zero for models without extended thinking."
         >${_fmtTokens(u.reasoning)}</span>
-        ${u.cacheRead > 0
-          ? html`
-              <span class="req-label">Cache Read</span>
-              <span class="req-value green">${_fmtTokens(u.cacheRead)}</span>
-            `
-          : ''}
-        ${u.cacheWrite > 0
-          ? html`
-              <span class="req-label">Cache Write</span>
-              <span class="req-value yellow">${_fmtTokens(u.cacheWrite)}</span>
-            `
-          : ''}
+        <span class="req-label">Cache Read</span>
+        <span
+          class="req-value ${u.cacheRead > 0 ? 'green' : ''}"
+          title="Tokens read from the provider's prompt cache for this request. Zero means no cache hit (cold cache, cache miss, or provider doesn't support caching)."
+        >${_fmtTokens(u.cacheRead)}</span>
+        <span class="req-label">Cache Write</span>
+        <span
+          class="req-value ${u.cacheWrite > 0 ? 'yellow' : ''}"
+          title="Tokens written to the provider's prompt cache for this request. Non-zero on the first request that primes a cache breakpoint; zero on follow-ups that hit the existing cache."
+        >${_fmtTokens(u.cacheWrite)}</span>
+        <span class="req-label">Cache Hit %</span>
+        <span
+          class="req-value ${hitColor}"
+          title="Fraction of this request's prompt input that came from the provider's cache. (cache_read / prompt) × 100. Higher is better — these tokens were billed at a discount or free. Distinct from Cache ROI, which compares read against write rather than against input."
+        >${hitLabel}</span>
       </div>
     `;
   }
@@ -1054,6 +1081,49 @@ export class TokenHud extends RpcMixin(LitElement) {
     if (!st) {
       return html`<span style="color: var(--text-secondary); font-size: 0.75rem; font-style: italic;">—</span>`;
     }
+    // Cache rows are persistent for the same reason as in
+    // _renderRequest: stable row pattern across sessions
+    // makes the HUD easier to scan, and a zero value
+    // genuinely conveys "no caching this session".
+    const cacheSaved =
+      st.cache_hit || st.cache_read_tokens || 0;
+    const cacheWritten =
+      st.cache_write || st.cache_write_tokens || 0;
+    const promptIn =
+      st.prompt || st.input_tokens || 0;
+    // Cache Hit % — cumulative cache_read / prompt_in
+    // × 100. What fraction of session input came from
+    // cache. Same shape as the per-request Cache Hit %,
+    // accumulated across the session. Suppressed when
+    // promptIn is zero.
+    const sessionHitPct = promptIn > 0
+      ? (cacheSaved / promptIn) * 100
+      : null;
+    const sessionHitLabel = sessionHitPct === null
+      ? '—'
+      : `${sessionHitPct.toFixed(1)}%`;
+    const sessionHitColor = sessionHitPct === null
+      ? ''
+      : sessionHitPct >= 50
+        ? 'green'
+        : sessionHitPct >= 20 ? 'yellow' : '';
+    // Cache ROI — ((read / write) - 1) × 100. Expresses
+    // "how many extra tokens has each written token paid
+    // back?". 0% = broke even, 100% = paid back twice,
+    // negative = haven't fully amortised the write cost
+    // yet. Only meaningful when cache_write > 0; the row
+    // is suppressed when there's been no write activity
+    // (a divide-by-zero would be ambiguous, and the row
+    // adds nothing without a write to amortise).
+    const cacheRoi = cacheWritten > 0
+      ? ((cacheSaved / cacheWritten) - 1) * 100
+      : null;
+    const roiColor = cacheRoi === null
+      ? ''
+      : cacheRoi >= 0 ? 'green' : 'yellow';
+    const roiLabel = cacheRoi === null
+      ? '—'
+      : `${cacheRoi >= 0 ? '+' : ''}${cacheRoi.toFixed(1)}%`;
     return html`
       <div class="totals-grid">
         <span class="tot-label">Prompt In</span>
@@ -1062,18 +1132,26 @@ export class TokenHud extends RpcMixin(LitElement) {
         <span class="tot-value">${_fmtTokens(st.completion || st.output_tokens || 0)}</span>
         <span class="tot-label">Total</span>
         <span class="tot-value">${_fmtTokens(st.total || 0)}</span>
-        ${(st.cache_hit || st.cache_read_tokens || 0) > 0
-          ? html`
-              <span class="tot-label">Cache Saved</span>
-              <span class="tot-value green">${_fmtTokens(st.cache_hit || st.cache_read_tokens || 0)}</span>
-            `
-          : ''}
-        ${(st.cache_write || st.cache_write_tokens || 0) > 0
-          ? html`
-              <span class="tot-label">Cache Written</span>
-              <span class="tot-value yellow">${_fmtTokens(st.cache_write || st.cache_write_tokens || 0)}</span>
-            `
-          : ''}
+        <span class="tot-label">Cache Saved</span>
+        <span
+          class="tot-value ${cacheSaved > 0 ? 'green' : ''}"
+          title="Cumulative tokens read from the provider's prompt cache across this session. Higher is better — these tokens were billed at a discount or free."
+        >${_fmtTokens(cacheSaved)}</span>
+        <span class="tot-label">Cache Written</span>
+        <span
+          class="tot-value ${cacheWritten > 0 ? 'yellow' : ''}"
+          title="Cumulative tokens written to the provider's prompt cache across this session. Cache writes are usually billed at a premium; the savings come on subsequent requests that hit the cache."
+        >${_fmtTokens(cacheWritten)}</span>
+        <span class="tot-label">Cache Hit %</span>
+        <span
+          class="tot-value ${sessionHitColor}"
+          title="Fraction of session prompt input that came from the provider's cache. (cache_saved / prompt_in) × 100. Cumulative across the session — same metric as the per-request Cache Hit %, accumulated. Higher is better."
+        >${sessionHitLabel}</span>
+        <span class="tot-label">Cache ROI</span>
+        <span
+          class="tot-value ${roiColor}"
+          title="Return on cache-write investment: ((read / write) − 1) × 100. 0% means the writes have been read back exactly once (broke even). 100% = read back twice. Negative values mean the writes haven't been fully read back yet — common at the start of a session before cache hits accumulate. Suppressed (—) when there's been no cache write activity yet."
+        >${roiLabel}</span>
       </div>
     `;
   }

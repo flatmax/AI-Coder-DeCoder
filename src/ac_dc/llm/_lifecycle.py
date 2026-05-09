@@ -64,6 +64,16 @@ def sync_file_context(
     but never reached the LLM's prompt because its content
     couldn't be read.
 
+    Files rejected as binary (xlsx, pdf, png, zip, etc.)
+    are additionally surfaced to the frontend via a
+    ``binaryFilesSkipped`` server-push event so the user
+    sees a toast naming the dropped files. Without this
+    broadcast the rejection is invisible — the file stays
+    checked in the picker but the LLM never sees its
+    content, leading to confusing "I can't find that file"
+    responses. See specs4/5-webapp/file-picker.md
+    § Binary File Selection.
+
     See :meth:`LLMService._sync_file_context` for the full
     invalidation-contract discussion. Summary: this method
     only adds files in ``selected - current`` and removes
@@ -84,6 +94,10 @@ def sync_file_context(
     for path in current - selected:
         file_context.remove_file(path)
 
+    # Track binary-rejected paths so we can fire one
+    # toast at the end rather than one per file.
+    binary_skipped: list[str] = []
+
     # Add newly-selected files.
     for path in selected - current:
         if service._repo is None:
@@ -91,6 +105,13 @@ def sync_file_context(
         try:
             file_context.add_file(path)
         except Exception as exc:
+            # The repo layer signals binary rejection with
+            # a specific message prefix; we match on it
+            # rather than introducing a new exception type
+            # because RepoError is already widely caught
+            # and we don't want to narrow that contract.
+            if "Binary file cannot be read as text" in str(exc):
+                binary_skipped.append(path)
             logger.warning(
                 "Selected file %s could not be loaded "
                 "into context: %s. The LLM will NOT see "
@@ -98,6 +119,49 @@ def sync_file_context(
                 "resolved.",
                 path, exc,
             )
+
+    if binary_skipped:
+        # Trim the rejected paths from the scope's
+        # selection list so the picker's checkboxes
+        # clear and the LLM stops seeing them as
+        # "selected but missing". The mutation is
+        # in-place via list.remove rather than
+        # rebinding, so any caller holding a reference
+        # to the same list (notably service._selected_files
+        # for the main scope, which default_scope passes
+        # by reference) sees the update too.
+        #
+        # Agent scopes have their own selected_files
+        # list — the trim is local to the agent and
+        # doesn't touch the user-facing selection.
+        # Spec: specs4/3-llm/context-model.md
+        # § Binary file rejection at sync time
+        for path in binary_skipped:
+            try:
+                scope.selected_files.remove(path)
+            except ValueError:
+                # Already absent (concurrent removal,
+                # or path normalisation drift between
+                # selection and FileContext). Harmless
+                # — the broadcast still goes out with
+                # whatever the current selection is.
+                pass
+
+        # Broadcast the trimmed selection so the picker
+        # checkbox clears. Fires before the toast event
+        # so the visual update lands first; the toast
+        # then explains why.
+        broadcast_event(
+            service,
+            "filesChanged",
+            list(scope.selected_files),
+        )
+        # Toast event with the rejected paths.
+        broadcast_event(
+            service,
+            "binaryFilesSkipped",
+            {"paths": sorted(binary_skipped)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +174,7 @@ async def post_response(
     request_id: str,
     turn_id: str,
     scope: "ConversationScope | None" = None,
+    request_usage: dict[str, Any] | None = None,
 ) -> None:
     """Stability tracker update, compaction, terminal HUD.
 
@@ -118,7 +183,11 @@ async def post_response(
 
     1. ``_update_stability`` — builds the full active items
        list and runs the tracker update cycle.
-    2. Print terminal HUD — three sections per spec.
+    2. Print terminal HUD — five sections per spec.
+       ``request_usage`` is forwarded so the HUD can show a
+       "Last Request" section alongside session totals;
+       None on cancelled/error paths suppresses that
+       section.
     3. Compaction — gated on current history token count.
        Emits ``compactionEvent`` progress callbacks. On
        success, appends a system event in both the context
@@ -139,7 +208,7 @@ async def post_response(
     service._update_stability(scope)
 
     # Terminal HUD — diagnostic output, reads shared state.
-    service._print_post_response_hud()
+    service._print_post_response_hud(request_usage)
 
     # Compaction — gated on current history token count.
     tokens = scope.context.history_token_count()

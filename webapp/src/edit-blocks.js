@@ -66,6 +66,18 @@ export function isFilePath(line) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.length > 200) return false;
 
+  // File paths never contain whitespace. Rejecting prose
+  // like "edit src/foo.py" or "do not wrap src/foo.py here"
+  // is essential — without this, the segmenter would
+  // misclassify those lines as path candidates, enter the
+  // expect-edit state, consume the surrounding code-fence
+  // markers as wrapper fences, and dump fenced-block content
+  // into a prose segment where mention detection then runs.
+  // Matches the backend's `_is_file_path` rule (see
+  // specs-reference/3-llm/edit-protocol.md § File path
+  // detection — "path with inner space rejected").
+  if (/\s/.test(trimmed)) return false;
+
   // Comment prefixes — not paths.
   if (
     trimmed.startsWith('#') ||
@@ -203,6 +215,13 @@ export function segmentResponse(text) {
           state = 'reading-old';
         } else if (stripped === '') {
           // Blank line between path and marker is tolerated.
+          continue;
+        } else if (/^```/.test(stripped)) {
+          // Fence line between path and EDIT marker — the
+          // LLM wrapped its block in a code fence. Tolerate
+          // the opening fence so the block still parses;
+          // the closing fence after END is already handled
+          // by the lookahead at the end of 'reading-new'.
           continue;
         } else if (isFilePath(stripped)) {
           // The "path" we held was actually a text line; the

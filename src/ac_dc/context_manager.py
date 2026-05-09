@@ -302,6 +302,18 @@ class ContextManager:
         # decide what to do when the value changes.
         self._mode: Mode = Mode.CODE
 
+        # Cross-reference flag. False by default. When True,
+        # the prompt assembler includes the secondary index
+        # (the opposite-mode structural map) alongside the
+        # primary. The :class:`LLMService` mirrors this flag
+        # globally on its main ContextManager via
+        # ``_cross_ref_enabled``; per-agent ContextManagers
+        # carry their own copy so each agent's descriptor entry
+        # can report its own mode independent of others.
+        # See ``specs4/7-future/parallel-agents.md`` § "Per-agent
+        # state descriptor" for why this is per-ContextManager.
+        self._cross_reference_enabled: bool = False
+
         # Layer 3.5 / 3.6 attachment points. Holders only — no logic
         # here. The stability tracker owns its own state; we just
         # point at it so downstream consumers (streaming handler,
@@ -456,6 +468,34 @@ class ContextManager:
                 f"Unknown mode {mode!r}; expected one of "
                 f"{[m.value for m in Mode]}"
             ) from exc
+
+    @property
+    def cross_reference_enabled(self) -> bool:
+        """Whether cross-reference mode is active for this context.
+
+        When True, prompt assembly includes the secondary
+        index (opposite-mode structural map) alongside the
+        primary. Per-ContextManager so each agent's
+        descriptor entry can report its own mode independent
+        of the others — see
+        ``specs4/7-future/parallel-agents.md`` § "Per-agent
+        state descriptor".
+        """
+        return self._cross_reference_enabled
+
+    def set_cross_reference_enabled(self, enabled: bool) -> None:
+        """Set the cross-reference flag.
+
+        The context manager records the value and exposes it
+        via :attr:`cross_reference_enabled`. The LLM service
+        is responsible for any side effects (tracker
+        invalidation, snapshot refresh) when its main
+        ContextManager's flag changes; per-agent
+        ContextManagers set this once at construction time
+        and don't toggle later — mode is fixed for the agent's
+        lifetime per the parallel-agents spec.
+        """
+        self._cross_reference_enabled = bool(enabled)
 
     # ------------------------------------------------------------------
     # Conversation history

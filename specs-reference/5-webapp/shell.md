@@ -94,6 +94,22 @@ Focus changes between tab switch and search activation clear the selection. Read
 
 Without throttling, rapid resize events cause feedback loops: scroll → layout shift → resize → `layout()` → forced reflow → visible jank.
 
+### `binaryFilesSkipped` server-push event
+
+Fired by the backend during `sync_file_context` whenever one or more selected files fail binary detection. Payload:
+
+```pseudo
+{
+    paths: list[str],   # repo-relative paths that were rejected
+}
+```
+
+Registered as a method on `AppShell` so jrpc-oo's `addClass(this, 'AcApp')` exposes it. Handler dispatches a `binary-files-skipped` window event and renders a single warning toast naming the rejected files and pointing the user at the Doc Convert tab. Toast wording is short — typically a leading file name plus "(+N more)" when the list is long, capped to keep the toast a single line.
+
+The picker's checkboxes update independently via the `filesChanged` broadcast that fires alongside this event — `binaryFilesSkipped` carries only the names for the toast, while `filesChanged` carries the post-trim selection that drives picker state. The two events are deliberately separate: future binary-rejection paths (e.g., a paste-binary handler in the chat input) might fire one without the other.
+
+Cross-reference: `specs-reference/3-llm/context-model.md` § Binary files in selection are trimmed at turn-start materialisation.
+
 ### Proportional rescaling baselines
 
 Used by the "same fraction of viewport" rule in `specs4/5-webapp/shell.md` § Proportional Rescaling.

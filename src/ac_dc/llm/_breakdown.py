@@ -151,6 +151,61 @@ def get_file_map_block(
     if path.startswith("meta:"):
         return get_meta_block(service, path)
 
+    # History entries — tracker keys of the form
+    # ``history:N`` where N is the zero-based index into
+    # ``ContextManager.get_history()``. The cache viewer
+    # surfaces these so the user can click an entry and
+    # read the actual message body that's occupying that
+    # tier slot.
+    if path.startswith("history:"):
+        idx_str = path[len("history:"):]
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return {
+                "error": f"Malformed history key: {path}",
+                "path": path,
+            }
+        history = service._context.get_history()
+        if idx < 0 or idx >= len(history):
+            return {
+                "error": (
+                    f"History index {idx} out of range "
+                    f"(have {len(history)} messages)"
+                ),
+                "path": path,
+            }
+        msg = history[idx]
+        role = msg.get("role", "?")
+        raw_content = msg.get("content", "")
+        # ``content`` may be a plain string or a list of
+        # multimodal blocks (text + image_url dicts). Render
+        # both shapes so multimodal turns show their text
+        # parts and a placeholder for images.
+        if isinstance(raw_content, str):
+            body = raw_content
+        elif isinstance(raw_content, list):
+            parts: list[str] = []
+            for block in raw_content:
+                if isinstance(block, dict):
+                    btype = block.get("type")
+                    if btype == "text":
+                        parts.append(block.get("text", ""))
+                    elif btype in ("image_url", "image"):
+                        parts.append("[image]")
+                    else:
+                        parts.append(str(block))
+                else:
+                    parts.append(str(block))
+            body = "\n".join(parts)
+        else:
+            body = str(raw_content)
+        return {
+            "path": path,
+            "content": f"[{role}]\n\n{body}",
+            "mode": service._context.mode.value,
+        }
+
     # Prefix dispatch.
     if path.startswith("file:"):
         file_path = path[len("file:"):]
@@ -342,6 +397,55 @@ def get_meta_block(
                     f"File {file_path} is not currently "
                     "loaded into context."
                 ),
+                "path": key,
+            }
+        return {
+            "path": key,
+            "content": content,
+            "mode": service._context.mode.value,
+        }
+
+    # meta:agent_descriptor — the per-turn agent-state
+    # descriptor that build_agent_descriptor injects into
+    # the outgoing user message at assembly time. Rebuilt
+    # fresh each call from the live registry; never
+    # persisted to history. Surfacing it here closes the
+    # gap between "what the LLM sees" and "what the cache
+    # viewer shows". Per
+    # specs4/7-future/parallel-agents.md § "Single-copy
+    # invariant — assembly-time injection".
+    if key == "meta:agent_descriptor":
+        from ac_dc.llm._agents import build_agent_descriptor
+        content = build_agent_descriptor(service)
+        if not content:
+            return {
+                "error": (
+                    "No live agents — descriptor would be "
+                    "empty this turn."
+                ),
+                "path": key,
+            }
+        return {
+            "path": key,
+            "content": content,
+            "mode": service._context.mode.value,
+        }
+
+    # meta:system_reminder — the system reminder text
+    # appended to the user prompt at assembly time. Read
+    # from config so changes via Settings are reflected
+    # immediately.
+    if key == "meta:system_reminder":
+        try:
+            content = service._config.get_system_reminder()
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "path": key,
+            }
+        if not content:
+            return {
+                "error": "System reminder is empty.",
                 "path": key,
             }
         return {
@@ -807,6 +911,53 @@ def get_context_breakdown(
                 "tokens": rv_tokens,
                 "type": "other",
             })
+    # Agent descriptor — assembly-time injection rebuilt
+    # fresh per turn from the live registry. Only the
+    # main scope's breakdown gets this row; agent scopes
+    # don't see the descriptor in their own prompts (per
+    # spec, agents don't self-reference the registry), so
+    # surfacing it under an agent breakdown would
+    # mismatch what the LLM actually received. Suppressed
+    # when no agents are registered (descriptor is empty).
+    if scope is None:
+        try:
+            from ac_dc.llm._agents import (
+                build_agent_descriptor,
+            )
+            descriptor = build_agent_descriptor(service)
+        except Exception as exc:
+            descriptor = ""
+            logger.debug(
+                "Agent descriptor preview failed: %s", exc,
+            )
+        if descriptor:
+            ad_tokens = service._counter.count(descriptor)
+            if ad_tokens > 0:
+                uncached_contents.append({
+                    "name": "meta:agent_descriptor",
+                    "path": "Live-agent descriptor",
+                    "tokens": ad_tokens,
+                    "type": "other",
+                })
+    # System reminder — appended to the user prompt at
+    # assembly time. Read from config so the row reflects
+    # whatever the next request would actually carry.
+    try:
+        reminder = service._config.get_system_reminder()
+    except Exception as exc:
+        reminder = ""
+        logger.debug(
+            "System reminder preview failed: %s", exc,
+        )
+    if reminder:
+        sr_tokens = service._counter.count(reminder)
+        if sr_tokens > 0:
+            uncached_contents.append({
+                "name": "meta:system_reminder",
+                "path": "System reminder",
+                "tokens": sr_tokens,
+                "type": "system",
+            })
     # Active files section — files in file context but not
     # graduated.
     represented_file_paths: set[str] = set()
@@ -843,11 +994,38 @@ def get_context_breakdown(
         if "active" in c and "→" in c and "promoted" not in c
     ]
 
+    # Live-agent roster — id + model + mode for every
+    # scope in the registry. Surfaced in the Context tab's
+    # "Live agents" panel so the user can see the team
+    # composition at a glance, mirroring what
+    # ``build_agent_descriptor`` shows the orchestrator in
+    # its prompt. Always present (even when empty) so the
+    # frontend doesn't need a defensive check before
+    # iterating. Sorted alphabetically by id for
+    # deterministic output.
+    agents_roster: list[dict[str, Any]] = []
+    for agent_id in sorted(service._agent_contexts.keys()):
+        agent_scope = service._agent_contexts[agent_id]
+        agent_ctx = agent_scope.context
+        if agent_ctx is None:
+            continue
+        agent_mode = agent_ctx.mode.value
+        agent_xref = agent_ctx.cross_reference_enabled
+        mode_label = (
+            f"{agent_mode}+xref" if agent_xref else agent_mode
+        )
+        agents_roster.append({
+            "id": agent_id,
+            "model": getattr(agent_ctx, "model", "") or "",
+            "mode": mode_label,
+        })
+
     return {
         "scope": scope_label,
         "model": model,
         "mode": mode,
         "cross_ref_enabled": service._cross_ref_enabled,
+        "agents": agents_roster,
         "total_tokens": total_tokens,
         "max_input_tokens": max_input,
         "cache_hit_rate": cache_hit_rate,
@@ -923,13 +1101,24 @@ def print_init_hud(service: "LLMService") -> None:
     print("\n".join(lines), file=sys.stderr)
 
 
-def print_post_response_hud(service: "LLMService") -> None:
-    """Print the three-section terminal HUD after each response.
+def print_post_response_hud(
+    service: "LLMService",
+    request_usage: dict[str, Any] | None = None,
+) -> None:
+    """Print the four-section terminal HUD after each response.
 
     Sections per specs-reference/5-webapp/viewers-hud.md:
     1. Cache blocks (boxed) — per-tier token counts + cache hit %
-    2. Token usage — model, per-category, total, last request, session
-    3. Tier changes — promotions and demotions
+    2. Token usage — model, per-category structural breakdown
+    3. Last Request — in/out/reasoning/cache for the request
+       just completed. ``request_usage`` carries the
+       provider's normalised counts (see
+       :func:`run_completion_sync`). When None, the section
+       is suppressed — happens on cancelled/error paths
+       where there's no meaningful per-request data.
+    4. Session Totals — cumulative across all requests in
+       this session.
+    5. Tier changes — promotions and demotions
     """
     all_items = service._stability_tracker.get_all_items()
     if not all_items:
@@ -1002,7 +1191,9 @@ def print_post_response_hud(service: "LLMService") -> None:
         ]
         print("\n".join(lines), file=sys.stderr)
 
-    # Section 2: Token Usage
+    # Section 2: Token Usage — structural breakdown of what
+    # the next request would carry. Independent of any
+    # individual call's actual token consumption.
     st = service._session_totals
     model = service._config.model
     system_tokens = service._counter.count(
@@ -1044,10 +1235,15 @@ def print_post_response_hud(service: "LLMService") -> None:
     )
     max_input = service._counter.max_input_tokens
 
+    # Mode-aware label so doc mode reads naturally.
+    map_label = (
+        "Doc Map:   " if service._context.mode.value == "doc"
+        else "Symbol Map:"
+    )
     usage_lines = [
         f"Model: {model}",
         f"System:    {system_tokens:>10,}",
-        f"Symbol Map:{symbol_map_tokens:>10,}",
+        f"{map_label}{symbol_map_tokens:>10,}",
         f"Files:     {files_tokens:>10,}",
     ]
     if url_tokens > 0:
@@ -1056,26 +1252,137 @@ def print_post_response_hud(service: "LLMService") -> None:
         f"History:   {history_tokens:>10,}",
         f"Total:     {total_est:>10,} / {max_input:,}",
     ])
+    print("\n".join(usage_lines), file=sys.stderr)
+
+    # Section 3: Last Request — actual provider counts for
+    # the request just completed. The structural totals
+    # above (Section 2) describe what the prompt CONTAINS;
+    # this section describes what the LLM actually billed,
+    # which differs because of cache hits, reasoning tokens,
+    # and tokenisation differences.
+    if request_usage is not None:
+        prompt_in = request_usage.get("prompt_tokens", 0) or 0
+        completion_out = (
+            request_usage.get("completion_tokens", 0) or 0
+        )
+        reasoning = (
+            request_usage.get("reasoning_tokens", 0) or 0
+        )
+        req_cache_read = (
+            request_usage.get("cache_read_tokens", 0) or 0
+        )
+        req_cache_write = (
+            request_usage.get("cache_write_tokens", 0) or 0
+        )
+        if prompt_in or completion_out:
+            req_lines = ["Last Request:"]
+            req_lines.append(f"  In:        {prompt_in:>10,}")
+            req_lines.append(
+                f"  Out:       {completion_out:>10,}"
+            )
+            if reasoning > 0:
+                req_lines.append(
+                    f"  Reasoning: {reasoning:>10,}"
+                )
+            if req_cache_read or req_cache_write:
+                req_lines.append(
+                    f"  Cache:     "
+                    f"read {req_cache_read:,}, "
+                    f"write {req_cache_write:,}"
+                )
+            # Cache hit ratio — what fraction of this
+            # request's prompt input came from cache.
+            # cache_read / prompt_in × 100. Distinct from
+            # ROI (which compares read against write); this
+            # answers "how much input did we save by
+            # caching". Suppressed when prompt_in is zero
+            # (avoid divide-by-zero) or when there were no
+            # reads (the row would just say 0.0%, no signal).
+            if prompt_in > 0 and req_cache_read > 0:
+                hit_pct = (
+                    req_cache_read / prompt_in
+                ) * 100
+                req_lines.append(
+                    f"  Cache hit: {hit_pct:>9.1f}%"
+                )
+            cost = request_usage.get("cost_usd")
+            if cost is not None:
+                try:
+                    req_lines.append(
+                        f"  Cost:      ${float(cost):.4f}"
+                    )
+                except (TypeError, ValueError):
+                    pass
+            print("\n".join(req_lines), file=sys.stderr)
+
+    # Section 4: Session Totals — cumulative across all
+    # requests since the session started.
     input_tok = st.get("input_tokens", 0)
     output_tok = st.get("output_tokens", 0)
-    if input_tok or output_tok:
-        usage_lines.append(
-            f"Session prompt: {input_tok:,} in, "
-            f"{output_tok:,} out"
-        )
     cache_read = st.get("cache_read_tokens", 0)
     cache_write = st.get("cache_write_tokens", 0)
-    if cache_read or cache_write:
-        usage_lines.append(
-            f"Session cache: read: {cache_read:,}, "
-            f"write: {cache_write:,}"
-        )
-    session_total = sum(
-        v for v in st.values() if isinstance(v, (int, float))
-    )
-    if session_total:
-        usage_lines.append(f"Session total: {session_total:,}")
-    print("\n".join(usage_lines), file=sys.stderr)
+    reasoning_tok = st.get("reasoning_tokens", 0)
+    if input_tok or output_tok:
+        sess_lines = ["Session Totals:"]
+        sess_lines.append(f"  In:        {input_tok:>10,}")
+        sess_lines.append(f"  Out:       {output_tok:>10,}")
+        if reasoning_tok > 0:
+            sess_lines.append(
+                f"  Reasoning: {reasoning_tok:>10,}"
+            )
+        if cache_read or cache_write:
+            sess_lines.append(
+                f"  Cache:     "
+                f"read {cache_read:,}, "
+                f"write {cache_write:,}"
+            )
+        # Cache hit ratio — cumulative cache_read /
+        # input_tokens × 100. What fraction of session
+        # input came from cache. Same as the HUD header
+        # badge's provider_cache_rate, surfaced explicitly
+        # here so the terminal output stands alone without
+        # the operator needing to look at the webapp.
+        # Suppressed when input_tok is zero or no reads.
+        if input_tok > 0 and cache_read > 0:
+            hit_pct = (cache_read / input_tok) * 100
+            sess_lines.append(
+                f"  Cache hit: {hit_pct:>9.1f}%"
+            )
+        # Cache ROI — return on cache-write investment.
+        # ((read / write) - 1) × 100 expresses "how many
+        # extra tokens has each written token paid back?".
+        # 0% = broke even, 100% = paid back twice, negative
+        # = haven't fully amortised the write cost yet.
+        # Only meaningful when cache_write > 0.
+        if cache_write > 0:
+            roi_pct = (
+                (cache_read / cache_write) - 1
+            ) * 100
+            sess_lines.append(
+                f"  Cache ROI: {roi_pct:>+9.1f}%"
+            )
+        sess_cost = st.get("cost_usd", 0.0)
+        priced = st.get("priced_request_count", 0)
+        unpriced = st.get("unpriced_request_count", 0)
+        if priced > 0 or unpriced > 0:
+            try:
+                cost_val = float(sess_cost)
+            except (TypeError, ValueError):
+                cost_val = 0.0
+            if priced > 0 and unpriced == 0:
+                sess_lines.append(
+                    f"  Cost:      ${cost_val:.4f}"
+                )
+            elif priced > 0 and unpriced > 0:
+                sess_lines.append(
+                    f"  Cost:      ${cost_val:.4f} "
+                    f"(partial, {unpriced} unpriced)"
+                )
+            else:
+                sess_lines.append(
+                    f"  Cost:      — ({unpriced} unpriced)"
+                )
+        print("\n".join(sess_lines), file=sys.stderr)
 
     # Section 3: Tier Changes
     # Merge tier transitions (changes) and fresh tracker

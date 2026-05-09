@@ -7,6 +7,11 @@ The chat panel renders conversation messages, handles streaming display, manages
 - User cards may include image thumbnails
 - Assistant cards render markdown with syntax highlighting, math, edit blocks, and file mentions
 - System event cards (commit, reset, mode switch) use distinct styling — dashed border, muted color, "System" role label
+### Finish-Reason Badge Placement
+- Severity-split between top and bottom of the assistant card
+- Natural completions (`stop`, `end_turn`) — muted green ✓ badge in the bottom-left of the card, paired with the hover toolbar; fades in on mouse-enter alongside the copy/paste icons. Positive confirmation that the stream ended cleanly without competing with role label or body content for attention
+- Error/warning reasons (`length` truncation, `content_filter`, `tool_calls`, `function_call`, unknown) — badge inline with the role label at the top of the card, always visible. Users notice these before reading the body
+- Card reserves extra bottom padding when a natural badge is present so the absolute-positioned badge doesn't overlap the last line of content
 ## Streaming Display
 ### Chunk Processing
 - Chunks coalesced per animation frame — a pending variable stores the latest content; the frame callback reads and clears it before updating the streaming content property
@@ -205,16 +210,61 @@ The transport never assumes a singleton stream — every chunk carries the exact
 
 Two visual groups separated by a thin vertical divider:
 
-- Search group — mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation
+- Search group — search-mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation, and the context-mode controls (primary mode + cross-reference) at the right end
 - Session group — new session, open history browser (hidden in file search mode)
 
-Git action buttons (copy diff, commit, reset) and the review toggle live in the dialog header, not the chat action bar. See [shell.md](shell.md).
+Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
 
 ### Dual-Mode Search
 
 - 💬 default — message search against raw message content
 - 📁 toggle — file search via repo grep
 - See [search.md](search.md) for the full search behavior
+
+## Mode Toggle
+
+The primary-mode segmented control and cross-reference overlay toggle sit at the right end of the search bar, after the match-navigation arrows. Three controls total — two for the primary mode, one for cross-reference.
+
+### Tab-Scoped Visibility
+
+- Rendered only when the active tab is `main` — agent tabs hide the controls entirely
+- Agents inherit the mode from their parent scope at spawn time and cannot switch independently in the current backend; hiding the UI on agent tabs avoids implying a capability that doesn't exist
+- When the backend gains per-agent mode (a future commit), the controls render on every tab and the read/write paths thread through `agent_tag`. The UI gate moves at that time; the controls themselves are unchanged
+
+### Primary Mode (Segmented)
+
+- Two mutually-exclusive icon buttons — `💻` (code mode) and `📄` (document mode)
+- Active button shows accent-coloured background and pressed-state border
+- Clicking the inactive button calls the mode-switch RPC
+- No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
+- Disabled when RPC isn't connected
+- Tooltips disclose the full mode name and what each mode does
+
+### Cross-Reference (Overlay Toggle)
+
+- Single icon button — `🔀`
+- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
+- Clicking calls the set-cross-reference RPC with the inverted current state
+- Disabled under the same conditions as the primary mode buttons
+- Tooltip switches between "Cross-reference ON — both indexes active (click to disable)" and "Cross-reference OFF — click to add the other index alongside" depending on state
+
+### State Synchronization
+
+- Initial state hydrated from the backend's `get_current_state` snapshot on RPC ready
+- Updated via `mode-changed` window events broadcast by the backend
+- When a `mode-changed` event reports a primary mode different from the current UI state, the cross-reference flag is reset to false locally — mirrors the backend's reset-on-switch behaviour per [modes.md](../3-llm/modes.md)
+- RPC call failures surface as toasts; restricted errors (non-localhost caller) use warning type rather than error
+
+### Feedback
+
+- The state flip happens via the `mode-changed` broadcast, not optimistically on RPC success — prevents the UI from racing the broadcast when multiple clients are connected
+- Failed RPCs (mode switch rejected, cross-reference toggle rejected) surface as toasts naming the reason
+
+### Non-Localhost Clients
+
+- Controls are rendered and clickable for every participant — the frontend has no signal distinguishing localhost from remote callers
+- The backend's `_check_localhost_only` guard rejects mode-switch and cross-reference RPCs from non-localhost callers with a `restricted` error; the chat panel surfaces this as a warning toast
+- `mode-changed` broadcasts update the UI state on every client (including non-localhost) so they passively follow the host's authoritative mode
 
 ### Review Status Bar
 

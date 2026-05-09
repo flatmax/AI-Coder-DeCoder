@@ -77,6 +77,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable collaboration mode (bind all interfaces, admission-gated)",
     )
+    parser.add_argument(
+        "--experimental",
+        action="store_true",
+        help="Unlock experimental features in the UI (e.g. agentic coding)",
+    )
     return parser
 
 
@@ -131,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         preview=args.preview,
         verbose=args.verbose,
         collab=args.collab,
+        experimental=args.experimental,
     ))
     return 0
 

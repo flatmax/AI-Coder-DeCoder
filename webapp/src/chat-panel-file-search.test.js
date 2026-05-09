@@ -22,7 +22,7 @@ import {
 } from 'vitest';
 
 import { SharedRpc } from './rpc.js';
-import './chat-panel.js';
+import './chat-panel/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

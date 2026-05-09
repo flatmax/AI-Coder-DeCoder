@@ -204,6 +204,7 @@ async def generate_commit_message(
                 ],
                 stream=False,
                 max_tokens=max_output,
+                timeout=service._config.aux_request_timeout_seconds,
             )
             return response.choices[0].message.content or ""
         except Exception as exc:

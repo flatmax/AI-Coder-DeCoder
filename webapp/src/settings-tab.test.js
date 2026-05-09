@@ -189,7 +189,17 @@ describe('ac-settings-tab agentic toggle', () => {
     });
   });
 
-  describe('toggle interaction', () => {
+  // The agentic-coding card is locked off during early
+  // development — `card.locked = true` in CONFIG_CARDS
+  // and `_EXPERIMENTAL_ENABLED` is false unless the
+  // launcher passed `--experimental` (which sets the
+  // `?experimental=1` URL param read at module load).
+  // In the test environment the param is absent, so the
+  // lock is active and clicks no-op at the handler level.
+  // These tests verify the lock is enforced; when the
+  // feature unlocks, this suite gets inverted to test
+  // the unlocked toggle mechanism.
+  describe('lock enforcement (locked=true, experimental off)', () => {
     let saves;
     let state;
 
@@ -209,7 +219,6 @@ describe('ac-settings-tab agentic toggle', () => {
         },
         'Settings.save_config_content': (key, content) => {
           saves.push({ key, content });
-          // Update "disk" state so next read sees the write.
           if (key === 'app') {
             try {
               state = JSON.parse(content);
@@ -222,126 +231,60 @@ describe('ac-settings-tab agentic toggle', () => {
       });
     });
 
-    it('flips the switch on click (off → on)', async () => {
+    it('switch is rendered disabled', async () => {
+      const el = mountTab();
+      await settle(el);
+      const sw = getToggleSwitch(el);
+      expect(sw.disabled).toBe(true);
+    });
+
+    it('click does not flip the switch', async () => {
       const el = mountTab();
       await settle(el);
       const sw = getToggleSwitch(el);
       expect(sw.getAttribute('aria-checked')).toBe('false');
-
       sw.click();
       await settle(el);
-
-      expect(sw.getAttribute('aria-checked')).toBe('true');
-      expect(sw.classList.contains('on')).toBe(true);
-    });
-
-    it('writes the new value to app.json', async () => {
-      const el = mountTab();
-      await settle(el);
-      const sw = getToggleSwitch(el);
-      sw.click();
-      await settle(el);
-
-      expect(saves.length).toBe(1);
-      expect(saves[0].key).toBe('app');
-      const parsed = JSON.parse(saves[0].content);
-      expect(parsed.agents.enabled).toBe(true);
-    });
-
-    it('flips back on second click (on → off)', async () => {
-      state = { agents: { enabled: true } };
-      const el = mountTab();
-      await settle(el);
-      const sw = getToggleSwitch(el);
-      expect(sw.getAttribute('aria-checked')).toBe('true');
-
-      sw.click();
-      await settle(el);
-
+      // Still off — the lock guard returned early.
       expect(sw.getAttribute('aria-checked')).toBe('false');
-      const parsed = JSON.parse(saves[0].content);
-      expect(parsed.agents.enabled).toBe(false);
+      expect(sw.classList.contains('on')).toBe(false);
     });
 
-    it('preserves other fields in app.json', async () => {
-      state = {
-        agents: { enabled: false },
-        compaction: { trigger_tokens: 20000 },
-        doc_index: { keyword_model: 'some-model' },
-      };
+    it('click does not write to app.json', async () => {
       const el = mountTab();
       await settle(el);
       const sw = getToggleSwitch(el);
       sw.click();
       await settle(el);
-
-      const parsed = JSON.parse(saves[0].content);
-      expect(parsed.agents.enabled).toBe(true);
-      expect(parsed.compaction.trigger_tokens).toBe(20000);
-      expect(parsed.doc_index.keyword_model).toBe('some-model');
+      expect(saves.length).toBe(0);
     });
 
-    it('creates the agents section if missing', async () => {
-      state = { compaction: { trigger_tokens: 20000 } };
+    it('renders a locked-state note', async () => {
       const el = mountTab();
       await settle(el);
-      const sw = getToggleSwitch(el);
-      sw.click();
-      await settle(el);
-
-      const parsed = JSON.parse(saves[0].content);
-      expect(parsed.agents).toEqual({ enabled: true });
-      expect(parsed.compaction.trigger_tokens).toBe(20000);
-    });
-
-    it('does not re-save while a toggle is in flight', async () => {
-      const el = mountTab();
-      await settle(el);
-      const sw = getToggleSwitch(el);
-      // Two rapid clicks — the second should be dropped
-      // because _togglingKey is set between them.
-      sw.click();
-      sw.click();
-      await settle(el);
-      expect(saves.length).toBe(1);
-    });
-
-    it('shows an error toast on malformed JSON during save', async () => {
-      // Fresh RPC that returns malformed JSON on read —
-      // the toggle-click path can't parse, so it bails
-      // before calling save.
-      SharedRpc.reset();
-      const localSaves = [];
-      publishFakeRpc({
-        'Settings.get_config_info': () => ({}),
-        'Settings.get_config_content': (key) => {
-          if (key === 'app') {
-            return { type: 'app', content: '{broken' };
-          }
-          return { type: key, content: '' };
-        },
-        'Settings.save_config_content': (key, content) => {
-          localSaves.push({ key, content });
-          return { status: 'ok' };
-        },
-      });
-      const el = mountTab();
-      const toastEvents = [];
-      window.addEventListener('ac-toast', (e) => {
-        toastEvents.push(e.detail);
-      });
-      await settle(el);
-      const sw = getToggleSwitch(el);
-      sw.click();
-      await settle(el);
-      expect(localSaves.length).toBe(0); // no save attempted
-      const errorToasts = toastEvents.filter(
-        (t) => t.type === 'error',
+      const note = el.shadowRoot.querySelector(
+        '.toggle-readonly-note',
       );
-      expect(errorToasts.length).toBeGreaterThan(0);
-      expect(errorToasts[0].message.toLowerCase()).toContain(
-        'not valid json',
-      );
+      expect(note).toBeTruthy();
+      // The CONFIG_CARDS entry sets `lockedNote: 'Locked
+      // — feature in early development'`. The exact
+      // wording is the source of truth; the test just
+      // confirms a note renders rather than pinning the
+      // string verbatim (so a copy-edit of the lockedNote
+      // doesn't break this test).
+      expect(note.textContent.trim().length).toBeGreaterThan(0);
+    });
+
+    it('repeated clicks remain inert', async () => {
+      const el = mountTab();
+      await settle(el);
+      const sw = getToggleSwitch(el);
+      sw.click();
+      sw.click();
+      sw.click();
+      await settle(el);
+      expect(saves.length).toBe(0);
+      expect(sw.getAttribute('aria-checked')).toBe('false');
     });
   });
 });

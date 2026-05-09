@@ -15,15 +15,127 @@ Tab labels carry the agent index plus a short summary derived from the spawn blo
 
 The currently-active tab is visually distinguished. Every input affordance on the chat panel (textarea, send button, snippet drawer, file picker bindings) targets the active tab's conversation.
 
+Each tab carries three inline affordances, all invisible by default and fading in on hover / active / focus:
+
+- **📊 Context icon** — leftmost, before the label. Opens the Context overlay scoped to this tab's conversation. Always rendered (Main and every agent), since every conversation has its own breakdown to view. Clicking activates the tab AND switches the dialog to Context; clicking again on the already-active tab still re-opens Context, treating the icon as a "show me Context for this" gesture rather than a state toggle. Placed leftmost so it remains visible even when long agent labels truncate the right edge of the tab.
+- **Streaming indicator** — small pulsing dot between the context icon and the label when the tab has an in-flight stream. Visible on every tab regardless of active state, so users see work happening on tabs they aren't currently viewing.
+- **✕ Close icon** — rightmost, agent tabs only. Main is never closable. Closes the tab and frees the backend scope.
+
+The 📊 icon dispatches a bubbling `request-dialog-tab` event with `{tab: 'context'}` which the app shell catches and routes through `_switchTab`. The Context tab listens independently for `active-tab-changed` — that's the channel that drives its rescope, so the icon click and a normal tab click produce identical Context content for that tab.
+
+## Status LEDs
+
+The main tab's header carries a compact row of status LEDs — one dot for the main conversation plus one per agent tab currently in the strip. The LEDs are a derived view of conversation state, giving the user ambient awareness without forcing them to scan tab labels.
+
+The main-tab LED is always present (the row exists whenever the chat panel is mounted) and follows the same colour rules as agent LEDs. Its presence regardless of whether agents have spawned means the LED row is the canonical place to look for "which conversation is active right now" — clicking the main LED switches focus back to the main tab the same way an agent LED activates its tab.
+
+Each LED has three states:
+
+- **Flashing cyan** — the agent's stream is active. The agent's request ID is in the chat panel's active-agent-streams set; equivalently, `streamComplete` has not yet fired for this agent's current run.
+- **Solid green** — the agent's last `streamComplete` arrived without an `error` field, and every `EditResult` in the result reports success. The agent finished its work cleanly.
+- **Solid red** — at least one of: the agent's last `streamComplete` carried an `error` field, any `EditResult` has `status="failed"` (anchor not found, ambiguous, binary file, path traversal), or the agent threw during assimilation. The agent needs the user's attention.
+
+LED lifetime tracks the agent tab's lifetime exactly. When `agentsSpawned` adds a tab, the corresponding LED appears in flashing cyan. When the user closes the tab (close affordance → backend `closeAgentContext`), the LED disappears with it. There is no separate acknowledgement gesture — closing the tab is the acknowledgement.
+
+Across turns within a session, an agent tab persists if the user does not close it (per [Tab Lifetime](#tab-lifetime)). Its LED reflects the *latest* event for that agent: a green LED from turn 1 returns to flashing cyan when the orchestrator re-uses the same agent ID in turn 3, then resolves to green or red based on the new turn's outcome. A red LED from a previous turn stays red until either the agent re-runs (state updates to whatever the new run produces) or the tab is closed.
+
+### Click and hover
+
+- Clicking a LED switches the active tab to that agent's tab — the same effect as clicking the tab itself, but the LED row is more compact and lives where the user's eyes already are when chatting in main. The tab strip also scrolls to reveal that tab's button if it was offscreen, so the LED row works as a navigation primitive even when many agents have pushed the active tab beyond the visible scroll window. Already-visible tabs do not jiggle — the scroll is a no-op when the target button is already on-screen.
+- Hovering a LED shows a tooltip with the agent's mode and current-state reason:
+  - Cyan: `<agent-id> (<mode>): running`
+  - Green: `<agent-id> (<mode>): completed (N edits applied)`
+  - Red: `<agent-id> (<mode>): <diagnostic>` — the failure reason from the failed `EditResult`, the streaming `error` field, or `assimilation failed` for sibling exceptions
+
+`<mode>` is one of `code`, `doc`, `code+xref`, `doc+xref` — matching the orchestrator's per-agent state descriptor (see [parallel-agents.md — Per-agent state descriptor](../7-future/parallel-agents.md#per-agent-state-descriptor)). The tooltip is what turns a red LED from "something is wrong, go look" into "here is what is wrong, decide whether to click." It is essential for red but useful in all states.
+
+### Layout
+
+The LED strip sits below the chat panel's input textarea, above the compaction-capacity bar. Dots are centered horizontally, sized to be unobtrusive (small enough that 8-10 fit on one line without wrapping; the strip wraps to a second line if necessary). No background, no border — the strip floats over the input area's surface so it costs no extra vertical real estate compared to a separate container.
+
+The strip is always visible while the chat panel is mounted — at minimum it carries the main-tab LED. With no agent tabs, the strip shows exactly one dot reflecting main-tab state. Dots reorder as agent tabs spawn and close; tab insertion order is preserved (main first, then agents in spawn order).
+
 ## Tab Lifetime
 
-Three events end a tab's life:
+Four events end a tab's life:
 
 - **New agentic turn in the main tab.** The user sends a new message to the main LLM that triggers a fresh decomposition. The current turn's agent tabs fade out of the strip; their archives persist on disk. Accessible by scrolling the main chat back to the previous turn and interacting with it via the history browser (see [Historical Turns](#historical-turns) below).
 - **Explicit close.** Each agent tab has a close affordance. Closing an agent tab discards its `ContextManager` from memory (freeing any cached symbol map data it held, plus its stability tracker state). The archive file stays on disk. Equivalent to killing that agent — a subsequent LLM call for that tab is not possible because the ContextManager is gone. The user can still read the archive via history browsing.
+- **`new_session` on the main tab.** Clicking the new-session button (or invoking the corresponding RPC) closes every live agent in addition to clearing main's history. The backend frees each agent's ContextManager, stability tracker, and file context, then broadcasts `agentClosed {agent_id}` per agent before broadcasting `sessionChanged`. The frontend's `agent-closed` window-event handler routes each id through the same close path explicit-close uses — the tab disappears, per-tab UI state frees, and the archive stays on disk. From the user's perspective, "new session" is a single gesture that resets main and dismisses the entire agent team. Archives remain browsable via history.
+
+  This is asymmetric with main's own `new_session` behavior: main's `ContextManager` survives (only its history clears), while agents' ContextManagers are torn down entirely. The asymmetry reflects the asymmetry of intent — main is the user's primary conversation surface and persists for the application's lifetime; agents are turn-scoped collaborators the user spun up for a specific decomposition. A user starting a new session is most often signalling "I'm done with what these agents were helping me with"; preserving the team would force a follow-up close gesture per agent.
 - **Server shutdown.** All in-memory state is lost regardless of tab type. Archives on disk survive; the next server startup can show them via history browsing.
 
-An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive and no new agentic turn has started. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
+An agent tab that finished streaming without being closed stays live indefinitely. The user can reply to it minutes, hours, or days later — as long as the session is alive, no new agentic turn has started, and `new_session` has not been clicked. Provider caching benefits accrue because the same ContextManager + StabilityTracker drive every subsequent call.
+
+### Refresh and Reconnect
+
+A browser refresh or WebSocket reconnect destroys and rebuilds the chat panel without ending the backend session. The backend's `_agent_contexts` registry is in-memory, scoped to the server process, and unaffected by frontend reload. Per [parallel-agents.md § Agent lifetime](../7-future/parallel-agents.md#agent-lifetime), live agents are part of the team until application exit; refresh is not application exit.
+
+The chat panel rehydrates live tabs at the same moment it loads main-conversation history:
+
+- On `onRpcReady` (initial connect or post-reconnect), the panel calls `list_live_agents()` (see [parallel-agents.md § Backend RPCs](../7-future/parallel-agents.md#backend-rpcs)). The response carries one entry per registered agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}`.
+- For each entry, the panel creates a writable tab keyed by the agent's `id` — the same key that would be used had the tab been created by an `agentsSpawned` event during the spawn turn. Tab creation is idempotent, so a subsequent `agentsSpawned` for the same id is a no-op.
+- For each tab, the panel calls `get_agent_history(agent_id)` to populate the message list. This returns the agent's full reconstructed conversation from its `ContextManager` — for session-reconstructed agents, this is the concatenation across every turn the agent participated in, not just the latest one. The live `ContextManager` is the source of truth for conversation content from this point forward; new messages append normally.
+- Tabs are **writable**, not read-only. The distinction from historical tabs (see [Historical Turns](#historical-turns)) is that live tabs target a `ContextManager` that is still alive on the backend. The user can reply, grant files via the picker while the tab is active, or close the tab to kill the agent — the same affordances available before refresh.
+
+What is genuinely lost across refresh:
+
+- Per-tab input draft (textarea content)
+- Per-tab scroll position within the message list
+- In-flight streaming buffer for any stream active at refresh time — backend continues streaming to the now-disconnected websocket; on reconnect, the partial response is recoverable only via the archive once `streamComplete` lands. The reconstructed tab opens at the bottom of the archive's last persisted message; the in-flight tail is not replayed
+- LED state computed from the most recent `streamComplete` event — recomputed from archive content on rehydration: green if the last persisted assistant message has no error metadata and every persisted edit succeeded, red otherwise. Cyan (active stream) is never recovered across refresh because the frontend cannot subscribe mid-stream
+
+What is preserved:
+
+- Agent identity (`id`)
+- Agent mode and cross-reference flag
+- Agent's full conversation as persisted to the archive
+- Agent's file context, file selection, stability tracker, and provider-cache warmth (all backend-resident)
+- The agent's tab badge if it had multiple iterations within the same turn (computed from archive content)
+
+If `list_live_agents()` returns an empty list (no agents currently registered), the chat panel renders only the Main tab. This is indistinguishable from a fresh session that has never spawned agents.
+
+### Session Load
+
+Loading a previous session via the history browser is a distinct rehydration trigger from refresh / reconnect. Refresh / reconnect rehydrates against the *current* backend session — agents already in `_agent_contexts` materialise as tabs. Session load *changes* the backend's notion of which session is current, then reconstructs the agents that participated in that session as new live scopes.
+
+The backend RPC `load_session_into_context(session_id)` does this work end-to-end (see [history.md § Session-Load Reconstruction](../3-llm/history.md#session-load-reconstruction)). Briefly:
+
+1. Main's history clears and reloads from `history.jsonl` filtered to the target session.
+2. The backend walks the loaded records for `agent_blocks` entries and groups them by agent id (latest record per id wins on retask).
+3. For each surviving id, the backend reads every relevant turn's archive, concatenates the messages chronologically, replays mode-change system events to arrive at the agent's final mode, builds a fresh `ContextManager` + `StabilityTracker`, and registers in `_agent_contexts`.
+4. `sessionChanged` fires first (the chat panel resets to the new session's main history). `agentsRehydrated` fires next, carrying only the just-reconstructed agent ids — agents already alive from the pre-load session are not re-broadcast.
+5. The frontend's `agents-rehydrated` handler calls `rehydrateLiveAgents(panel)` — the same path used after `onRpcReady` for refresh / reconnect. Tab creation is idempotent; existing tabs short-circuit.
+
+From the user's perspective, loading an old session restores not just the conversation but the team that was helping with it. Reconstructed agents are fully writable — the user can reply in their tabs, the orchestrator can retask them by id, the LED row reflects their state. Provider cache starts cold (the saved tracker's tier assignments aren't persisted; rebuilding from scratch is the only option), but everything else works.
+
+What does NOT survive session load:
+
+- Per-agent file selection (selections are ephemeral; even refresh today loses them)
+- Per-agent excluded-files state (same)
+- Provider-cache warmth (the rebuilt tracker has no tier placements)
+- Frontend per-tab UI state (input draft, scroll position) — same loss as refresh
+
+### Backend RPCs
+
+The chat panel consumes a small RPC surface for agent-related work:
+
+- `list_live_agents()` — one entry per registered agent: `{id, mode, cross_reference_enabled, model, turn_id, agent_idx}`. Called on `onRpcReady` for rehydration. Empty list when no agents are registered.
+- `get_agent_history(agent_id)` — full reconstructed conversation for a live agent, by reading from its ContextManager. Used to populate live tabs after refresh, reconnect, or session load. Returns the concatenation across every turn the agent participated in (which matters for session-reconstructed agents that span multiple turns). Empty list for unknown ids.
+- `get_turn_archive(turn_id)` — per-agent conversations for a single past turn, read from `.ac-dc4/agents/{turn_id}/`. Used for historical-tab population when scrolling the main chat back. Empty list when the directory doesn't exist.
+- `close_agent_context(agent_id)` — frees the agent's ContextManager, tracker, and file_context. Idempotent on unknown / already-closed ids. Localhost-only. Archive on disk survives.
+- `set_agent_selected_files(agent_id, files)` — per-agent file selection. Localhost-only. Filters non-existent paths against the repo. No `filesChanged` broadcast (per-tab state isn't shared across clients).
+- `set_agent_excluded_index_files(agent_id, files)` — per-agent index-exclusion list. Localhost-only. Drops matching `symbol:` / `doc:` / `file:` entries from the agent's tracker.
+- `switch_agent_mode(agent_id, mode)` — change an agent's mode (one of `code`, `doc`, `code+xref`, `doc+xref`). Localhost-only. Rejected mid-stream with `{error: "agent stream active"}`. Rebuilds the agent's StabilityTracker (every tier prefix invalidated by the new prompt + index combination), writes a mode-change system event to the archive (so session-load reconstruction can replay it), and broadcasts `agentModeChanged`.
+- `set_agent_cross_reference(agent_id, enabled)` — toggle cross-reference for an agent without changing primary mode. Same shape as `switch_agent_mode`: mid-stream rejection, tracker rebuild, archive event, broadcast.
+
+Server-push events the chat panel listens for:
+
+- `agentsSpawned {turn_id, parent_request_id, agent_blocks}` — fired immediately after the orchestrator's response is parsed and BEFORE child streams dispatch. Frontend creates tabs with their child request IDs pre-populated so chunks route correctly. See [streaming.md § Agents Spawned Event](../3-llm/streaming.md#agents-spawned-event) for the ordering invariant.
+- `agentsRehydrated {agent_ids}` — fired after `sessionChanged` on session load. Frontend re-runs `rehydrateLiveAgents` to materialise tabs for the just-reconstructed agents.
+- `agentClosed {agent_id}` — fired one per agent when `new_session` runs (before `sessionChanged`), or as a confirmation when the user closes an agent tab and the backend frees the scope. Frontend removes the tab and frees per-tab state.
+- `agentModeChanged {agent_id, mode, cross_reference_enabled}` — fired after a successful `switch_agent_mode` or `set_agent_cross_reference`. Frontend updates `_tabModes` and re-renders the toggle.
 
 ## Interaction
 
@@ -146,6 +258,7 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 
 - The chat panel is one component. Multiple tabs are additional per-tab state slots, not duplicated components.
 - Tab switching is pure UI — no backend notification, no tracker invalidation, no cache eviction.
+- Tab enumeration is NOT pure UI. The set of live tabs at any moment is a function of the backend's `_agent_contexts` registry, populated via `agentsSpawned` events during spawn turns and via `list_live_agents()` on `onRpcReady` after refresh or reconnect. The frontend never invents tabs and never persists tabs across refresh — it always asks the backend.
 - The Main tab's identifier is always `"main"`. Agent tab identifiers are the agent's LLM-chosen id directly. No overlap (the literal `"main"` is reserved), no parsing required to recover identity from the tab id.
 - Streaming is routed by request ID. A chunk's destination tab is determined before the chunk is applied — switching tabs mid-stream never routes chunks to the wrong conversation.
 - File picker selection is per-tab. Changing a tab's selection never affects another tab's ContextManager.
@@ -154,3 +267,6 @@ A URL parameter `?turn=<turn_id>` scrolls the main chat to that turn and trigger
 - The main LLM's synthesis is not auto-triggered. Users explicitly request it when they've heard enough from the agents.
 - Historical tabs are read-only. Past turns' ContextManagers are not reconstructed; the archive is sufficient for reading but not for continuing the conversation.
 - Turns without agents render exactly as today's chat. The tab strip still exists but contains only the Main tab.
+- The LED row in the main tab header is a derived view of conversation tab state. It always carries one LED for the main tab plus one per live agent tab. Closing an agent tab removes its LED; the main-tab LED is permanent for the chat panel's lifetime.
+- LED state is a pure function of the most recent `streamComplete` event for the agent plus `streamChunk` activity. No separate state machine, no acknowledgement gesture beyond closing the tab, no auto-fade or "seen" state.
+- Clicking a LED activates its tab and scrolls the tab strip to make that tab's button visible. The activation primitive is shared with clicking the tab directly; the auto-scroll is specific to the LED entry point because users reaching for a LED have no guarantee the tab itself is visible.

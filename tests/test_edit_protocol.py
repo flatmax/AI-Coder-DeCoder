@@ -136,9 +136,36 @@ class TestIsFilePath:
     def test_known_extensionless_rakefile(self) -> None:
         assert _is_file_path("Rakefile") is True
 
-    def test_unknown_extensionless_rejected(self) -> None:
-        """Random words aren't paths."""
-        assert _is_file_path("something") is False
+    def test_extensionless_license_accepted(self) -> None:
+        """LICENSE is a bare-token candidate.
+
+        Pinned regression: the old implementation used a
+        hardcoded allowlist (Makefile, Dockerfile, ...) that
+        omitted conventional metadata files like LICENSE,
+        README, AUTHORS. An LLM emitting ``LICENSE\\n🟧🟧🟧 EDIT
+        \\n...\\n🟨🟨🟨 REPL\\n...\\n🟩🟩🟩 END`` would have its block
+        silently dropped because LICENSE wasn't in the list.
+
+        The current implementation accepts any single-token
+        word as a path candidate; the state machine's
+        EDIT-marker lookahead does the actual disambiguation.
+        """
+        assert _is_file_path("LICENSE") is True
+
+    def test_extensionless_readme_accepted(self) -> None:
+        assert _is_file_path("README") is True
+
+    def test_extensionless_word_accepted(self) -> None:
+        """Bare-token branch accepts any single word.
+
+        ``something`` on its own is a path candidate as far as
+        ``_is_file_path`` is concerned. The parser's
+        EDIT-marker lookahead is what decides whether the
+        candidate is a real path or stray prose — see
+        ``TestPathDetectionIntegration`` for the integrated
+        behaviour.
+        """
+        assert _is_file_path("something") is True
 
     def test_bare_dot_rejected(self) -> None:
         assert _is_file_path(".") is False
@@ -443,6 +470,39 @@ class TestPathDetectionIntegration:
         assert len(result.blocks) == 1
         assert result.blocks[0].file_path == "src/c.py"
 
+    def test_bare_token_followed_by_edit_treated_as_path(self) -> None:
+        """A bare-word line directly before EDIT is the file path.
+
+        Pins the lookahead-disambiguation contract: if the LLM
+        emits ``LICENSE\\n🟧🟧🟧 EDIT\\n...``, the parser commits
+        ``LICENSE`` as the file path. The bare-token branch of
+        ``_is_file_path`` plus the state machine's EDIT lookahead
+        is what makes extensionless filenames like LICENSE,
+        README, AUTHORS work without a hardcoded allowlist.
+        """
+        text = _block("LICENSE", "old", "new")
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "LICENSE"
+
+    def test_bare_token_in_prose_recovers(self) -> None:
+        """A bare word in prose (no EDIT after) is harmless.
+
+        The state machine briefly enters EXPECT_EDIT then
+        resets to SCANNING when the next non-blank line isn't
+        an EDIT marker. No spurious blocks; no state stuck on
+        the wrong path.
+        """
+        text = (
+            "Done.\n"
+            "Now I'll edit the file:\n"
+            "\n"
+            + _block("src/foo.py", "old", "new")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "src/foo.py"
+
     def test_path_then_another_path_then_edit(self) -> None:
         """Path followed by another path: second wins."""
         text = (
@@ -685,6 +745,11 @@ class TestAgentBlockShape:
         b = AgentBlock(id="a", task="t")
         assert b.completed is True
 
+    def test_default_mode_empty_string(self) -> None:
+        """mode defaults to empty — meaning inherit at spawn time."""
+        b = AgentBlock(id="a", task="t")
+        assert b.mode == ""
+
     def test_default_extras_empty_dict(self) -> None:
         """extras defaults to a fresh empty dict per instance."""
         b1 = AgentBlock(id="a", task="t")
@@ -693,6 +758,126 @@ class TestAgentBlockShape:
         # Mutating one doesn't affect the other — separate
         # default dicts, not a shared reference.
         assert b2.extras == {}
+
+
+class TestAgentBlockMode:
+    """The optional ``mode`` field — parsing and validation."""
+
+    def test_omitted_mode_is_empty(self) -> None:
+        """No ``mode:`` line → empty string, valid block."""
+        text = _agent_block("id: a\ntask: t\n")
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.mode == ""
+        assert block.valid is True
+
+    def test_valid_mode_code(self) -> None:
+        text = _agent_block("id: a\ntask: t\nmode: code\n")
+        result = parse_text(text)
+        block = result.agent_blocks[0]
+        assert block.mode == "code"
+        assert block.valid is True
+
+    def test_valid_mode_doc(self) -> None:
+        text = _agent_block("id: a\ntask: t\nmode: doc\n")
+        result = parse_text(text)
+        assert result.agent_blocks[0].mode == "doc"
+
+    def test_valid_mode_code_xref(self) -> None:
+        text = _agent_block(
+            "id: a\ntask: t\nmode: code+xref\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert block.mode == "code+xref"
+        assert block.valid is True
+
+    def test_valid_mode_doc_xref(self) -> None:
+        text = _agent_block(
+            "id: a\ntask: t\nmode: doc+xref\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert block.mode == "doc+xref"
+        assert block.valid is True
+
+    def test_unknown_mode_marks_invalid(self) -> None:
+        """Unrecognised mode value → valid=False.
+
+        Pinned so a typo or hallucinated mode string from
+        the LLM (``mode: typescript``, ``mode: pdf``)
+        surfaces as a parser-level malformed block rather
+        than silently spawning an agent in the
+        orchestrator's default mode.
+        """
+        text = _agent_block(
+            "id: a\ntask: t\nmode: typescript\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert block.mode == "typescript"
+        assert block.valid is False
+
+    def test_blank_mode_value_is_inherit(self) -> None:
+        """``mode:`` with empty value → empty string, valid.
+
+        ``mode:`` followed by nothing (or whitespace only)
+        is the same as omitting the field — inherit from
+        the orchestrator at spawn time.
+        """
+        text = _agent_block("id: a\ntask: t\nmode:   \n")
+        block = parse_text(text).agent_blocks[0]
+        assert block.mode == ""
+        assert block.valid is True
+
+    def test_mode_does_not_land_in_extras(self) -> None:
+        """``mode`` is a recognised field, not an extra."""
+        text = _agent_block(
+            "id: a\ntask: t\nmode: code\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert "mode" not in block.extras
+
+    def test_mode_field_does_not_terminate_task(self) -> None:
+        """``mode`` after multi-line ``task`` works correctly.
+
+        Because ``mode`` is in the known-fields allowlist,
+        it terminates the preceding ``task`` field as
+        intended (it's a structured field, not a markdown
+        heading inside prose).
+        """
+        text = _agent_block(
+            "id: a\n"
+            "task: line one\n"
+            "line two of the task\n"
+            "mode: code\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert block.task == "line one\nline two of the task"
+        assert block.mode == "code"
+
+    def test_invalid_mode_preserves_id_and_task(self) -> None:
+        """An invalid mode shouldn't corrupt the other fields."""
+        text = _agent_block(
+            "id: agent-0\n"
+            "task: do something\n"
+            "mode: bogus\n"
+        )
+        block = parse_text(text).agent_blocks[0]
+        assert block.id == "agent-0"
+        assert block.task == "do something"
+        assert block.mode == "bogus"
+        assert block.valid is False
+
+    def test_mode_streaming_split(self) -> None:
+        """Per-char streaming with mode parses correctly."""
+        parser = EditParser()
+        full = _agent_block(
+            "id: a\ntask: t\nmode: doc+xref\n"
+        )
+        for ch in full:
+            parser.feed(ch)
+        result = parser.finalize()
+        block = result.agent_blocks[0]
+        assert block.mode == "doc+xref"
+        assert block.valid is True
 
 
 class TestAgentBlockParsing:

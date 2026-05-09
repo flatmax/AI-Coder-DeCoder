@@ -49,6 +49,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.agent_factory import build_agent_context_manager
+from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import AgentBlock
 from ac_dc.llm._types import ConversationScope
 from ac_dc.stability_tracker import StabilityTracker
@@ -57,6 +58,54 @@ if TYPE_CHECKING:
     from ac_dc.llm_service import LLMService
 
 logger = logging.getLogger("ac_dc.llm_service")
+
+
+# ---------------------------------------------------------------------------
+# Mode-string resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_agent_mode(
+    block_mode: str,
+    parent_mode: Mode,
+    parent_cross_ref: bool,
+) -> tuple[Mode, bool]:
+    """Resolve an agent's ``(Mode, cross_ref)`` from its block.
+
+    Per ``specs4/7-future/parallel-agents.md`` § "Agent-spawn
+    block format":
+
+    - Empty ``block_mode`` → inherit the orchestrator's
+      current mode (both axes).
+    - One of the four valid mode strings → flatten back into
+      ``(Mode, bool)``.
+
+    The parser already validated the value (commit 1) so any
+    non-empty string we see here is one of the four; an
+    invalid string would have been flagged ``valid=False``
+    upstream and filtered out by ``filter_dispatchable_agents``
+    before reaching this code.
+
+    A defensive ``ValueError`` for unrecognised strings stays
+    in place anyway — if the validation pipeline is ever
+    bypassed (test-only construction of an AgentBlock with a
+    bad mode), failing loudly here is better than silently
+    inheriting parent mode.
+    """
+    if not block_mode:
+        return parent_mode, parent_cross_ref
+    if block_mode == "code":
+        return Mode.CODE, False
+    if block_mode == "doc":
+        return Mode.DOC, False
+    if block_mode == "code+xref":
+        return Mode.CODE, True
+    if block_mode == "doc+xref":
+        return Mode.DOC, True
+    raise ValueError(
+        f"Unrecognised agent mode {block_mode!r}; expected one "
+        f"of '', 'code', 'doc', 'code+xref', 'doc+xref'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,33 +180,55 @@ async def spawn_agents_for_turn(
     """Fan out N agents under a single user turn.
 
     Each block has an LLM-chosen ``id`` (e.g.
-    ``"frontend-chat"``). The id is the registry key — re-using
-    a known id retasks an existing agent (preserving its
-    ContextManager, file context, tracker, and identity);
-    a new id spawns a fresh agent. See
-    :meth:`LLMService._spawn_agents_for_turn` for the full
-    prose.
+    ``"frontend-chat"``). The id is the registry key. The
+    dispatch on each block:
 
-    Each child request ID follows
-    ``{parent}-agent-{NN:02d}`` where NN is the block's
-    positional index — used only for stream routing on
-    the frontend, not for identity. All tasks run
-    concurrently via :func:`asyncio.gather` with
-    ``return_exceptions=True``. After gathering,
+    - **Hit + mode matches** — retask. Reuse the existing
+      scope; the task arrives as the next user message in
+      the agent's existing conversation. ContextManager,
+      file context, stability tracker, archival sink (with
+      its baked-in ``agent_idx``) are all preserved. Provider
+      cache stays warm.
+    - **Hit + mode mismatches** — skip with a warning. The
+      existing agent stays in its current mode; the
+      orchestrator's malformed decomposition is surfaced via
+      the log line. The agent isn't started for this turn.
+    - **Miss** — fresh spawn via :func:`build_agent_scope`.
+      A new ContextManager + tracker is constructed and
+      registered; the task drives the agent's first turn.
+
+    Each child request ID follows ``{parent}-agent-{NN:02d}``
+    where NN is the block's positional index in this turn's
+    spawn list — used only for stream routing on the
+    frontend, not for identity. The on-disk archive file
+    (``agent-NN.jsonl``) is keyed by the agent's ORIGINAL
+    ``agent_idx`` from its first spawn (baked into the
+    archival sink closure), so retasked agents continue to
+    write to the same archive file across turns.
+
+    All tasks run concurrently via :func:`asyncio.gather`
+    with ``return_exceptions=True``. After gathering,
     :func:`assimilate_agent_changes` folds per-agent file
     changes into the parent.
+
+    Per ``specs4/7-future/parallel-agents.md`` § "Agent
+    Reuse by ID".
     """
     if not agent_blocks:
         return
     tasks: list[asyncio.Task[Any]] = []
     for agent_idx, block in enumerate(agent_blocks):
-        agent_scope = build_agent_scope(
+        agent_scope = _resolve_or_spawn_agent_scope(
             service,
             block=block,
             agent_idx=agent_idx,
             parent_scope=parent_scope,
             turn_id=turn_id,
         )
+        if agent_scope is None:
+            # Mode-conflict skip. Logged inside the resolver.
+            # The block doesn't reach the LLM this turn.
+            continue
         child_request_id = (
             f"{parent_request_id}-agent-{agent_idx:02d}"
         )
@@ -184,6 +255,94 @@ async def spawn_agents_for_turn(
     await assimilate_agent_changes(
         service, agent_results, parent_scope
     )
+
+
+def _resolve_or_spawn_agent_scope(
+    service: "LLMService",
+    *,
+    block: AgentBlock,
+    agent_idx: int,
+    parent_scope: ConversationScope,
+    turn_id: str,
+) -> ConversationScope | None:
+    """Look up an existing agent or spawn a fresh one.
+
+    Returns the scope to stream into, or ``None`` when the
+    block should be skipped (mode conflict on retask).
+
+    Three cases per ``specs4/7-future/parallel-agents.md``
+    § "Agent Reuse by ID":
+
+    - **Hit, mode matches** — return the existing scope.
+      Caller proceeds to stream the new task into the same
+      ContextManager, which appends it as the next user
+      message in the agent's accumulated conversation.
+    - **Hit, mode mismatches** — log a warning and return
+      None. The orchestrator's malformed decomposition is
+      surfaced; the existing agent stays untouched.
+    - **Miss** — call :func:`build_agent_scope` to construct
+      a fresh ContextManager + tracker, register it, and
+      return the new scope.
+
+    Mode resolution for the comparison uses the same logic
+    as :func:`build_agent_scope` — empty ``block.mode``
+    inherits the orchestrator's current mode. So an
+    orchestrator that emits a bare ``id: foo`` block to
+    retask agent ``foo`` succeeds when its own mode hasn't
+    drifted since the agent's last spawn, and is rejected
+    when it has. That's the behaviour the spec wants:
+    inherited mode is implicit, but the implicit value
+    still has to match the existing agent.
+    """
+    existing = service._agent_contexts.get(block.id)
+    if existing is None or existing.context is None:
+        # Miss — fresh spawn.
+        return build_agent_scope(
+            service,
+            block=block,
+            agent_idx=agent_idx,
+            parent_scope=parent_scope,
+            turn_id=turn_id,
+        )
+
+    # Hit — validate mode against the existing scope.
+    parent_cm = parent_scope.context
+    parent_mode = parent_cm.mode if parent_cm else Mode.CODE
+    parent_cross_ref = (
+        parent_cm.cross_reference_enabled if parent_cm else False
+    )
+    resolved_mode, resolved_cross_ref = _resolve_agent_mode(
+        block.mode, parent_mode, parent_cross_ref,
+    )
+    existing_mode = existing.context.mode
+    existing_cross_ref = existing.context.cross_reference_enabled
+    if (
+        existing_mode != resolved_mode
+        or existing_cross_ref != resolved_cross_ref
+    ):
+        logger.warning(
+            "Agent %r already exists in mode %s; "
+            "cannot retask with mode %s. Skipping this "
+            "spawn block. The orchestrator must close the "
+            "existing agent and respawn to switch modes.",
+            block.id,
+            _format_mode(existing_mode, existing_cross_ref),
+            _format_mode(resolved_mode, resolved_cross_ref),
+        )
+        return None
+
+    # Hit + mode matches — retask. Return the existing scope
+    # unchanged. The caller's _agent_stream_impl will
+    # append block.task as the next user message in the
+    # agent's existing conversation and stream the response
+    # into the same ContextManager.
+    logger.info(
+        "Retasking agent %r (mode=%s) — preserving "
+        "ContextManager, file context, tracker.",
+        block.id,
+        _format_mode(existing_mode, existing_cross_ref),
+    )
+    return existing
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +484,24 @@ def build_agent_scope(
     Agent mode requires a history store — the archive IS
     the transcript the main LLM reads in synthesis. Without
     one, raises :class:`RuntimeError`.
+
+    Mode resolution: ``block.mode`` (one of ``""``, ``code``,
+    ``doc``, ``code+xref``, ``doc+xref``) is flattened back
+    into ``(Mode, cross_reference_enabled)`` and applied to
+    the agent's ContextManager via the factory. An empty
+    ``block.mode`` inherits both axes from
+    ``parent_scope.context``.
+
+    This function ALWAYS constructs a fresh scope and
+    overwrites any existing entry for ``block.id`` in the
+    registry. The retask-vs-fresh-spawn dispatch — and the
+    mode-conflict check that goes with it — lives in
+    :func:`spawn_agents_for_turn`, not here. Calling this
+    function directly when an entry for ``block.id`` already
+    exists will throw away the existing scope's
+    ContextManager, conversation history, file context, and
+    stability tracker. Most callers should use
+    :func:`spawn_agents_for_turn`.
     """
     if service._history_store is None:
         raise RuntimeError(
@@ -332,6 +509,19 @@ def build_agent_scope(
             "construct LLMService with history_store=... "
             "to enable agent mode."
         )
+
+    # Resolve the agent's (mode, cross_ref) pair. Inherits
+    # from the parent scope's ContextManager when the block
+    # didn't specify a mode.
+    parent_cm = parent_scope.context
+    parent_mode = parent_cm.mode if parent_cm else Mode.CODE
+    parent_cross_ref = (
+        parent_cm.cross_reference_enabled if parent_cm else False
+    )
+    resolved_mode, resolved_cross_ref = _resolve_agent_mode(
+        block.mode, parent_mode, parent_cross_ref,
+    )
+
     agent_context = build_agent_context_manager(
         turn_id=turn_id,
         agent_idx=agent_idx,
@@ -355,6 +545,8 @@ def build_agent_scope(
         # depth is 1 per spec, agents don't spawn
         # sub-agents.
         system_prompt=service._config.get_agent_system_prompt(),
+        mode=resolved_mode,
+        cross_reference_enabled=resolved_cross_ref,
     )
     agent_tracker = StabilityTracker(
         cache_target_tokens=(
@@ -368,6 +560,7 @@ def build_agent_scope(
         session_id=parent_scope.session_id,
         selected_files=list(parent_scope.selected_files),
         archival_append=agent_context.archival_sink,
+        agent_idx=agent_idx,
     )
 
     # Register flat under the LLM-chosen id. Agents persist
@@ -380,6 +573,170 @@ def build_agent_scope(
     return scope
 
 
+def _format_mode(mode: Mode, cross_ref: bool) -> str:
+    """Render a ``(Mode, bool)`` pair as the user-facing string.
+
+    Inverse of :func:`_resolve_agent_mode`. Used in error
+    messages so the orchestrator (and the user reading the
+    backend log) sees ``code+xref`` rather than the raw
+    ``Mode.CODE / cross_ref=True`` representation.
+    """
+    base = mode.value  # "code" or "doc"
+    return f"{base}+xref" if cross_ref else base
+
+
+# Mode-change event format.
+#
+# ``switch_agent_mode`` and ``set_agent_cross_reference`` in
+# ``_rpc_state.py`` write archive events with content::
+#
+#     "Mode changed: {old} → {new}."
+#
+# where {old}/{new} are produced by :func:`_format_mode`. The
+# arrow is U+2192 RIGHTWARDS ARROW. The four valid mode
+# strings are the same set ``_resolve_agent_mode`` recognises.
+#
+# Replay parses these events in order and updates running
+# ``(Mode, cross_ref)`` state. Malformed events skip without
+# raising — the running state continues from the previous
+# record.
+_MODE_CHANGE_PREFIX = "Mode changed: "
+_MODE_CHANGE_ARROW = " → "
+_VALID_MODE_STRINGS: frozenset[str] = frozenset(
+    {"code", "doc", "code+xref", "doc+xref"}
+)
+
+
+def _parse_mode_string(mode_str: str) -> tuple[Mode, bool] | None:
+    """Parse a mode string back to ``(Mode, cross_ref)``.
+
+    Inverse of :func:`_format_mode`. Returns None for
+    unrecognised strings — the four-element valid set is
+    the only acceptable input. Empty strings, garbage,
+    case mismatches all return None so the replay walk
+    can skip them defensively.
+    """
+    if mode_str not in _VALID_MODE_STRINGS:
+        return None
+    if mode_str == "code":
+        return Mode.CODE, False
+    if mode_str == "doc":
+        return Mode.DOC, False
+    if mode_str == "code+xref":
+        return Mode.CODE, True
+    if mode_str == "doc+xref":
+        return Mode.DOC, True
+    return None  # unreachable but keeps type checker happy
+
+
+def _replay_mode_events(
+    archive_messages: list[dict[str, Any]],
+    initial_mode: Mode,
+    initial_cross_ref: bool,
+) -> tuple[Mode, bool]:
+    """Replay archive mode-change events on top of a baseline.
+
+    Walks ``archive_messages`` in order looking for
+    ``system_event: true`` records whose content matches the
+    format ``switch_agent_mode`` and
+    ``set_agent_cross_reference`` write. Each valid event
+    advances the running ``(Mode, cross_ref)`` state to the
+    parsed target.
+
+    Per spec specs4/3-llm/history.md § Session-Load
+    Reconstruction step 5 — replay strategy (b) is the
+    authoritative source of truth for an agent's mode at
+    session-save time. The spawn-time baseline supplied by
+    the caller is just the starting point; archived
+    transitions are what land the agent in its final state.
+
+    Defensive parsing rules:
+
+    - Records without ``system_event: true`` are skipped
+      without inspection. Non-event records (the agent's
+      actual conversation) outnumber events; this is the
+      hot path.
+    - Records with malformed content (missing prefix,
+      missing arrow, missing terminator, unrecognised mode
+      strings on either side of the arrow) are skipped
+      with no state change. The running state continues
+      from the previous valid record.
+    - The terminating ``"."`` is required — without it,
+      a content like ``"Mode changed: code → doc"``
+      should not be treated as an event because that's
+      not the format the writers produce. Strict matching
+      surfaces a writer-side regression as a quietly
+      lost replay rather than a silently-tolerated drift.
+
+    Old mode (left of arrow) is parsed but only used as a
+    sanity check — the replay applies the right-side mode
+    regardless. A drift between persisted-old and
+    running-state would indicate either a malformed event
+    or two different agents' events mixing in one archive;
+    in either case the right-side mode is the authoritative
+    "what mode is the agent NOW" answer.
+
+    Parameters
+    ----------
+    archive_messages:
+        The agent's concatenated archive, in chronological
+        order. Same shape passed to
+        :func:`reconstruct_agent_scope` for history
+        population.
+    initial_mode:
+        Spawn-time baseline mode from the latest
+        ``agent_blocks`` record.
+    initial_cross_ref:
+        Spawn-time baseline cross-reference flag.
+
+    Returns
+    -------
+    tuple[Mode, bool]
+        The agent's final mode + cross_ref after replaying
+        every valid event. When no events match, returns
+        the baseline unchanged.
+    """
+    mode = initial_mode
+    cross_ref = initial_cross_ref
+
+    for record in archive_messages:
+        if not isinstance(record, dict):
+            continue
+        if record.get("system_event") is not True:
+            continue
+        content = record.get("content")
+        if not isinstance(content, str):
+            continue
+        # Strict format match. The writers always produce
+        # the prefix + arrow + period shape; loosening here
+        # would tolerate writer drift silently.
+        if not content.startswith(_MODE_CHANGE_PREFIX):
+            continue
+        if not content.endswith("."):
+            continue
+        # Strip prefix + trailing period, then split on the
+        # arrow. Both halves must parse to valid mode
+        # strings.
+        body = content[len(_MODE_CHANGE_PREFIX):-1]
+        if _MODE_CHANGE_ARROW not in body:
+            continue
+        old_str, new_str = body.split(
+            _MODE_CHANGE_ARROW, 1,
+        )
+        old_str = old_str.strip()
+        new_str = new_str.strip()
+        # Validate left side. We don't compare it against
+        # the running state — see the docstring for why.
+        if _parse_mode_string(old_str) is None:
+            continue
+        parsed = _parse_mode_string(new_str)
+        if parsed is None:
+            continue
+        mode, cross_ref = parsed
+
+    return mode, cross_ref
+
+
 # ---------------------------------------------------------------------------
 # Per-turn agent-state descriptor
 # ---------------------------------------------------------------------------
@@ -389,8 +746,26 @@ def build_agent_descriptor(service: "LLMService") -> str:
     """Render the per-turn agent-state descriptor.
 
     Walks every live agent in ``service._agent_contexts`` and
-    builds a markdown block listing each agent's id and the
-    paths it currently has loaded, classified by depth.
+    builds a markdown block listing each agent's id, the
+    model it speaks to, its repo-view mode, and the paths
+    it currently has loaded, classified by depth.
+
+    Each entry's identity line takes the shape
+    ``**{id}** — model: {model}, mode: {mode}`` where
+    ``{model}`` is the provider-qualified identifier the
+    agent's ContextManager was constructed with (e.g.
+    ``anthropic/claude-sonnet-4-5``) and ``{mode}`` is one
+    of ``code``, ``doc``, ``code+xref``, ``doc+xref`` —
+    matching the four-string surface the orchestrator
+    uses in spawn blocks. The orchestrator reads this to
+    decide which agent is the right target for a given
+    task: a code-mode agent is good for refactors, a
+    doc-mode agent for documentation work, the ``+xref``
+    variants for tasks spanning both. The model hint
+    matters when agents run on heterogenous models —
+    retasking a cheap-fast agent for a problem that needs
+    a stronger model is a routing error the orchestrator
+    can avoid when it sees both.
 
     Three depth values per
     :doc:`specs4/7-future/parallel-agents` § "Per-agent state
@@ -449,7 +824,40 @@ def build_agent_descriptor(service: "LLMService") -> str:
 
     for agent_id in sorted_ids:
         scope = contexts[agent_id]
-        lines.append(f"- **{agent_id}**")
+        # Surface the agent's identity (model + mode)
+        # inline with its id so the orchestrator can route
+        # work appropriately. Two pieces:
+        #
+        # - model — the provider-qualified id the agent
+        #   speaks to (e.g. ``anthropic/claude-sonnet-4-5``).
+        #   Different agents can in principle run on
+        #   different models; surfacing the model lets the
+        #   orchestrator avoid retasking a fast-cheap agent
+        #   onto a problem that needs a stronger model and
+        #   vice versa.
+        # - mode — the four-string surface ``code`` /
+        #   ``doc`` / ``code+xref`` / ``doc+xref``.
+        #
+        # Agents without a ContextManager (defensive —
+        # shouldn't happen in practice) get no
+        # parenthesised hint.
+        meta_parts: list[str] = []
+        if scope.context is not None:
+            model = getattr(scope.context, "model", "") or ""
+            if model:
+                meta_parts.append(f"model: {model}")
+            mode_str = _format_mode(
+                scope.context.mode,
+                scope.context.cross_reference_enabled,
+            )
+            if mode_str:
+                meta_parts.append(f"mode: {mode_str}")
+        if meta_parts:
+            lines.append(
+                f"- **{agent_id}** — {', '.join(meta_parts)}"
+            )
+        else:
+            lines.append(f"- **{agent_id}**")
 
         full_paths, symbol_paths, doc_paths = _classify_agent_paths(scope)
 
@@ -520,3 +928,213 @@ def _classify_agent_paths(
         sorted(symbol_set),
         sorted(doc_set),
     )
+
+
+# ---------------------------------------------------------------------------
+# Session-load reconstruction
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_agent_scope(
+    service: "LLMService",
+    *,
+    agent_id: str,
+    turn_id: str,
+    agent_idx: int,
+    model: str | None,
+    mode: Mode,
+    cross_ref: bool,
+    archive_messages: list[dict[str, Any]],
+) -> ConversationScope:
+    """Reconstruct an agent scope from persisted archive content.
+
+    Mirrors :func:`build_agent_scope` but for the session-load
+    path: no parent_scope (no orchestrator turn in flight at
+    load time), no spawn-block mode resolution (caller has
+    already resolved mode + cross_ref from persisted state),
+    no deep copy of selected_files (selections aren't
+    persisted; reconstructed agents start with empty
+    selection — the spec defers that).
+
+    Per :doc:`specs4/3-llm/history` § Session-Load Reconstruction
+    steps 6-8: build a fresh ContextManager via the factory,
+    pre-populate its history from the archive, attach a fresh
+    StabilityTracker (cache starts cold), construct the scope,
+    register in ``service._agent_contexts[agent_id]``.
+
+    The ``model`` parameter is informational — the agent's
+    ContextManager always uses ``service._config.model`` for
+    LLM calls (per-agent model overrides aren't supported
+    yet). When the persisted ``agent_blocks`` entry carries a
+    ``model`` field, callers thread it through for future
+    routing logic; today the value is recorded but not acted
+    on. None means the persisted record predated Increment 3a.
+
+    Replay strategy (b) for mode is the spec's authoritative
+    contract, but Commit 1 supplies only the spawn-time
+    baseline. Commit 2 will add ``_replay_mode_events`` and
+    update this function to call it before constructing the
+    ContextManager. Until then, an agent toggled mid-session
+    reconstructs as its spawn-time mode — known-wrong
+    intermediate state.
+
+    Parameters
+    ----------
+    service:
+        The :class:`LLMService` whose ``_agent_contexts``
+        registry will receive the reconstructed scope.
+    agent_id:
+        The LLM-chosen identifier from the agent's spawn
+        block. Becomes the registry key.
+    turn_id:
+        The turn ID the agent's archive directory is named
+        by. Used by the archival sink closure so post-load
+        messages append to the same ``agent-NN.jsonl`` file.
+    agent_idx:
+        The agent's positional index within its spawn turn.
+        Determines the archive filename. Stable across
+        retasks within the session.
+    model:
+        Provider-qualified model identifier from the
+        persisted ``agent_blocks`` entry, or None for
+        pre-Increment-3a records. Currently informational.
+    mode:
+        The agent's primary mode at session-save time. Per
+        replay strategy (b) this should be the post-replay
+        mode; Commit 1 supplies the spawn-time baseline only
+        and Commit 2 adds the replay step.
+    cross_ref:
+        Whether cross-reference is enabled for this agent.
+        Same replay caveat as ``mode``.
+    archive_messages:
+        The agent's full conversation, concatenated across
+        every turn it participated in, in chronological
+        order. Each entry is a dict with at minimum ``role``
+        and ``content``; ``system_event`` and other optional
+        fields round-trip through ContextManager.add_message.
+
+    Returns
+    -------
+    ConversationScope
+        The reconstructed scope, already registered in the
+        service's ``_agent_contexts`` map. Caller does not
+        need to register separately.
+
+    Raises
+    ------
+    RuntimeError
+        If the service has no history store attached. Agent
+        reconstruction requires the same persistence
+        infrastructure as agent spawning.
+    """
+    if service._history_store is None:
+        raise RuntimeError(
+            "Agent reconstruction requires a history store; "
+            "construct LLMService with history_store=... to "
+            "enable session-load agent rehydration."
+        )
+
+    # Replay mode-change events on top of the spawn-time
+    # baseline. Per spec § Session-Load Reconstruction step
+    # 5, replay-from-archive is the authoritative source of
+    # truth for an agent's mode at session-save time. The
+    # ``mode``/``cross_ref`` parameters are the spawn-time
+    # baseline — the starting point for the replay walk;
+    # the post-replay values are what land in the
+    # ContextManager.
+    final_mode, final_cross_ref = _replay_mode_events(
+        archive_messages, mode, cross_ref,
+    )
+
+    # Construct the ContextManager via the same factory the
+    # spawn path uses. The factory bakes turn_id and
+    # agent_idx into the archival sink closure, so messages
+    # the agent produces post-load append to the correct
+    # archive file. ``model`` is currently informational —
+    # the factory uses ``service._config.model`` for LLM
+    # routing.
+    del model  # informational only; unused in Commit 1
+    agent_context = build_agent_context_manager(
+        turn_id=turn_id,
+        agent_idx=agent_idx,
+        model_name=service._config.model,
+        history_store=service._history_store,
+        repo=service._repo,
+        cache_target_tokens=(
+            service._config.cache_target_tokens_for_model()
+        ),
+        compaction_config=service._config.compaction_config,
+        system_prompt=service._config.get_agent_system_prompt(),
+        mode=final_mode,
+        cross_reference_enabled=final_cross_ref,
+    )
+
+    # Pre-populate history from the archive. Each archive
+    # record is a dict with role/content plus optional
+    # fields; ContextManager.add_message takes role and
+    # content positionally and forwards extras via **kwargs.
+    # We strip backend-internal fields the ContextManager
+    # doesn't know about (turn_id, agent_idx, id, timestamp)
+    # but pass through the user-relevant ones (system_event,
+    # files, files_modified, edit_results, image_refs).
+    for record in archive_messages:
+        if not isinstance(record, dict):
+            continue
+        role = record.get("role")
+        content = record.get("content", "")
+        if role not in ("user", "assistant"):
+            continue
+        # Forward optional fields ContextManager / its sink
+        # know about. The sink will re-route them through
+        # append_agent_message, which is itself the source
+        # of these archive records — so the round-trip
+        # preserves them. system_event is the load-bearing
+        # one for Commit 2's replay step.
+        extras: dict[str, Any] = {}
+        if record.get("system_event") is True:
+            extras["system_event"] = True
+        # Pass through optional list/dict fields verbatim;
+        # ContextManager.add_message accepts arbitrary
+        # **kwargs and stores them on the message dict.
+        for key in ("files", "files_modified",
+                    "edit_results", "image_refs"):
+            if key in record:
+                extras[key] = record[key]
+        agent_context.add_message(role, content, **extras)
+
+    # Fresh StabilityTracker — cache starts cold per spec.
+    # Saved tracker tier assignments are not persisted, so
+    # rebuilding from scratch is the only option. The next
+    # turn the agent runs will rebuild tier state naturally
+    # from its loaded history + symbol/doc index activity.
+    agent_tracker = StabilityTracker(
+        cache_target_tokens=(
+            service._config.cache_target_tokens_for_model()
+        ),
+    )
+    agent_context.set_stability_tracker(agent_tracker)
+
+    # Selections are not persisted (per spec). Reconstructed
+    # agents start with empty selection lists; the user can
+    # re-tick files in the picker if needed, or the
+    # orchestrator can grant files via edit blocks.
+    scope = ConversationScope(
+        context=agent_context,
+        tracker=agent_tracker,
+        session_id=service._session_id,
+        selected_files=[],
+        archival_append=agent_context.archival_sink,
+        agent_idx=agent_idx,
+    )
+
+    service._agent_contexts[agent_id] = scope
+    logger.info(
+        "Reconstructed agent %r (turn %s, idx %d, mode %s) — "
+        "%d archive message(s) loaded",
+        agent_id,
+        turn_id,
+        agent_idx,
+        _format_mode(final_mode, final_cross_ref),
+        len(archive_messages),
+    )
+    return scope

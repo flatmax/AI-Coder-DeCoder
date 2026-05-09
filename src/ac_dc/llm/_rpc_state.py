@@ -396,22 +396,36 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
 
 
 def new_session(service: "LLMService") -> dict[str, Any]:
-    """Start a fresh session — clear chat history; preserve agent scopes.
+    """Start a fresh session — close all live agents and reset state.
 
-    Per :doc:`specs4/7-future/parallel-agents` § "Agent
-    lifetime", ``new_session`` clears each agent's chat
-    history but does NOT tear down the agent itself. The
-    agent's :class:`ContextManager` retains its file context,
-    the :class:`StabilityTracker` keeps its tier assignments
-    and provider-cache state, and the agent remains
-    addressable by its id for the next turn.
+    Per the "Agents as first-class persistent entities" plan
+    (Increment 2 in IMPLEMENTATION_NOTES.md), ``new_session``
+    is "the entire conversation thread of the session goes
+    with it — including agents". This supersedes the earlier
+    "agents survive new_session" policy: the frontend
+    rendered the new-session button on every tab including
+    agents but only ever reset main, producing the
+    "I clicked new session and nothing happened" UX bug.
 
-    The symmetry matters: from the user's perspective,
-    ``new_session`` is "start a fresh conversation with the
-    same warm team" — applied uniformly to the orchestrator
-    (whose ContextManager survives this call too) and every
-    live agent. Application exit is the only event that
-    drops the agents themselves.
+    Sequence (order matters for frontend coherence):
+
+    1. Generate a fresh session id and clear main's history,
+       URL context, and fetched URLs.
+    2. Cancel any in-flight agent streams by clearing
+       ``_active_agent_streams``. The streaming loop checks
+       this set per-chunk; clearing it signals stop.
+    3. Snapshot the current agent ids, clear
+       ``_agent_contexts`` to free memory and tracker state.
+    4. Broadcast ``agentClosed`` per snapshot id so the
+       frontend dissolves each tab. The frontend's existing
+       handler removes the tab and frees per-tab state.
+    5. Broadcast ``sessionChanged`` last so the chat panel
+       reloads main's empty history after the agents have
+       gone.
+
+    Per-agent archive files on disk survive — closing an
+    agent frees memory; the transcript stays readable via
+    :meth:`LLMService.get_turn_archive`.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
@@ -424,13 +438,40 @@ def new_session(service: "LLMService") -> dict[str, Any]:
             f"sess_{int(time.time() * 1000)}_nostore"
         )
     service._context.clear_history()
-    # Clear each agent's chat history but preserve the
-    # scope itself. The agent's ContextManager, file context,
-    # and stability tracker survive — only the conversation
-    # messages are wiped. Mirrors the orchestrator's own
-    # behaviour above (clear_history on _context).
-    for scope in service._agent_contexts.values():
-        scope.context.clear_history()
+    # Wipe URL state alongside chat history. Without this,
+    # _fetched URLs and the prompt's url_context survive
+    # across sessions — the user starts a "fresh" session
+    # but every turn still carries the previous session's
+    # URL content (and the HUD chips still list them).
+    # Filesystem cache is preserved; only this session's
+    # active URL context is cleared.
+    service._context.clear_url_context()
+    if service._url_service is not None:
+        service._url_service.clear_fetched()
+    # Cancel any in-flight agent streams. The streaming
+    # loop checks this set per chunk; clearing it signals
+    # the agent task to stop. Doing this BEFORE clearing
+    # _agent_contexts avoids a race where the agent task
+    # finishes a chunk, looks up its scope to write to the
+    # archive, and finds nothing.
+    closed_agent_ids = list(service._agent_contexts.keys())
+    service._active_agent_streams.clear()
+    # Drop scopes — frees ContextManager + StabilityTracker
+    # + file_context for each agent. Archive files on disk
+    # survive (per-turn archive paths are independent of
+    # the in-memory registry).
+    service._agent_contexts.clear()
+    # Broadcast per-agent close events so the frontend's
+    # existing tab-removal path runs for each. Order is
+    # before sessionChanged because the frontend's
+    # sessionChanged handler reloads main's history; if the
+    # agent tabs were still around at that point they'd
+    # briefly show as live with empty histories before the
+    # close events arrived.
+    for agent_id in closed_agent_ids:
+        service._broadcast_event(
+            "agentClosed", {"agent_id": agent_id}
+        )
     service._broadcast_event(
         "sessionChanged",
         {"session_id": service._session_id, "messages": []},
@@ -549,3 +590,300 @@ def set_agent_excluded_index_files(
                         item.tier, "agent excluded file"
                     )
     return list(valid)
+
+
+# ---------------------------------------------------------------------------
+# Per-agent mode and cross-reference (Increment 4a)
+# ---------------------------------------------------------------------------
+
+
+# Valid mode strings — same set the parser and history store
+# accept. Kept as a module-level constant rather than a per-
+# function literal so a future mode addition is a single edit.
+_VALID_AGENT_MODES = frozenset(
+    {"code", "doc", "code+xref", "doc+xref"}
+)
+
+
+def _parse_agent_mode_string(
+    mode: str,
+) -> tuple[Mode, bool] | None:
+    """Decompose a mode string into ``(Mode, cross_ref)``.
+
+    Returns ``None`` when the input isn't one of the four
+    valid mode strings. Used by :func:`switch_agent_mode` to
+    flatten the wire format (a single string carrying both
+    axes) back into the two ContextManager fields.
+    """
+    if mode == "code":
+        return Mode.CODE, False
+    if mode == "doc":
+        return Mode.DOC, False
+    if mode == "code+xref":
+        return Mode.CODE, True
+    if mode == "doc+xref":
+        return Mode.DOC, True
+    return None
+
+
+def _format_agent_mode(
+    mode: Mode, cross_ref: bool,
+) -> str:
+    """Inverse of :func:`_parse_agent_mode_string`.
+
+    Used to render the agent's current mode for archive
+    system events and broadcast payloads. Mirrors the
+    format ``_format_mode`` in ``_agents.py`` produces for
+    the descriptor / spawn payload.
+    """
+    base = "doc" if mode == Mode.DOC else "code"
+    return f"{base}+xref" if cross_ref else base
+
+
+def _rebuild_agent_tracker(
+    service: "LLMService",
+    scope: Any,
+) -> None:
+    """Replace the agent's tracker with a fresh instance.
+
+    Called by :func:`switch_agent_mode` and
+    :func:`set_agent_cross_reference` after a mode/xref
+    change. The existing tier placements were valid for the
+    old prompt + index combination; the new combination
+    invalidates every cached prefix, so a fresh tracker is
+    the correct starting state for the next turn.
+
+    The agent's conversation history, file context, and
+    selection are preserved — they live on the
+    ``ContextManager``, not the tracker. Provider cache
+    warmth is lost (all four tiers cold on next call); that
+    cost is the unavoidable price of switching the agent's
+    repo-view shape.
+    """
+    new_tracker = StabilityTracker(
+        cache_target_tokens=(
+            service._config.cache_target_tokens_for_model()
+        ),
+    )
+    scope.tracker = new_tracker
+    scope.context.set_stability_tracker(new_tracker)
+
+
+def switch_agent_mode(
+    service: "LLMService",
+    agent_id: str,
+    mode: str,
+) -> dict[str, Any]:
+    """Switch a specific agent's mode.
+
+    Per-agent analogue of :func:`switch_mode`. Identifies
+    the agent by its LLM-chosen id. Accepts the four
+    combined mode strings used elsewhere on the wire —
+    ``code`` / ``doc`` / ``code+xref`` / ``doc+xref`` — and
+    flattens them into the agent's ContextManager's two
+    axes (``mode`` + ``cross_reference_enabled``).
+
+    Mid-stream changes are rejected: an agent with an entry
+    in :attr:`LLMService._active_agent_streams` is currently
+    executing, and switching mode mid-flight would leave the
+    cached tier prefix mismatched against the new prompt.
+    Frontend renders the agent's tab with a flashing-cyan
+    LED in this state; the rejection toast tells the user
+    to wait for the stream to finish.
+
+    Sequence:
+
+    1. Validate id and mode shape; check guard slot.
+    2. Resolve the existing scope and its current
+       (mode, cross_ref) pair.
+    3. Compute the new pair from ``mode``. Same as current
+       → no-op return.
+    4. Update the ContextManager.
+    5. Rebuild the stability tracker (every tier
+       invalidated by the prompt/index change).
+    6. Write a mode-change system event to the agent's
+       archive via ``scope.archival_append``. Survives
+       across server restarts so reconstruction (Increment
+       5) can replay the change history to arrive at the
+       agent's final mode.
+    7. Broadcast ``agentModeChanged`` so the frontend
+       updates the tab's tooltip and any LED state.
+
+    Returns ``{status: "ok", agent_id: str, mode: str}`` on
+    success. ``mode`` in the response carries the combined
+    string (mirrors the input format).
+
+    Per :doc:`specs4/7-future/parallel-agents` § Per-agent
+    state descriptor — the orchestrator's prompt-time
+    descriptor reads each agent's current mode from its
+    ``ContextManager``, so a successful switch is visible
+    to the orchestrator on its very next turn without any
+    further wiring.
+    """
+    restricted = service._check_localhost_only()
+    if restricted is not None:
+        return restricted
+    if not isinstance(agent_id, str) or not agent_id:
+        return {"error": "agent not found"}
+    scope = service._agent_contexts.get(agent_id)
+    if scope is None:
+        return {"error": "agent not found"}
+    if not isinstance(mode, str) or mode not in _VALID_AGENT_MODES:
+        return {
+            "error": "invalid mode",
+            "reason": (
+                f"Mode must be one of {sorted(_VALID_AGENT_MODES)}; "
+                f"got {mode!r}"
+            ),
+        }
+    # Mid-stream rejection. The frontend should hide the
+    # toggle while the LED is cyan, but the backend guards
+    # defensively against a stale click.
+    if agent_id in service._active_agent_streams:
+        return {
+            "error": "agent stream active",
+            "reason": (
+                "Wait for the agent to finish its current "
+                "response before changing mode."
+            ),
+        }
+    parsed = _parse_agent_mode_string(mode)
+    if parsed is None:
+        # Unreachable given the _VALID_AGENT_MODES check
+        # above; defensive belt-and-braces.
+        return {"error": "invalid mode"}
+    new_mode, new_xref = parsed
+    cm = scope.context
+    old_mode = cm.mode
+    old_xref = cm.cross_reference_enabled
+    if old_mode == new_mode and old_xref == new_xref:
+        return {
+            "status": "ok",
+            "agent_id": agent_id,
+            "mode": mode,
+            "message": "Already in that mode",
+        }
+    # Apply the change.
+    cm.set_mode(new_mode)
+    cm.set_cross_reference_enabled(new_xref)
+    _rebuild_agent_tracker(service, scope)
+    # Archive the change as a system event so reconstruction
+    # (Increment 5) can replay mode transitions.
+    old_str = _format_agent_mode(old_mode, old_xref)
+    new_str = _format_agent_mode(new_mode, new_xref)
+    event_text = (
+        f"Mode changed: {old_str} → {new_str}."
+    )
+    if scope.archival_append is not None:
+        try:
+            scope.archival_append(
+                "user", event_text, system_event=True,
+            )
+        except Exception as exc:
+            # Defensive — a sink failure shouldn't roll back
+            # the in-memory mode change. Matches the same
+            # discipline ContextManager._invoke_archival_sink
+            # uses for normal message appends.
+            logger.warning(
+                "Agent mode-change archive write failed for "
+                "%s: %s",
+                agent_id, exc,
+            )
+    service._broadcast_event(
+        "agentModeChanged",
+        {
+            "agent_id": agent_id,
+            "mode": new_str,
+            "cross_reference_enabled": new_xref,
+        },
+    )
+    return {
+        "status": "ok",
+        "agent_id": agent_id,
+        "mode": new_str,
+    }
+
+
+def set_agent_cross_reference(
+    service: "LLMService",
+    agent_id: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Toggle cross-reference for a specific agent.
+
+    Per-agent analogue of :func:`set_cross_reference`. The
+    agent's primary mode (code or doc) stays the same; only
+    the cross-reference axis flips. Same mid-stream
+    rejection, archive event, and broadcast as
+    :func:`switch_agent_mode`.
+
+    Returns ``{status: "ok", agent_id: str,
+    cross_reference_enabled: bool}`` on success.
+
+    Note — unlike the main conversation, agent cross-ref
+    enable does NOT gate on ``_doc_index_ready``. Agents
+    inherit doc-index readiness from the orchestrator's
+    state at spawn time; if the doc index isn't ready when
+    an agent tries to enable cross-ref, the descriptor and
+    prompt assembly handle the empty-index case
+    gracefully. This matches how the existing
+    :func:`switch_agent_mode` accepts ``doc+xref`` without
+    consulting the readiness flag.
+    """
+    restricted = service._check_localhost_only()
+    if restricted is not None:
+        return restricted
+    if not isinstance(agent_id, str) or not agent_id:
+        return {"error": "agent not found"}
+    scope = service._agent_contexts.get(agent_id)
+    if scope is None:
+        return {"error": "agent not found"}
+    new_xref = bool(enabled)
+    if agent_id in service._active_agent_streams:
+        return {
+            "error": "agent stream active",
+            "reason": (
+                "Wait for the agent to finish its current "
+                "response before changing cross-reference."
+            ),
+        }
+    cm = scope.context
+    old_xref = cm.cross_reference_enabled
+    if old_xref == new_xref:
+        return {
+            "status": "ok",
+            "agent_id": agent_id,
+            "cross_reference_enabled": new_xref,
+            "message": "Already in that state",
+        }
+    cm.set_cross_reference_enabled(new_xref)
+    _rebuild_agent_tracker(service, scope)
+    old_str = _format_agent_mode(cm.mode, old_xref)
+    new_str = _format_agent_mode(cm.mode, new_xref)
+    event_text = (
+        f"Mode changed: {old_str} → {new_str}."
+    )
+    if scope.archival_append is not None:
+        try:
+            scope.archival_append(
+                "user", event_text, system_event=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Agent xref-toggle archive write failed for "
+                "%s: %s",
+                agent_id, exc,
+            )
+    service._broadcast_event(
+        "agentModeChanged",
+        {
+            "agent_id": agent_id,
+            "mode": new_str,
+            "cross_reference_enabled": new_xref,
+        },
+    )
+    return {
+        "status": "ok",
+        "agent_id": agent_id,
+        "cross_reference_enabled": new_xref,
+    }

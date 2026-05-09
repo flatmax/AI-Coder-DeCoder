@@ -224,6 +224,37 @@ The config override is clamped against the counter ceiling — values larger tha
 
 Without the explicit argument, providers apply their own defaults (commonly 4096) which silently truncate long responses. Edit-heavy assistant turns routinely exceed 4096 tokens, so the argument is always set.
 
+### Streaming timeouts (three layers)
+
+The streaming pipeline guards against hung LLM calls with three independent timeouts. Configured in `llm.json`; all four keys have sensible defaults and never need to be set unless the user has unusually long workloads.
+
+| Layer | Default | `llm.json` key | Catches |
+|---|---|---|---|
+| Overall request timeout | 300s | `request_timeout_seconds` | Stream never started — DNS/TLS hang, slow start before first byte. Passed to `litellm.completion` as `timeout=` |
+| First-chunk watchdog | 60s | `first_chunk_timeout_seconds` | Provider accepted request but never began streaming. Enforced by `threading.Timer` armed before iteration |
+| Inter-chunk watchdog | 120s | `chunk_timeout_seconds` | Stream stalled mid-response. Timer reset on every chunk; tolerant of legitimate reasoning pauses |
+| Aux call timeout | 60s | `aux_request_timeout_seconds` | Hung commit-message / topic-detector / URL-summarizer calls. Single `timeout=` per non-streaming call |
+
+**Watchdog mechanism.** A `threading.Timer` runs on a separate thread. On expiry, the callback walks the stream object looking for a `close()` method (tries `stream.close`, then `stream.response.close` — provider wrappers vary). Calling close on the underlying HTTP stream causes the worker thread's blocked `next()` to raise. The streaming loop's `except` clause distinguishes a watchdog-fired abort (`watchdog_fired[0]` is set) from a provider-side mid-stream error and surfaces a typed timeout error rather than a generic exception.
+
+**Partial content preservation.** When a watchdog fires, whatever content accumulated before the stall is preserved — the function returns `(full_content, False, None, empty_usage, error_string)`. The frontend renders the partial response with a red LED + timeout error toast. This is more useful than discarding everything because reasoning models often produce minutes of valid output before stalling on the final chunks.
+
+**`error_info` shape on watchdog fire:**
+
+```python
+{
+    "error_type": "timeout",
+    "message": "no chunk for 120s mid-stream",   # or first-chunk variant
+    "retry_after": None,
+    "status_code": None,
+    "provider": None,
+    "model": "<configured model>",
+    "original_type": "WatchdogTimeout",
+}
+```
+
+**Cancellation responsiveness.** The watchdog's `stream.close()` mechanism doubles as a faster cancellation path. The `_cancelled_requests` check inside the loop only fires between chunks, so a hung read would otherwise ignore a user's Stop click until the next chunk arrived — by which point the watchdog itself has fired anyway. Users see their terminal back within `chunk_timeout_seconds` worst-case regardless of whether they clicked Stop.
+
 ### Post-response compaction delay
 
 Compaction runs after `streamComplete` with a brief delay:

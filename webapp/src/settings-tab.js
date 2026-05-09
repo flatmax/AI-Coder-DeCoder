@@ -13,6 +13,28 @@ import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 
 /**
+ * Read the `?experimental=1` URL parameter set by the
+ * Python launcher when started with `--experimental`.
+ * Cached at module load so every settings-tab instance
+ * sees the same value without re-parsing.
+ *
+ * Truthy values: '1', 'true', 'yes' (case-insensitive).
+ * Anything else — including the param being absent — is
+ * treated as false.
+ */
+const _EXPERIMENTAL_ENABLED = (() => {
+  try {
+    const raw = new URLSearchParams(window.location.search).get(
+      'experimental',
+    );
+    if (!raw) return false;
+    return ['1', 'true', 'yes'].includes(raw.toLowerCase());
+  } catch (_err) {
+    return false;
+  }
+})();
+
+/**
  * Config cards — one per whitelisted type. The `key` field
  * matches the backend's CONFIG_TYPES keys. `reloadable`
  * controls whether save auto-triggers a reload RPC.
@@ -109,6 +131,32 @@ export class SettingsTab extends RpcMixin(LitElement) {
       padding: 1rem;
     }
 
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .toolbar .minimize-right {
+      margin-left: auto;
+    }
+    .back-btn {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .back-btn:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
+
     .info-banner {
       background: rgba(22, 27, 34, 0.6);
       border: 1px solid rgba(240, 246, 252, 0.1);
@@ -133,15 +181,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
     .card-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-      gap: 0.75rem;
-      margin-bottom: 1rem;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
     }
     .card {
       background: rgba(22, 27, 34, 0.6);
       border: 1px solid rgba(240, 246, 252, 0.1);
-      border-radius: 6px;
-      padding: 0.75rem;
+      border-radius: 5px;
+      padding: 0.4rem 0.5rem;
       cursor: pointer;
       text-align: center;
       transition: border-color 120ms ease, background 120ms ease;
@@ -155,13 +203,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.08);
     }
     .card-icon {
-      font-size: 1.5rem;
+      font-size: 1.1rem;
       display: block;
-      margin-bottom: 0.35rem;
+      margin-bottom: 0.2rem;
+      line-height: 1;
     }
     .card-label {
-      font-size: 0.8125rem;
+      font-size: 0.75rem;
       color: var(--text-secondary, #8b949e);
+      line-height: 1.2;
     }
 
     /* Toggle card — renders a switch inline rather than
@@ -173,7 +223,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.4rem;
+      gap: 0.25rem;
     }
     .card.toggle-card:hover {
       background: rgba(22, 27, 34, 0.6);
@@ -184,23 +234,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
       background: rgba(88, 166, 255, 0.04);
     }
     .card-description {
-      font-size: 0.6875rem;
-      color: var(--text-secondary, #8b949e);
-      line-height: 1.35;
-      text-align: center;
-      padding: 0 0.25rem;
+      display: none;
     }
     .toggle-switch {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.35rem;
       background: transparent;
       border: none;
       color: var(--text-primary, #c9d1d9);
       cursor: pointer;
-      padding: 0.25rem 0;
+      padding: 0.1rem 0;
       font-family: inherit;
-      font-size: 0.75rem;
+      font-size: 0.65rem;
       font-weight: 600;
       letter-spacing: 0.05em;
     }
@@ -210,10 +256,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
     .toggle-track {
       position: relative;
-      width: 2.2rem;
-      height: 1.1rem;
+      width: 1.6rem;
+      height: 0.85rem;
       background: rgba(240, 246, 252, 0.15);
-      border-radius: 0.55rem;
+      border-radius: 0.425rem;
       transition: background 120ms ease;
     }
     .toggle-switch.on .toggle-track {
@@ -221,16 +267,16 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
     .toggle-thumb {
       position: absolute;
-      top: 0.125rem;
-      left: 0.125rem;
-      width: 0.85rem;
-      height: 0.85rem;
+      top: 0.1rem;
+      left: 0.1rem;
+      width: 0.65rem;
+      height: 0.65rem;
       background: #ffffff;
       border-radius: 50%;
       transition: transform 120ms ease;
     }
     .toggle-switch.on .toggle-thumb {
-      transform: translateX(1.1rem);
+      transform: translateX(0.75rem);
     }
     .toggle-state-label {
       color: var(--text-secondary, #8b949e);
@@ -239,9 +285,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       color: var(--accent-primary, #58a6ff);
     }
     .toggle-readonly-note {
-      font-size: 0.6875rem;
-      color: var(--text-secondary, #8b949e);
-      font-style: italic;
+      display: none;
     }
 
     .editor-area {
@@ -491,7 +535,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   async _onToggleClick(card) {
     if (!card || card.renderer !== 'toggle') return;
-    if (card.locked) return;
+    if (card.locked && !_EXPERIMENTAL_ENABLED) return;
     if (!this._localhost) return;
     if (this._togglingKey) return;
     this._togglingKey = card.key;
@@ -709,8 +753,55 @@ export class SettingsTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Dispatch a request to the app shell to flip the
+   * active dialog tab back to the chat. Companion to
+   * the equivalent method in ContextTab and DocConvertTab.
+   */
+  _goBackToChat() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Dispatch a request to the app shell to minimize
+   * the dialog. Companion to ``_goBackToChat``: the
+   * tab-strip minimize button isn't reachable when
+   * Settings is the active tab (the strip sits in
+   * the chat panel which is a sibling tab-panel),
+   * so each overlay carries its own minimize
+   * affordance.
+   */
+  _minimizeDialog() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   render() {
     return html`
+      <div class="toolbar">
+        <button
+          class="back-btn"
+          title="Back to chat"
+          aria-label="Back to chat"
+          @click=${() => this._goBackToChat()}
+        >← Chat</button>
+        <button
+          class="back-btn minimize-right"
+          title="Minimize dialog"
+          aria-label="Minimize dialog"
+          @click=${() => this._minimizeDialog()}
+        >▾</button>
+      </div>
       ${this._info
         ? html`
             <div class="info-banner">
@@ -764,17 +855,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const state = this._toggles[card.key];
     const isLoaded = state !== undefined;
     const value = isLoaded ? state : Boolean(card.toggleDefault);
+    const lockedActive = card.locked && !_EXPERIMENTAL_ENABLED;
     const isDisabled =
-      card.locked ||
+      lockedActive ||
       !this._localhost ||
       this._togglingKey === card.key;
     const ariaLabel = `${card.label}: ${value ? 'on' : 'off'}`;
     const baseTooltip = card.description
       ? `${card.label} — ${card.description}`
       : card.label;
-    const tooltip = card.locked && card.lockedNote
+    const tooltip = lockedActive && card.lockedNote
       ? `${baseTooltip} (${card.lockedNote})`
-      : baseTooltip;
+      : card.locked && _EXPERIMENTAL_ENABLED
+        ? `${baseTooltip} (Experimental — enabled by --experimental flag)`
+        : baseTooltip;
     return html`
       <div
         class="card toggle-card ${value ? 'toggle-on' : ''} ${
@@ -806,15 +900,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ${value ? 'ON' : 'OFF'}
           </span>
         </button>
-        ${card.locked
+        ${lockedActive
           ? html`<span class="toggle-readonly-note">
               ${card.lockedNote || 'Locked'}
             </span>`
-          : !this._localhost
-            ? html`<span class="toggle-readonly-note">
-                Host controls this setting
+          : card.locked && _EXPERIMENTAL_ENABLED
+            ? html`<span class="toggle-readonly-note experimental">
+                Experimental
               </span>`
-            : ''}
+            : !this._localhost
+              ? html`<span class="toggle-readonly-note">
+                  Host controls this setting
+                </span>`
+              : ''}
       </div>
     `;
   }

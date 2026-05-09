@@ -1,6 +1,6 @@
 # AC⚡DC — AI-assisted Code editing tool, De-Coder
 AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
-**Reimplementation in progress.** This tree is a clean-room rebuild of AC⚡DC against a new specification suite. The user-facing feature set below describes the target — individual features land layer by layer and are tracked in [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md).
+**Reimplementation in progress.** This tree is a clean-room rebuild of AC⚡DC against a new specification suite. The user-facing feature set below describes the target — individual features land layer by layer and are tracked in [`specs4/impl-history/work-log.md`](specs4/impl-history/work-log.md).
 
 ## Features
 
@@ -15,6 +15,7 @@ AC⚡DC is an AI pair-programming tool that runs as a terminal application with 
 - **Tree-sitter symbol index** for Python, JavaScript, TypeScript, C, and C++ with cross-file reference graphs and LSP-style hover, go-to-definition, references, and completions inside the diff viewer.
 - **Document index** for markdown and SVG with keyword-enriched headings, containment-aware SVG outlines, and a cross-reference graph between documents.
 - **Cross-reference mode** — optional toggle that layers document outlines into code mode (and vice versa), so the LLM can trace how documentation references code without a full mode switch.
+- **Agent mode** — optional capability (off by default) that lets the main LLM decompose a turn into parallel agent conversations using `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` spawn blocks. Agents run as independent context managers with their own tabs in the chat panel; their archives are persisted under `.ac-dc4/agents/<turn-id>/` and re-attach across reconnects. Per-agent mode (`code`, `doc`, `code+xref`, `doc+xref`) is set in the spawn block.
 - **Monaco-powered diff viewer** with LSP integration, markdown preview, TeX preview, markdown link provider (cross-file navigation), MATLAB syntax, and cross-file go-to-definition.
 - **Visual SVG editor** — click-to-select, drag-to-move, resize handles, path endpoint + control-point editing, inline text edit, marquee multi-selection, copy / paste / duplicate, undo, copy-as-PNG, and a full-width presentation mode.
 - **Code review mode** — pick a commit in a live git graph, soft-reset the branch, and work through the change with reverse diffs in context.
@@ -194,6 +195,23 @@ Markdown files produce a heading tree annotated with content-type markers (table
 Keyword enrichment (optional — requires `docs-enrich` extras) runs KeyBERT with a TF-IDF fallback for short sections, boosting heading disambiguation for repetitive structures.
 Cross-references resolve markdown `[text](path.md#heading)` links and image references, producing a reference graph that feeds cache-tier initialisation.
 Runtime toggle — code mode, document mode, or cross-reference mode (both indexes layered). No restart needed.
+### Agent mode
+Off by default. Enable by setting `"agents": { "enabled": true }` in `app.json` directly, or by ticking the agentic-coding toggle in the Settings tab — note that the in-app toggle is hidden unless ac-dc is launched with `--experimental`. When enabled, an appendix is added to the system prompt explaining the spawn-block protocol; the main LLM may then emit `🟧🟧🟧 AGENT` … `🟩🟩🟩 AGEND` blocks to fan out work across independent agents.
+
+Each spawned agent is a separate context manager with its own conversation history, file context, and stability tracker. Agents stream into their own tabs in the chat panel, run in parallel over the same WebSocket, and apply edits through the same anchor-matched pipeline as the main LLM. Per-tab affordances (cancel, view archive, jump to turn) work the same way for agents as for the main conversation.
+
+Spawn-block fields:
+
+- `id` — required; reusing an id retasks an existing agent (preserves its history and trackers), a new id spawns a fresh one
+- `task` — required; the initial natural-language prompt
+- `mode` — optional; one of `code`, `doc`, `code+xref`, `doc+xref`. Omitted means inherit the orchestrator's current mode
+
+Agent archives live under `.ac-dc4/agents/<turn-id>/<NN>-<agent-id>.jsonl` and survive reconnects — refreshing the browser re-attaches live agent tabs and lets you browse historical agent turns from the main chat.
+
+Reproduce the marker bytes (three orange squares + `AGENT`, three green squares + `AGEND`) exactly when authoring spawn blocks. The end marker `AGEND` is intentionally distinct from the edit-block end marker `END` so the parser can dispatch on the literal line.
+
+Full contract: [src/ac_dc/config/system_agentic_appendix.md](src/ac_dc/config/system_agentic_appendix.md) and [specs4/7-future/parallel-agents.md](specs4/7-future/parallel-agents.md).
+
 ### Cache tiering
 Content is tracked across categories (files, code symbols, doc outlines, URL context, history, system prompt) and flows through four stability tiers:
 - **Active** — just-added or recently changed; no promotion threshold
@@ -312,6 +330,7 @@ See [specs4/4-features/collaboration.md](specs4/4-features/collaboration.md) for
 | `--preview` | off | Serve the pre-built webapp locally |
 | `--verbose` | off | Debug-level logging |
 | `--collab` | off | Enable collaboration mode (LAN-accessible, multi-browser) |
+| `--experimental` | off | Unlock experimental UI affordances (agent-mode toggle, reasoning toggle) in the Settings tab and chat panel. JSON-config flags work without it; this flag only exposes the in-browser switches. |
 ---
 ## Keyboard Shortcuts
 | Shortcut | Context | Action |
@@ -375,6 +394,8 @@ All of these are editable from the Settings tab in the browser UI. `llm.json` an
 | `history_compaction` | `enabled`, `compaction_trigger_tokens`, `verbatim_window_tokens`, `summary_budget_tokens`, `min_verbatim_exchanges` |
 | `doc_convert` | `enabled`, `extensions`, `max_source_size_mb` |
 | `doc_index` | `keyword_model`, `keywords_enabled`, `keywords_top_n`, `keywords_ngram_range`, `keywords_min_section_chars`, `keywords_min_score`, `keywords_diversity`, `keywords_tfidf_fallback_chars`, `keywords_max_doc_freq` |
+| `agents` | `enabled` (off by default; flips on the agent-spawn capability and the system-prompt appendix). The Settings-tab toggle for this is gated by `--experimental`; editing the JSON directly works without the flag. |
+| `reasoning` | `enabled`, `budget_tokens`, `effort` (experimental — provider-specific extended-thinking support). The chat-panel reasoning toggle is gated by `--experimental`; the JSON section is read regardless. |
 Full field reference: [specs-reference/1-foundation/configuration.md](specs-reference/1-foundation/configuration.md).
 ---
 ## Per-Repo Working Directory
@@ -386,7 +407,7 @@ A `.ac-dc4/` directory is created at the repo root on first run and added to `.g
 | `doc_cache/` | Keyword-enriched document outline cache (mtime-keyed sidecars) |
 | `tex_preview/` | Transient TeX compilation working directory (cleaned on startup) |
 | `snippets.json` | Optional per-repo override of quick-insert snippets |
-The directory name is `.ac-dc4/` (not `.ac-dc/`) deliberately — this reimplementation coexists with the previous AC-DC on the same checkout without state collisions. See [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) decision D17.
+The directory name is `.ac-dc4/` (not `.ac-dc/`) deliberately — this reimplementation coexists with the previous AC-DC on the same checkout without state collisions. See [`specs4/impl-history/decisions.md`](specs4/impl-history/decisions.md) decision D17.
 ---
 ## Development
 ### Prerequisites

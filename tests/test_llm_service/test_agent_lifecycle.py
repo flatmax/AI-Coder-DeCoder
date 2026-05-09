@@ -221,47 +221,46 @@ class TestAgentContextRegistry:
         assert service._agent_contexts["worker"] is scope_v2
         assert service._agent_contexts["worker"] is not scope_v1
 
-    def test_new_session_preserves_agent_scopes(
+    def test_new_session_closes_all_live_agents(
         self,
         service: LLMService,
     ) -> None:
-        """new_session keeps the agent registry but clears each agent's history.
+        """new_session clears the agent registry entirely.
 
-        Per :doc:`specs4/7-future/parallel-agents` § Agent
-        lifetime: ``new_session`` clears each agent's chat
-        history but preserves its scope — the team stays
-        warm for the next conversation. Application exit is
-        the only event that drops scope objects.
+        Per the "Agents as first-class persistent entities"
+        plan (Increment 2 in IMPLEMENTATION_NOTES.md): the
+        new-session gesture means "the entire conversation
+        thread goes with it — including agents". This
+        supersedes the earlier "agents survive new_session"
+        policy that produced the "I clicked new session
+        and nothing happened" UX bug for users on agent
+        tabs.
+
+        Application exit and explicit close-tab clicks both
+        also free agents; new_session joins them as a third
+        teardown trigger.
         """
         parent_scope = service._default_scope()
-        scope_a = service._build_agent_scope(
+        service._build_agent_scope(
             block=self._make_agent_block("alpha"),
             agent_idx=0,
             parent_scope=parent_scope,
             turn_id="turn_one",
         )
-        scope_b = service._build_agent_scope(
+        service._build_agent_scope(
             block=self._make_agent_block("beta"),
             agent_idx=1,
             parent_scope=parent_scope,
             turn_id="turn_one",
         )
-        # Seed each agent with a chat message so we can
-        # observe the history-clear behaviour.
-        scope_a.context.add_message("user", "first message")
-        scope_b.context.add_message("user", "first message")
-        assert len(scope_a.context.get_history()) == 1
-        assert len(scope_b.context.get_history()) == 1
+        assert "alpha" in service._agent_contexts
+        assert "beta" in service._agent_contexts
 
         result = service.new_session()
         assert "session_id" in result
 
-        # Scopes survive — same identity objects.
-        assert service._agent_contexts["alpha"] is scope_a
-        assert service._agent_contexts["beta"] is scope_b
-        # But each agent's chat history was wiped.
-        assert scope_a.context.get_history() == []
-        assert scope_b.context.get_history() == []
+        # All agent scopes gone.
+        assert service._agent_contexts == {}
 
     async def test_completion_result_carries_turn_id(
         self,
@@ -1142,6 +1141,698 @@ class TestSetAgentExcludedIndexFilesLocalhostOnly:
         assert scope.excluded_index_files == []
 
 
+class TestSwitchAgentMode:
+    """switch_agent_mode RPC.
+
+    Per-agent mode toggle (Increment 4a). Identifies the
+    agent by its LLM-chosen id. Accepts the four combined
+    mode strings on the wire and flattens them into the
+    ContextManager's two axes (mode + cross_reference_enabled).
+
+    Tests cover happy path for each mode transition,
+    no-op when already in the target state, mid-stream
+    rejection, validation errors (unknown agent, malformed
+    mode), tracker rebuild side-effect, archive event
+    persistence, and the localhost-only gate.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown agent id → agent-not-found error."""
+        result = service.switch_agent_mode("nonexistent", "doc")
+        assert result == {"error": "agent not found"}
+
+    def test_empty_string_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Empty string id → agent-not-found (defensive)."""
+        result = service.switch_agent_mode("", "doc")
+        assert result == {"error": "agent not found"}
+
+    def test_invalid_mode_string_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Mode value outside the four-valid set → error.
+
+        The LLM-side surface accepts the same four strings
+        every other mode-bearing API does. A malformed
+        client payload must surface a clear error rather
+        than silently mutating to an unexpected state.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode("worker", "rust")
+        assert result.get("error") == "invalid mode"
+        assert "rust" in result.get("reason", "")
+
+    def test_non_string_mode_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Defensive — non-string mode value rejected."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode("worker", 42)
+        assert result.get("error") == "invalid mode"
+
+    def test_switches_code_to_doc(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → doc switches Mode and clears cross-ref."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Default agent state: code mode, xref off.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is False
+
+        result = service.switch_agent_mode("worker", "doc")
+        assert result == {
+            "status": "ok",
+            "agent_id": "worker",
+            "mode": "doc",
+        }
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is False
+
+    def test_switches_to_code_xref(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → code+xref flips just the xref axis."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode(
+            "worker", "code+xref",
+        )
+        assert result["mode"] == "code+xref"
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_switches_to_doc_xref(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → doc+xref flips both axes in one call."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode(
+            "worker", "doc+xref",
+        )
+        assert result["mode"] == "doc+xref"
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_no_op_when_already_in_target_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Same mode → ok status with 'already' message.
+
+        Pinned because re-applying the same mode would
+        otherwise rebuild the tracker (a needless cache
+        write) and emit an archive event for nothing. The
+        identity comparison guards both axes.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Pre-set to doc+xref.
+        from ac_dc.context_manager import Mode
+        scope.context.set_mode(Mode.DOC)
+        scope.context.set_cross_reference_enabled(True)
+        original_tracker = scope.tracker
+
+        result = service.switch_agent_mode(
+            "idle", "doc+xref",
+        )
+        assert result["status"] == "ok"
+        assert "already" in result.get("message", "").lower()
+        # Tracker untouched — the no-op short-circuit avoids
+        # the rebuild.
+        assert scope.tracker is original_tracker
+
+    def test_mid_stream_rejected(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Agent with active stream → stream-active error.
+
+        Switching mode mid-flight would leave the cached
+        tier prefix mismatched against the agent's
+        in-progress LLM call. Frontend hides the toggle
+        while the LED is cyan, but the backend guards
+        defensively against a stale click.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("busy"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Simulate an in-flight stream.
+        service._active_agent_streams.add("busy")
+        try:
+            result = service.switch_agent_mode("busy", "doc")
+            assert result.get("error") == "agent stream active"
+            assert "wait" in result.get("reason", "").lower()
+            # Mode unchanged.
+            from ac_dc.context_manager import Mode
+            assert scope.context.mode == Mode.CODE
+        finally:
+            service._active_agent_streams.discard("busy")
+
+    def test_rebuilds_tracker(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Successful switch replaces the agent's tracker.
+
+        Tier placements were valid for the old prompt + index
+        combination; the new combination invalidates every
+        cached prefix, so a fresh tracker is the correct
+        starting state for the next turn. The
+        ContextManager's ``stability_tracker`` reference
+        also follows the swap so reads through that path
+        see the new instance.
+        """
+        from ac_dc.stability_tracker import StabilityTracker
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        original_tracker = scope.tracker
+
+        service.switch_agent_mode("worker", "doc")
+        assert scope.tracker is not original_tracker
+        assert isinstance(scope.tracker, StabilityTracker)
+        # ContextManager attachment also updated.
+        assert scope.context.stability_tracker is scope.tracker
+
+    def test_writes_archive_system_event(
+        self,
+        service: LLMService,
+        history_store: Any,
+    ) -> None:
+        """Archive carries a mode-change system event.
+
+        Per Increment 3b: the agent's archive records the
+        transition so reconstruction (Increment 5) can
+        replay events and arrive at the agent's final
+        mode. The event's content names both the old and
+        new modes so a future reader can audit the
+        transition without inferring it from neighbouring
+        records.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("recorder"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_event",
+        )
+
+        service.switch_agent_mode(
+            "recorder", "doc+xref",
+        )
+
+        archive = history_store.get_turn_archive("turn_event")
+        assert len(archive) == 1
+        messages = archive[0]["messages"]
+        # The mode-change event is the only system_event in
+        # the archive — agent's task wasn't run, no
+        # streaming happened, so the only record is our
+        # archive write.
+        events = [
+            m for m in messages
+            if m.get("system_event") is True
+        ]
+        assert len(events) == 1
+        content = events[0].get("content", "")
+        assert "code" in content
+        assert "doc+xref" in content
+
+    def test_broadcasts_agent_mode_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Successful switch fires an agentModeChanged event.
+
+        Frontend listens for this to update the tab's
+        tooltip and the LED-row state without polling. The
+        payload's ``agent_id`` field is the registry key so
+        the frontend can route to the right tab.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("notifier"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.switch_agent_mode("notifier", "doc")
+
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert len(broadcasts) == 1
+        payload = broadcasts[0][0]
+        assert payload == {
+            "agent_id": "notifier",
+            "mode": "doc",
+            "cross_reference_enabled": False,
+        }
+
+    def test_no_op_does_not_broadcast(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Re-applying same mode → no broadcast.
+
+        Mirrors the ``main.switch_mode`` no-broadcast
+        contract for already-current state. Without this,
+        rapid identical clicks would flood the event
+        channel.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.switch_agent_mode("idle", "code")  # already
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert broadcasts == []
+
+
+class TestSwitchAgentModeLocalhostOnly:
+    """switch_agent_mode restricts non-localhost callers."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("guarded"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.switch_agent_mode("guarded", "doc")
+        assert result.get("error") == "restricted"
+        # Mode unchanged.
+        from ac_dc.context_manager import Mode
+        assert scope.context.mode == Mode.CODE
+
+
+class TestSetAgentCrossReference:
+    """set_agent_cross_reference RPC.
+
+    Per-agent cross-ref toggle (Increment 4a). Tests cover
+    happy path for both directions, no-op when already in
+    the target state, mid-stream rejection, unknown agent,
+    archive event, and broadcast.
+
+    Mode-axis stability is the key contract here:
+    cross-ref toggles must NOT change the agent's primary
+    mode. Pinned by tests that exercise both code and doc
+    starting states.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown agent id → agent-not-found error."""
+        result = service.set_agent_cross_reference(
+            "nonexistent", True,
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_empty_string_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Empty string id → agent-not-found (defensive)."""
+        result = service.set_agent_cross_reference("", True)
+        assert result == {"error": "agent not found"}
+
+    def test_enables_xref_in_code_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → code+xref via toggle."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.set_agent_cross_reference(
+            "worker", True,
+        )
+        assert result == {
+            "status": "ok",
+            "agent_id": "worker",
+            "cross_reference_enabled": True,
+        }
+        # Primary mode unchanged.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_disables_xref_preserving_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """doc+xref → doc keeps the primary doc mode.
+
+        Critical contract — the cross-ref RPC must not
+        accidentally collapse mode to its default. Without
+        this guard a regression that read both axes from
+        wire input would silently reset mode on every
+        xref toggle.
+        """
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        scope.context.set_mode(Mode.DOC)
+        scope.context.set_cross_reference_enabled(True)
+
+        result = service.set_agent_cross_reference(
+            "worker", False,
+        )
+        assert result["cross_reference_enabled"] is False
+        # Primary mode preserved.
+        assert scope.context.mode == Mode.DOC
+
+    def test_no_op_when_already_in_target_state(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Same xref state → ok with 'already' message."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Default xref is False.
+        original_tracker = scope.tracker
+        result = service.set_agent_cross_reference(
+            "idle", False,
+        )
+        assert result["status"] == "ok"
+        assert "already" in result.get("message", "").lower()
+        assert scope.tracker is original_tracker
+
+    def test_mid_stream_rejected(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Active stream → stream-active error."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("busy"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        service._active_agent_streams.add("busy")
+        try:
+            result = service.set_agent_cross_reference(
+                "busy", True,
+            )
+            assert result.get("error") == "agent stream active"
+            # State unchanged.
+            assert scope.context.cross_reference_enabled is False
+        finally:
+            service._active_agent_streams.discard("busy")
+
+    def test_non_bool_input_coerced(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Truthy/falsy values coerce via bool() — defensive.
+
+        The wire input arrives as JSON, where True/False are
+        the only legal bool values. A truthy int leaking
+        through (frontend bug) shouldn't crash; bool()
+        handles it.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.set_agent_cross_reference(
+            "worker", 1,
+        )
+        assert result["cross_reference_enabled"] is True
+        assert scope.context.cross_reference_enabled is True
+
+    def test_rebuilds_tracker(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Successful toggle replaces the tracker."""
+        from ac_dc.stability_tracker import StabilityTracker
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        original_tracker = scope.tracker
+
+        service.set_agent_cross_reference("worker", True)
+        assert scope.tracker is not original_tracker
+        assert isinstance(scope.tracker, StabilityTracker)
+        assert scope.context.stability_tracker is scope.tracker
+
+    def test_writes_archive_system_event(
+        self,
+        service: LLMService,
+        history_store: Any,
+    ) -> None:
+        """Archive carries a cross-ref-toggle system event."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("recorder"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_xref_event",
+        )
+
+        service.set_agent_cross_reference("recorder", True)
+
+        archive = history_store.get_turn_archive(
+            "turn_xref_event",
+        )
+        events = [
+            m for m in archive[0]["messages"]
+            if m.get("system_event") is True
+        ]
+        assert len(events) == 1
+        content = events[0].get("content", "")
+        # Event names both the old (code) and new (code+xref)
+        # modes — the format mirrors switch_agent_mode's
+        # event so reconstruction can use one parser.
+        assert "code" in content
+        assert "code+xref" in content
+
+    def test_broadcasts_agent_mode_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Toggle fires the same agentModeChanged event.
+
+        Frontend listens for one event regardless of which
+        axis changed — keeps the listener simple and the
+        wire chatter narrow.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("notifier"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.set_agent_cross_reference("notifier", True)
+
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert len(broadcasts) == 1
+        payload = broadcasts[0][0]
+        assert payload["agent_id"] == "notifier"
+        assert payload["mode"] == "code+xref"
+        assert payload["cross_reference_enabled"] is True
+
+    def test_no_op_does_not_broadcast(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Re-applying same state → no broadcast."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.set_agent_cross_reference("idle", False)
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert broadcasts == []
+
+
+class TestSetAgentCrossReferenceLocalhostOnly:
+    """set_agent_cross_reference restricts non-localhost."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("guarded"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.set_agent_cross_reference(
+            "guarded", True,
+        )
+        assert result.get("error") == "restricted"
+        # State unchanged.
+        assert scope.context.cross_reference_enabled is False
+
+
 class TestParseAgentTag:
     """:meth:`LLMService._parse_agent_tag` input validation.
 
@@ -1563,3 +2254,1028 @@ class TestAgentTaggedStreaming:
             agent_tag="closeable",
         )
         assert result == {"error": "agent not found"}
+
+
+class TestSessionLoadReconstruction:
+    """Increment 5 Commit 1 — session-load agent reconstruction.
+
+    Pins the spec contract from `specs4/3-llm/history.md §
+    Session-Load Reconstruction`: loading a previous session
+    rebuilds every agent that participated as a live,
+    writable scope. Reconstructed agents are reachable via
+    `_agent_contexts`, accept new messages, and surface in
+    `list_live_agents()`.
+
+    Commit 1 covers the spawn-time-baseline mode resolution.
+    Commit 2 will add archive-replay for mid-session mode
+    toggles; tests for that behaviour land alongside that
+    commit. A `# Commit 2` marker comment flags the
+    intermediate known-wrong state — an agent toggled mid-
+    session reconstructs as its spawn-time mode after Commit
+    1, and as its post-toggle mode after Commit 2.
+    """
+
+    def _persist_agent_turn(
+        self,
+        history_store: HistoryStore,
+        session_id: str,
+        turn_id: str,
+        agent_blocks: list[dict[str, Any]],
+        archive_per_agent: dict[int, list[dict[str, Any]]],
+    ) -> None:
+        """Persist one agent-spawning turn to disk.
+
+        Writes the user message, the assistant message
+        carrying ``agent_blocks``, and each agent's archive
+        records. Mirrors what `_stream_chat` does at runtime
+        but without the LLM call. Tests use this to seed a
+        history-store the same way a real session would
+        leave it.
+        """
+        history_store.append_message(
+            session_id=session_id,
+            role="user",
+            content="please decompose",
+            turn_id=turn_id,
+        )
+        history_store.append_message(
+            session_id=session_id,
+            role="assistant",
+            content="delegating",
+            turn_id=turn_id,
+            agent_blocks=agent_blocks,
+        )
+        for agent_idx, msgs in archive_per_agent.items():
+            for msg in msgs:
+                history_store.append_agent_message(
+                    turn_id=turn_id,
+                    agent_idx=agent_idx,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content", ""),
+                    session_id=session_id,
+                    system_event=bool(
+                        msg.get("system_event", False)
+                    ),
+                )
+
+    def test_empty_session_reconstructs_no_agents(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Loading a session with no agentic turns: registry empty."""
+        sid = HistoryStore.new_session_id()
+        # Persist a non-agent turn so the session isn't empty
+        # (load_session_into_context refuses empty sessions).
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+            turn_id=HistoryStore.new_turn_id(),
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+        result = service.load_session_into_context(sid)
+        assert "error" not in result
+        assert service._agent_contexts == {}
+
+    def test_single_agent_session_restores_context_manager(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """One agent in one turn: scope registered, history loaded."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "frontend",
+                    "agent_idx": 0,
+                    "mode": "code",
+                    "cross_reference_enabled": False,
+                    "model": "anthropic/claude-sonnet-4-5",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "do the work"},
+                    {
+                        "role": "assistant",
+                        "content": "work done",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        # Agent registered.
+        assert "frontend" in service._agent_contexts
+        scope = service._agent_contexts["frontend"]
+        # Mode reflects the persisted spawn-time baseline.
+        from ac_dc.context_manager import Mode
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is False
+        # History populated from archive.
+        history = scope.context.get_history()
+        contents = [m.get("content") for m in history]
+        assert "do the work" in contents
+        assert "work done" in contents
+
+    def test_multi_agent_single_turn_session_restores_all(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Multiple agents in one turn: each gets its own scope."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "agent-a",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+                {
+                    "id": "agent-b",
+                    "agent_idx": 1,
+                    "mode": "doc",
+                },
+                {
+                    "id": "agent-c",
+                    "agent_idx": 2,
+                    "mode": "code+xref",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task a"}],
+                1: [{"role": "user", "content": "task b"}],
+                2: [{"role": "user", "content": "task c"}],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        assert "agent-a" in service._agent_contexts
+        assert "agent-b" in service._agent_contexts
+        assert "agent-c" in service._agent_contexts
+        a = service._agent_contexts["agent-a"]
+        b = service._agent_contexts["agent-b"]
+        c = service._agent_contexts["agent-c"]
+        # Modes round-trip through reconstruction.
+        assert a.context.mode == Mode.CODE
+        assert a.context.cross_reference_enabled is False
+        assert b.context.mode == Mode.DOC
+        assert b.context.cross_reference_enabled is False
+        assert c.context.mode == Mode.CODE
+        assert c.context.cross_reference_enabled is True
+
+    def test_retask_within_session_uses_latest_spawn_record(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Same id across two turns: latest spawn record wins.
+
+        Per spec § Session-Load Reconstruction step 3:
+        "When an id appears in multiple turns ... the
+        latest record wins — its agent_blocks entry is
+        the spawn-time baseline. Earlier turns contribute
+        archive content but not mode state."
+
+        Setup: agent ``worker`` spawned in turn 1 as code
+        mode, retasked in turn 2 as doc mode. After
+        reconstruction (Commit 1 spawn-time baseline) the
+        agent's mode is doc — the latest spawn record's
+        value. Both turns' archive content is concatenated.
+        """
+        sid = HistoryStore.new_session_id()
+        tid_1 = HistoryStore.new_turn_id()
+        tid_2 = HistoryStore.new_turn_id()
+        # Turn 1 — worker spawned in code mode.
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid_1,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "first task"},
+                    {
+                        "role": "assistant",
+                        "content": "first done",
+                    },
+                ],
+            },
+        )
+        # Turn 2 — same worker, retasked in doc mode.
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid_2,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "doc",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {
+                        "role": "user",
+                        "content": "second task",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "second done",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["worker"]
+        # Latest record's mode wins per spec.
+        assert scope.context.mode == Mode.DOC
+        # History from BOTH turns concatenated.
+        contents = [
+            m.get("content")
+            for m in scope.context.get_history()
+        ]
+        assert "first task" in contents
+        assert "first done" in contents
+        assert "second task" in contents
+        assert "second done" in contents
+
+    def test_missing_archive_directory_skipped(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        repo_dir: Path,
+    ) -> None:
+        """Deleted archive: agent reconstructs with empty history.
+
+        Per spec: "Turns whose archive directory has been
+        deleted are skipped without error. The agent's
+        reconstruction proceeds with whatever archive
+        content remains."
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "ghost", "agent_idx": 0, "mode": "code"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        # Delete the archive directory after persistence.
+        archive_dir = (
+            repo_dir / ".ac-dc4" / "agents" / tid
+        )
+        assert archive_dir.exists()
+        for f in archive_dir.iterdir():
+            f.unlink()
+        archive_dir.rmdir()
+
+        service.load_session_into_context(sid)
+
+        # Agent still reconstructed (record in main store
+        # has agent_blocks); just empty history.
+        assert "ghost" in service._agent_contexts
+        scope = service._agent_contexts["ghost"]
+        assert scope.context.get_history() == []
+
+    def test_records_without_agent_blocks_skipped(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Pre-Increment-A records (no agent_blocks) silently skipped."""
+        sid = HistoryStore.new_session_id()
+        # User + assistant without turn_id or agent_blocks
+        # — simulates a record from before agent persistence.
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+
+        service.load_session_into_context(sid)
+
+        assert service._agent_contexts == {}
+
+    def test_reconstructed_scope_reachable_via_rpc(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Reconstructed agent answers to set_agent_selected_files."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "live-agent",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        # Agent reachable through the agent-keyed RPC
+        # surface — proves it's a live writable scope, not
+        # a read-only stub.
+        result = service.set_agent_selected_files(
+            "live-agent", [],
+        )
+        assert result == []
+
+    # ----- Commit 2 — mode replay from archive events -----
+
+    def test_spawn_then_toggle_reconstructs_as_toggled_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Mid-session toggle survives reload via archive replay.
+
+        Per spec § Session-Load Reconstruction step 5: the
+        spawn-time baseline is just the replay's starting
+        point. An agent spawned in code and toggled to doc
+        mid-session reconstructs as doc — replay strategy
+        (b) is authoritative.
+
+        Setup: agent ``worker`` spawned in code mode (turn 1
+        spawn record carries mode=code), then toggled to doc
+        via a system event recorded in the archive. After
+        reconstruction, mode is doc despite the spawn-time
+        baseline saying code.
+
+        Pre-Commit-2 behaviour was the failing case: the
+        spawn-time baseline won and the toggle silently
+        vanished on session reload. Pinning the post-replay
+        outcome catches a regression that would re-introduce
+        that bug.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "do it"},
+                    {
+                        "role": "assistant",
+                        "content": "ok",
+                    },
+                    # Mode-change event written by
+                    # switch_agent_mode. Format mirrors
+                    # _rpc_state.py's writer exactly.
+                    {
+                        "role": "user",
+                        "content": "Mode changed: code → doc.",
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": "another task",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["worker"]
+        # Replay strategy (b) — the toggled mode wins, not
+        # the spawn-time baseline.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is False
+
+    def test_multiple_sequential_toggles_reconstruct_final_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Several toggles in sequence — final state wins.
+
+        Pinned because a future refactor that took the
+        FIRST event rather than walking to the last would
+        produce wrong intermediate state. The walk must
+        consume every valid event, applying each
+        transition.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "shifter",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {
+                        "role": "user",
+                        "content": "Mode changed: code → doc.",
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc → doc+xref."
+                        ),
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc+xref → code+xref."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["shifter"]
+        # After three transitions the final state is
+        # code+xref. Walk-to-end is critical here — picking
+        # any intermediate event would land doc+xref or doc.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_malformed_event_skipped_subsequent_valid_applies(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Malformed event is skipped, later valid event still applies.
+
+        Defensive contract — the replay walk continues
+        past unparseable events rather than aborting. A
+        single corrupt archive line shouldn't sink the
+        entire reconstruction.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "robust",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Missing terminator — not a valid event.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → rust"
+                        ),
+                        "system_event": True,
+                    },
+                    # Garbled prefix — not an event.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Switched: code → doc."
+                        ),
+                        "system_event": True,
+                    },
+                    # Unrecognised right-side mode.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → typescript."
+                        ),
+                        "system_event": True,
+                    },
+                    # Valid — this one applies.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → doc."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["robust"]
+        assert scope.context.mode == Mode.DOC
+
+    def test_no_events_leaves_baseline_unchanged(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Archive without mode events: spawn-time baseline wins.
+
+        Most common case — agents that ran without any
+        mid-session toggle. Replay produces the baseline
+        unchanged.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "stable",
+                    "agent_idx": 0,
+                    "mode": "doc+xref",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["stable"]
+        # Baseline applied unchanged.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_xref_axis_toggled_independently(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Cross-ref-only toggle preserves primary mode through replay.
+
+        Pinned because :func:`set_agent_cross_reference`
+        writes events with the same format
+        :func:`switch_agent_mode` uses, and the parser must
+        handle ``code → code+xref`` (xref toggle within
+        same primary mode) just as well as
+        ``code → doc`` (primary mode change).
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "xref-only",
+                    "agent_idx": 0,
+                    "mode": "doc",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Cross-ref enabled mid-session.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc → doc+xref."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["xref-only"]
+        # Primary mode preserved, cross-ref now on.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_non_event_records_ignored_by_replay(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Conversation messages don't trigger spurious replay.
+
+        An assistant message containing the literal text
+        "Mode changed: code → doc." (e.g., the agent
+        narrating mode-change UX in its prose) MUST NOT be
+        treated as a replay event because it lacks
+        ``system_event: true``. The system_event flag is
+        the load-bearing discriminator.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "narrator",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Looks like an event but isn't one —
+                    # no system_event flag.
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "Mode changed: code → doc."
+                        ),
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["narrator"]
+        # Mode unchanged — the conversation message wasn't
+        # an event.
+        assert scope.context.mode == Mode.CODE
+
+    # ----- Commit 3 — agentsRehydrated broadcast -----
+
+    def test_load_session_broadcasts_agents_rehydrated(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Successful load fires agentsRehydrated with reconstructed ids.
+
+        Frontend uses the broadcast as the trigger to
+        materialise agent tabs in the chat panel after a
+        session load. Without it, the chat panel would
+        only learn about reconstructed agents at the next
+        onRpcReady (browser refresh) — defeating the
+        whole point of mid-session reconstruction.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "alpha", "agent_idx": 0, "mode": "code"},
+                {"id": "beta", "agent_idx": 1, "mode": "doc"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task a"}],
+                1: [{"role": "user", "content": "task b"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        payload = rehydrated[0][0]
+        assert sorted(payload["agent_ids"]) == [
+            "alpha", "beta",
+        ]
+
+    def test_rehydrated_fires_after_session_changed(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Order matters — sessionChanged before agentsRehydrated.
+
+        The chat panel's session-changed handler resets
+        message list and streaming state for the new
+        session. If agentsRehydrated arrived first, the
+        new agent tabs would briefly render against the
+        previous session's main-tab content before the
+        reset.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "solo", "agent_idx": 0, "mode": "code"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        names = [name for name, _ in event_cb.events]
+        first_session = names.index("sessionChanged")
+        first_rehydrate = names.index("agentsRehydrated")
+        assert first_session < first_rehydrate
+
+    def test_no_agents_no_rehydrated_broadcast(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Loading a non-agent session: no spurious broadcast.
+
+        agentsRehydrated only fires when at least one
+        agent was reconstructed. A session that never
+        spawned agents loads without firing — frontend
+        avoids a no-op rehydrate call.
+        """
+        sid = HistoryStore.new_session_id()
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+            turn_id=HistoryStore.new_turn_id(),
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert rehydrated == []
+        # sessionChanged still fires.
+        assert any(
+            name == "sessionChanged"
+            for name, _ in event_cb.events
+        )
+
+    def test_pre_existing_agents_excluded_from_rehydrated_payload(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Already-live agents don't appear in the broadcast.
+
+        The payload lists agents NEWLY registered by this
+        load, not the full registry. A user with live
+        agents in the current session who loads an old
+        session should see only the loaded session's
+        agents in the rehydrated event — the live agents
+        are already present on the frontend.
+        """
+        from ac_dc.edit_protocol import AgentBlock
+
+        # Pre-register a live agent to simulate an
+        # in-progress session.
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=AgentBlock(id="pre-existing", task="t"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_live",
+        )
+
+        # Now persist and load a different session.
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "from-archive",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        event_cb.events.clear()
+
+        service.load_session_into_context(sid)
+
+        rehydrated = [
+            args for name, args in event_cb.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        payload = rehydrated[0][0]
+        # Only the just-reconstructed id appears.
+        assert payload["agent_ids"] == ["from-archive"]
+        # Pre-existing agent still in registry but not in
+        # broadcast.
+        assert "pre-existing" in service._agent_contexts
+
+    def test_full_round_trip_two_service_instances(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        history_store: HistoryStore,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """Service A spawns + toggles; service B loads and reconstructs.
+
+        End-to-end integration test: service A persists an
+        agent through a real toggle, then a fresh service
+        B (same history store, simulating a server
+        restart) loads the session and reaches the same
+        final mode. Pins that the persistence layer +
+        reconstruction layer + replay layer compose
+        correctly.
+
+        Service A doesn't run real LLM calls — we
+        construct the agent scope directly and use the
+        switch_agent_mode RPC to write the archive event.
+        That's the path the real streaming pipeline would
+        take; bypassing the LLM call avoids fake-litellm
+        coordination for what is fundamentally a
+        persistence test.
+        """
+        from ac_dc.context_manager import Mode
+        from ac_dc.edit_protocol import AgentBlock
+
+        # Service A — spawns agent and toggles its mode.
+        cb_a = _RecordingEventCallback()
+        service_a = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=cb_a,
+            history_store=history_store,
+        )
+        sid = service_a.get_current_state()["session_id"]
+        tid = HistoryStore.new_turn_id()
+
+        # Persist the spawn-time record so reconstruction
+        # has agent_blocks to walk. In real operation this
+        # happens during _stream_chat's persistence step.
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="please decompose",
+            turn_id=tid,
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="delegating to agent worker",
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                    "cross_reference_enabled": False,
+                },
+            ],
+        )
+
+        # Build the agent scope on service A so the
+        # registry has it for switch_agent_mode to find.
+        parent_scope_a = service_a._default_scope()
+        scope_a = service_a._build_agent_scope(
+            block=AgentBlock(
+                id="worker", task="initial task",
+            ),
+            agent_idx=0,
+            parent_scope=parent_scope_a,
+            turn_id=tid,
+        )
+        # Seed the agent's first user message — the task
+        # text. In real operation _stream_chat does this
+        # as it begins streaming; the test bypasses
+        # _stream_chat to avoid fake-litellm coordination,
+        # so we drive the same persistence path directly
+        # via the scope's ContextManager.
+        scope_a.context.add_message("user", "initial task")
+        # Toggle to doc — writes the mode-change event to
+        # the archive.
+        result = service_a.switch_agent_mode("worker", "doc")
+        assert result["mode"] == "doc"
+
+        # Service B — fresh instance (same history store),
+        # simulates a server restart between sessions.
+        cb_b = _RecordingEventCallback()
+        service_b = LLMService(
+            config=config,
+            repo=repo,
+            event_callback=cb_b,
+            history_store=history_store,
+        )
+        # Service B starts with no agents in its registry.
+        assert service_b._agent_contexts == {}
+
+        # Load the session — reconstruction reads from
+        # disk.
+        service_b.load_session_into_context(sid)
+
+        # Agent reconstructed with post-replay mode.
+        assert "worker" in service_b._agent_contexts
+        scope_b = service_b._agent_contexts["worker"]
+        assert scope_b.context.mode == Mode.DOC
+        # Initial spawn task plus the toggle's archive
+        # event are both in history.
+        contents = [
+            m.get("content")
+            for m in scope_b.context.get_history()
+        ]
+        assert "initial task" in contents
+        # Mode-change system event also present.
+        assert any(
+            "Mode changed" in (c or "")
+            for c in contents
+        )
+
+        # agentsRehydrated broadcast fired on service B.
+        rehydrated = [
+            args for name, args in cb_b.events
+            if name == "agentsRehydrated"
+        ]
+        assert len(rehydrated) == 1
+        assert rehydrated[0][0]["agent_ids"] == ["worker"]

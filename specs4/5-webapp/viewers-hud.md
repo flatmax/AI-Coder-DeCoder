@@ -105,7 +105,9 @@ Summary at top with cache hit rate as a percentage label and a proportional bar.
 
 #### Synthetic Meta Rows
 
-Tier content includes synthetic rows with a `meta:` prefix alongside the per-entry tracker rows. Meta rows surface sections of the assembled prompt that don't correspond to individual tracker entries — the aggregate map body (cached in L0), the file tree, fetched URLs, review-mode context, and active (non-graduated) selected files (all in the uncached tail). Clicking a meta row opens the same map-block modal used for per-entry rows; the modal dispatches to the backend which recomputes or re-fetches the section's content.
+Tier content includes synthetic rows with a `meta:` prefix alongside the per-entry tracker rows. Meta rows surface sections of the assembled prompt that don't correspond to individual tracker entries — the aggregate map body (cached in L0), the file tree, fetched URLs, review-mode context, active (non-graduated) selected files, the per-turn agent-state descriptor, and the system reminder (all in the uncached tail except the cached aggregate map). Clicking a meta row opens the same map-block modal used for per-entry rows; the modal dispatches to the backend which recomputes or re-fetches the section's content.
+
+The agent descriptor row (`meta:agent_descriptor`) and system reminder row (`meta:system_reminder`) are assembly-time injections — rebuilt fresh on every turn and prepended/appended to the outgoing user message, never persisted to history. Surfacing them in the cache viewer closes the loop on the tab's "ground truth" promise: every byte the LLM receives has a visible meta row, including transient injections that don't enter the tracker. The descriptor row is suppressed when no agents are registered; the reminder row is suppressed when the configured reminder is empty.
 
 The token counts displayed on `meta:repo_map` / `meta:doc_map` rows must match the content the click-to-view modal produces. Divergence indicates a violation of the three-way exclusion-set contract documented in [`specs-reference/3-llm/prompt-assembly.md § Symbol map exclusions`](../../specs-reference/3-llm/prompt-assembly.md#symbol-map-exclusions).
 
@@ -226,6 +228,7 @@ Mode-aware labels — "Symbol Map" in code mode, "Doc Map" in document mode. Whe
 - Section collapse state in the HUD persists across sessions via localStorage
 - Unmeasured tier items are always collapsed into a summary line; never rendered individually
 - Map-block modal dispatches to the correct index based on item key prefix, with cross-mode fallback when the primary index has no data
+- Assembly-time injections (agent descriptor, system reminder) surface as synthetic meta rows in the uncached tier; suppressed when their content is empty so the viewer doesn't show zero-token noise
 - Terminal HUD is printed after every completed LLM response, whether the stream succeeded or was cancelled
 - Startup init HUD is printed exactly once per server start, after stability tracker initialization completes
 - Cache sub-view Rebuild button is visible to all clients but rejected server-side for non-localhost callers; the restricted-error toast path is exercised rather than silently allowing a client-side dispatch

@@ -19,8 +19,8 @@ import {
 } from 'vitest';
 
 import { SharedRpc } from './rpc.js';
-import { buildPrunedTree } from './files-tab.js';
-import './files-tab.js';
+import { buildPrunedTree } from './files-tab/index.js';
+import './files-tab/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

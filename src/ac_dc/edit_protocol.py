@@ -129,10 +129,26 @@ _AGENT_FIELD_REGEX = re.compile(r"^(\w+):\s*(.*)$")
 # Extending this set when new structured fields are added
 # (e.g., ``tools:`` for the future MCP integration per
 # specs4/7-future/mcp-integration.md) is a one-line change
-# here. Until then, ``id`` and ``task`` are the only
-# structured fields the parser knows about; everything else
-# is prose.
-_AGENT_KNOWN_FIELDS: frozenset[str] = frozenset({"id", "task"})
+# here. Today ``id``, ``task``, and ``mode`` are the only
+# structured fields; everything else is prose that lands in
+# the accumulated ``task`` value verbatim.
+_AGENT_KNOWN_FIELDS: frozenset[str] = frozenset({"id", "task", "mode"})
+
+
+# Allowed ``mode`` values per
+# specs4/7-future/parallel-agents.md § "Per-agent state
+# descriptor". Mirror the user-facing two-axis mode toggle
+# (primary=code|doc; cross-reference=on|off) flattened into
+# four strings. The parser validates the value at parse
+# time so a malformed block surfaces as ``valid=False``
+# rather than waiting until spawn-time to fail.
+#
+# Empty ``mode`` is also valid: it signals "inherit from
+# orchestrator at spawn time" (see ``build_agent_scope``
+# in ``ac_dc.llm._agents``).
+_AGENT_VALID_MODES: frozenset[str] = frozenset({
+    "code", "doc", "code+xref", "doc+xref",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -163,24 +179,49 @@ _FILENAME_WITH_EXT = re.compile(r"^\.?[\w\-\.]+\.\w+$")
 # Matches ``.gitignore``, ``.env``, ``.dockerignore`` — dotfile
 # names without an extension. Single leading dot, then word
 # characters / dashes / dots. The leading dot is mandatory;
-# non-dotfile extensionless names are handled by the whitelist.
+# non-dotfile extensionless names are handled by ``_BARE_TOKEN``.
 _DOTFILE_NO_EXT = re.compile(r"^\.\w[\w\-\.]*$")
 
-# Extensionless filenames we recognise unconditionally. Covers the
-# build-tooling conventions users expect to be able to edit.
-_KNOWN_EXTENSIONLESS = frozenset({
-    "Makefile", "Dockerfile", "Vagrantfile",
-    "Gemfile", "Rakefile", "Procfile",
-    "Brewfile", "Justfile",
-})
-
+# Matches a bare extensionless token: word character first,
+# then word characters / dashes / dots. Covers ``LICENSE``,
+# ``Makefile``, ``README``, ``MY-CUSTOM-FILE``. The leading
+# character must be a word character (letter / digit /
+# underscore) — that excludes lines starting with punctuation
+# the prefix-rejector hasn't already caught. The state
+# machine's EDIT-marker lookahead disambiguates these from
+# prose.
+_BARE_TOKEN = re.compile(r"^\w[\w\-\.]*$")
 
 def _is_file_path(line: str) -> bool:
     """Return True if ``line`` looks like a repo-relative file path.
 
-    Authoritative Python-side heuristic. Matches the rules
-    in specs-reference/3-llm/edit-protocol.md § Frontend vs
-    backend detection divergence.
+    Authoritative Python-side heuristic. The state machine's
+    lookahead (path candidate → ``🟧🟧🟧 EDIT`` marker on the
+    next non-blank line) is what actually disambiguates path
+    declarations from prose; this function only needs to reject
+    obvious prose so the lookahead doesn't fire on random
+    sentences.
+
+    Accepts:
+
+    - Anything containing a path separator with no inner
+      whitespace (``src/foo.py``, ``a\\b\\c``).
+    - Filenames with an extension (``foo.py``, ``.env.local``).
+    - Dotfiles without an extension (``.gitignore``, ``.env``).
+    - Bare extensionless tokens of word characters with optional
+      dashes/dots (``LICENSE``, ``Makefile``, ``README``,
+      ``MY-CUSTOM-FILE``). The 🟧🟧🟧 EDIT marker on the next
+      line confirms the intent; if a single-word line is
+      followed by an EDIT marker, the LLM meant it as a path.
+
+    Rejects:
+
+    - Empty / whitespace-only lines.
+    - Lines longer than 200 characters (almost certainly prose).
+    - Lines starting with a prose / comment prefix
+      (``#``, ``//``, ``*``, ``-``, ``>``, code fence).
+    - Multi-token lines without a path separator
+      (``This is a sentence``).
     """
     # Defensive input-sanitisation. Empty-after-strip lines never
     # count; very long lines (200+ chars) are almost certainly
@@ -206,8 +247,14 @@ def _is_file_path(line: str) -> bool:
     # Dotfile without extension — ``.gitignore``, ``.env``.
     if _DOTFILE_NO_EXT.match(stripped):
         return True
-    # Known extensionless filenames.
-    if stripped in _KNOWN_EXTENSIONLESS:
+    # Bare extensionless token — must be a single token (no
+    # inner whitespace) of word characters / dashes / dots.
+    # Covers ``LICENSE``, ``Makefile``, ``README``, etc. without
+    # an allowlist. The 🟧🟧🟧 EDIT marker on the next line is
+    # what confirms the intent — a stray single-word line in
+    # prose won't be followed by an EDIT marker, so the
+    # state machine drops back to SCANNING harmlessly.
+    if " " not in stripped and _BARE_TOKEN.match(stripped):
         return True
     return False
 
@@ -289,6 +336,18 @@ class AgentBlock:
       ``key:`` prefix are appended to the current field's
       value with a newline separator).
 
+    Optional field:
+
+    - ``mode`` — the agent's repo-view mode, one of ``code``,
+      ``doc``, ``code+xref``, ``doc+xref``. Empty string
+      means "inherit from orchestrator at spawn time".
+      Mirrors the two-axis user-facing mode toggle. The
+      parser validates the value at parse time so a
+      malformed mode (e.g., ``mode: typescript``) surfaces
+      as ``valid=False`` rather than waiting until spawn
+      time to fail. See ``specs4/7-future/parallel-agents.md``
+      § "Per-agent state descriptor".
+
     ``extras`` carries forward-compatible unknown fields. Per
     ``specs4/7-future/mcp-integration.md``, a future MCP
     integration uses this slot for the optional ``tools:``
@@ -297,9 +356,10 @@ class AgentBlock:
     them.
 
     ``valid`` flags whether the block had both required fields
-    on emission. Missing required fields don't silently drop
-    the block — callers can surface the malformed output to
-    the user / LLM as feedback.
+    on emission AND an acceptable ``mode`` if one was given.
+    Missing required fields or an unrecognised mode don't
+    silently drop the block — callers can surface the
+    malformed output to the user / LLM as feedback.
 
     ``completed`` mirrors :class:`EditBlock.completed` —
     ``False`` when the stream ended mid-block (no closing
@@ -308,6 +368,7 @@ class AgentBlock:
 
     id: str = ""
     task: str = ""
+    mode: str = ""
     extras: dict[str, str] = field(default_factory=dict)
     valid: bool = True
     completed: bool = True
@@ -577,6 +638,13 @@ class EditParser:
         if not stripped:
             # Blank line between path and marker — tolerated.
             return
+        if stripped.startswith("```"):
+            # Fence line between path and EDIT marker — the
+            # LLM wrapped its block in a markdown code fence.
+            # Tolerate the opening fence so the block still
+            # applies. The closing fence after END falls into
+            # SCANNING and is dropped harmlessly as prose.
+            return
         if _is_file_path(line):
             # Previous path was prose; new candidate.
             self._pending_path = line.strip()
@@ -703,10 +771,19 @@ class EditParser:
     def _build_agent_block(self, *, completed: bool) -> AgentBlock:
         """Materialise an :class:`AgentBlock` from current fields.
 
-        Extracts ``id`` and ``task`` from the field dict,
-        dropping them from the dict so the remainder lands in
+        Extracts ``id``, ``task``, and ``mode`` from the field
+        dict, dropping them so the remainder lands in
         ``extras``. Missing required fields → ``valid=False``.
         Blank values for required fields also count as missing.
+
+        ``mode`` is optional: an empty string is fine and
+        means "inherit from orchestrator at spawn time". A
+        non-empty value must be one of the four allowed
+        strings (see :data:`_AGENT_VALID_MODES`); anything
+        else also marks the block ``valid=False`` so the
+        orchestrator's malformed output is surfaced to the
+        user rather than being silently retried at spawn
+        time.
 
         ``completed`` mirrors the caller's state: True from the
         normal-termination path, False from the stream-ended-
@@ -715,13 +792,17 @@ class EditParser:
         fields = dict(self._agent_fields)
         agent_id = fields.pop("id", "").strip()
         task = fields.pop("task", "").strip()
+        mode = fields.pop("mode", "").strip()
         valid = bool(agent_id and task)
+        if mode and mode not in _AGENT_VALID_MODES:
+            valid = False
         # Strip extras values — multi-line extras get the same
         # whitespace treatment as ``task``.
         extras = {k: v.strip() for k, v in fields.items()}
         return AgentBlock(
             id=agent_id,
             task=task,
+            mode=mode,
             extras=extras,
             valid=valid,
             completed=completed,

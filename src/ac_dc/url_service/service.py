@@ -194,6 +194,7 @@ class URLService:
         cache: URLCache | None = None,
         smaller_model: str | None = None,
         symbol_index_cls: Any = None,
+        summarizer_timeout: float | None = None,
     ) -> None:
         """Construct the service.
 
@@ -219,10 +220,19 @@ class URLService:
             GitHub repo fetches return content without a
             symbol map. Normal construction passes
             ``SymbolIndex`` directly (not an instance).
+        summarizer_timeout:
+            Optional wall-clock timeout in seconds for the
+            summarizer LLM call. Passed to
+            :func:`ac_dc.url_service.summarizer.summarize` as
+            its ``timeout`` kwarg. None means "no client-side
+            timeout — rely on provider defaults" (used by
+            tests). Production construction passes
+            ``config.aux_request_timeout_seconds``.
         """
         self._cache = cache
         self._smaller_model = smaller_model
         self._symbol_index_cls = symbol_index_cls
+        self._summarizer_timeout = summarizer_timeout
         # Fetched results for the current session. Keyed by URL
         # string (exact match). Both successes and errors are
         # stored — the error field distinguishes.
@@ -402,6 +412,7 @@ class URLService:
             model=self._smaller_model,
             summary_type=summary_type,
             user_text=user_text,
+            timeout=self._summarizer_timeout,
         )
 
     def detect_and_fetch(

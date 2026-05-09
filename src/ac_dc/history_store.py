@@ -360,6 +360,7 @@ class HistoryStore:
         edit_results: list[dict[str, Any]] | None = None,
         system_event: bool = False,
         turn_id: str | None = None,
+        agent_blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append one message to the JSONL store.
 
@@ -411,6 +412,19 @@ class HistoryStore:
             yet adopted turn propagation — readers tolerate its
             absence and the chat panel simply does not offer
             the "show agents" affordance for records lacking it.
+        agent_blocks:
+            Optional ordered list of ``{id, agent_idx}`` entries
+            naming every agent the orchestrator spawned in this
+            turn. Persisted only on assistant records produced
+            by an agent-spawning turn. Per specs4/3-llm/history.md
+            § Cross-Turn Agent Reconstruction, the list lets a
+            future "show me everything agent-X did across the
+            session" view recover the per-turn id↔agent_idx
+            mapping without scanning archive contents. Omitted
+            from records whose turn did not spawn agents and
+            from records predating cross-turn reconstruction —
+            readers skip such records when filtering by agent
+            id rather than guessing at the mapping.
 
         Returns
         -------
@@ -465,6 +479,75 @@ class HistoryStore:
             record["files_modified"] = list(files_modified)
         if edit_results:
             record["edit_results"] = list(edit_results)
+        if agent_blocks:
+            # Defensive copy + per-entry filter so callers can't
+            # corrupt the persisted shape with extras like
+            # ``task`` (recoverable from the agent's own archive
+            # file) or stray non-string ids. Required fields:
+            # ``id`` (non-empty string) and ``agent_idx``
+            # (non-negative int). Optional fields per Increment
+            # 3a (specs4 "Agents as first-class persistent
+            # entities" plan): ``mode`` (one of
+            # ``code``/``doc``/``code+xref``/``doc+xref``),
+            # ``cross_reference_enabled`` (bool), ``model``
+            # (provider-qualified id string). Optional fields
+            # round-trip when present and are silently dropped
+            # when malformed — the reconstruction algorithm
+            # tolerates absence (older records predating this
+            # extension load correctly).
+            valid_modes = {
+                "code", "doc", "code+xref", "doc+xref",
+            }
+            persisted_blocks: list[dict[str, Any]] = []
+            for entry in agent_blocks:
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = entry.get("id")
+                entry_idx = entry.get("agent_idx")
+                if not isinstance(entry_id, str) or not entry_id:
+                    continue
+                if (
+                    not isinstance(entry_idx, int)
+                    or isinstance(entry_idx, bool)
+                    or entry_idx < 0
+                ):
+                    continue
+                persisted: dict[str, Any] = {
+                    "id": entry_id,
+                    "agent_idx": entry_idx,
+                }
+                # Optional mode — defensive against unknown
+                # strings so a future mode value added on the
+                # write side can't corrupt records the read
+                # side doesn't recognise.
+                entry_mode = entry.get("mode")
+                if (
+                    isinstance(entry_mode, str)
+                    and entry_mode in valid_modes
+                ):
+                    persisted["mode"] = entry_mode
+                # Optional cross_reference_enabled — strict
+                # bool check rejects the int-coerced 0/1 case
+                # (Python's bool is a subclass of int but
+                # we want explicit bools on disk).
+                entry_xref = entry.get("cross_reference_enabled")
+                if isinstance(entry_xref, bool):
+                    persisted["cross_reference_enabled"] = (
+                        entry_xref
+                    )
+                # Optional model — provider-qualified id
+                # like ``anthropic/claude-sonnet-4-5``. Empty
+                # strings rejected (no useful information,
+                # just clutter).
+                entry_model = entry.get("model")
+                if (
+                    isinstance(entry_model, str)
+                    and entry_model
+                ):
+                    persisted["model"] = entry_model
+                persisted_blocks.append(persisted)
+            if persisted_blocks:
+                record["agent_blocks"] = persisted_blocks
 
         # Append one line. Open in append-text mode; on POSIX
         # this is atomic for a single write call under the pipe

@@ -96,6 +96,34 @@ All dispatch to window-level custom events that the relevant child components li
 
 The dialog is a draggable, resizable foreground panel hosting the tab bar and tab bodies. It sits above the viewer background layer (z-index 10 vs 0–1) so it always renders on top regardless of what the viewer's internal positioning does. Left-docked by default; first drag or first bottom/corner resize undocks it into an explicit rectangle.
 
+### Layout
+
+The dialog has no header bar. The chat panel's tab strip sits directly at the top of the dialog body; messages, input, and a compact LED strip follow.
+
+**Tab strip** (top of chat panel): Main + one per agent. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present. Each tab carries a per-tab 📊 Context icon (visible on hover/active/focus) that opens the Context overlay scoped to that conversation. Agent tabs additionally carry a ✕ close icon. The strip is the dialog **drag handle** — pointerdown on its empty background or the gap between buttons begins a drag; pointerdown on any tab button, Context icon, close icon, or overflow button skips drag via the `closest('button')` guard.
+
+**LED strip** (below the textarea, above the compaction-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the tab id, mode, and state-specific diagnostic per [agent-browser.md](agent-browser.md#status-leds).
+
+**Convert FAB**: floating circular button at the dialog's bottom-left. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
+
+**Minimize button**: ▾ button rendered at the right edge of each dialog tab's toolbar — the chat panel's tab strip (after the overflow ⋯ menu), and each overlay tab's toolbar/nav-bar (Context, Settings, Convert). Right-edge placement is consistent across all four tabs so the affordance lives in the same spatial location regardless of which tab is active.
+
+All four dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Each tab carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button) — overlay tabs are sibling tab-panels inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay is active.
+
+**Expand FAB**: ▴ button at the dialog's top-right, rendered ONLY when the dialog is minimized. The minimized state hides the dialog body, so all in-tab minimize buttons are unreachable; the expand FAB takes over as the only way to restore the dialog.
+
+**Settings**: lives in the file picker's top toolbar (a ⚙️ button between the sort glyphs and the git actions row). Clicking dispatches `request-dialog-tab` with `{tab: 'settings'}`.
+
+**Drag detection**: the dialog as a whole listens for pointerdown. Drag is initiated only when the pointer's `composedPath()` walks through an element with `data-drag-handle="true"` AND no button. Today only the tab strip carries that attribute. This means:
+
+- Pointerdown on a tab button, the per-tab 📊 Context icon, the per-tab ✕ close icon, or the overflow button — `closest('button')` matches, no drag.
+- Pointerdown on the tab strip's background or the gap between buttons — drag begins.
+- Pointerdown anywhere else in the dialog (LEDs, message area, picker, FABs, input) — no drag, normal click handling.
+
+Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
+
+**Layout history note**: the journey here started from a draft that kept a dialog header and tried to project the chat tab strip up into it via absolute positioning — that failed due to shadow-DOM stacking-context constraints. A second iteration removed the header but kept a full-width LED row at the top with Context/minimize icons attached. The current layout is a third pass: the LED row collapses into a compact strip at the bottom of the chat panel, Context lives per-tab, and minimize joins Convert as a corner FAB. The tab strip absorbs the drag-handle role.
+
 ### Layout Modes
 
 Two mutually-exclusive modes:
@@ -184,48 +212,21 @@ Malformed values (non-JSON, wrong shape, width below minimum, finite-number chec
 
 ## Mode Toggle
 
-A segmented control plus overlay toggle lives inline in the dialog header, between the tab buttons and the minimize button. Three controls total — two for the primary mode, one for cross-reference.
+The primary-mode segmented control and cross-reference overlay toggle live in the chat panel's search bar — not the dialog header. Only the Main tab renders these controls; agent tabs hide them entirely. See [chat.md § Mode Toggle](chat.md#mode-toggle) for the full UI specification.
 
-### Primary Mode (Segmented)
-
-- Two mutually-exclusive buttons — `💻 Code` and `📄 Doc`
-- Active button shows accent-coloured background and pressed-state border
-- Clicking the inactive button calls the mode-switch RPC
-- No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
-- Disabled when RPC isn't connected or when the current client is non-localhost
-
-### Cross-Reference (Overlay Toggle)
-
-- Single toggle button — `🔀 Cross-ref` or `🔀 Cross-ref ON` when active
-- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
-- Clicking calls the set-cross-reference RPC with the inverted current state
-- Disabled under the same conditions as the primary mode buttons
-
-### State Synchronization
-
-- Initial state hydrated from the backend's `get_current_state` snapshot on connection
-- Updated via `mode-changed` window events broadcast by the backend
-- When a `mode-changed` event reports a primary mode different from the current UI state, the cross-reference flag is reset to false locally — mirrors the backend's reset-on-switch behaviour per [modes.md](../3-llm/modes.md)
-- RPC call failures surface as toasts; restricted errors (non-localhost caller) use warning type rather than error
-
-### Feedback
-
-- Successful primary-mode switch shows an info toast — "Switched to document mode" / "Switched to code mode"
-- Successful cross-reference enable shows "Cross-reference enabled — both indexes active"
-- Successful cross-reference disable shows "Cross-reference disabled"
-- The actual state flip happens via the `mode-changed` broadcast, not optimistically on RPC success — prevents the UI from racing the broadcast when multiple clients are connected
-
-### Non-Localhost Clients
-
-- Buttons are rendered but disabled for non-localhost participants
-- The disabled-state tooltip still shows the mode's description so participants can see what the current authoritative mode is even if they can't change it
-- `mode-changed` broadcasts still update the UI state — participants passively follow the server
+Rationale: mode is per-conversation in spirit (an agent could in principle inherit a different mode from its parent), and visually anchoring the controls to a specific chat tab makes the per-tab scope obvious. Today the backend has one authoritative mode for the whole service; agents inherit it via their parent scope. When the backend gains per-agent mode, the controls' read/write paths thread through `agent_tag` without a UI move.
 
 ## Global Keyboard Shortcuts
 
-- Alt+1..4 switch tabs (4 when doc convert is available)
+- Alt+1 returns to Chat (the default body)
+- Alt+2 opens Context
+- Alt+3 opens Settings
+- Alt+4 opens Convert (when available; the keystroke is consumed but no-op when Convert is unavailable)
 - Alt+M toggles dialog minimize
 - Ctrl+Shift+F activates file search in the chat panel, prefilling from the current selection
+
+Alt+1 always returns to Chat regardless of which overlay is currently shown — same effect as clicking the back arrow. Alt+3 is fixed on Settings regardless of whether Convert is installed, so muscle memory survives stripped-down deployments.
+🟨🟨🟨 REPL
 
 ### Ctrl+Shift+F Selection Capture
 

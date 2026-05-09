@@ -19,13 +19,24 @@ The end marker deliberately differs from edit blocks' `END` so the parser can di
 
 Required fields:
 
-- `id` — identifier scoped to this turn's decomposition. Convention: `agent-0`, `agent-1`, etc.
-- `task` — the initial prompt handed to the agent. May span multiple lines. Describe the goal in natural language; don't enumerate file paths — the agent navigates the repo the same way you do (symbol map, reference graph, file mentions).
+- `id` — identifier scoped to this turn's decomposition. Choose a stable, descriptive id you can re-address across turns — e.g., `frontend-chat`, `auth-refactor`, `docs-cleanup`. Reusing a known id retasks the existing agent (its conversation, file context, and stability tracker are preserved); a new id spawns a fresh agent. Positional ids like `agent-0` work too but make it harder to retask the same agent in a follow-up turn.
+- `task` — the initial prompt handed to the agent. May span multiple lines. Describe the goal in natural language; don't enumerate file paths — the agent navigates the repo the same way you do (symbol map, reference graph, file mentions). Avoid markdown headings ending in `:` (like `Requirements:` or `Notes:`) at the start of lines inside the task body — the parser only treats `id:`, `task:`, and `mode:` as field starts, so other `word:` lines stay part of the task value, but plain prose with a leading capital word is clearer.
+
+Optional fields:
+
+- `mode` — the agent's repo-view mode. One of:
+  - `code` — symbol map only (default code-mode view)
+  - `doc` — document outline only (default doc-mode view)
+  - `code+xref` — symbol map primary, document outline as secondary index
+  - `doc+xref` — document outline primary, symbol map as secondary index
+
+  Pick `code` for refactors and code edits, `doc` for documentation work, and the `+xref` variants when the task spans both code and docs. When omitted, the agent inherits your current mode. The mode is fixed for the life of the agent — to change it, close the agent and respawn with a new id. Retasking a known id with a different `mode` value is rejected.
 
 Example spawn block (reproduce the marker bytes exactly — do not substitute ASCII):
 
     🟧🟧🟧 AGENT
     id: agent-0
+    mode: code
     task: Refactor the auth module to extract session logic into a new
     SessionManager class. Update callers of auth.Session to use the new class.
     🟩🟩🟩 AGEND

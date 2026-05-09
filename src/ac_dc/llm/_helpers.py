@@ -39,6 +39,124 @@ from ac_dc.llm._types import (
 
 
 # ---------------------------------------------------------------------------
+# Reasoning / extended-thinking kwargs
+# ---------------------------------------------------------------------------
+
+
+def _model_uses_adaptive_thinking(model: str) -> bool:
+    """True when the model requires the ``adaptive`` thinking shape.
+
+    Newer Anthropic models (Opus 4.5+, Haiku 4.5+, and the
+    Sonnet 4.5+ family on some backends — notably Bedrock)
+    rejected the legacy ``{"type": "enabled", "budget_tokens": N}``
+    shape with::
+
+        "thinking.type.enabled" is not supported for this model.
+        Use "thinking.type.adaptive" and "output_config.effort"
+        to control thinking behavior.
+
+    For these models we emit the adaptive shape and let the
+    provider pick a default effort level. The legacy shape
+    still works for older Claude families (Sonnet 3.x, Opus 3,
+    earlier Haiku), so we keep it as the default rather than
+    flipping wholesale.
+
+    Match by lowercase substring against the configured model
+    name. Bedrock prefixes (``bedrock/anthropic.``), Anthropic-
+    direct prefixes (``anthropic/``), and bare model names all
+    pass through the same check.
+    """
+    lowered = model.lower()
+    adaptive_markers = (
+        "opus-4-5", "opus-4.5",
+        "opus-4-6", "opus-4.6",
+        "opus-4-7", "opus-4.7",
+        "haiku-4-5", "haiku-4.5",
+        "sonnet-4-5", "sonnet-4.5",
+    )
+    return any(marker in lowered for marker in adaptive_markers)
+
+
+def _build_thinking_payload(
+    config: "ConfigManager",
+) -> dict[str, Any]:
+    """Build the ``thinking`` value for the active model.
+
+    Returns the model-appropriate shape:
+
+    - Adaptive-thinking models: ``{"type": "adaptive"}``.
+      Effort is conveyed separately as a top-level
+      ``reasoning_effort`` kwarg (see
+      :func:`build_thinking_kwargs`) — LiteLLM's
+      standardised cross-provider param, translated to
+      ``output_config.effort`` for Anthropic backends.
+      Splitting the kwargs this way avoids fighting
+      LiteLLM's translation layer for the
+      ``output_config`` field, whose kwarg surface has
+      churned across releases.
+    - Legacy-thinking models: ``{"type": "enabled",
+      "budget_tokens": N}`` with N from
+      ``config.reasoning_budget_tokens``. These models
+      don't accept ``reasoning_effort`` and ignore it
+      when present, so the helper omits the kwarg below.
+    """
+    if _model_uses_adaptive_thinking(config.model):
+        return {"type": "adaptive"}
+    return {
+        "type": "enabled",
+        "budget_tokens": config.reasoning_budget_tokens,
+    }
+
+
+def build_thinking_kwargs(
+    config: "ConfigManager",
+    request_override: bool | None,
+) -> dict[str, Any]:
+    """Build the reasoning kwargs for ``litellm.completion``.
+
+    Returns one of:
+
+    - ``{}`` when reasoning is disabled.
+    - ``{"thinking": {...}, "reasoning_effort": "..."}`` for
+      adaptive-thinking models (Opus 4.5+/4.6+/4.7+, Haiku
+      4.5+, Sonnet 4.5+). The ``thinking`` block tells the
+      model to use adaptive mode; ``reasoning_effort`` is
+      LiteLLM's standardised param, translated to
+      ``output_config.effort`` for Anthropic backends.
+    - ``{"thinking": {"type": "enabled", "budget_tokens": N}}``
+      for legacy-thinking models. ``reasoning_effort`` is
+      omitted — those models don't accept it.
+
+    Resolution chain (per ``specs4/7-future/reasoning.md``):
+
+    1. ``request_override`` — per-request flag from the
+       frontend's toggle. ``True`` / ``False`` override the
+       config default; ``None`` defers to config.
+    2. ``config.reasoning_enabled`` — config-level default.
+
+    Aux LLM calls (commit message generation, topic
+    detection) call this with ``request_override=False`` so
+    they're guaranteed not to reason regardless of config.
+    Spec § Aux call policy: aux calls should never reason
+    even when the primary is configured to.
+    """
+    if request_override is False:
+        return {}
+    enabled = (
+        request_override is True
+        or (request_override is None and config.reasoning_enabled)
+    )
+    if not enabled:
+        return {}
+    kwargs: dict[str, Any] = {
+        "thinking": _build_thinking_payload(config),
+    }
+    if _model_uses_adaptive_thinking(config.model):
+        kwargs["reasoning_effort"] = config.reasoning_effort
+    return kwargs
+
+
+# ---------------------------------------------------------------------------
 # Max-tokens resolution
 # ---------------------------------------------------------------------------
 
@@ -371,7 +489,9 @@ def _build_topic_detector(
         )
         try:
             # Non-streaming call — we want the full JSON response
-            # before parsing.
+            # before parsing. ``timeout=`` is the safety net for
+            # hung sockets; a healthy detector call returns in a
+            # few seconds.
             response = litellm.completion(
                 model=model,
                 messages=[
@@ -380,6 +500,7 @@ def _build_topic_detector(
                 ],
                 stream=False,
                 max_tokens=max_output,
+                timeout=config.aux_request_timeout_seconds,
             )
         except Exception as exc:
             # Classify for richer log output. Topic detection
