@@ -2628,3 +2628,343 @@ class TestSessionLoadReconstruction:
             "live-agent", [],
         )
         assert result == []
+
+    # ----- Commit 2 — mode replay from archive events -----
+
+    def test_spawn_then_toggle_reconstructs_as_toggled_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Mid-session toggle survives reload via archive replay.
+
+        Per spec § Session-Load Reconstruction step 5: the
+        spawn-time baseline is just the replay's starting
+        point. An agent spawned in code and toggled to doc
+        mid-session reconstructs as doc — replay strategy
+        (b) is authoritative.
+
+        Setup: agent ``worker`` spawned in code mode (turn 1
+        spawn record carries mode=code), then toggled to doc
+        via a system event recorded in the archive. After
+        reconstruction, mode is doc despite the spawn-time
+        baseline saying code.
+
+        Pre-Commit-2 behaviour was the failing case: the
+        spawn-time baseline won and the toggle silently
+        vanished on session reload. Pinning the post-replay
+        outcome catches a regression that would re-introduce
+        that bug.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "do it"},
+                    {
+                        "role": "assistant",
+                        "content": "ok",
+                    },
+                    # Mode-change event written by
+                    # switch_agent_mode. Format mirrors
+                    # _rpc_state.py's writer exactly.
+                    {
+                        "role": "user",
+                        "content": "Mode changed: code → doc.",
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": "another task",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["worker"]
+        # Replay strategy (b) — the toggled mode wins, not
+        # the spawn-time baseline.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is False
+
+    def test_multiple_sequential_toggles_reconstruct_final_mode(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Several toggles in sequence — final state wins.
+
+        Pinned because a future refactor that took the
+        FIRST event rather than walking to the last would
+        produce wrong intermediate state. The walk must
+        consume every valid event, applying each
+        transition.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "shifter",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {
+                        "role": "user",
+                        "content": "Mode changed: code → doc.",
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc → doc+xref."
+                        ),
+                        "system_event": True,
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc+xref → code+xref."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["shifter"]
+        # After three transitions the final state is
+        # code+xref. Walk-to-end is critical here — picking
+        # any intermediate event would land doc+xref or doc.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_malformed_event_skipped_subsequent_valid_applies(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Malformed event is skipped, later valid event still applies.
+
+        Defensive contract — the replay walk continues
+        past unparseable events rather than aborting. A
+        single corrupt archive line shouldn't sink the
+        entire reconstruction.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "robust",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Missing terminator — not a valid event.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → rust"
+                        ),
+                        "system_event": True,
+                    },
+                    # Garbled prefix — not an event.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Switched: code → doc."
+                        ),
+                        "system_event": True,
+                    },
+                    # Unrecognised right-side mode.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → typescript."
+                        ),
+                        "system_event": True,
+                    },
+                    # Valid — this one applies.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: code → doc."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["robust"]
+        assert scope.context.mode == Mode.DOC
+
+    def test_no_events_leaves_baseline_unchanged(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Archive without mode events: spawn-time baseline wins.
+
+        Most common case — agents that ran without any
+        mid-session toggle. Replay produces the baseline
+        unchanged.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "stable",
+                    "agent_idx": 0,
+                    "mode": "doc+xref",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["stable"]
+        # Baseline applied unchanged.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_xref_axis_toggled_independently(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Cross-ref-only toggle preserves primary mode through replay.
+
+        Pinned because :func:`set_agent_cross_reference`
+        writes events with the same format
+        :func:`switch_agent_mode` uses, and the parser must
+        handle ``code → code+xref`` (xref toggle within
+        same primary mode) just as well as
+        ``code → doc`` (primary mode change).
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "xref-only",
+                    "agent_idx": 0,
+                    "mode": "doc",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Cross-ref enabled mid-session.
+                    {
+                        "role": "user",
+                        "content": (
+                            "Mode changed: doc → doc+xref."
+                        ),
+                        "system_event": True,
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["xref-only"]
+        # Primary mode preserved, cross-ref now on.
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_non_event_records_ignored_by_replay(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Conversation messages don't trigger spurious replay.
+
+        An assistant message containing the literal text
+        "Mode changed: code → doc." (e.g., the agent
+        narrating mode-change UX in its prose) MUST NOT be
+        treated as a replay event because it lacks
+        ``system_event: true``. The system_event flag is
+        the load-bearing discriminator.
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "narrator",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    # Looks like an event but isn't one —
+                    # no system_event flag.
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "Mode changed: code → doc."
+                        ),
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["narrator"]
+        # Mode unchanged — the conversation message wasn't
+        # an event.
+        assert scope.context.mode == Mode.CODE

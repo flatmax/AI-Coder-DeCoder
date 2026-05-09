@@ -585,6 +585,158 @@ def _format_mode(mode: Mode, cross_ref: bool) -> str:
     return f"{base}+xref" if cross_ref else base
 
 
+# Mode-change event format.
+#
+# ``switch_agent_mode`` and ``set_agent_cross_reference`` in
+# ``_rpc_state.py`` write archive events with content::
+#
+#     "Mode changed: {old} → {new}."
+#
+# where {old}/{new} are produced by :func:`_format_mode`. The
+# arrow is U+2192 RIGHTWARDS ARROW. The four valid mode
+# strings are the same set ``_resolve_agent_mode`` recognises.
+#
+# Replay parses these events in order and updates running
+# ``(Mode, cross_ref)`` state. Malformed events skip without
+# raising — the running state continues from the previous
+# record.
+_MODE_CHANGE_PREFIX = "Mode changed: "
+_MODE_CHANGE_ARROW = " → "
+_VALID_MODE_STRINGS: frozenset[str] = frozenset(
+    {"code", "doc", "code+xref", "doc+xref"}
+)
+
+
+def _parse_mode_string(mode_str: str) -> tuple[Mode, bool] | None:
+    """Parse a mode string back to ``(Mode, cross_ref)``.
+
+    Inverse of :func:`_format_mode`. Returns None for
+    unrecognised strings — the four-element valid set is
+    the only acceptable input. Empty strings, garbage,
+    case mismatches all return None so the replay walk
+    can skip them defensively.
+    """
+    if mode_str not in _VALID_MODE_STRINGS:
+        return None
+    if mode_str == "code":
+        return Mode.CODE, False
+    if mode_str == "doc":
+        return Mode.DOC, False
+    if mode_str == "code+xref":
+        return Mode.CODE, True
+    if mode_str == "doc+xref":
+        return Mode.DOC, True
+    return None  # unreachable but keeps type checker happy
+
+
+def _replay_mode_events(
+    archive_messages: list[dict[str, Any]],
+    initial_mode: Mode,
+    initial_cross_ref: bool,
+) -> tuple[Mode, bool]:
+    """Replay archive mode-change events on top of a baseline.
+
+    Walks ``archive_messages`` in order looking for
+    ``system_event: true`` records whose content matches the
+    format ``switch_agent_mode`` and
+    ``set_agent_cross_reference`` write. Each valid event
+    advances the running ``(Mode, cross_ref)`` state to the
+    parsed target.
+
+    Per spec specs4/3-llm/history.md § Session-Load
+    Reconstruction step 5 — replay strategy (b) is the
+    authoritative source of truth for an agent's mode at
+    session-save time. The spawn-time baseline supplied by
+    the caller is just the starting point; archived
+    transitions are what land the agent in its final state.
+
+    Defensive parsing rules:
+
+    - Records without ``system_event: true`` are skipped
+      without inspection. Non-event records (the agent's
+      actual conversation) outnumber events; this is the
+      hot path.
+    - Records with malformed content (missing prefix,
+      missing arrow, missing terminator, unrecognised mode
+      strings on either side of the arrow) are skipped
+      with no state change. The running state continues
+      from the previous valid record.
+    - The terminating ``"."`` is required — without it,
+      a content like ``"Mode changed: code → doc"``
+      should not be treated as an event because that's
+      not the format the writers produce. Strict matching
+      surfaces a writer-side regression as a quietly
+      lost replay rather than a silently-tolerated drift.
+
+    Old mode (left of arrow) is parsed but only used as a
+    sanity check — the replay applies the right-side mode
+    regardless. A drift between persisted-old and
+    running-state would indicate either a malformed event
+    or two different agents' events mixing in one archive;
+    in either case the right-side mode is the authoritative
+    "what mode is the agent NOW" answer.
+
+    Parameters
+    ----------
+    archive_messages:
+        The agent's concatenated archive, in chronological
+        order. Same shape passed to
+        :func:`reconstruct_agent_scope` for history
+        population.
+    initial_mode:
+        Spawn-time baseline mode from the latest
+        ``agent_blocks`` record.
+    initial_cross_ref:
+        Spawn-time baseline cross-reference flag.
+
+    Returns
+    -------
+    tuple[Mode, bool]
+        The agent's final mode + cross_ref after replaying
+        every valid event. When no events match, returns
+        the baseline unchanged.
+    """
+    mode = initial_mode
+    cross_ref = initial_cross_ref
+
+    for record in archive_messages:
+        if not isinstance(record, dict):
+            continue
+        if record.get("system_event") is not True:
+            continue
+        content = record.get("content")
+        if not isinstance(content, str):
+            continue
+        # Strict format match. The writers always produce
+        # the prefix + arrow + period shape; loosening here
+        # would tolerate writer drift silently.
+        if not content.startswith(_MODE_CHANGE_PREFIX):
+            continue
+        if not content.endswith("."):
+            continue
+        # Strip prefix + trailing period, then split on the
+        # arrow. Both halves must parse to valid mode
+        # strings.
+        body = content[len(_MODE_CHANGE_PREFIX):-1]
+        if _MODE_CHANGE_ARROW not in body:
+            continue
+        old_str, new_str = body.split(
+            _MODE_CHANGE_ARROW, 1,
+        )
+        old_str = old_str.strip()
+        new_str = new_str.strip()
+        # Validate left side. We don't compare it against
+        # the running state — see the docstring for why.
+        if _parse_mode_string(old_str) is None:
+            continue
+        parsed = _parse_mode_string(new_str)
+        if parsed is None:
+            continue
+        mode, cross_ref = parsed
+
+    return mode, cross_ref
+
+
 # ---------------------------------------------------------------------------
 # Per-turn agent-state descriptor
 # ---------------------------------------------------------------------------
@@ -882,6 +1034,18 @@ def reconstruct_agent_scope(
             "enable session-load agent rehydration."
         )
 
+    # Replay mode-change events on top of the spawn-time
+    # baseline. Per spec § Session-Load Reconstruction step
+    # 5, replay-from-archive is the authoritative source of
+    # truth for an agent's mode at session-save time. The
+    # ``mode``/``cross_ref`` parameters are the spawn-time
+    # baseline — the starting point for the replay walk;
+    # the post-replay values are what land in the
+    # ContextManager.
+    final_mode, final_cross_ref = _replay_mode_events(
+        archive_messages, mode, cross_ref,
+    )
+
     # Construct the ContextManager via the same factory the
     # spawn path uses. The factory bakes turn_id and
     # agent_idx into the archival sink closure, so messages
@@ -901,8 +1065,8 @@ def reconstruct_agent_scope(
         ),
         compaction_config=service._config.compaction_config,
         system_prompt=service._config.get_agent_system_prompt(),
-        mode=mode,
-        cross_reference_enabled=cross_ref,
+        mode=final_mode,
+        cross_reference_enabled=final_cross_ref,
     )
 
     # Pre-populate history from the archive. Each archive
@@ -970,7 +1134,7 @@ def reconstruct_agent_scope(
         agent_id,
         turn_id,
         agent_idx,
-        _format_mode(mode, cross_ref),
+        _format_mode(final_mode, final_cross_ref),
         len(archive_messages),
     )
     return scope
