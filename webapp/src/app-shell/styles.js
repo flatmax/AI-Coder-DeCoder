@@ -138,6 +138,40 @@ export const APP_SHELL_STYLES = css`
       border-color: var(--accent-primary, #58a6ff);
       transform: scale(1.05);
     }
+    /* Expand FAB — only rendered when the dialog
+     * is minimized. Lives at the top-right of the
+     * collapsed dialog as the sole way to expand
+     * again. When the dialog is expanded, the
+     * minimize button in the tab strip takes over
+     * — this FAB stays out of the way so it never
+     * overlaps tab content like the Context tab's
+     * refresh button. */
+    .expand-fab {
+      position: absolute;
+      top: 0.4rem;
+      right: 0.4rem;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(22, 27, 34, 0.95);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      color: var(--text-primary, #c9d1d9);
+      cursor: pointer;
+      font-size: 0.85rem;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 12;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      opacity: 0.85;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .expand-fab:hover {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.15);
+      border-color: var(--accent-primary, #58a6ff);
+    }
     .dialog.dragging,
     .dialog.resizing {
       /* Disable text selection and remove the transition

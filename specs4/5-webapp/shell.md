@@ -98,32 +98,34 @@ The dialog is a draggable, resizable foreground panel hosting the tab bar and ta
 
 ### Layout
 
-The dialog has no header bar. The chat panel's existing rows — tab strip, then LED row, then message area — sit directly at the top of the dialog body.
+The dialog has no header bar. The chat panel's tab strip sits directly at the top of the dialog body; messages, input, and a compact LED strip follow.
 
-**Tab strip** (top of chat panel): Main + one per agent. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present, since closing the dialog header removed the alternative entry points to per-tab affordances.
+**Tab strip** (top of chat panel): Main + one per agent. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present. Each tab carries a per-tab 📊 Context icon (visible on hover/active/focus) that opens the Context overlay scoped to that conversation. Agent tabs additionally carry a ✕ close icon. The strip is the dialog **drag handle** — pointerdown on its empty background or the gap between buttons begins a drag; pointerdown on any tab button, Context icon, close icon, or overflow button skips drag via the `closest('button')` guard.
 
-**LED row** (immediately below the tab strip): the relief surface that doubles as the dialog drag handle and the home for utility icons.
+**LED strip** (below the textarea, above the compaction-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the tab id, mode, and state-specific diagnostic per [agent-browser.md](agent-browser.md#status-leds).
 
-- Left side: one LED dot per tab reflecting that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a LED activates the corresponding tab.
-- Right side: 📊 Context icon and ▾ minimize button. Both are flush-right, separated from the LEDs by a flex spacer.
+**Convert FAB**: floating circular button at the dialog's bottom-left. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
 
-The **📊 Context icon** opens the Context overlay scoped to the active conversation. The Context tab listens for `active-tab-changed` and rescopes accordingly; clicking the icon dispatches `request-dialog-tab` with `{tab: 'context'}` and the shell flips dialogs without changing which chat tab is active.
+**Minimize button**: ▾ button rendered in two parallel locations depending on which dialog tab is active.
 
-The **▾ minimize button** dispatches `request-dialog-minimize` which the shell routes through its existing minimize toggle.
+- Chat tab (default): right edge of the tab strip, after the overflow ⋯ menu.
+- Context, Settings, Convert tabs: right of each overlay's `← Chat` back-arrow in its own toolbar/nav-bar.
 
-**Convert FAB**: floating circular button at bottom-left of the dialog. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
+Both forms dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Two-location strategy: each dialog tab is a sibling tab-panel inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay tab is active. Each overlay carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button).
+
+**Expand FAB**: ▴ button at the dialog's top-right, rendered ONLY when the dialog is minimized. The minimized state hides the dialog body, so all in-tab minimize buttons are unreachable; the expand FAB takes over as the only way to restore the dialog.
 
 **Settings**: lives in the file picker's top toolbar (a ⚙️ button between the sort glyphs and the git actions row). Clicking dispatches `request-dialog-tab` with `{tab: 'settings'}`.
 
-**Drag**: the dialog as a whole listens for pointerdown. Drag is initiated only when the pointer's `composedPath()` walks through an element with `data-drag-handle="true"` AND no button. Today only the LED row carries that attribute. This means:
+**Drag detection**: the dialog as a whole listens for pointerdown. Drag is initiated only when the pointer's `composedPath()` walks through an element with `data-drag-handle="true"` AND no button. Today only the tab strip carries that attribute. This means:
 
-- Pointerdown on a LED dot, the Context icon, or the minimize button — the closest('button') guard short-circuits, no drag.
-- Pointerdown on the LED row's background — drag begins.
-- Pointerdown anywhere else in the dialog (tab strip buttons, message area, picker, etc.) — no drag, normal click handling.
+- Pointerdown on a tab button, the per-tab 📊 Context icon, the per-tab ✕ close icon, or the overflow button — `closest('button')` matches, no drag.
+- Pointerdown on the tab strip's background or the gap between buttons — drag begins.
+- Pointerdown anywhere else in the dialog (LEDs, message area, picker, FABs, input) — no drag, normal click handling.
 
 Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
 
-**Earlier attempt note**: an earlier iteration tried to keep a dialog header and project the chat tab strip up into it via absolute positioning. The strip rendered offscreen or behind the header due to shadow-DOM stacking-context constraints. The revised approach removes the header outright; tabs and LEDs sit at the top of the chat panel as normal flow, and utility icons relocate to the LED row's right edge or to FAB positions.
+**Layout history note**: the journey here started from a draft that kept a dialog header and tried to project the chat tab strip up into it via absolute positioning — that failed due to shadow-DOM stacking-context constraints. A second iteration removed the header but kept a full-width LED row at the top with Context/minimize icons attached. The current layout is a third pass: the LED row collapses into a compact strip at the bottom of the chat panel, Context lives per-tab, and minimize joins Convert as a corner FAB. The tab strip absorbs the drag-handle role.
 
 ### Layout Modes
 

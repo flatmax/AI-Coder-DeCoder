@@ -1166,6 +1166,24 @@ export class ContextTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Dispatch a request to the app shell to minimize
+   * the dialog. Companion to ``_goBackToChat``: the
+   * tab-strip minimize button isn't reachable when
+   * an overlay tab is active (the strip sits inside
+   * the chat panel which is a sibling tab-panel),
+   * so each overlay carries its own minimize
+   * affordance.
+   */
+  _minimizeDialog() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _loadCacheExpanded() {
     try {
       const raw = localStorage.getItem(_CACHE_EXPANDED_KEY);
@@ -1315,6 +1333,12 @@ export class ContextTab extends RpcMixin(LitElement) {
           @click=${() => this._refresh()}
           title="Refresh"
         >↻</button>
+        <button
+          class="back-btn"
+          title="Minimize dialog"
+          aria-label="Minimize dialog"
+          @click=${() => this._minimizeDialog()}
+        >▾</button>
       </div>
       <div class="content">
         ${this._subview === 'budget'

@@ -137,6 +137,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
       gap: 0.5rem;
       margin-bottom: 1rem;
     }
+    .toolbar .minimize-right {
+      margin-left: auto;
+    }
     .back-btn {
       background: transparent;
       border: 1px solid rgba(240, 246, 252, 0.15);
@@ -765,6 +768,24 @@ export class SettingsTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Dispatch a request to the app shell to minimize
+   * the dialog. Companion to ``_goBackToChat``: the
+   * tab-strip minimize button isn't reachable when
+   * Settings is the active tab (the strip sits in
+   * the chat panel which is a sibling tab-panel),
+   * so each overlay carries its own minimize
+   * affordance.
+   */
+  _minimizeDialog() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   render() {
     return html`
       <div class="toolbar">
@@ -774,6 +795,12 @@ export class SettingsTab extends RpcMixin(LitElement) {
           aria-label="Back to chat"
           @click=${() => this._goBackToChat()}
         >← Chat</button>
+        <button
+          class="back-btn minimize-right"
+          title="Minimize dialog"
+          aria-label="Minimize dialog"
+          @click=${() => this._minimizeDialog()}
+        >▾</button>
       </div>
       ${this._info
         ? html`

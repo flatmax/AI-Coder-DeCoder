@@ -249,7 +249,6 @@ export function render(panel) {
   const fileMode = panel._searchMode === 'file';
   return html`
     ${renderTabStrip(panel)}
-    ${renderLedRow(panel)}
     <div class="messages-wrapper">
       <div
         class="messages ${fileMode ? 'messages-hidden' : ''}"
@@ -401,6 +400,7 @@ export function render(panel) {
               </button>`}
         </div>
       </div>
+      ${renderLedRow(panel)}
     </div>
     <ac-history-browser
       ?open=${panel._historyOpen}

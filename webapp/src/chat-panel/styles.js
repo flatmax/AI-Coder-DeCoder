@@ -56,6 +56,18 @@ export const STYLES = css`
     background: rgba(22, 27, 34, 0.6);
     border-bottom: 1px solid rgba(240, 246, 252, 0.1);
     position: relative;
+    /* The tab strip is the dialog drag handle now that
+     * the LED row has been removed. Pointerdown handler
+     * in dialog.js detects drag origin via the
+     * data-drag-handle attribute on the strip's outer
+     * div. Clicks on individual tab buttons skip drag
+     * via the closest('button') guard, so dragging
+     * works on the strip's empty background space and
+     * the gap between tab buttons / overflow button. */
+    cursor: grab;
+  }
+  .dialog.dragging .tab-strip {
+    cursor: grabbing;
   }
   .tab-strip-scroll {
     flex: 1;
@@ -237,6 +249,29 @@ export const STYLES = css`
     background: rgba(240, 246, 252, 0.08);
     color: var(--text-primary, #c9d1d9);
   }
+  /* Minimize button — sits at the right edge of the
+   * tab strip after the overflow ⋯ button. Same
+   * neutral styling as the overflow button so the
+   * strip's right cluster reads as a single
+   * dialog-level control group. The ▾ glyph
+   * matches the dialog header's old minimize button
+   * for visual continuity. */
+  .tab-strip-minimize {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    border-left: 1px solid rgba(240, 246, 252, 0.08);
+    color: var(--text-secondary, #8b949e);
+    padding: 0 0.6rem;
+    cursor: pointer;
+    font-size: 0.95rem;
+    line-height: 1;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .tab-strip-minimize:hover {
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-primary, #c9d1d9);
+  }
   .tab-strip-overflow-menu {
     position: absolute;
     top: 100%;
@@ -298,50 +333,27 @@ export const STYLES = css`
    * The active-tab dot is slightly enlarged so users
    * can see at a glance which agent's transcript is
    * currently shown in the message area. */
-  .led-row {
+  /* LED strip — compact horizontal bar centered below
+   * the input row, above the compaction-capacity bar.
+   * Replaces the earlier full-width LED row that sat
+   * at the top of the chat panel. The strip reuses the
+   * same dot styling (cyan/green/red, click-to-activate,
+   * tooltip per state) but takes minimal vertical space
+   * — just enough to host the dots themselves.
+   *
+   * Centered horizontally so the dots align below the
+   * textarea regardless of how wide the dialog is. No
+   * background or border — the strip blends into the
+   * input area's surface. */
+  .led-strip {
     flex-shrink: 0;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 0.35rem;
-    padding: 0.3rem 0.75rem;
-    background: rgba(22, 27, 34, 0.6);
-    border-bottom: 1px solid rgba(240, 246, 252, 0.1);
-    /* The LED row is the dialog drag handle now that
-     * the dialog header has been removed. The cursor
-     * signals affordance; pointerdown handler in
-     * dialog.js detects drag origin via the
-     * data-drag-handle attribute. Clicks on
-     * individual LED dots and right-side icons skip
-     * drag via the closest('button') guard. */
-    cursor: grab;
-  }
-  .dialog.dragging .led-row {
-    cursor: grabbing;
-  }
-  .led-row-spacer {
-    flex: 1;
-    min-width: 0.5rem;
-  }
-  .led-row-icon {
-    flex-shrink: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--text-secondary, #8b949e);
-    padding: 0.2rem 0.4rem;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.95rem;
-    line-height: 1;
-    opacity: 0.7;
-    transition: opacity 120ms ease,
-      background 120ms ease,
-      color 120ms ease;
-  }
-  .led-row-icon:hover {
-    opacity: 1;
-    background: rgba(240, 246, 252, 0.08);
-    color: var(--text-primary, #c9d1d9);
+    padding: 0.25rem 0;
+    margin-top: 0.25rem;
   }
   .led-dot {
     flex-shrink: 0;

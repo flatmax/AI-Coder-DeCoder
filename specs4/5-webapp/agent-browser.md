@@ -15,12 +15,13 @@ Tab labels carry the agent index plus a short summary derived from the spawn blo
 
 The currently-active tab is visually distinguished. Every input affordance on the chat panel (textarea, send button, snippet drawer, file picker bindings) targets the active tab's conversation.
 
-Each tab carries two inline affordances, all invisible by default and fading in on hover / active / focus:
+Each tab carries three inline affordances, all invisible by default and fading in on hover / active / focus:
 
 - **Streaming indicator** — small pulsing dot on the left of the label when the tab has an in-flight stream. Visible on every tab regardless of active state, so users see work happening on tabs they aren't currently viewing.
+- **📊 Context icon** — opens the Context overlay scoped to this tab's conversation. Always rendered (Main and every agent), since every conversation has its own breakdown to view. Clicking activates the tab AND switches the dialog to Context; clicking again on the already-active tab still re-opens Context, treating the icon as a "show me Context for this" gesture rather than a state toggle.
 - **✕ Close icon** — agent tabs only. Main is never closable. Closes the tab and frees the backend scope.
 
-There is no per-tab Context icon. The Context overlay is reached via the 📊 icon on the LED row's right edge (see [shell.md § Layout](shell.md#layout)) — clicking it opens Context scoped to whichever tab is currently active. This keeps the tab strip uncluttered: the Context entry point is one icon shared across all tabs, not N icons that fade in on hover.
+The 📊 icon dispatches a bubbling `request-dialog-tab` event with `{tab: 'context'}` which the app shell catches and routes through `_switchTab`. The Context tab listens independently for `active-tab-changed` — that's the channel that drives its rescope, so the icon click and a normal tab click produce identical Context content for that tab.
 
 ## Status LEDs
 
@@ -50,9 +51,9 @@ Across turns within a session, an agent tab persists if the user does not close 
 
 ### Layout
 
-The LED row sits in the main tab header, distinct from but adjacent to the main tab's own label. When more than 4-5 agent tabs exist the row wraps onto a second line rather than truncating; the dots are small enough that even 8-10 fit naturally. There is no cap and no overflow indicator — every live agent tab gets a visible LED.
+The LED strip sits below the chat panel's input textarea, above the compaction-capacity bar. Dots are centered horizontally, sized to be unobtrusive (small enough that 8-10 fit on one line without wrapping; the strip wraps to a second line if necessary). No background, no border — the strip floats over the input area's surface so it costs no extra vertical real estate compared to a separate container.
 
-The row is always visible while the chat panel is mounted — at minimum it carries the main-tab LED. With no agent tabs, the row shows exactly one dot reflecting main-tab state.
+The strip is always visible while the chat panel is mounted — at minimum it carries the main-tab LED. With no agent tabs, the strip shows exactly one dot reflecting main-tab state. Dots reorder as agent tabs spawn and close; tab insertion order is preserved (main first, then agents in spawn order).
 
 ## Tab Lifetime
 

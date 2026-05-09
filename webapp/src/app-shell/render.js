@@ -124,6 +124,14 @@ export function renderTemplate(host) {
           aria-label="Convert"
         >📄</button>
       ` : null}
+      ${host._minimized ? html`
+        <button
+          class="expand-fab"
+          @click=${host._toggleMinimize}
+          title="Expand dialog"
+          aria-label="Expand dialog"
+        >▴</button>
+      ` : null}
       <div class="dialog-body">
         <div class="tab-panel ${host.activeTab === 'files' ? 'active' : ''}">
           <ac-files-tab></ac-files-tab>

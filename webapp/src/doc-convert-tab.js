@@ -215,6 +215,9 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       border-bottom: 1px solid rgba(240, 246, 252, 0.08);
       background: rgba(22, 27, 34, 0.4);
     }
+    .nav-bar .minimize-right {
+      margin-left: auto;
+    }
     .back-btn {
       background: transparent;
       border: 1px solid rgba(240, 246, 252, 0.15);
@@ -1014,6 +1017,12 @@ export class DocConvertTab extends RpcMixin(LitElement) {
           aria-label="Back to chat"
           @click=${() => this._goBackToChat()}
         >← Chat</button>
+        <button
+          class="back-btn minimize-right"
+          title="Minimize dialog"
+          aria-label="Minimize dialog"
+          @click=${() => this._minimizeDialog()}
+        >▾</button>
       </div>
     `;
   }
@@ -1027,6 +1036,24 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     this.dispatchEvent(
       new CustomEvent('request-dialog-tab', {
         detail: { tab: 'files' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Dispatch a request to the app shell to minimize
+   * the dialog. Companion to ``_goBackToChat``: the
+   * tab-strip minimize button isn't reachable when
+   * Convert is the active tab (the strip sits in
+   * the chat panel which is a sibling tab-panel),
+   * so each overlay carries its own minimize
+   * affordance.
+   */
+  _minimizeDialog() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
         bubbles: true,
         composed: true,
       }),

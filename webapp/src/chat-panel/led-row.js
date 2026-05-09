@@ -36,39 +36,6 @@ import { html } from 'lit';
 import { onTabClick } from './tabs.js';
 
 /**
- * Click handler for the right-side Context icon. Dispatches
- * `request-dialog-tab` so the app-shell flips to the Context
- * overlay scoped to whichever tab is currently active.
- *
- * The Context overlay reads the active tab from the chat
- * panel's `_activeTabId` setter event (`active-tab-changed`)
- * — we don't need to pass it explicitly here.
- */
-function onContextIconClick(panel) {
-  panel.dispatchEvent(
-    new CustomEvent('request-dialog-tab', {
-      detail: { tab: 'context' },
-      bubbles: true,
-      composed: true,
-    }),
-  );
-}
-
-/**
- * Click handler for the right-side minimize button. Dispatches
- * a `request-dialog-minimize` event the app-shell catches and
- * routes through its existing minimize toggle.
- */
-function onMinimizeClick(panel) {
-  panel.dispatchEvent(
-    new CustomEvent('request-dialog-minimize', {
-      bubbles: true,
-      composed: true,
-    }),
-  );
-}
-
-/**
  * Scroll the tab strip so the button for `tabId` is
  * visible. No-op when the strip isn't rendered (single-
  * tab mode) or the button isn't found yet — the next
@@ -185,10 +152,9 @@ export function renderLedRow(panel) {
   }
   return html`
     <div
-      class="led-row"
+      class="led-strip"
       role="group"
       aria-label="Conversation status"
-      data-drag-handle="true"
     >
       ${tabs.map((tabId) => {
         const tab = panel._tabs.get(tabId);
@@ -230,19 +196,6 @@ export function renderLedRow(panel) {
           ></button>
         `;
       })}
-      <div class="led-row-spacer" aria-hidden="true"></div>
-      <button
-        class="led-row-icon led-row-context"
-        title="Context — token budget and cache tier viewer"
-        aria-label="Open Context for the active conversation"
-        @click=${() => onContextIconClick(panel)}
-      >📊</button>
-      <button
-        class="led-row-icon led-row-minimize"
-        title="Minimize dialog"
-        aria-label="Minimize dialog"
-        @click=${() => onMinimizeClick(panel)}
-      >▾</button>
     </div>
   `;
 }

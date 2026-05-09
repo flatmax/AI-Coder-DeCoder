@@ -412,7 +412,7 @@ export function renderTabStrip(panel) {
   // spawn order.
   const tabs = Array.from(panel._tabs.keys());
   return html`
-    <div class="tab-strip">
+    <div class="tab-strip" data-drag-handle="true">
       <div class="tab-strip-scroll" role="tablist">
         ${tabs.map((tabId) => {
           const label = panel._tabLabels.get(tabId) || tabId;
@@ -506,11 +506,39 @@ export function renderTabStrip(panel) {
         title="Jump to tab"
         @click=${() => toggleOverflowMenu(panel)}
       >⋯</button>
+      <button
+        class="tab-strip-minimize"
+        aria-label="Minimize dialog"
+        title="Minimize dialog"
+        @click=${() => onMinimizeClick(panel)}
+      >▾</button>
       ${panel._tabStripOverflowOpen
         ? renderOverflowMenu(panel, tabs)
         : ''}
     </div>
   `;
+}
+
+/**
+ * Click handler for the tab-strip minimize button.
+ * Dispatches `request-dialog-minimize` which the
+ * app-shell's window listener routes through its
+ * existing `_toggleMinimize` method.
+ *
+ * Lives in the tab strip (not on the dialog as a
+ * FAB) because the strip is the always-present
+ * top-of-dialog region and pairs naturally with
+ * the overflow menu — both are dialog-level
+ * controls that don't belong inside any single
+ * tab's body.
+ */
+function onMinimizeClick(panel) {
+  panel.dispatchEvent(
+    new CustomEvent('request-dialog-minimize', {
+      bubbles: true,
+      composed: true,
+    }),
+  );
 }
 
 /**
