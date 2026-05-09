@@ -1141,6 +1141,698 @@ class TestSetAgentExcludedIndexFilesLocalhostOnly:
         assert scope.excluded_index_files == []
 
 
+class TestSwitchAgentMode:
+    """switch_agent_mode RPC.
+
+    Per-agent mode toggle (Increment 4a). Identifies the
+    agent by its LLM-chosen id. Accepts the four combined
+    mode strings on the wire and flattens them into the
+    ContextManager's two axes (mode + cross_reference_enabled).
+
+    Tests cover happy path for each mode transition,
+    no-op when already in the target state, mid-stream
+    rejection, validation errors (unknown agent, malformed
+    mode), tracker rebuild side-effect, archive event
+    persistence, and the localhost-only gate.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown agent id → agent-not-found error."""
+        result = service.switch_agent_mode("nonexistent", "doc")
+        assert result == {"error": "agent not found"}
+
+    def test_empty_string_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Empty string id → agent-not-found (defensive)."""
+        result = service.switch_agent_mode("", "doc")
+        assert result == {"error": "agent not found"}
+
+    def test_invalid_mode_string_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Mode value outside the four-valid set → error.
+
+        The LLM-side surface accepts the same four strings
+        every other mode-bearing API does. A malformed
+        client payload must surface a clear error rather
+        than silently mutating to an unexpected state.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode("worker", "rust")
+        assert result.get("error") == "invalid mode"
+        assert "rust" in result.get("reason", "")
+
+    def test_non_string_mode_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Defensive — non-string mode value rejected."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode("worker", 42)
+        assert result.get("error") == "invalid mode"
+
+    def test_switches_code_to_doc(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → doc switches Mode and clears cross-ref."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Default agent state: code mode, xref off.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is False
+
+        result = service.switch_agent_mode("worker", "doc")
+        assert result == {
+            "status": "ok",
+            "agent_id": "worker",
+            "mode": "doc",
+        }
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is False
+
+    def test_switches_to_code_xref(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → code+xref flips just the xref axis."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode(
+            "worker", "code+xref",
+        )
+        assert result["mode"] == "code+xref"
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_switches_to_doc_xref(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → doc+xref flips both axes in one call."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.switch_agent_mode(
+            "worker", "doc+xref",
+        )
+        assert result["mode"] == "doc+xref"
+        assert scope.context.mode == Mode.DOC
+        assert scope.context.cross_reference_enabled is True
+
+    def test_no_op_when_already_in_target_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Same mode → ok status with 'already' message.
+
+        Pinned because re-applying the same mode would
+        otherwise rebuild the tracker (a needless cache
+        write) and emit an archive event for nothing. The
+        identity comparison guards both axes.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Pre-set to doc+xref.
+        from ac_dc.context_manager import Mode
+        scope.context.set_mode(Mode.DOC)
+        scope.context.set_cross_reference_enabled(True)
+        original_tracker = scope.tracker
+
+        result = service.switch_agent_mode(
+            "idle", "doc+xref",
+        )
+        assert result["status"] == "ok"
+        assert "already" in result.get("message", "").lower()
+        # Tracker untouched — the no-op short-circuit avoids
+        # the rebuild.
+        assert scope.tracker is original_tracker
+
+    def test_mid_stream_rejected(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Agent with active stream → stream-active error.
+
+        Switching mode mid-flight would leave the cached
+        tier prefix mismatched against the agent's
+        in-progress LLM call. Frontend hides the toggle
+        while the LED is cyan, but the backend guards
+        defensively against a stale click.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("busy"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Simulate an in-flight stream.
+        service._active_agent_streams.add("busy")
+        try:
+            result = service.switch_agent_mode("busy", "doc")
+            assert result.get("error") == "agent stream active"
+            assert "wait" in result.get("reason", "").lower()
+            # Mode unchanged.
+            from ac_dc.context_manager import Mode
+            assert scope.context.mode == Mode.CODE
+        finally:
+            service._active_agent_streams.discard("busy")
+
+    def test_rebuilds_tracker(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Successful switch replaces the agent's tracker.
+
+        Tier placements were valid for the old prompt + index
+        combination; the new combination invalidates every
+        cached prefix, so a fresh tracker is the correct
+        starting state for the next turn. The
+        ContextManager's ``stability_tracker`` reference
+        also follows the swap so reads through that path
+        see the new instance.
+        """
+        from ac_dc.stability_tracker import StabilityTracker
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        original_tracker = scope.tracker
+
+        service.switch_agent_mode("worker", "doc")
+        assert scope.tracker is not original_tracker
+        assert isinstance(scope.tracker, StabilityTracker)
+        # ContextManager attachment also updated.
+        assert scope.context.stability_tracker is scope.tracker
+
+    def test_writes_archive_system_event(
+        self,
+        service: LLMService,
+        history_store: Any,
+    ) -> None:
+        """Archive carries a mode-change system event.
+
+        Per Increment 3b: the agent's archive records the
+        transition so reconstruction (Increment 5) can
+        replay events and arrive at the agent's final
+        mode. The event's content names both the old and
+        new modes so a future reader can audit the
+        transition without inferring it from neighbouring
+        records.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("recorder"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_event",
+        )
+
+        service.switch_agent_mode(
+            "recorder", "doc+xref",
+        )
+
+        archive = history_store.get_turn_archive("turn_event")
+        assert len(archive) == 1
+        messages = archive[0]["messages"]
+        # The mode-change event is the only system_event in
+        # the archive — agent's task wasn't run, no
+        # streaming happened, so the only record is our
+        # archive write.
+        events = [
+            m for m in messages
+            if m.get("system_event") is True
+        ]
+        assert len(events) == 1
+        content = events[0].get("content", "")
+        assert "code" in content
+        assert "doc+xref" in content
+
+    def test_broadcasts_agent_mode_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Successful switch fires an agentModeChanged event.
+
+        Frontend listens for this to update the tab's
+        tooltip and the LED-row state without polling. The
+        payload's ``agent_id`` field is the registry key so
+        the frontend can route to the right tab.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("notifier"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.switch_agent_mode("notifier", "doc")
+
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert len(broadcasts) == 1
+        payload = broadcasts[0][0]
+        assert payload == {
+            "agent_id": "notifier",
+            "mode": "doc",
+            "cross_reference_enabled": False,
+        }
+
+    def test_no_op_does_not_broadcast(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Re-applying same mode → no broadcast.
+
+        Mirrors the ``main.switch_mode`` no-broadcast
+        contract for already-current state. Without this,
+        rapid identical clicks would flood the event
+        channel.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.switch_agent_mode("idle", "code")  # already
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert broadcasts == []
+
+
+class TestSwitchAgentModeLocalhostOnly:
+    """switch_agent_mode restricts non-localhost callers."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("guarded"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.switch_agent_mode("guarded", "doc")
+        assert result.get("error") == "restricted"
+        # Mode unchanged.
+        from ac_dc.context_manager import Mode
+        assert scope.context.mode == Mode.CODE
+
+
+class TestSetAgentCrossReference:
+    """set_agent_cross_reference RPC.
+
+    Per-agent cross-ref toggle (Increment 4a). Tests cover
+    happy path for both directions, no-op when already in
+    the target state, mid-stream rejection, unknown agent,
+    archive event, and broadcast.
+
+    Mode-axis stability is the key contract here:
+    cross-ref toggles must NOT change the agent's primary
+    mode. Pinned by tests that exercise both code and doc
+    starting states.
+    """
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_unknown_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Unknown agent id → agent-not-found error."""
+        result = service.set_agent_cross_reference(
+            "nonexistent", True,
+        )
+        assert result == {"error": "agent not found"}
+
+    def test_empty_string_id_returns_error(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Empty string id → agent-not-found (defensive)."""
+        result = service.set_agent_cross_reference("", True)
+        assert result == {"error": "agent not found"}
+
+    def test_enables_xref_in_code_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """code → code+xref via toggle."""
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.set_agent_cross_reference(
+            "worker", True,
+        )
+        assert result == {
+            "status": "ok",
+            "agent_id": "worker",
+            "cross_reference_enabled": True,
+        }
+        # Primary mode unchanged.
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is True
+
+    def test_disables_xref_preserving_mode(
+        self,
+        service: LLMService,
+    ) -> None:
+        """doc+xref → doc keeps the primary doc mode.
+
+        Critical contract — the cross-ref RPC must not
+        accidentally collapse mode to its default. Without
+        this guard a regression that read both axes from
+        wire input would silently reset mode on every
+        xref toggle.
+        """
+        from ac_dc.context_manager import Mode
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        scope.context.set_mode(Mode.DOC)
+        scope.context.set_cross_reference_enabled(True)
+
+        result = service.set_agent_cross_reference(
+            "worker", False,
+        )
+        assert result["cross_reference_enabled"] is False
+        # Primary mode preserved.
+        assert scope.context.mode == Mode.DOC
+
+    def test_no_op_when_already_in_target_state(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Same xref state → ok with 'already' message."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        # Default xref is False.
+        original_tracker = scope.tracker
+        result = service.set_agent_cross_reference(
+            "idle", False,
+        )
+        assert result["status"] == "ok"
+        assert "already" in result.get("message", "").lower()
+        assert scope.tracker is original_tracker
+
+    def test_mid_stream_rejected(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Active stream → stream-active error."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("busy"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        service._active_agent_streams.add("busy")
+        try:
+            result = service.set_agent_cross_reference(
+                "busy", True,
+            )
+            assert result.get("error") == "agent stream active"
+            # State unchanged.
+            assert scope.context.cross_reference_enabled is False
+        finally:
+            service._active_agent_streams.discard("busy")
+
+    def test_non_bool_input_coerced(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Truthy/falsy values coerce via bool() — defensive.
+
+        The wire input arrives as JSON, where True/False are
+        the only legal bool values. A truthy int leaking
+        through (frontend bug) shouldn't crash; bool()
+        handles it.
+        """
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        result = service.set_agent_cross_reference(
+            "worker", 1,
+        )
+        assert result["cross_reference_enabled"] is True
+        assert scope.context.cross_reference_enabled is True
+
+    def test_rebuilds_tracker(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Successful toggle replaces the tracker."""
+        from ac_dc.stability_tracker import StabilityTracker
+
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("worker"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        original_tracker = scope.tracker
+
+        service.set_agent_cross_reference("worker", True)
+        assert scope.tracker is not original_tracker
+        assert isinstance(scope.tracker, StabilityTracker)
+        assert scope.context.stability_tracker is scope.tracker
+
+    def test_writes_archive_system_event(
+        self,
+        service: LLMService,
+        history_store: Any,
+    ) -> None:
+        """Archive carries a cross-ref-toggle system event."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("recorder"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_xref_event",
+        )
+
+        service.set_agent_cross_reference("recorder", True)
+
+        archive = history_store.get_turn_archive(
+            "turn_xref_event",
+        )
+        events = [
+            m for m in archive[0]["messages"]
+            if m.get("system_event") is True
+        ]
+        assert len(events) == 1
+        content = events[0].get("content", "")
+        # Event names both the old (code) and new (code+xref)
+        # modes — the format mirrors switch_agent_mode's
+        # event so reconstruction can use one parser.
+        assert "code" in content
+        assert "code+xref" in content
+
+    def test_broadcasts_agent_mode_changed(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Toggle fires the same agentModeChanged event.
+
+        Frontend listens for one event regardless of which
+        axis changed — keeps the listener simple and the
+        wire chatter narrow.
+        """
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("notifier"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.set_agent_cross_reference("notifier", True)
+
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert len(broadcasts) == 1
+        payload = broadcasts[0][0]
+        assert payload["agent_id"] == "notifier"
+        assert payload["mode"] == "code+xref"
+        assert payload["cross_reference_enabled"] is True
+
+    def test_no_op_does_not_broadcast(
+        self,
+        service: LLMService,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """Re-applying same state → no broadcast."""
+        parent_scope = service._default_scope()
+        service._build_agent_scope(
+            block=self._make_agent_block("idle"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+        event_cb.events.clear()
+
+        service.set_agent_cross_reference("idle", False)
+        broadcasts = [
+            args for name, args in event_cb.events
+            if name == "agentModeChanged"
+        ]
+        assert broadcasts == []
+
+
+class TestSetAgentCrossReferenceLocalhostOnly:
+    """set_agent_cross_reference restricts non-localhost."""
+
+    def _make_agent_block(
+        self,
+        agent_id: str = "agent-0",
+        task: str = "do something",
+    ) -> Any:
+        from ac_dc.edit_protocol import AgentBlock
+        return AgentBlock(id=agent_id, task=task)
+
+    def test_non_localhost_returns_restricted(
+        self,
+        service: LLMService,
+    ) -> None:
+        """Non-localhost caller gets the restricted-error shape."""
+        parent_scope = service._default_scope()
+        scope = service._build_agent_scope(
+            block=self._make_agent_block("guarded"),
+            agent_idx=0,
+            parent_scope=parent_scope,
+            turn_id="turn_t",
+        )
+
+        class _FakeCollab:
+            def is_caller_localhost(self) -> bool:
+                return False
+
+        service._collab = _FakeCollab()
+        result = service.set_agent_cross_reference(
+            "guarded", True,
+        )
+        assert result.get("error") == "restricted"
+        # State unchanged.
+        assert scope.context.cross_reference_enabled is False
+
+
 class TestParseAgentTag:
     """:meth:`LLMService._parse_agent_tag` input validation.
 

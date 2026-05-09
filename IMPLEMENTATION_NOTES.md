@@ -594,29 +594,43 @@ No frontend change. No reconstruction yet — just the data.
 
 ### Increment 4 — Per-agent mode toggle
 
-The user-visible feature you described. The mode toggle on an agent tab actually changes that agent's mode.
+The user-visible feature: the mode toggle on an agent tab actually changes that agent's mode.
 
-Two parts:
+Split into two parts. 4a (backend) lands first; 4b (frontend) follows.
 
-**4a — Backend: per-agent mode RPCs.**
+#### ~~4a — Backend: per-agent mode RPCs~~ — delivered
 
-- `LLMService.switch_agent_mode(agent_id, mode)` — looks up the agent in `_agent_contexts`, swaps its ContextManager mode, rebuilds its stability tracker, writes a mode-change system event to the agent's archive (per 3b), broadcasts `agentModeChanged` so the frontend updates the tab's tooltip and the LED-row state.
-- `LLMService.set_agent_cross_reference(agent_id, enabled)` — same shape for cross-reference.
-- Both reject mid-stream changes (agent's tab shows flashing-cyan LED). Toast surfaces the reason.
-- Both update the descriptor that `build_agent_descriptor` injects into main's prompt — so the next time main runs, it sees the agent's new mode in its context. (This part is automatic if the descriptor reads from the agent's live ContextManager rather than a snapshot — verify.)
+Two new RPCs in `_rpc_state.py`:
 
-**4b — Frontend: render mode toggle on agent tabs and route to per-agent RPCs.**
+- **`LLMService.switch_agent_mode(agent_id, mode)`** — accepts the four combined mode strings (`code` / `doc` / `code+xref` / `doc+xref`) and flattens them into the agent's ContextManager's two axes. Validates the id, the mode shape, and the mid-stream guard (rejects when `agent_id in _active_agent_streams`). On a real change: applies the mode and cross-ref flags, rebuilds the agent's `StabilityTracker` (every tier prefix invalidated by the new prompt + index combination), writes a mode-change system event to the agent's archive via `scope.archival_append`, broadcasts `agentModeChanged`. No-op short-circuit when the new state matches the current state — saves a needless tracker rebuild and skips the event/broadcast.
+
+- **`LLMService.set_agent_cross_reference(agent_id, enabled)`** — same shape, axis-isolated. Critical contract: toggling cross-ref MUST NOT touch the primary mode. Pinned by `test_disables_xref_preserving_mode` which exercises a `doc+xref → doc` transition and asserts `Mode.DOC` survives.
+
+Helper functions in the same module: `_parse_agent_mode_string` (wire string → `(Mode, bool)`), `_format_agent_mode` (the inverse, used for archive event content), `_rebuild_agent_tracker` (replace `scope.tracker` with a fresh `StabilityTracker` and re-attach via `scope.context.set_stability_tracker`).
+
+Archive system events follow the format `"Mode changed: {old} → {new}."` for both RPCs — reconstruction (Increment 5) can parse one format. Sink failures are logged at WARNING and swallowed; the in-memory mode change is authoritative.
+
+Both RPCs are localhost-only, matching the rest of the agent-keyed surface. `LLMService` exposes thin delegators (`switch_agent_mode`, `set_agent_cross_reference`).
+
+The orchestrator's prompt-time descriptor (per `specs4/7-future/parallel-agents.md` § Per-agent state descriptor) already reads each agent's mode from its live ContextManager via `build_agent_descriptor`, so a successful switch is visible to main on its very next turn without any further wiring. The "verify" item from the original 4a scope is satisfied by inspection of `_agents.py:build_agent_descriptor` which calls `cm.mode` and `cm.cross_reference_enabled` — both now fresh after a switch.
+
+Tests: `TestSwitchAgentMode` (12 tests) and `TestSetAgentCrossReference` (12 tests) in `test_agent_lifecycle.py` cover happy paths for every transition, no-op short-circuits, unknown-agent errors, malformed-mode errors (string and non-string), mid-stream rejection, tracker rebuild side-effect, ContextManager attachment update, archive event persistence with content matching the format above, broadcast payload shape (`{agent_id, mode, cross_reference_enabled}`), no-broadcast on no-op. Companion `*LocalhostOnly` classes pin the restriction gate.
+
+What 4a does NOT deliver: per-agent mode-change events being interleaved with normal agent conversation in the archive. The archive write happens via `archival_append` which targets the agent's `agent-NN.jsonl` file directly — so the sequence is correct and chronological, but the agent's NEXT turn's records (when the user replies) come AFTER the mode-change event, not woven in. This matches the design — system events are operational records, not conversational turns.
+
+What 4a sets up for 4b: the RPC surface is stable, the broadcast event name (`agentModeChanged`) is fixed, and the frontend can route a single click to `switch_agent_mode` for combined transitions OR to `set_agent_cross_reference` for the overlay-only toggle. Same pattern as the main-tab segmented + overlay UI.
+
+#### 4b — Frontend: render mode toggle on agent tabs and route to per-agent RPCs
 
 Reverse of Increment 1: the mode toggle now appears on agent tabs but routes differently. When `panel._activeTabId !== 'main'`, the toggle calls `switch_agent_mode` instead of `switch_mode`. Disabled while the agent's stream is active. Tooltip explains.
 
 Scope:
-- New RPCs as above.
-- `webapp/src/chat-panel/rendering.js` — render mode toggle on agent tabs in Increment 4 (reversing Increment 1's hide for this specific button).
+- `webapp/src/chat-panel/rendering.js` — render mode toggle on agent tabs (reversing Increment 1's hide for this specific button).
 - `webapp/src/app-shell/mode.js` — route to per-agent RPCs when active tab is an agent.
-- Tests covering the happy path, mid-stream rejection, descriptor update, archive event persistence.
+- Tests covering the happy path, mid-stream rejection, descriptor update, archive event persistence (end-to-end via the RPC).
 - Spec updates: `specs4/5-webapp/agent-browser.md`, `system_agentic_appendix.md` (relax the "mode is fixed for the life of the agent" constraint with an explanation of how mid-session changes work).
 
-After this lands, your scenario step 2 works: select an agent, toggle xref on, the agent's effective mode changes immediately for the next turn, main sees the new mode in its context.
+After this lands, the user scenario works: select an agent, toggle xref on, the agent's effective mode changes immediately for the next turn, main sees the new mode in its context.
 
 ### Increment 5 — Reconstruct agents on session-load
 

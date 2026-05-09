@@ -1448,6 +1448,24 @@ class LLMService:
             self, agent_id, files
         )
 
+    def switch_agent_mode(
+        self,
+        agent_id: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.switch_agent_mode`."""
+        from ac_dc.llm._rpc_state import switch_agent_mode
+        return switch_agent_mode(self, agent_id, mode)
+
+    def set_agent_cross_reference(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_agent_cross_reference`."""
+        from ac_dc.llm._rpc_state import set_agent_cross_reference
+        return set_agent_cross_reference(self, agent_id, enabled)
+
     # ------------------------------------------------------------------
     # Conversation scope construction
     # ------------------------------------------------------------------
