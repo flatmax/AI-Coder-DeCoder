@@ -482,17 +482,16 @@ Tab IDs use the agent's LLM-chosen string id (per D26 flat identity); `deriveAge
 
 The handler is fire-and-forget on errors: a failed `list_live_agents` call logs at console-error level (skipping the routine "method not found" case for stripped-down test fixtures) but never surfaces a toast — running on every connect, transient failures shouldn't punish the user with a notification on every reload.
 
-### Increment D — Per-turn historical view
+### ~~Increment D — Per-turn historical view~~ — delivered
 
-Implements agent-browser.md § "Historical Turns". Once the user starts a new agentic turn in the main tab, the previous turn's agent tabs leave the strip. Their archives remain on disk, readable via `get_turn_archive(turn_id)`. The UI affordance: scrolling the main chat back to a previous turn surfaces a "View agents (N)" affordance beneath that turn's assistant message; clicking it populates the tab strip with read-only tabs from the archive.
+Implements agent-browser.md § "Historical Turns". Three commits:
 
-Scope:
-- Affordance render on previous-turn assistant messages — checks for the existence of `.ac-dc4/agents/{turn_id}/` (the spec's "did this turn spawn agents?" signal) by reading the `turn_id` field on the message and calling `get_turn_archive` to count results.
-- Click handler that loads the archive and populates read-only tabs.
-- Read-only mode for tabs — input box disabled, no LED state changes, no `chat_streaming` calls (the ContextManager is gone).
-- Leaving the historical turn (scrolling away, clicking a newer turn) removes the read-only tabs.
+- **Commit 1 (`7774c18`)** — field threading. `turn_id` and `agent_blocks` ride through stream-complete, session-changed, state-loaded, and compaction-event mutation paths. Without this, persisted-then-reloaded messages lost the metadata the renderer needs.
+- **Commit 2 (`d3b203f`)** — view-agents affordance. Assistant messages from previous agentic turns render a "View agents (N)" button below the body. Visibility gated on partial-overlap (at least one agent no longer live in the tab strip), so the active turn — whose agents are already reachable via the strip — doesn't grow a duplicate button.
+- **Commit 3 (`65b82da`)** — load handler. Click fetches the archive via `get_turn_archive(turn_id)`, creates read-only tabs with `historical:{turn_id}/{agent_id}` ids, marks them `readOnly: true`, disables the input on those tabs, and switches to the first new tab. Idempotent re-clicks clear prior historical tabs so the strip doesn't accumulate.
 
-Independent of cross-turn reconstruction — this is the per-turn audit trail many users want without the cross-turn complexity.
+Deferred:
+- **Scroll-away cleanup.** Spec says historical tabs should disappear when the user scrolls away from their parent message. Currently the user closes them explicitly via the existing tab close button or by triggering another View Agents click (which clears the strip first). Not critical to D's value; revisit if the manual-close UX produces complaints.
 
 ### Increment E — Cross-turn agent history view
 
