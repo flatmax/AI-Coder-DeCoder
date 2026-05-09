@@ -262,8 +262,9 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 
 ### Non-Localhost Clients
 
-- Controls are rendered but disabled for non-localhost participants — they passively follow the server's authoritative mode
-- `mode-changed` broadcasts still update the UI state for these clients
+- Controls are rendered and clickable for every participant — the frontend has no signal distinguishing localhost from remote callers
+- The backend's `_check_localhost_only` guard rejects mode-switch and cross-reference RPCs from non-localhost callers with a `restricted` error; the chat panel surfaces this as a warning toast
+- `mode-changed` broadcasts update the UI state on every client (including non-localhost) so they passively follow the host's authoritative mode
 
 ### Review Status Bar
 

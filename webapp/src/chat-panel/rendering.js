@@ -159,8 +159,13 @@ function renderModeToggle(panel) {
   const tab = panel._tabs.get(panel._activeTabId);
   const streaming = !!(tab && tab.streaming);
   const readOnly = !!(tab && tab.readOnly);
+  // Disabled rules. The localhost-only check is
+  // enforced by the backend (`_check_localhost_only`
+  // returns a `restricted` error which surfaces as
+  // a toast); we don't pre-gate here because no
+  // frontend signal currently carries the localhost
+  // flag.
   const disabled = !panel.rpcConnected
-    || (isMain && !panel._isLocalhost)
     || (!isMain && streaming)
     || readOnly;
   const codeTitle = isMain
