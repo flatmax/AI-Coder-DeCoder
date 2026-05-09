@@ -103,6 +103,28 @@ The reconstruction is read-only; archives are not rewritten when the orchestrato
 
 Filename safety is incidental: because `agent_idx` is numeric, arbitrary characters in `id` (hyphens, dots, mixed case) never reach the filesystem. A future implementation MUST NOT shortcut by using `id` as a filename — case-sensitivity differences across platforms and unrestricted character set would silently corrupt the archive.
 
+### Session-Load Reconstruction
+
+Loading a previous session via `load_session_into_context(session_id)` reconstructs not just main's history but every agent that participated. Reconstructed agents are **live and writable** — their `ContextManager` accepts new messages, the orchestrator can retask them, the user can reply in their tab — distinct from the historical-tab affordance (read-only browsing of turns within the *current* session) which targets a `ContextManager` that no longer exists.
+
+Reconstruction algorithm:
+
+1. Load main's messages via `get_session_messages_for_context(session_id)`. Clear and set history on the main `ContextManager` as today.
+2. Walk the loaded messages for assistant records carrying both `turn_id` and a non-empty `agent_blocks`. For each entry, note `(turn_id, id, agent_idx, mode, cross_reference_enabled, model)`.
+3. When an `id` appears in multiple turns (orchestrator retasked the same agent across the session), the *latest* record wins — its `agent_blocks` entry is the spawn-time baseline for that agent's reconstruction. Earlier turns contribute archive content but not mode state.
+4. For each surviving `(turn_id, id, agent_idx)` triple, read `get_turn_archive(turn_id)` filtered to that index. Concatenate messages from every turn the agent participated in, in chronological order (turn-by-turn by user-message timestamp).
+5. **Replay mode-change system events** on top of the spawn-time baseline. Each `switch_agent_mode` / `set_agent_cross_reference` call writes a `system_event: true` record to the archive with content `"Mode changed: {old} → {new}."`. Walk the concatenated message list in order; for each matching record, parse the target mode and update the running state. The final state after replay is the agent's mode at session-save time.
+6. Construct a fresh `ContextManager` via `build_agent_context_manager`, with mode set to the replay result. Pre-populate its history with the concatenated archive messages.
+7. Construct a fresh `StabilityTracker` (cache starts cold — the saved tracker's tier assignments aren't persisted, and rebuilding from scratch produces a coherent starting state for the next turn).
+8. Register the new `ConversationScope` in `service._agent_contexts[id]`.
+9. Broadcast `agentsRehydrated` carrying the reconstructed agent ids. The frontend's handler calls `list_live_agents()` to materialise tabs, identical to the post-`onRpcReady` rehydration path.
+
+Replay-from-archive (step 5) is the authoritative source of truth for an agent's current mode, not the spawn-time baseline alone. An agent spawned in `code` mode and then toggled to `doc+xref` mid-session must reconstruct as `doc+xref`. Without replay, every retasked agent would silently revert to its spawn-time mode on session reload — a data-loss-feeling bug. The spawn-time baseline serves only as the starting state for the replay.
+
+Mode-change events that fail to parse (malformed content, unrecognised mode strings) are skipped; the running state continues from the previous record. A turn whose archive directory was deleted contributes nothing — the agent's reconstruction proceeds with whatever archive content remains, mode replay still works on the surviving records.
+
+Per-agent file selections, file context, and cache warmth are NOT reconstructed. Selections have always been ephemeral — even a refresh today loses them. The cache rebuilds naturally as the agent runs its next turn.
+
 ## Message Schema
 
 - Unique message ID — timestamp + short random suffix
