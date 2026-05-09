@@ -2254,3 +2254,377 @@ class TestAgentTaggedStreaming:
             agent_tag="closeable",
         )
         assert result == {"error": "agent not found"}
+
+
+class TestSessionLoadReconstruction:
+    """Increment 5 Commit 1 — session-load agent reconstruction.
+
+    Pins the spec contract from `specs4/3-llm/history.md §
+    Session-Load Reconstruction`: loading a previous session
+    rebuilds every agent that participated as a live,
+    writable scope. Reconstructed agents are reachable via
+    `_agent_contexts`, accept new messages, and surface in
+    `list_live_agents()`.
+
+    Commit 1 covers the spawn-time-baseline mode resolution.
+    Commit 2 will add archive-replay for mid-session mode
+    toggles; tests for that behaviour land alongside that
+    commit. A `# Commit 2` marker comment flags the
+    intermediate known-wrong state — an agent toggled mid-
+    session reconstructs as its spawn-time mode after Commit
+    1, and as its post-toggle mode after Commit 2.
+    """
+
+    def _persist_agent_turn(
+        self,
+        history_store: HistoryStore,
+        session_id: str,
+        turn_id: str,
+        agent_blocks: list[dict[str, Any]],
+        archive_per_agent: dict[int, list[dict[str, Any]]],
+    ) -> None:
+        """Persist one agent-spawning turn to disk.
+
+        Writes the user message, the assistant message
+        carrying ``agent_blocks``, and each agent's archive
+        records. Mirrors what `_stream_chat` does at runtime
+        but without the LLM call. Tests use this to seed a
+        history-store the same way a real session would
+        leave it.
+        """
+        history_store.append_message(
+            session_id=session_id,
+            role="user",
+            content="please decompose",
+            turn_id=turn_id,
+        )
+        history_store.append_message(
+            session_id=session_id,
+            role="assistant",
+            content="delegating",
+            turn_id=turn_id,
+            agent_blocks=agent_blocks,
+        )
+        for agent_idx, msgs in archive_per_agent.items():
+            for msg in msgs:
+                history_store.append_agent_message(
+                    turn_id=turn_id,
+                    agent_idx=agent_idx,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content", ""),
+                    session_id=session_id,
+                    system_event=bool(
+                        msg.get("system_event", False)
+                    ),
+                )
+
+    def test_empty_session_reconstructs_no_agents(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Loading a session with no agentic turns: registry empty."""
+        sid = HistoryStore.new_session_id()
+        # Persist a non-agent turn so the session isn't empty
+        # (load_session_into_context refuses empty sessions).
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+            turn_id=HistoryStore.new_turn_id(),
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+        result = service.load_session_into_context(sid)
+        assert "error" not in result
+        assert service._agent_contexts == {}
+
+    def test_single_agent_session_restores_context_manager(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """One agent in one turn: scope registered, history loaded."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "frontend",
+                    "agent_idx": 0,
+                    "mode": "code",
+                    "cross_reference_enabled": False,
+                    "model": "anthropic/claude-sonnet-4-5",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "do the work"},
+                    {
+                        "role": "assistant",
+                        "content": "work done",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        # Agent registered.
+        assert "frontend" in service._agent_contexts
+        scope = service._agent_contexts["frontend"]
+        # Mode reflects the persisted spawn-time baseline.
+        from ac_dc.context_manager import Mode
+        assert scope.context.mode == Mode.CODE
+        assert scope.context.cross_reference_enabled is False
+        # History populated from archive.
+        history = scope.context.get_history()
+        contents = [m.get("content") for m in history]
+        assert "do the work" in contents
+        assert "work done" in contents
+
+    def test_multi_agent_single_turn_session_restores_all(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Multiple agents in one turn: each gets its own scope."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "agent-a",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+                {
+                    "id": "agent-b",
+                    "agent_idx": 1,
+                    "mode": "doc",
+                },
+                {
+                    "id": "agent-c",
+                    "agent_idx": 2,
+                    "mode": "code+xref",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task a"}],
+                1: [{"role": "user", "content": "task b"}],
+                2: [{"role": "user", "content": "task c"}],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        assert "agent-a" in service._agent_contexts
+        assert "agent-b" in service._agent_contexts
+        assert "agent-c" in service._agent_contexts
+        a = service._agent_contexts["agent-a"]
+        b = service._agent_contexts["agent-b"]
+        c = service._agent_contexts["agent-c"]
+        # Modes round-trip through reconstruction.
+        assert a.context.mode == Mode.CODE
+        assert a.context.cross_reference_enabled is False
+        assert b.context.mode == Mode.DOC
+        assert b.context.cross_reference_enabled is False
+        assert c.context.mode == Mode.CODE
+        assert c.context.cross_reference_enabled is True
+
+    def test_retask_within_session_uses_latest_spawn_record(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Same id across two turns: latest spawn record wins.
+
+        Per spec § Session-Load Reconstruction step 3:
+        "When an id appears in multiple turns ... the
+        latest record wins — its agent_blocks entry is
+        the spawn-time baseline. Earlier turns contribute
+        archive content but not mode state."
+
+        Setup: agent ``worker`` spawned in turn 1 as code
+        mode, retasked in turn 2 as doc mode. After
+        reconstruction (Commit 1 spawn-time baseline) the
+        agent's mode is doc — the latest spawn record's
+        value. Both turns' archive content is concatenated.
+        """
+        sid = HistoryStore.new_session_id()
+        tid_1 = HistoryStore.new_turn_id()
+        tid_2 = HistoryStore.new_turn_id()
+        # Turn 1 — worker spawned in code mode.
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid_1,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {"role": "user", "content": "first task"},
+                    {
+                        "role": "assistant",
+                        "content": "first done",
+                    },
+                ],
+            },
+        )
+        # Turn 2 — same worker, retasked in doc mode.
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid_2,
+            agent_blocks=[
+                {
+                    "id": "worker",
+                    "agent_idx": 0,
+                    "mode": "doc",
+                },
+            ],
+            archive_per_agent={
+                0: [
+                    {
+                        "role": "user",
+                        "content": "second task",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "second done",
+                    },
+                ],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        from ac_dc.context_manager import Mode
+        scope = service._agent_contexts["worker"]
+        # Latest record's mode wins per spec.
+        assert scope.context.mode == Mode.DOC
+        # History from BOTH turns concatenated.
+        contents = [
+            m.get("content")
+            for m in scope.context.get_history()
+        ]
+        assert "first task" in contents
+        assert "first done" in contents
+        assert "second task" in contents
+        assert "second done" in contents
+
+    def test_missing_archive_directory_skipped(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+        repo_dir: Path,
+    ) -> None:
+        """Deleted archive: agent reconstructs with empty history.
+
+        Per spec: "Turns whose archive directory has been
+        deleted are skipped without error. The agent's
+        reconstruction proceeds with whatever archive
+        content remains."
+        """
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {"id": "ghost", "agent_idx": 0, "mode": "code"},
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+        # Delete the archive directory after persistence.
+        archive_dir = (
+            repo_dir / ".ac-dc4" / "agents" / tid
+        )
+        assert archive_dir.exists()
+        for f in archive_dir.iterdir():
+            f.unlink()
+        archive_dir.rmdir()
+
+        service.load_session_into_context(sid)
+
+        # Agent still reconstructed (record in main store
+        # has agent_blocks); just empty history.
+        assert "ghost" in service._agent_contexts
+        scope = service._agent_contexts["ghost"]
+        assert scope.context.get_history() == []
+
+    def test_records_without_agent_blocks_skipped(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Pre-Increment-A records (no agent_blocks) silently skipped."""
+        sid = HistoryStore.new_session_id()
+        # User + assistant without turn_id or agent_blocks
+        # — simulates a record from before agent persistence.
+        history_store.append_message(
+            session_id=sid,
+            role="user",
+            content="hi",
+        )
+        history_store.append_message(
+            session_id=sid,
+            role="assistant",
+            content="hello",
+        )
+
+        service.load_session_into_context(sid)
+
+        assert service._agent_contexts == {}
+
+    def test_reconstructed_scope_reachable_via_rpc(
+        self,
+        service: LLMService,
+        history_store: HistoryStore,
+    ) -> None:
+        """Reconstructed agent answers to set_agent_selected_files."""
+        sid = HistoryStore.new_session_id()
+        tid = HistoryStore.new_turn_id()
+        self._persist_agent_turn(
+            history_store,
+            session_id=sid,
+            turn_id=tid,
+            agent_blocks=[
+                {
+                    "id": "live-agent",
+                    "agent_idx": 0,
+                    "mode": "code",
+                },
+            ],
+            archive_per_agent={
+                0: [{"role": "user", "content": "task"}],
+            },
+        )
+
+        service.load_session_into_context(sid)
+
+        # Agent reachable through the agent-keyed RPC
+        # surface — proves it's a live writable scope, not
+        # a read-only stub.
+        result = service.set_agent_selected_files(
+            "live-agent", [],
+        )
+        assert result == []

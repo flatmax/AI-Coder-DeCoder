@@ -776,3 +776,201 @@ def _classify_agent_paths(
         sorted(symbol_set),
         sorted(doc_set),
     )
+
+
+# ---------------------------------------------------------------------------
+# Session-load reconstruction
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_agent_scope(
+    service: "LLMService",
+    *,
+    agent_id: str,
+    turn_id: str,
+    agent_idx: int,
+    model: str | None,
+    mode: Mode,
+    cross_ref: bool,
+    archive_messages: list[dict[str, Any]],
+) -> ConversationScope:
+    """Reconstruct an agent scope from persisted archive content.
+
+    Mirrors :func:`build_agent_scope` but for the session-load
+    path: no parent_scope (no orchestrator turn in flight at
+    load time), no spawn-block mode resolution (caller has
+    already resolved mode + cross_ref from persisted state),
+    no deep copy of selected_files (selections aren't
+    persisted; reconstructed agents start with empty
+    selection — the spec defers that).
+
+    Per :doc:`specs4/3-llm/history` § Session-Load Reconstruction
+    steps 6-8: build a fresh ContextManager via the factory,
+    pre-populate its history from the archive, attach a fresh
+    StabilityTracker (cache starts cold), construct the scope,
+    register in ``service._agent_contexts[agent_id]``.
+
+    The ``model`` parameter is informational — the agent's
+    ContextManager always uses ``service._config.model`` for
+    LLM calls (per-agent model overrides aren't supported
+    yet). When the persisted ``agent_blocks`` entry carries a
+    ``model`` field, callers thread it through for future
+    routing logic; today the value is recorded but not acted
+    on. None means the persisted record predated Increment 3a.
+
+    Replay strategy (b) for mode is the spec's authoritative
+    contract, but Commit 1 supplies only the spawn-time
+    baseline. Commit 2 will add ``_replay_mode_events`` and
+    update this function to call it before constructing the
+    ContextManager. Until then, an agent toggled mid-session
+    reconstructs as its spawn-time mode — known-wrong
+    intermediate state.
+
+    Parameters
+    ----------
+    service:
+        The :class:`LLMService` whose ``_agent_contexts``
+        registry will receive the reconstructed scope.
+    agent_id:
+        The LLM-chosen identifier from the agent's spawn
+        block. Becomes the registry key.
+    turn_id:
+        The turn ID the agent's archive directory is named
+        by. Used by the archival sink closure so post-load
+        messages append to the same ``agent-NN.jsonl`` file.
+    agent_idx:
+        The agent's positional index within its spawn turn.
+        Determines the archive filename. Stable across
+        retasks within the session.
+    model:
+        Provider-qualified model identifier from the
+        persisted ``agent_blocks`` entry, or None for
+        pre-Increment-3a records. Currently informational.
+    mode:
+        The agent's primary mode at session-save time. Per
+        replay strategy (b) this should be the post-replay
+        mode; Commit 1 supplies the spawn-time baseline only
+        and Commit 2 adds the replay step.
+    cross_ref:
+        Whether cross-reference is enabled for this agent.
+        Same replay caveat as ``mode``.
+    archive_messages:
+        The agent's full conversation, concatenated across
+        every turn it participated in, in chronological
+        order. Each entry is a dict with at minimum ``role``
+        and ``content``; ``system_event`` and other optional
+        fields round-trip through ContextManager.add_message.
+
+    Returns
+    -------
+    ConversationScope
+        The reconstructed scope, already registered in the
+        service's ``_agent_contexts`` map. Caller does not
+        need to register separately.
+
+    Raises
+    ------
+    RuntimeError
+        If the service has no history store attached. Agent
+        reconstruction requires the same persistence
+        infrastructure as agent spawning.
+    """
+    if service._history_store is None:
+        raise RuntimeError(
+            "Agent reconstruction requires a history store; "
+            "construct LLMService with history_store=... to "
+            "enable session-load agent rehydration."
+        )
+
+    # Construct the ContextManager via the same factory the
+    # spawn path uses. The factory bakes turn_id and
+    # agent_idx into the archival sink closure, so messages
+    # the agent produces post-load append to the correct
+    # archive file. ``model`` is currently informational —
+    # the factory uses ``service._config.model`` for LLM
+    # routing.
+    del model  # informational only; unused in Commit 1
+    agent_context = build_agent_context_manager(
+        turn_id=turn_id,
+        agent_idx=agent_idx,
+        model_name=service._config.model,
+        history_store=service._history_store,
+        repo=service._repo,
+        cache_target_tokens=(
+            service._config.cache_target_tokens_for_model()
+        ),
+        compaction_config=service._config.compaction_config,
+        system_prompt=service._config.get_agent_system_prompt(),
+        mode=mode,
+        cross_reference_enabled=cross_ref,
+    )
+
+    # Pre-populate history from the archive. Each archive
+    # record is a dict with role/content plus optional
+    # fields; ContextManager.add_message takes role and
+    # content positionally and forwards extras via **kwargs.
+    # We strip backend-internal fields the ContextManager
+    # doesn't know about (turn_id, agent_idx, id, timestamp)
+    # but pass through the user-relevant ones (system_event,
+    # files, files_modified, edit_results, image_refs).
+    for record in archive_messages:
+        if not isinstance(record, dict):
+            continue
+        role = record.get("role")
+        content = record.get("content", "")
+        if role not in ("user", "assistant"):
+            continue
+        # Forward optional fields ContextManager / its sink
+        # know about. The sink will re-route them through
+        # append_agent_message, which is itself the source
+        # of these archive records — so the round-trip
+        # preserves them. system_event is the load-bearing
+        # one for Commit 2's replay step.
+        extras: dict[str, Any] = {}
+        if record.get("system_event") is True:
+            extras["system_event"] = True
+        # Pass through optional list/dict fields verbatim;
+        # ContextManager.add_message accepts arbitrary
+        # **kwargs and stores them on the message dict.
+        for key in ("files", "files_modified",
+                    "edit_results", "image_refs"):
+            if key in record:
+                extras[key] = record[key]
+        agent_context.add_message(role, content, **extras)
+
+    # Fresh StabilityTracker — cache starts cold per spec.
+    # Saved tracker tier assignments are not persisted, so
+    # rebuilding from scratch is the only option. The next
+    # turn the agent runs will rebuild tier state naturally
+    # from its loaded history + symbol/doc index activity.
+    agent_tracker = StabilityTracker(
+        cache_target_tokens=(
+            service._config.cache_target_tokens_for_model()
+        ),
+    )
+    agent_context.set_stability_tracker(agent_tracker)
+
+    # Selections are not persisted (per spec). Reconstructed
+    # agents start with empty selection lists; the user can
+    # re-tick files in the picker if needed, or the
+    # orchestrator can grant files via edit blocks.
+    scope = ConversationScope(
+        context=agent_context,
+        tracker=agent_tracker,
+        session_id=service._session_id,
+        selected_files=[],
+        archival_append=agent_context.archival_sink,
+        agent_idx=agent_idx,
+    )
+
+    service._agent_contexts[agent_id] = scope
+    logger.info(
+        "Reconstructed agent %r (turn %s, idx %d, mode %s) — "
+        "%d archive message(s) loaded",
+        agent_id,
+        turn_id,
+        agent_idx,
+        _format_mode(mode, cross_ref),
+        len(archive_messages),
+    )
+    return scope
