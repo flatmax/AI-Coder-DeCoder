@@ -51,6 +51,7 @@ import {
   segmentResponse,
 } from '../edit-blocks.js';
 import { renderEditCard } from '../edit-block-render.js';
+import { renderAgentCard } from '../agent-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderLedRow } from './led-row.js';
@@ -1194,6 +1195,25 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
         <div class="md-content">${unsafeHTML(html_)}</div>
       `;
     }
+    if (seg.type === 'agent' || seg.type === 'agent-pending') {
+      // Agent-spawn cards. Status comes from the per-tab
+      // streaming state — the agent's tab id is its id under
+      // the flat-identity contract, so we can look it up
+      // directly. Pending segments (mid-stream block
+      // truncation) always render as 'pending' regardless.
+      const status = _resolveAgentStatus(panel, seg);
+      const cardHtml = renderAgentCard(seg, status);
+      // Wrap the unsafeHTML in a Lit div with a delegated
+      // click handler so the id chip can flip the active tab
+      // without needing a separate event listener wired
+      // through events.js. The handler reads data-agent-id
+      // off the event target's closest ancestor — same
+      // pattern the diff viewer uses for file-path chips.
+      return html`<div
+        class="agent-block-wrapper"
+        @click=${(e) => _onAgentCardClick(panel, e)}
+      >${unsafeHTML(cardHtml)}</div>`;
+    }
     // edit and edit-pending both go through
     // renderEditCard. Pending segments resolve
     // to the 'pending' status badge; completed
@@ -1202,6 +1222,68 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
     return html`${unsafeHTML(cardHtml)}`;
   });
   return html`<div class="assistant-body">${parts}</div>`;
+}
+
+/**
+ * Resolve the live execution status for an agent-spawn
+ * segment. Reads the per-tab state map. Returns one of
+ * 'pending', 'streaming', 'complete', 'error'.
+ *
+ * Tab id == agent id under the flat-identity contract from
+ * specs4/7-future/parallel-agents.md, so this is a direct
+ * Map lookup with no parsing.
+ *
+ * Pending segments (mid-stream truncation) get 'pending' from
+ * the renderer's resolver — this function only runs for
+ * fully-parsed `agent` segments.
+ */
+function _resolveAgentStatus(panel, segment) {
+  if (segment.type === 'agent-pending') return 'pending';
+  const id = segment.id;
+  if (typeof id !== 'string' || !id) return 'pending';
+  const tab = panel._tabs?.get(id);
+  if (!tab) {
+    // Block parsed but no tab yet — either the backend
+    // hasn't dispatched agentsSpawned, or this is a
+    // historical message whose tab was closed. Both render
+    // as pending; the user can click the View Agents
+    // affordance below the message to reload from archive.
+    return 'pending';
+  }
+  if (tab.streaming) return 'streaming';
+  const outcome = tab.lastEditOutcome;
+  if (outcome && outcome.status === 'error') return 'error';
+  if (outcome && outcome.status === 'clean') return 'complete';
+  // Tab exists but no completion recorded yet — agent was
+  // spawned, hasn't started streaming. Show as pending.
+  return 'pending';
+}
+
+/**
+ * Delegated click handler for agent-card chips. The id chip
+ * carries `data-agent-id`; clicking flips the chat panel's
+ * active tab to that id (which the setter handles —
+ * snapshot URL chips, restore on the new tab, requestUpdate).
+ *
+ * No-op when the click didn't land on a chip with the
+ * attribute (e.g. clicking on the task body, the status
+ * badge, or the card chrome).
+ *
+ * No-op when the agent's tab no longer exists — historical
+ * messages whose tabs have closed don't get a switch
+ * affordance from the inline card; the user reaches archive
+ * tabs via the "View agents" affordance instead.
+ */
+function _onAgentCardClick(panel, event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const chip = target.closest('[data-agent-id]');
+  if (!chip) return;
+  const agentId = chip.getAttribute('data-agent-id');
+  if (typeof agentId !== 'string' || !agentId) return;
+  if (!panel._tabs?.has(agentId)) return;
+  event.stopPropagation();
+  panel._activeTabId = agentId;
 }
 
 /**

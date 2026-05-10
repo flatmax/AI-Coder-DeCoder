@@ -1347,6 +1347,162 @@ export const STYLES = css`
     border-top: 1px solid rgba(248, 81, 73, 0.15);
   }
 
+  /* Agent-spawn cards — rendered inline in the
+   * orchestrator's assistant message when it emits a
+   * 🟧🟧🟧 AGENT block. Symmetric to edit-block cards
+   * but with a magenta accent so users can tell at a
+   * glance whether a card is "the LLM proposes a file
+   * edit" vs. "the LLM spawned a worker agent".
+   *
+   * The id chip is clickable and, when the agent's tab
+   * exists, switches the chat panel to that tab. Click
+   * delegation lives on the wrapper div in rendering.js.
+   * Per specs4/7-future/parallel-agents.md § Frontend
+   * agent-block rendering. */
+  .agent-block-wrapper {
+    display: contents;
+  }
+  .agent-block-card {
+    border: 1px solid rgba(210, 168, 255, 0.35);
+    border-radius: 6px;
+    background: rgba(210, 168, 255, 0.04);
+    overflow: hidden;
+    font-size: 0.875rem;
+  }
+  .agent-block-card.agent-status-streaming {
+    border-color: rgba(210, 168, 255, 0.55);
+    box-shadow: 0 0 0 1px rgba(210, 168, 255, 0.15);
+  }
+  .agent-block-card.agent-status-complete {
+    border-color: rgba(126, 231, 135, 0.4);
+  }
+  .agent-block-card.agent-status-error {
+    border-color: rgba(248, 81, 73, 0.45);
+  }
+  .agent-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: rgba(22, 27, 34, 0.7);
+    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .agent-card-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    flex: 1;
+  }
+  .agent-id-chip {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.8125rem;
+    color: #c8a2ff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    padding: 0.1rem 0.35rem;
+    margin: -0.1rem -0.35rem;
+    border-radius: 3px;
+    transition: background 120ms ease;
+  }
+  .agent-id-chip:hover {
+    background: rgba(210, 168, 255, 0.15);
+    text-decoration: underline;
+  }
+  .agent-id-chip:focus-visible {
+    outline: 2px solid #c8a2ff;
+    outline-offset: 1px;
+  }
+  .agent-id-chip.agent-id-empty {
+    color: var(--text-secondary, #8b949e);
+    cursor: default;
+    font-style: italic;
+  }
+  .agent-id-chip.agent-id-empty:hover {
+    background: transparent;
+    text-decoration: none;
+  }
+  .agent-mode-pill {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    background: rgba(13, 17, 23, 0.6);
+    color: var(--text-secondary, #8b949e);
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    border-radius: 3px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .agent-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(13, 17, 23, 0.6);
+  }
+  .agent-status-icon {
+    font-size: 0.875rem;
+  }
+  .agent-status-badge.agent-status-pending {
+    color: var(--text-secondary, #8b949e);
+  }
+  .agent-status-badge.agent-status-streaming {
+    color: #c8a2ff;
+  }
+  .agent-status-badge.agent-status-streaming .agent-status-icon {
+    animation: agent-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .agent-status-badge.agent-status-complete {
+    color: #7ee787;
+  }
+  .agent-status-badge.agent-status-error {
+    color: #f85149;
+  }
+  .agent-task-body {
+    padding: 0.5rem 0.75rem;
+  }
+  .agent-task-empty {
+    padding: 0.5rem 0.75rem;
+    color: var(--text-secondary, #8b949e);
+    font-style: italic;
+    font-size: 0.8125rem;
+  }
+  .agent-task-long {
+    padding: 0;
+  }
+  .agent-task-long .agent-task-summary {
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.8125rem;
+    user-select: none;
+  }
+  .agent-task-long .agent-task-summary:hover {
+    background: rgba(240, 246, 252, 0.04);
+    color: var(--text-primary, #c9d1d9);
+  }
+  .agent-task-long[open] .agent-task-summary {
+    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .agent-task-long .agent-task-markdown {
+    padding: 0.5rem 0.75rem;
+  }
+  .agent-task-markdown :first-child {
+    margin-top: 0;
+  }
+  .agent-task-markdown :last-child {
+    margin-bottom: 0;
+  }
+
   /* Edit summary banner — rendered at the end of an
    * assistant message (after all edit cards) when the
    * response contained at least one edit. Shows aggregate

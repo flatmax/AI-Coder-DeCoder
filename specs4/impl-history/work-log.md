@@ -136,6 +136,27 @@ Implements agent-browser.md § "Historical Turns". Three commits:
 Deferred:
 - **Scroll-away cleanup.** Spec says historical tabs should disappear when the user scrolls away from their parent message. Currently the user closes them explicitly via the existing tab close button or by triggering another View Agents click (which clears the strip first). Not critical to D's value; revisit if the manual-close UX produces complaints.
 
+### ~~Increment D.5 — Inline agent-spawn card rendering~~ — delivered
+
+Closes a gap that D and the original A–E plan both missed: when the orchestrator emits a `🟧🟧🟧 AGENT … 🟩🟩🟩 AGEND` block in its assistant response, the chat panel now renders it as a card inline in the message body — symmetric to edit-block cards. Before this, the markers fell through the segmenter as plain `text` segments and rendered as preformatted prose, which read as visual garbage in the orchestrator's output.
+
+Three files, one new module, no backend changes:
+
+- **`webapp/src/edit-blocks.js`** — `segmentResponse` learned a `reading-agent` state and emits `agent` / `agent-pending` segments alongside the existing `text` / `edit` / `edit-pending` types. Body parsed into `{id, task, mode}` via a new `_parseAgentBody` helper that uses a field-name allowlist (`id` / `task` / `mode`) so multi-line task bodies containing `Requirements:` / `Notes:` / `Examples:` headings don't truncate. Mirrors the backend `EditParser`'s allowlist contract from `specs-reference/3-llm/edit-protocol.md`.
+
+- **`webapp/src/agent-block-render.js`** (new) — pure rendering helpers symmetric to `edit-block-render.js`. Exports `renderAgentCard(segment, status)` plus piecewise helpers (`renderAgentId`, `renderModePill`, `renderTaskBody`, `renderStatusBadge`, `resolveDisplayStatus`) and the `STATUS_META` table for tests. Status enum is `pending` / `streaming` / `complete` / `error` per `specs4/7-future/parallel-agents.md` § Frontend agent-block rendering. Long task bodies (more than ~6 lines or 600 chars) wrap in `<details>` so the card doesn't dominate the message.
+
+- **`webapp/src/chat-panel/rendering.js`** — `renderAssistantBody` dispatches `agent` / `agent-pending` segments to `renderAgentCard`. Wraps the unsafeHTML output in a Lit `<div class="agent-block-wrapper">` with a delegated click handler `_onAgentCardClick` that reads `data-agent-id` off the chip and flips `panel._activeTabId` directly when a tab with that id exists. No round-trip through `events.js` — same in-file pattern the file summary chips use.
+
+- **`webapp/src/chat-panel/styles.js`** — agent-card styling. Magenta accent (`rgba(210, 168, 255, ...)`) distinct from the edit-block blue so users can tell at a glance whether a card is "the LLM proposes a file edit" or "the LLM spawned a worker agent". Status-badge variants for the four statuses with a `agent-pulse` keyframe for the streaming state. Long-task `<details>` styling.
+
+Status binding reads per-tab streaming state via the same Map the LED row uses: tab id == agent id under D26's flat-identity contract, so `_resolveAgentStatus` is a direct `panel._tabs.get(id)` lookup with no parsing. `tab.streaming` → `streaming`; `tab.lastEditOutcome.status === 'clean'` → `complete`; `tab.lastEditOutcome.status === 'error'` → `error`; tab present but no completion yet → `pending`; tab missing entirely (historical message whose agent has been closed) → `pending`. Card status reflects state at render time; live updates piggyback on the message card's existing re-render triggers (chunk arrivals, completion events) — no separate subscription.
+
+What this delivery does NOT cover:
+
+- **Tests for the new behaviour.** `agent-block-render.test.js` and the new `reading-agent` cases in `edit-blocks.test.js` should land as a follow-up.
+- **Status-update push.** A historical-but-still-live agent's card may show stale status until the parent message re-renders for some other reason. A `requestUpdate` on `agentsSpawned` and on each agent's `streamComplete` would fix this; deferred until a real case appears where the staleness is visible.
+
 ### Increment E — Cross-turn agent history view
 
 Implements the feature D30's `agent_blocks` persistence enables. UI affordance: a control on a live agent's tab (e.g., "show full history across all turns") that walks the main store, finds turns where that agent's `id` appears in `agent_blocks`, and presents a unified view. Or equivalently: a "filter by agent id" view in the history browser.
