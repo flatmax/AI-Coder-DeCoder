@@ -315,8 +315,17 @@ export function onChatTabShortcut(panel, event) {
  * Close a tab. Removes the tab from ``_tabs`` and
  * ``_tabLabels``; if the closed tab was active,
  * switches to Main. Main tab can never be closed
- * (the button isn't rendered for it) but a defensive
- * guard here makes the intent explicit.
+ * but a defensive guard here makes the intent
+ * explicit.
+ *
+ * Per specs4/5-webapp/agent-browser.md § Tab Strip
+ * and § Tab Lifetime, no UI gesture binds to this
+ * function. It is the internal primitive the
+ * ``agent-closed`` event handler invokes when
+ * ``new_session`` (or session load) fans out, one
+ * call per dismissed agent. It also runs from
+ * ``view-agents-requested`` cleanup paths and from
+ * tests asserting the close pathway.
  *
  * Dispatches ``close-tab`` so future backend
  * integrations can hook in. Fires
@@ -417,7 +426,6 @@ export function renderTabStrip(panel) {
         ${tabs.map((tabId) => {
           const label = panel._tabLabels.get(tabId) || tabId;
           const active = tabId === panel._activeTabId;
-          const closable = tabId !== 'main';
           // Streaming indicator — read the tab's own
           // streaming flag directly from the Map
           // rather than through the active-tab
@@ -444,6 +452,17 @@ export function renderTabStrip(panel) {
             active ? 'active' : '',
             readOnly ? 'read-only' : '',
           ].filter(Boolean).join(' ');
+          // No per-tab ✕ close affordance — agent
+          // tabs are session-scoped and dismissed
+          // only by `new_session`, session load, or
+          // server shutdown. See
+          // specs4/5-webapp/agent-browser.md § Tab
+          // Strip and § Tab Lifetime. The
+          // `onTabClose` function below stays as the
+          // internal primitive the `agent-closed`
+          // event handler invokes during
+          // `new_session` fan-out; it is not bound
+          // to any UI element here.
           return html`
             <button
               class=${cls}
@@ -475,26 +494,7 @@ export function renderTabStrip(panel) {
                   class="tab-streaming-indicator"
                   aria-hidden="true"
                 ></span>`
-              : ''}${label}${closable
-              ? html`<span
-                  class="tab-close"
-                  role="button"
-                  tabindex="0"
-                  aria-label="Close ${label}"
-                  title="Close tab"
-                  @click=${(e) => {
-                    e.stopPropagation();
-                    onTabClose(panel, tabId);
-                  }}
-                  @keydown=${(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onTabClose(panel, tabId);
-                    }
-                  }}
-                >✕</span>`
-              : ''}</button>
+              : ''}${label}</button>
           `;
         })}
       </div>

@@ -490,13 +490,22 @@ def close_agent_context(
 ) -> dict[str, Any]:
     """Free an agent's ContextManager + tracker + file_context.
 
-    Called when the user clicks ✕ on an agent tab. Identifies
-    the agent by its LLM-chosen id (the same id used in
-    ``🟧🟧🟧 AGENT`` blocks). Idempotent — unknown id returns
-    ``closed: False`` rather than raising. Archive files on
-    disk survive; transcripts remain readable via
-    :meth:`LLMService.get_turn_archive` for any turn this
-    agent participated in.
+    Identifies the agent by its LLM-chosen id (the same id
+    used in ``🟧🟧🟧 AGENT`` blocks). Idempotent — unknown
+    id returns ``closed: False`` rather than raising.
+    Archive files on disk survive; transcripts remain
+    readable via :meth:`LLMService.get_turn_archive` for any
+    turn this agent participated in.
+
+    Per :doc:`specs4/5-webapp/agent-browser` § Tab Strip and
+    § Tab Lifetime, no UI gesture invokes this RPC directly
+    — agents are session-scoped and dismissed only when the
+    session itself is dismissed. The RPC is exposed because
+    :func:`new_session` invokes it once per live agent during
+    fan-out, and session-load reconstruction calls it per
+    agent in the pre-load team before constructing the
+    post-load team. It also remains useful as a debugging
+    hook even though no user-facing affordance reaches it.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
