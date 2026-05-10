@@ -1013,8 +1013,11 @@ export const STYLES = css`
     color: var(--text-primary, #c9d1d9);
   }
   .mode-segmented .mode-btn.active {
-    background: rgba(88, 166, 255, 0.15);
+    background: rgba(88, 166, 255, 0.22);
     color: var(--accent-primary, #58a6ff);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   .mode-segmented .mode-btn[disabled] {
     opacity: 0.35;
@@ -1036,9 +1039,12 @@ export const STYLES = css`
     color: var(--text-primary, #c9d1d9);
   }
   .crossref-btn.active {
-    background: rgba(210, 153, 34, 0.15);
-    border-color: rgba(210, 153, 34, 0.4);
+    background: rgba(210, 153, 34, 0.22);
+    border-color: rgba(210, 153, 34, 0.65);
     color: #d29922;
+    box-shadow:
+      0 0 0 1px rgba(210, 153, 34, 0.5),
+      0 0 8px rgba(210, 153, 34, 0.4);
   }
   .crossref-btn[disabled] {
     opacity: 0.35;

@@ -234,7 +234,7 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 ### Primary Mode (Segmented)
 
 - Two mutually-exclusive icon buttons — `💻` (code mode) and `📄` (document mode)
-- Active button shows accent-coloured background and pressed-state border
+- Active button shows accent-coloured background, a 1px ring, and a soft outer halo in the same accent colour — the halo is the load-bearing affordance because the icon-only buttons live on a dark background where a tint shift alone is hard to read at a glance
 - Clicking the inactive button calls the mode-switch RPC
 - No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
 - Disabled when RPC isn't connected
@@ -243,7 +243,7 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 ### Cross-Reference (Overlay Toggle)
 
 - Single icon button — `🔀`
-- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
+- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue), with the same ring + halo treatment so users learn one "this is glowing therefore active" rule across both controls
 - Clicking calls the set-cross-reference RPC with the inverted current state
 - Disabled under the same conditions as the primary mode buttons
 - Tooltip switches between "Cross-reference ON — both indexes active (click to disable)" and "Cross-reference OFF — click to add the other index alongside" depending on state

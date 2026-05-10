@@ -1202,7 +1202,23 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
       // directly. Pending segments (mid-stream block
       // truncation) always render as 'pending' regardless.
       const status = _resolveAgentStatus(panel, seg);
-      const cardHtml = renderAgentCard(seg, status);
+      // Mode fallback: on retask, the orchestrator commonly
+      // omits the `mode:` field from the spawn block (mode is
+      // preserved from the existing agent's scope, not
+      // re-specified). The block body therefore parses to an
+      // empty mode, but the live tab in `_tabModes` carries
+      // the resolved value from the agentsSpawned broadcast.
+      // Enrich the segment in-place when its mode is empty
+      // and we can recover it from the registry — the card
+      // renders with the correct pill instead of dropping it.
+      let segForCard = seg;
+      if (!seg.mode && typeof seg.id === 'string' && seg.id) {
+        const liveMode = panel._tabModes?.get(seg.id);
+        if (typeof liveMode === 'string' && liveMode) {
+          segForCard = { ...seg, mode: liveMode };
+        }
+      }
+      const cardHtml = renderAgentCard(segForCard, status);
       // Wrap the unsafeHTML in a Lit div with a delegated
       // click handler so the id chip can flip the active tab
       // without needing a separate event listener wired
