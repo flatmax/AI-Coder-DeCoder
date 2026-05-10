@@ -144,6 +144,25 @@ Broadcast to all connected clients before the stream starts, so collaborators se
 
 The sending client ignores this broadcast (it already added the message optimistically).
 
+### Stream resumption snapshot
+
+The `get_current_state` RPC response carries an `active_streams` field — one entry per in-flight stream — so a refreshed browser can re-attach to its own stream rather than receive the opaque single-stream-guard rejection. Schema for the RPC envelope itself lives in `specs-reference/1-foundation/rpc-inventory.md` § Service: LLMService; this section pins the per-entry field shape.
+
+Per-entry shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `request_id` | string | The stream's request ID. Frontend stamps this onto the resumed tab so subsequent `streamChunk` and `streamComplete` events route correctly via the existing request-ID lookup |
+| `agent_id` | string \| null | The owning agent's LLM-chosen id when the stream runs under an agent scope; `null` for the main user-facing scope. Frontend uses this to pick the target tab — `null` → main tab, otherwise the agent tab keyed by id |
+| `accumulated_content` | string | The chunks received so far, joined into one accumulated string (matches `streamChunk`'s "full content per chunk" semantics). Frontend installs this as the resumed tab's `streamingContent` so the partial response is visible immediately rather than waiting for the next chunk to arrive |
+
+Empty list when no stream is in flight. Child agent request IDs (the `{parent-id}-agent-NN` format) are emitted as their own entries with `agent_id` set to the agent's id; the frontend resolves them to the agent tab without reconstructing the parent relationship.
+
+Backed by two backend fields:
+
+- `_active_request_to_agent: dict[str, str | None]` — reverse map populated alongside the single-stream guard in `chat_streaming`, cleared in the streaming pipeline's `finally` block. Authoritative source of "is this request id currently in flight, and who owns it".
+- `_request_accumulators: dict[str, str]` — per-request accumulated content, populated by the worker thread on every chunk. Already used internally for terminal HUD output and post-response work; surfaced here so the resume snapshot can include partial response bytes.
+
 ### `commitResult(result)` — server → browser (broadcast)
 
 Broadcast to all clients when a commit completes.

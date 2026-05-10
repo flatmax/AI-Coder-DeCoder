@@ -219,6 +219,26 @@ def get_current_state(service: "LLMService") -> dict[str, Any]:
 
     Called by the browser on WebSocket connect. Returns the
     minimal set of fields needed to rebuild the UI.
+
+    The ``active_streams`` field carries one entry per
+    in-flight stream so a refreshed browser can re-attach
+    to the live stream rather than seeing the opaque
+    "Another stream is active" rejection. Each entry::
+
+        {
+            "request_id": str,
+            "agent_id": str | None,   # None for main scope
+            "accumulated_content": str,
+        }
+
+    The request id is what the frontend uses to register
+    its tab as the chunk owner; subsequent chunks broadcast
+    on the same request id then route automatically through
+    the existing chunk-routing path. Empty list when no
+    stream is in flight. Per spec ``specs4/3-llm/streaming``
+    § Passive Stream Adoption — this is the same mechanism
+    extended to cover the originating client after
+    reconnect.
     """
     doc_convert_available = False
     try:
@@ -227,11 +247,47 @@ def get_current_state(service: "LLMService") -> dict[str, Any]:
     except Exception:
         pass
 
+    # Build the active-streams snapshot. Iterate the
+    # request → agent map (the authoritative registry of
+    # in-flight streams) and pair each entry with its
+    # accumulated content from ``_request_accumulators``.
+    # A request id present in the map but absent from
+    # accumulators means the stream registered but no
+    # chunk has arrived yet — emit it with empty content
+    # so the frontend still adopts the request id.
+    active_streams: list[dict[str, Any]] = []
+    for req_id, agent_id in service._active_request_to_agent.items():
+        # Skip child request ids — child agent streams
+        # are tracked under their parent's request via
+        # the prefix convention; the frontend resumes
+        # the parent and child chunks route through the
+        # parent's tab. (Today no child streams have
+        # entries in this map because the registration
+        # path skips child requests; this guard is
+        # belt-and-braces for future spawn paths.)
+        if (
+            service._active_user_request is not None
+            and req_id != service._active_user_request
+            and agent_id is None
+            and req_id.startswith(
+                service._active_user_request + "-"
+            )
+        ):
+            continue
+        active_streams.append({
+            "request_id": req_id,
+            "agent_id": agent_id,
+            "accumulated_content": (
+                service._request_accumulators.get(req_id, "")
+            ),
+        })
+
     return {
         "messages": service._context.get_history(),
         "selected_files": list(service._selected_files),
         "excluded_index_files": list(service._excluded_index_files),
         "streaming_active": service._active_user_request is not None,
+        "active_streams": active_streams,
         "session_id": service._session_id,
         "repo_name": service._repo.name if service._repo else "",
         "init_complete": service._init_complete,

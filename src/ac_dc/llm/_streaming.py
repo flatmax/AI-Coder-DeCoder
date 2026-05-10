@@ -552,6 +552,10 @@ async def stream_chat(
     service._cancelled_requests.discard(request_id)
     # Drop accumulator slot after all reads complete.
     service._request_accumulators.pop(request_id, None)
+    # Drop the request → agent map entry. Done last so
+    # any final-chunk consumers that need to look up the
+    # owning agent can still do so.
+    service._active_request_to_agent.pop(request_id, None)
 
     # Post-response housekeeping — only on normal completion.
     if error is None and not cancelled:

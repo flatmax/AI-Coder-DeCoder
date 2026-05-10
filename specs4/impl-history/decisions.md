@@ -790,6 +790,38 @@ In two-turn sessions the bug compounded — turn 2's pair of calls each hit the 
 
 ---
 
+### D33 — Stream resumption on reconnect via `active_streams` snapshot
+
+User-observed bug: refreshing the browser mid-stream produced an opaque "Another stream is active (request {id})" rejection on the next send attempt. The single-stream guard correctly identified that the prior stream was still running server-side (worker thread independent of WebSocket lifecycle, by design — D10's guard scoping covers this), but the originating client had no way to discover the in-flight stream's identity, observe its accumulated content, or recover gracefully. The user's only options were waiting for an unknown duration or starting a new session and losing the in-flight response.
+
+Three fix shapes considered:
+
+1. **Auto-cancel on `remote_disconnected` of the originating client.** Rejected — required tracking caller↔request mapping at the WebSocket layer, breaks the deliberate "stream survives transport drop" property that lets long LLM calls weather flaky networks, and would also kill collaborator-passive-adoption (D10 invariant).
+
+2. **Frontend parses the rejection and offers cancel-and-retry.** Rejected as primary — surfaces an opaque error first, then asks the user to recover. Doesn't preserve the in-flight response. Kept as a fallback for the narrow race window where the user sends faster than `state-loaded` resolves.
+
+3. **Surface in-flight streams via `get_current_state`; frontend re-attaches as a passive observer.** Chosen. Reuses the existing chunk-broadcast path (chunks already broadcast to all connected clients; refreshed browser receives subsequent chunks without backend changes) and the existing chunk-routing layer (`findTabForRequest` keys on `currentRequestId`). The only new infrastructure is the snapshot field itself plus the resume handler.
+
+**Implementation cost.** Two new backend fields (a reverse map `_active_request_to_agent` and the already-populated `_request_accumulators` were both wired up but only the map needed adding), a new `active_streams` field on `get_current_state`'s response, a new `resumeActiveStreams` function in the chat panel's events module, and an extended message in `handleStreamStartError` for the narrow race window where a user sends before `state-loaded` resolves. No changes to the streaming pipeline, the chunk-broadcast path, or the single-stream guard logic.
+
+**The reverse map is load-bearing.** The pre-existing single-stream guards (`_active_user_request: str | None` and `_active_agent_streams: set[str]`) carry "is something running?" but not "what's the request ID?". Without the reverse map, the snapshot couldn't enumerate in-flight streams without scanning every connected client's state — and even then, child agent streams' request IDs (`{parent}-agent-NN`) aren't reconstructable without remembering the original parent ID. The map captures `request_id → agent_id|None` at registration time, cleared at completion. Authoritative; tiny; one-to-one with the existing guard fields.
+
+**The accumulator was already populated for unrelated reasons.** `_request_accumulators` exists so the post-response HUD and the deferred enrichment pipeline can read accumulated content without re-parsing chunks. Surfacing it here is essentially free — no new write path, just a new reader.
+
+**`agent_id: null` for main scope, agent's id otherwise.** Mirrors the per-tab routing the frontend already uses: `parseAgentTabId` returns `null` for `"main"` and the id verbatim otherwise. The state-loaded handler dispatches on the same null check (`null → main tab, otherwise agent tab`), so the resume path doesn't need new tab-resolution logic.
+
+**Race window.** A user who sends a new message before `state-loaded` resolves still hits the single-stream-guard rejection. The frontend augments that error path with a clearer message — "A previous request is still running on the server. Wait for it to complete (the tab will resume streaming when the next chunk arrives), or use 'New Session' to abandon it." Plus a toast with the same guidance. Narrow window (typically <100ms after page load); the augmented message means even users who hit it understand what's happening and have a clear next action.
+
+**Why the `agent_blocks`-style retry mechanism (D32) doesn't apply.** D32 memoises on `parent_request_id` to prevent the dual-event spawn path from creating duplicate tabs. That's a different problem — there, two events fire for one logical operation; here, one event fires once per page load and races against user typing. No memoisation needed; the user's only "retry" is sending another message, which goes through the normal guard path.
+
+**Tests pinning the contract.** `tests/test_llm_service/test_state_snapshot.py::test_snapshot_shape` updated to include `active_streams` in the expected key set. The accumulator behaviour is already covered by `test_request_accumulator.py`. The end-to-end resume path (refresh → state-loaded → re-attach → chunks arrive → completion) is integration-level and not covered by unit tests; manual verification covered the happy path during landing.
+
+**Spec authority:** `specs4/3-llm/streaming.md` § Stream Resumption After Reconnect describes the behavioural contract; `specs-reference/3-llm/streaming.md` § Stream resumption snapshot pins the per-entry field shape; `specs-reference/1-foundation/rpc-inventory.md` § Service: LLMService updates `CurrentState` with the new field.
+
+**Lesson for reimplementers.** When the transport layer is decoupled from a long-running operation's lifecycle (here: WebSocket vs LLM call), the recovery path needs an explicit way for clients to discover and re-attach to operations they originally started. The opposite design — tying operation lifecycle to transport lifecycle — produces the wrong tradeoff for chat: a flaky network would kill the LLM call, wasting tokens and forcing retries. The `active_streams` snapshot is the minimum viable recovery primitive; everything else (the resume handler, the augmented error message) is UX polish around the snapshot's existence.
+
+---
+
 ### D30 — `agent_blocks` persisted on orchestrator records to enable cross-turn reconstruction
 
 Per `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" (committed `bd79d93`), every assistant record produced by a turn that spawned agents persists an ordered list of `{id, agent_idx}` entries — one per spawn block emitted in that turn. The disk layout for agent archives is keyed by a turn-local numeric `agent_idx` (`agent-NN.jsonl`) while the orchestrator addresses agents by an LLM-chosen string `id`. The two namespaces are deliberately separate, and `agent_idx` is NOT stable across turns — a re-use of `agent-backend` in turn 1 (idx 0) and turn 3 (idx 1, because `agent-frontend` was spawned first) writes to two different filenames within their respective turn directories. Without persisting the per-turn id↔idx mapping, a "show me everything `agent-backend` did across the session" view has no way to find the right archive files except by guessing or by reading every archive's first message — both fragile.

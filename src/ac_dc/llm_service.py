@@ -514,6 +514,24 @@ class LLMService:
         # Cleared in the background task's finally block, same
         # pattern as ``_active_user_request``.
         self._active_agent_streams: set[str] = set()
+        # Reverse map for stream resumption after browser
+        # refresh / reconnect. Keyed by request id, value is
+        # the agent's LLM-chosen id (== tab id) for tagged
+        # streams, or None for the main user-initiated
+        # stream. Populated alongside ``_active_user_request``
+        # and ``_active_agent_streams`` in ``chat_streaming``;
+        # cleared in ``stream_chat``'s finally block.
+        #
+        # Used by :func:`get_current_state` to surface every
+        # in-flight stream's request id, owning agent (or
+        # main), and accumulated content so a refreshed
+        # browser can re-attach to the live stream rather
+        # than seeing the opaque "Another stream is active"
+        # rejection. See specs4/3-llm/streaming.md § Passive
+        # Stream Adoption — this is the same mechanism
+        # extended to cover the originating client after
+        # reconnect.
+        self._active_request_to_agent: dict[str, str | None] = {}
         # Cancellation flags keyed by request ID. Populated by
         # cancel_streaming; the worker thread polls and breaks out
         # when it finds its ID.

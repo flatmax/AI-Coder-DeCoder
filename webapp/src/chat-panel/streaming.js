@@ -715,11 +715,37 @@ export function handleStreamStartError(
   // to reflect both the new message and the
   // owner-tab outcome we just wrote (LED row
   // re-renders on every panel update).
+  //
+  // Special case: the "Another stream is active"
+  // error fires when the user sends before the
+  // post-reconnect state-loaded handler has
+  // finished resuming the in-flight stream. Race
+  // window is narrow but real on slow connections.
+  // Augment the message with actionable guidance
+  // and emit a toast pointing at the cancel
+  // affordance.
+  let displayMsg = errorMsg;
+  if (
+    typeof errorMsg === 'string'
+    && errorMsg.startsWith('Another stream is active')
+  ) {
+    displayMsg = (
+      `${errorMsg}\n\n`
+      + 'A previous request is still running on the server. '
+      + 'Wait for it to complete (the tab will resume '
+      + 'streaming when the next chunk arrives), or use '
+      + '"New Session" to abandon it.'
+    );
+    panel._emitToast(
+      'Previous stream still running — wait or start a new session',
+      'warning',
+    );
+  }
   panel.messages = [
     ...panel.messages,
     {
       role: 'assistant',
-      content: `**Error:** ${errorMsg}`,
+      content: `**Error:** ${displayMsg}`,
     },
   ];
   panel.requestUpdate();

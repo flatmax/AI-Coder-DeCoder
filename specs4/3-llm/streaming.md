@@ -22,6 +22,19 @@ The single-stream guard gates user-initiated requests, not internal streams. A f
 
 Request IDs are the multiplexing primitive. All server-push events carry the exact ID of the stream they belong to. The transport never assumes a singleton stream.
 
+### Stream Resumption After Reconnect
+
+The server-side stream lifecycle is independent of the websocket transport. When the originating browser disconnects (refresh, network drop, tab swap), the worker thread keeps running the LLM call; chunks accumulate server-side; cleanup happens when the call completes naturally. A reconnecting client must be able to re-attach to its own in-flight stream rather than seeing the opaque single-stream-guard rejection.
+
+The mechanism extends Passive Stream Adoption (below) to cover the originating client. Two pieces of state make this possible:
+
+- A reverse map `_active_request_to_agent: dict[str, str | None]` keyed by request ID, valued by the owning agent ID (or `None` for the main scope). Populated alongside the single-stream guard in `chat_streaming`; cleared in the streaming pipeline's `finally` block.
+- The existing per-request accumulator `_request_accumulators: dict[str, str]` populated by the worker thread on every chunk.
+
+The `get_current_state` RPC's response carries an `active_streams` field — one entry per in-flight stream, each entry containing the request ID, owning agent ID (or null for main), and the accumulated content so far. The frontend's `state-loaded` handler consumes the field, resolves each entry to its tab, and re-attaches: stamps `currentRequestId`, sets `streaming=true`, installs `accumulated_content` as `streamingContent`. Subsequent chunks broadcast on the same request ID then route through the existing chunk-routing path. The next `streamComplete` finalizes the message normally.
+
+Race window: a user who sends a new message before `state-loaded` resolves still sees the single-stream-guard rejection. The frontend augments the rejection toast with guidance to wait for resume or start a new session — small UX patch for a narrow timing window.
+
 ## Background Task Overview
 
 - Remove deselected files from context
