@@ -378,6 +378,36 @@ Each increment gets its own delivery-note section here when it lands. Strike-thr
 
 ## Known bugs — per-tab state
 
+### ~~Agent tab shows duplicated user prompt + stuck cursor after agent completes~~ — fixed
+
+**Symptom.** When the orchestrator spawned agents, the agent's tab showed the user prompt twice — once before the streamed response, once after — and the streaming cursor remained visible indefinitely even though the backend log confirmed `finish_reason='stop'` had fired. After hard browser reload (which loads from archive via `get_agent_history`), the persisted state showed exactly one user prompt + one assistant response per agent, confirming the duplicates were frontend-only.
+
+In two-turn agent sessions the bug compounded:
+
+```
+- user prompt 1
+- agent response 1
+- user prompt 1 (duplicate)
+- user prompt 2
+- agent response 2
+- user prompt 2 (duplicate)
+```
+
+Hard reload shrunk this to four items (the persisted truth).
+
+**Root cause.** `spawnAgentTabs` was invoked twice per agentic turn:
+
+1. Eagerly from `onAgentsSpawned` when the backend's `agentsSpawned` broadcast arrived (BEFORE child streams dispatched, so tabs could claim child request IDs in time to route chunks).
+2. As a fallback inside main's `onStreamComplete` handler when `result.agent_blocks` was non-empty (intended for older backends that only surface agent blocks via `streamComplete`).
+
+Modern backends emit BOTH events for every agentic turn. The second call hit the retask branch (added in the earlier per-tab streaming routing fix) for every tab — because the tabs already existed from call 1 — and the retask branch appended the user task to `existing.messages` and re-set `existing.currentRequestId = childId`, `existing.streaming = true`. By the time the fallback fired, the agent's child stream had already completed and cleared those flags, so the re-arm produced a cursor that would never advance.
+
+**Fix.** Memoise on `parent_request_id` inside `spawnAgentTabs`. The first invocation for a given parent request runs the create/retask logic; subsequent invocations with the same parent request id no-op. Turn boundaries are distinguished by parent request id (each turn has its own), so retask in turn 2 still appends correctly while the duplicate fallback inside turn 2 no-ops. The memo set is session-scoped — `new_session` doesn't clear it, but parent request ids carry an epoch prefix and don't collide across sessions in practice.
+
+**Why memoise rather than remove the fallback.** The fallback path's stated purpose (older-backend support) is preserved — for a backend that emits only `streamComplete` and not `agentsSpawned`, the first invocation IS the fallback, and it runs normally because no prior call recorded the parent request id. The memo only suppresses redundant work, not necessary work.
+
+**Spec updates.** `specs4/5-webapp/agent-browser.md` § Tab Creation Ordering gained a new "Idempotency under the dual-event design" paragraph documenting the dual-call architecture and the memoise-on-parent-request-id contract. See D32 in [`decisions.md`](decisions.md) for the deeper architectural rationale.
+
 ### URL fetch result lands in wrong tab when user switches tabs mid-fetch
 
 **Symptom.** A URL fetch is initiated from agent tab A (user clicks "Fetch" on a chip). While the RPC is in flight (GitHub repo clone + symbol map generation can take 10+ seconds), the user switches to agent tab B. When the fetch resolves, `chipsEl.markFetched(url, result)` runs against whichever tab's chip state is currently installed on the singleton `ac-url-chips` element — which is B, not A. The user sees a chip for a URL they never fetched on B, and A's own chip stays in `fetching` state indefinitely.

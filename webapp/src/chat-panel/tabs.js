@@ -726,6 +726,45 @@ function deriveAgentTabLabelFromEntry(entry) {
 export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
   if (typeof turnId !== 'string' || !turnId) return;
   if (!Array.isArray(agentBlocks)) return;
+  // Idempotency: spawnAgentTabs is invoked twice per
+  // turn — once eagerly via the backend's
+  // ``agentsSpawned`` broadcast (which fires BEFORE
+  // child agent streams dispatch, so tabs claim child
+  // request ids in time to route chunks), and once as
+  // a fallback inside main's ``streamComplete``
+  // handler (for older backends that only surface
+  // agent blocks via the completion result).
+  //
+  // Without a memo, the second call hits the retask
+  // branch below for every tab and appends the task
+  // text a second time AND re-arms streaming /
+  // currentRequestId AFTER the agent's stream has
+  // already completed and cleared them. Result: a
+  // duplicate user prompt in the agent tab and a
+  // cursor that never advances because no further
+  // chunks will arrive on a stream that's already
+  // finished.
+  //
+  // Memoising on ``parentRequestId`` distinguishes
+  // turn boundaries: turn 1 and turn 2 have different
+  // parent request ids, so retask appends in turn 2
+  // still happen exactly once. The set is
+  // session-scoped — ``new_session`` doesn't clear it,
+  // but parent request ids carry an epoch prefix and
+  // never collide across sessions in practice.
+  if (!panel._spawnedParentRequestIds) {
+    panel._spawnedParentRequestIds = new Set();
+  }
+  if (
+    typeof parentRequestId === 'string'
+    && parentRequestId
+    && panel._spawnedParentRequestIds.has(parentRequestId)
+  ) {
+    return;
+  }
+  if (typeof parentRequestId === 'string' && parentRequestId) {
+    panel._spawnedParentRequestIds.add(parentRequestId);
+  }
   let anySpawned = false;
   // Snapshot of the main tab's selection. Each new
   // agent tab gets its own copy so mutations on one
@@ -748,17 +787,64 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
     const task = typeof block.task === 'string' ? block.task : '';
     const paddedIdx = String(Math.floor(agentIdx)).padStart(2, '0');
     const tabId = agentId;
-    if (panel._tabs.has(tabId)) continue;
-    // Fresh tab state with the task seeded as the
-    // initial user message.
+    // Compute the child request id once — both
+    // fresh-spawn and retask paths route on it.
+    const childId =
+      typeof parentRequestId === 'string' && parentRequestId
+        ? `${parentRequestId}-agent-${paddedIdx}`
+        : null;
+    const existing = panel._tabs.get(tabId);
+    if (existing) {
+      // Retask. The orchestrator reused this id in a
+      // new turn, so the agent's ContextManager
+      // (backend) already has the new task appended;
+      // we mirror that on the frontend by appending a
+      // YOU bubble and re-arming the tab's streaming
+      // surface so child chunks route here.
+      //
+      // Without this, the existing tab's
+      // currentRequestId stays null from the prior
+      // turn's completion, findTabForRequest can't
+      // route the new turn's child chunks to any tab,
+      // and the user sees no streaming or task in the
+      // agent tab even though the backend is doing
+      // the work.
+      //
+      // Preserved: existing.messages (history
+      // accumulates across turns), existing.selectedFiles
+      // (per-tab file selection survives),
+      // existing.urlChips.
+      if (task) {
+        existing.messages = [
+          ...existing.messages,
+          { role: 'user', content: task },
+        ];
+      }
+      if (childId) {
+        existing.currentRequestId = childId;
+        existing.streaming = true;
+        existing.streamingContent = '';
+      }
+      // Reset prior-turn outcome so the LED reflects
+      // "running again" rather than the previous
+      // completion's green/red state.
+      existing.lastEditOutcome = null;
+      const blockModeRetask =
+        typeof block.mode === 'string' ? block.mode : '';
+      if (blockModeRetask) {
+        panel._tabModes.set(tabId, blockModeRetask);
+      }
+      panel._tabLabels.set(
+        tabId, deriveAgentTabLabel(agentIdx, task, agentId),
+      );
+      anySpawned = true;
+      continue;
+    }
+    // Fresh spawn — tab doesn't exist yet.
     const state = makeTabState();
     state.messages = [{ role: 'user', content: task }];
     state.selectedFiles = [...mainSelection];
-    // Route child stream chunks to this tab. The
-    // backend's child request ID format is
-    // ``{parent}-agent-{NN:02d}``.
-    if (typeof parentRequestId === 'string' && parentRequestId) {
-      const childId = `${parentRequestId}-agent-${paddedIdx}`;
+    if (childId) {
       state.currentRequestId = childId;
       state.streaming = true;
     }

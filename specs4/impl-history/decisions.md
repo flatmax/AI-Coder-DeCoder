@@ -738,6 +738,58 @@ The Context-tab refresh button overlap problem surfaced during integration: the 
 
 ---
 
+### D32 — Dual-event tab-creation idempotency: memoise `spawnAgentTabs` on `parent_request_id`
+
+The frontend's `spawnAgentTabs` entry point is invoked twice per agentic turn by design, and the retask branch needed a way to distinguish "user retasked an existing agent in a new turn" from "this is the same turn's redundant fallback call" without that distinction collapsing into either category swallowing the other.
+
+**The dual-event architecture.** Per the tab-creation-ordering invariant in `specs4/5-webapp/agent-browser.md` § Streaming Routing, `spawnAgentTabs` has two callers:
+
+1. **Eager** — `onAgentsSpawned` runs synchronously when the backend's `agentsSpawned` broadcast arrives. The broadcast is emitted by `_streaming.stream_chat` IMMEDIATELY after the orchestrator's response is parsed and BEFORE any child agent stream dispatches. The frontend has to create tabs in time to claim child request IDs (`{parent_request_id}-agent-{NN:02d}`) before the first child chunk lands. Without this, fast-completing agents finish before any tab claims their child request ID and `findTabForRequest` silently drops every chunk.
+
+2. **Fallback** — `onStreamComplete` for the orchestrator's main-tab completion runs `spawnAgentTabs` again when `result.agent_blocks` is non-empty. The fallback exists for backends that only surface agent blocks via the completion result (older releases, future minimal reimplementations) — in that single-event regime, the fallback IS the only call and runs normally.
+
+Modern backends fire both events for every agentic turn. Without an idempotency primitive, the second call repeats work and produces visible bugs.
+
+**The retask branch's failure mode.** D24's `_resolve_or_spawn_agent_scope` introduced backend retask routing — when the orchestrator emits an `id` that already has a live tab, the new task arrives as the next user message in that agent's existing scope (preserving the ContextManager, file context, stability tracker, and provider cache warmth). The frontend's tab-creation path mirrors this: when `existing` is found, append the new task to `existing.messages`, re-arm `existing.currentRequestId = childId`, set `existing.streaming = true`. This is correct exactly once per turn.
+
+When `spawnAgentTabs` runs twice with the same `parent_request_id`:
+
+- Call 1 (eager) finds no existing tab on first agentic turn → fresh-spawn branch, seeds `state.messages = [{role: 'user', content: task}]`, sets streaming flags.
+- Agent's `_stream_chat` runs, chunks arrive, `streamComplete` fires, owner-tab streaming flags clear.
+- Call 2 (fallback) now finds the tab `existing` → retask branch fires → appends the user task to `existing.messages` (DUPLICATE) → re-sets `existing.streaming = true`, `existing.currentRequestId = childId` (RE-ARMS A FLAG THE COMPLETE EVENT JUST CLEARED).
+
+User-visible symptoms after this sequence:
+
+- Agent tab shows the user prompt twice (the seeded message + the retask append).
+- Streaming cursor stays visible indefinitely because no further chunks arrive on a stream that has already completed; the re-armed `streaming = true` has no event left to clear it.
+
+In two-turn sessions the bug compounded — turn 2's pair of calls each hit the retask branch (tabs exist from turn 1), so each turn appended the user prompt twice. Hard browser reload via `get_agent_history` showed the persisted truth (one user message + one assistant response per agent), confirming the duplicates were entirely frontend.
+
+**Three fix shapes considered.**
+
+1. **Remove the fallback.** Rejected — the fallback exists for older / minimal backends per the spec. A reimplementer building only the `streamComplete` half of the contract would lose tab creation entirely.
+
+2. **Make the retask branch detect "already armed for this child request."** Possible — check `existing.currentRequestId === childId && existing.streaming`. Rejected because the timing depends on whether `streamComplete` has already fired before the fallback call. In practice it has (main's stream completes before the orchestrator's `streamComplete` event handler runs synchronously to fire the fallback), so the check would pass and the fallback would no-op — but the timing could shift with future async refactors. Detection-by-state is fragile in a way detection-by-identity isn't.
+
+3. **Memoise on `parent_request_id`.** Chosen. Each call to `spawnAgentTabs` records its `parent_request_id` in a Set on the panel; subsequent calls with the same id are no-ops. Turn boundaries are distinguished by parent request id (turn 1's parent ≠ turn 2's parent), so retask in turn N still appends correctly while the duplicate fallback inside turn N no-ops. Detection-by-identity, not by state.
+
+**Why `parent_request_id` is the right primitive.**
+
+- Already on every `agentsSpawned` payload (the broadcast carries it explicitly).
+- Already on every main-stream `streamComplete` event (it IS the event's `requestId`).
+- Already epoch-prefixed (`{epoch_ms}-{6-char-alnum}` per `helpers.generateRequestId`), so cross-session collisions are not realistic — a session restart starts at a new epoch, an agentic turn within a session always has a unique parent.
+- No coordination needed between the two callers — both already pass the same value.
+
+**Implementation.** One Set on the panel (`_spawnedParentRequestIds`), lazy-initialised inside `spawnAgentTabs` to keep the change co-located with its consumer. Two if-blocks at function entry — early-return when the parent id is already in the set, add it when not. The fix is two of stuff (one Set, two if-blocks) plus an explanatory comment.
+
+**Spec authority.** `specs4/5-webapp/agent-browser.md` § Tab Creation Ordering gained a new "Idempotency under the dual-event design" paragraph documenting the dual-call architecture and the memoise-on-parent-request-id contract. The paragraph is brief because the rationale lives here in the decisions log; the spec section pins the contract.
+
+**Tests pinning the contract.** Pre-existing tests in `webapp/src/chat-panel/streaming.test.js` and `webapp/src/chat-panel/tabs.test.js` already exercise both call paths (eager via `onAgentsSpawned`, fallback via `onStreamComplete.agent_blocks`). With the memo in place, these tests assert the correct one-shot behaviour. A future regression that broke memoisation would surface as a duplicated message append in the multi-turn agent test cases.
+
+**Lesson for reimplementers.** Two events firing for the same logical operation is a deliberate design choice, not redundancy to clean up. The eager event closes a race window; the fallback event preserves backwards compatibility. Any consumer of `agentsSpawned` + `streamComplete.agent_blocks` MUST expect both events for the same turn under modern backends and MUST be idempotent with respect to repeated calls carrying the same parent request id. Memoising on the parent id is the cheapest correct primitive — comparing arrays of agent blocks would also work but costs more code and offers no advantage.
+
+---
+
 ### D30 — `agent_blocks` persisted on orchestrator records to enable cross-turn reconstruction
 
 Per `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" (committed `bd79d93`), every assistant record produced by a turn that spawned agents persists an ordered list of `{id, agent_idx}` entries — one per spawn block emitted in that turn. The disk layout for agent archives is keyed by a turn-local numeric `agent_idx` (`agent-NN.jsonl`) while the orchestrator addresses agents by an LLM-chosen string `id`. The two namespaces are deliberately separate, and `agent_idx` is NOT stable across turns — a re-use of `agent-backend` in turn 1 (idx 0) and turn 3 (idx 1, because `agent-frontend` was spawned first) writes to two different filenames within their respective turn directories. Without persisting the per-turn id↔idx mapping, a "show me everything `agent-backend` did across the session" view has no way to find the right archive files except by guessing or by reading every archive's first message — both fragile.
