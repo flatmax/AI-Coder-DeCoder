@@ -1,5 +1,9 @@
 # AC-DC empty-response diagnosis
 
+> **Status:** Diagnostic note only — not an implementation target.
+> The "Suggested fixes" section below records options that were
+> considered; do not treat them as a work plan.
+
 ## Problem
 Running `ac-dc --dev` from `/tmp/test` (or any non-AC-DC4 directory) produces empty assistant responses in the browser chat. From the AC-DC4 repo root, the same command works.
 
