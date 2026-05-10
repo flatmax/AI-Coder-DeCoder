@@ -79,16 +79,17 @@ describe('ChatPanel tab strip rendering', () => {
     const mainBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="main"]',
     );
-    // Tabs render the label followed by inline icons —
-    // 📊 (Context) on every tab, ✕ (close) on agent
-    // tabs only. Strip both from the trailing edge to
-    // recover the visible label text. The `u` flag is
-    // required because 📊 is outside the BMP — without
-    // it, the character class treats the emoji as two
+    // Tabs render the 📊 (Context) icon BEFORE the
+    // label and the ✕ (close) icon AFTER it (agent
+    // tabs only). Strip both edges to recover the
+    // visible label text. The `u` flag is required
+    // because 📊 is outside the BMP — without it,
+    // the character class treats the emoji as two
     // surrogate code units and leaves a stray
     // \uD83D behind.
     const labelText = mainBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('Main');
   });
@@ -102,17 +103,15 @@ describe('ChatPanel tab strip rendering', () => {
     const agentBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="agent-0"]',
     );
-    // Tabs render the label followed by inline icons —
-    // 📊 (Context) and ✕ (close on agent tabs only).
-    // Strip both from the trailing edge to isolate the
-    // visible label text. The `u` flag is required so
-    // 📊 (outside the BMP) is treated as one
-    // codepoint inside the character class. Two passes
-    // handle the 📊-then-✕ ordering — first pass
-    // strips ✕, second strips 📊.
+    // Tabs render the 📊 (Context) icon BEFORE the
+    // label and the ✕ (close) icon AFTER it on agent
+    // tabs. Strip both edges to isolate the visible
+    // label text. The `u` flag is required so 📊
+    // (outside the BMP) is treated as one codepoint
+    // inside the character class.
     const labelText = agentBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('Agent 0: refactor auth');
   });
@@ -126,13 +125,13 @@ describe('ChatPanel tab strip rendering', () => {
     const orphanBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="orphan-tab"]',
     );
-    // Strip trailing 📊 and ✕ icons before comparing —
-    // see "renders custom labels" for rationale (the
-    // `u` flag is required for 📊 to match as one
-    // codepoint).
+    // Strip leading 📊 and trailing ✕ icons before
+    // comparing — see "renders custom labels" for
+    // rationale (the `u` flag is required for 📊 to
+    // match as one codepoint).
     const labelText = orphanBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('orphan-tab');
   });
