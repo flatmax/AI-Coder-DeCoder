@@ -274,6 +274,50 @@ The streaming pipeline guards against hung LLM calls with three independent time
 
 **Cancellation responsiveness.** The watchdog's `stream.close()` mechanism doubles as a faster cancellation path. The `_cancelled_requests` check inside the loop only fires between chunks, so a hung read would otherwise ignore a user's Stop click until the next chunk arrived — by which point the watchdog itself has fired anyway. Users see their terminal back within `chunk_timeout_seconds` worst-case regardless of whether they clicked Stop.
 
+### Retry schedule for `litellm.completion`
+
+Every `litellm.completion(...)` call is wrapped in an explicit retry loop with exponential backoff — LiteLLM's built-in `num_retries=` kwarg is NOT passed (stacking both layers would multiply waits and mask provider retry hints).
+
+| Parameter | Value | Notes |
+|---|---|---|
+| Max attempts | `config.num_retries + 1` | From `llm.json`; default `10 + 1 = 11` attempts total |
+| Base wait | 2.0s | First retry waits `2s + jitter` |
+| Growth | Exponential, base 2 | Attempt N waits `min(max, base × 2^N)` |
+| Max wait per attempt | 60s | Ceiling so total budget stays bounded |
+| Jitter | uniform(0, 1.5s) | Added to each computed wait |
+| `Retry-After` floor | Header value when present | Computed wait is used only when it exceeds the header value |
+
+Retryable error types (from `_classify_litellm_error`):
+
+- `rate_limit`
+- `api_connection`
+- `service_unavailable`
+- `timeout`
+
+Non-retryable types fail fast on the first attempt:
+
+- `authentication`
+- `bad_request`
+- `context_window_exceeded`
+- `not_found`
+- `llm_error` (unrecognized exceptions)
+
+**Streaming caveat.** For streaming calls, the retry applies only to stream establishment — the `litellm.completion(..., stream=True)` call itself, before any chunk is yielded. Once chunks start flowing, a mid-stream failure can't be replayed because the partial response has already been delivered to the UI through `streamChunk` events. The 429 pattern this wrapper protects against raises before any chunk arrives, so the retry still catches it cleanly.
+
+**Exhaustion behavior.** After `max_attempts` failures, the final exception is re-raised unchanged. The caller's existing error-classification path (`run_completion_sync` for streaming; the per-site try/except for commit + detector) handles the post-retry exception as it would have handled the original.
+
+**Log output.** Each retry emits a WARNING:
+
+```
+{context} attempt N/M failed (type=rate_limit); sleeping X.Ys before retry
+```
+
+Where `{context}` is the call-site label (`streaming completion`, `commit message`, `topic detector`). Final exhaustion emits:
+
+```
+{context} retries exhausted after M attempts: type=rate_limit provider=bedrock msg=...
+```
+
 ### Post-response compaction delay
 
 Compaction runs after `streamComplete` with a brief delay:

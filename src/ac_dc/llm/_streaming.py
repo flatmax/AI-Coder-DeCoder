@@ -55,6 +55,7 @@ from ac_dc.llm._helpers import (
     _extract_response_cost,
     _resolve_max_output_tokens,
     build_thinking_kwargs,
+    retry_litellm_completion,
 )
 from ac_dc.llm._types import _URL_PER_MESSAGE_LIMIT
 
@@ -754,16 +755,36 @@ def run_completion_sync(
     request_timeout = service._config.request_timeout_seconds
     first_chunk_timeout = service._config.first_chunk_timeout_seconds
     chunk_timeout = service._config.chunk_timeout_seconds
+    num_retries = service._config.num_retries
 
     try:
-        stream = litellm.completion(
-            model=service._config.model,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},
-            max_tokens=max_output,
-            timeout=request_timeout,
-            **thinking_kwargs,
+        # Explicit retry wrapper with exponential backoff +
+        # Retry-After honoring. Replaces LiteLLM's internal
+        # ``num_retries=`` kwarg — stacking the two would
+        # multiply waits and mask provider retry hints.
+        #
+        # For streaming, the retry applies only to stream
+        # establishment — once chunks start flowing, a
+        # mid-stream failure can't be replayed because the
+        # partial response has already been delivered to the
+        # UI. The Bedrock 429 pattern we're protecting against
+        # raises BEFORE any chunk is received, so this catches
+        # it cleanly.
+        def _open_stream() -> Any:
+            return litellm.completion(
+                model=service._config.model,
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+                max_tokens=max_output,
+                timeout=request_timeout,
+                **thinking_kwargs,
+            )
+        stream = retry_litellm_completion(
+            litellm,
+            _open_stream,
+            max_attempts=num_retries + 1,
+            context="streaming completion",
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from ac_dc.llm._helpers import (
     _classify_litellm_error,
     _resolve_max_output_tokens,
+    retry_litellm_completion,
 )
 from ac_dc.token_counter import TokenCounter
 
@@ -196,15 +197,26 @@ async def generate_commit_message(
 
     def _call() -> str:
         try:
-            response = litellm.completion(
-                model=service._config.smaller_model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": diff},
-                ],
-                stream=False,
-                max_tokens=max_output,
-                timeout=service._config.aux_request_timeout_seconds,
+            # Retry via :func:`retry_litellm_completion` rather
+            # than LiteLLM's ``num_retries=`` for predictable
+            # exponential backoff + Retry-After honoring. See
+            # the matching comment in ``_streaming.py``.
+            def _commit_completion() -> Any:
+                return litellm.completion(
+                    model=service._config.smaller_model,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": diff},
+                    ],
+                    stream=False,
+                    max_tokens=max_output,
+                    timeout=service._config.aux_request_timeout_seconds,
+                )
+            response = retry_litellm_completion(
+                litellm,
+                _commit_completion,
+                max_attempts=service._config.num_retries + 1,
+                context="commit message",
             )
             return response.choices[0].message.content or ""
         except Exception as exc:

@@ -645,6 +645,37 @@ class ConfigManager:
         return value if value > 0 else 60.0
 
     @property
+    def num_retries(self) -> int:
+        """Number of LiteLLM retries on retryable errors.
+
+        LiteLLM retries with exponential backoff on the typed
+        subset of exceptions it considers transient —
+        ``RateLimitError``, ``APIConnectionError``,
+        ``ServiceUnavailableError``, ``Timeout``, and provider-
+        specific 5xx wrappers. Non-retryable errors
+        (``AuthenticationError``, ``BadRequestError``,
+        ``ContextWindowExceededError``, ``NotFoundError``) fail
+        immediately regardless of this setting.
+
+        For streaming calls the retry applies only to the
+        initial connection — LiteLLM can't replay a partial
+        response. The Bedrock rate-limit pattern we see in
+        practice ("Too many requests, please wait") raises
+        BEFORE any tokens stream, so this catches it cleanly.
+
+        Default 10. A burst of parallel agents against a
+        provider with tight per-minute limits can produce
+        several 429s back-to-back; 10 retries with exponential
+        backoff covers the typical clear window. Non-positive
+        values are clamped to 0 (no retry).
+        """
+        try:
+            value = int(self.llm_config.get("num_retries", 10))
+        except (TypeError, ValueError):
+            return 10
+        return value if value >= 0 else 0
+
+    @property
     def cache_buffer_multiplier(self) -> float:
         """Multiplier applied to the cache minimum to compute target.
 

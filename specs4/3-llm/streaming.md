@@ -141,6 +141,22 @@ The provider reports `finish_reason` on the final chunk (earlier chunks report N
 
 The worker captures whichever chunk first reports a non-null value and propagates it through the stream-complete result. Natural stops log at INFO; non-natural stops log at WARNING so operators can diagnose truncation without trawling debug logs.
 
+### Retry Policy
+
+LiteLLM's built-in `num_retries=` kwarg uses a tenacity policy with a short fixed delay and doesn't treat provider-specific rate-limit errors as retryable on all providers (Bedrock 429s in particular fall through on some LiteLLM versions). AC⚡DC wraps every `litellm.completion(...)` call in its own retry loop with explicit exponential backoff:
+
+- Retries the call up to `num_retries` times on transient error types — rate_limit, api_connection, service_unavailable, timeout. Non-transient types (authentication, bad_request, context_window_exceeded, not_found) fail immediately without retry.
+- Exponential backoff with jitter between attempts. Per-attempt wait is capped at a ceiling (60 seconds) to keep the total retry budget bounded on long runs of 429s.
+- Honours the `Retry-After` header when the provider supplies one. When the header value exceeds the computed exponential wait, the header value wins — Bedrock sometimes hands back 30-60s retry hints that would otherwise be under-respected by the exponential schedule alone.
+
+The outer retry replaces LiteLLM's `num_retries=` kwarg at every call site — stacking both would multiply waits and mask provider retry hints. The three call sites that use it:
+
+- Streaming completion — retry applies only to stream establishment. Once chunks start flowing, a mid-stream failure can't be replayed because partial content has already been delivered to the UI. The 429 pattern this protects against raises before any chunk arrives, so the retry catches it cleanly.
+- Commit-message generation — non-streaming call on the smaller model.
+- Topic boundary detection — non-streaming call on the smaller model; failures still fall back to the safe default after retry exhaustion.
+
+`num_retries` is a config field in `llm.json`, defaulting to 10. Non-positive values disable retry (single attempt). Values larger than a few dozen are pointless in practice — sustained rate-limit windows that last that long require either provider-side quota adjustment or a different model.
+
 ## Chunk Delivery Semantics
 
 - Each chunk carries full accumulated content, not deltas

@@ -14,7 +14,9 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
+
+T = TypeVar("T")
 
 from ac_dc.history_compactor import TopicBoundary
 from ac_dc.token_counter import TokenCounter
@@ -491,16 +493,26 @@ def _build_topic_detector(
             # Non-streaming call — we want the full JSON response
             # before parsing. ``timeout=`` is the safety net for
             # hung sockets; a healthy detector call returns in a
-            # few seconds.
-            response = litellm.completion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=False,
-                max_tokens=max_output,
-                timeout=config.aux_request_timeout_seconds,
+            # few seconds. Retry with exponential backoff is
+            # applied via :func:`retry_litellm_completion` rather
+            # than LiteLLM's internal ``num_retries=`` so the
+            # backoff schedule is explicit and provider-agnostic.
+            def _detector_call() -> Any:
+                return litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    stream=False,
+                    max_tokens=max_output,
+                    timeout=config.aux_request_timeout_seconds,
+                )
+            response = retry_litellm_completion(
+                litellm,
+                _detector_call,
+                max_attempts=config.num_retries + 1,
+                context="topic detector",
             )
         except Exception as exc:
             # Classify for richer log output. Topic detection
@@ -761,6 +773,165 @@ def _classify_litellm_error(
         info["error_type"] = "timeout"
 
     return info
+
+
+# ---------------------------------------------------------------------------
+# Retry wrapper for litellm.completion
+# ---------------------------------------------------------------------------
+#
+# LiteLLM's built-in ``num_retries=`` uses a tenacity policy with a short
+# fixed delay and doesn't always treat provider-specific rate-limit errors
+# as retryable (Bedrock 429s in particular fall through on some versions).
+# We wrap the call in our own tenacity retry with:
+#
+# - Exponential backoff with jitter, bounded by a per-attempt ceiling.
+# - Explicit retry predicate based on _classify_litellm_error's output —
+#   retries on rate_limit, api_connection, service_unavailable, timeout;
+#   fails fast on authentication, bad_request, context_window_exceeded,
+#   not_found.
+# - Retry-After header honoring: if the RateLimitError carries a
+#   Retry-After value, wait at least that long on the next attempt.
+#
+# The outer retry REPLACES the ``num_retries=`` kwarg on call sites that
+# use this helper — double-retrying would produce a multiplicative wait
+# that's hard to reason about.
+
+
+_RETRYABLE_ERROR_TYPES = frozenset({
+    "rate_limit",
+    "api_connection",
+    "service_unavailable",
+    "timeout",
+})
+
+# Backoff schedule: wait = min(_MAX_WAIT, _BASE * 2^attempt) + jitter.
+_RETRY_BASE_SECONDS = 2.0
+_RETRY_MAX_SECONDS = 60.0
+_RETRY_JITTER_SECONDS = 1.5
+
+
+def _compute_retry_wait(
+    attempt: int,
+    retry_after: float | None,
+) -> float:
+    """Compute the wait time before a retry attempt.
+
+    ``attempt`` is 0-indexed — the first retry waits
+    ``_RETRY_BASE_SECONDS + jitter`` (~2s), the second
+    ``2 × _RETRY_BASE_SECONDS + jitter`` (~4s), and so on,
+    capped at ``_RETRY_MAX_SECONDS``.
+
+    When the provider supplied a ``Retry-After`` header
+    (surfaced via :func:`_classify_litellm_error`), we
+    respect it as a floor — the computed exponential wait
+    is used when it exceeds ``retry_after``, otherwise we
+    wait the header value. Bedrock sometimes hands back
+    30-60s retry hints; the exponential schedule alone
+    would under-wait and burn retry attempts.
+    """
+    exponential = min(
+        _RETRY_MAX_SECONDS,
+        _RETRY_BASE_SECONDS * (2 ** attempt),
+    )
+    jittered = exponential + random.uniform(
+        0.0, _RETRY_JITTER_SECONDS,
+    )
+    if retry_after is not None and retry_after > 0:
+        return max(jittered, retry_after)
+    return jittered
+
+
+def retry_litellm_completion(
+    litellm_module: Any,
+    call: Callable[[], T],
+    max_attempts: int,
+    *,
+    context: str = "completion",
+) -> T:
+    """Invoke ``call`` with retry on transient LiteLLM errors.
+
+    Parameters
+    ----------
+    litellm_module:
+        The imported ``litellm`` module — passed rather than imported here
+        so the heavyweight import happens at the call site.
+    call:
+        Zero-arg callable that invokes ``litellm.completion(...)``. Keeps
+        kwargs at the call site where they're readable.
+    max_attempts:
+        Total attempts including the initial call. ``1`` disables
+        retry. Typically sourced from ``config.num_retries + 1``.
+    context:
+        Human-readable label used in warning logs. Defaults to
+        ``"completion"``; callers can pass ``"commit"``,
+        ``"topic detector"``, etc.
+
+    Returns
+    -------
+    The return value of ``call()`` on success.
+
+    Raises
+    ------
+    The last exception from ``call()`` once retries are exhausted, or
+    immediately on any non-retryable error.
+    """
+    if max_attempts < 1:
+        max_attempts = 1
+
+    attempt = 0
+    last_exc: BaseException | None = None
+    while attempt < max_attempts:
+        try:
+            return call()
+        except Exception as exc:
+            info = _classify_litellm_error(litellm_module, exc)
+            error_type = info.get("error_type", "llm_error")
+            last_exc = exc
+
+            # Non-retryable error types fail fast.
+            if error_type not in _RETRYABLE_ERROR_TYPES:
+                raise
+
+            # Final attempt — propagate after exhaustion.
+            if attempt >= max_attempts - 1:
+                logger.warning(
+                    "%s retries exhausted after %d attempts: "
+                    "type=%s provider=%s msg=%s",
+                    context,
+                    max_attempts,
+                    error_type,
+                    info.get("provider"),
+                    info.get("message"),
+                )
+                raise
+
+            retry_after = info.get("retry_after")
+            try:
+                retry_after_f = (
+                    float(retry_after)
+                    if retry_after is not None else None
+                )
+            except (TypeError, ValueError):
+                retry_after_f = None
+
+            wait = _compute_retry_wait(attempt, retry_after_f)
+            logger.warning(
+                "%s attempt %d/%d failed (type=%s); "
+                "sleeping %.1fs before retry",
+                context,
+                attempt + 1,
+                max_attempts,
+                error_type,
+                wait,
+            )
+            time.sleep(wait)
+            attempt += 1
+
+    # Unreachable — loop either returns or raises. Defensive
+    # re-raise for type checkers.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("retry_litellm_completion exited without result")
 
 
 # ---------------------------------------------------------------------------
