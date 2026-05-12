@@ -814,6 +814,25 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  /**
+   * Server-push callback fired by the retry wrapper in
+   * `retry_litellm_completion` before each sleep. Carries
+   * {attempt, max_attempts, error_type, wait_seconds,
+   * message, provider, context}. Re-dispatched as a
+   * window event so the chat panel can surface a toast
+   * with the backoff countdown — without this, a 10-minute
+   * exponential retry looks like a frozen UI.
+   *
+   * See specs-reference/3-llm/streaming.md § Retry
+   * schedule for the emitted payload shape.
+   */
+  streamRetry(requestId, info) {
+    window.dispatchEvent(new CustomEvent('stream-retry', {
+      detail: { requestId, info },
+    }));
+    return true;
+  }
+
   filesChanged(selectedFiles) {
     window.dispatchEvent(new CustomEvent('files-changed', {
       detail: { selectedFiles },

@@ -497,6 +497,70 @@ export function onStreamComplete(panel, event) {
 // ---------------------------------------------------------------
 
 /**
+ * Handle a `stream-retry` window event.
+ *
+ * Fired by the backend's retry wrapper before each
+ * backoff sleep when a retryable LiteLLM error
+ * (rate_limit, api_connection, service_unavailable,
+ * timeout) is encountered during stream
+ * establishment. Payload shape (from
+ * `retry_litellm_completion`'s on_retry callback):
+ *
+ *   { requestId,
+ *     info: { attempt, max_attempts, error_type,
+ *             wait_seconds, message, provider,
+ *             context } }
+ *
+ * User feedback: surface a toast naming the error
+ * type and the wait-before-retry duration. Without
+ * this, exponential backoff on (e.g.) Bedrock rate
+ * limits produces minutes of UI silence while the
+ * worker thread sleeps between attempts.
+ *
+ * Scoped to the owning tab — if the retry belongs
+ * to a child agent stream, route the toast via the
+ * same lookup the chunk/complete handlers use, so
+ * a background agent's retries don't flood the
+ * main conversation's toast area.
+ */
+export function onStreamRetry(panel, event) {
+  const detail = event.detail || {};
+  const requestId = detail.requestId;
+  const info = detail.info || {};
+  if (!requestId) return;
+  // Only toast if this retry belongs to one of our
+  // tabs. Collaborator broadcasts for streams we
+  // don't own would otherwise produce spurious
+  // toasts.
+  const ownerTabId = findTabForRequest(panel, requestId);
+  if (!ownerTabId) return;
+
+  const attempt = Number(info.attempt) || 0;
+  const maxAttempts = Number(info.max_attempts) || 0;
+  const waitSeconds = Number(info.wait_seconds) || 0;
+  const errorType = typeof info.error_type === 'string'
+    ? info.error_type
+    : 'llm_error';
+
+  // Human-readable type label — reuse the same
+  // dispatcher the error-toast path uses so
+  // terminology stays consistent. errorTypeLabel is
+  // defined below in this module.
+  const label = errorTypeLabel(errorType);
+  const waitText = waitSeconds >= 60
+    ? `${Math.round(waitSeconds / 60)} min`
+    : `${Math.round(waitSeconds)} s`;
+  const icon = errorType === 'rate_limit' ? '⏱️' : '🔄';
+  const attemptSuffix = maxAttempts > 0
+    ? ` (attempt ${attempt}/${maxAttempts})`
+    : '';
+  panel._emitToast(
+    `${icon} ${label} — retrying in ${waitText}${attemptSuffix}`,
+    'warning',
+  );
+}
+
+/**
  * Handle a `user-message` window event.
  *
  * The server broadcasts user messages to all

@@ -42,6 +42,7 @@ import {
   onAgentsSpawned,
   onStreamChunk,
   onStreamComplete,
+  onStreamRetry,
   onUserMessage,
 } from './streaming.js';
 
@@ -64,6 +65,7 @@ import {
 export function bindEventHandlers(panel) {
   panel._onStreamChunk = (e) => onStreamChunk(panel, e);
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
+  panel._onStreamRetry = (e) => onStreamRetry(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
   panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
   panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
@@ -210,6 +212,7 @@ export function resumeActiveStreams(panel, activeStreams) {
 export function attachEventListeners(panel) {
   window.addEventListener('stream-chunk', panel._onStreamChunk);
   window.addEventListener('stream-complete', panel._onStreamComplete);
+  window.addEventListener('stream-retry', panel._onStreamRetry);
   window.addEventListener('user-message', panel._onUserMessage);
   window.addEventListener('session-changed', panel._onSessionChanged);
   window.addEventListener('agents-spawned', panel._onAgentsSpawned);
@@ -280,6 +283,7 @@ export function detachEventListeners(panel) {
   document.removeEventListener('keydown', panel._onChatTabShortcutBound);
   window.removeEventListener('stream-chunk', panel._onStreamChunk);
   window.removeEventListener('stream-complete', panel._onStreamComplete);
+  window.removeEventListener('stream-retry', panel._onStreamRetry);
   window.removeEventListener('user-message', panel._onUserMessage);
   window.removeEventListener('session-changed', panel._onSessionChanged);
   window.removeEventListener('agents-spawned', panel._onAgentsSpawned);

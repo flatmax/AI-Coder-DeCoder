@@ -705,6 +705,83 @@ def _classify_litellm_error(
     info["model"] = getattr(exc, "model", None)
     info["provider"] = getattr(exc, "llm_provider", None)
 
+    # Credential errors raised by botocore (expired SSO tokens,
+    # missing credentials, invalid refresh tokens) surface
+    # through LiteLLM's Bedrock path as APIConnectionError —
+    # technically accurate (no request left the client) but
+    # operationally wrong for retry policy: re-trying with the
+    # same expired token can only fail. Walk the exception's
+    # __cause__/__context__ chain and check for botocore
+    # credential-type names; if found, classify as
+    # authentication so the retry wrapper fails fast and the
+    # UI surfaces an actionable "credentials" toast instead of
+    # eleven silent retries.
+    _CRED_EXC_NAMES = frozenset({
+        "TokenRetrievalError",
+        "NoCredentialsError",
+        "PartialCredentialsError",
+        "CredentialRetrievalError",
+        "UnauthorizedSSOTokenError",
+        "SSOTokenLoadError",
+        "InvalidGrantException",
+        "ExpiredTokenException",
+        "UnrecognizedClientException",
+    })
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in _CRED_EXC_NAMES:
+            info["error_type"] = "authentication"
+            # Prefer the credential error's own message over
+            # LiteLLM's wrapper so the toast shows the real
+            # cause (e.g. "Token has expired and refresh failed").
+            cred_msg = str(cur).strip()
+            if cred_msg:
+                info["message"] = cred_msg
+            return info
+        cur = cur.__cause__ or cur.__context__
+
+    # Message-substring fallback. LiteLLM sometimes
+    # re-raises with ``raise ... from None`` which wipes
+    # the ``__cause__`` chain, or wraps the botocore error
+    # deep enough that only the string representation
+    # preserves the signal. If the flattened exception text
+    # mentions a known credential-error marker, classify as
+    # authentication anyway. Conservative list — only
+    # markers that are unambiguous auth failures.
+    _CRED_MSG_MARKERS = (
+        "TokenRetrievalError",
+        "NoCredentialsError",
+        "InvalidGrantException",
+        "ExpiredTokenException",
+        "UnauthorizedSSOTokenError",
+        "SSOTokenLoadError",
+        "Token for default does not exist",
+        "Error loading SSO Token",
+        "Token has expired",
+        "Invalid refresh token",
+        "Unable to locate credentials",
+        "The security token included in the request is expired",
+        "The security token included in the request is invalid",
+    )
+    flat = str(exc)
+    if any(marker in flat for marker in _CRED_MSG_MARKERS):
+        info["error_type"] = "authentication"
+        # Try to surface a cleaner message than LiteLLM's
+        # whole stringified wrapper. Look for the marker
+        # and take the sentence around it.
+        for marker in _CRED_MSG_MARKERS:
+            idx = flat.find(marker)
+            if idx >= 0:
+                start = flat.rfind(".", 0, idx) + 1
+                end = flat.find("\n", idx)
+                if end < 0:
+                    end = min(len(flat), idx + 200)
+                info["message"] = flat[start:end].strip()
+                break
+        return info
+
     # Classification. Each branch uses getattr on the module so
     # a LiteLLM version that drops one of these classes doesn't
     # crash classification — the attribute lookup returns None
@@ -847,6 +924,7 @@ def retry_litellm_completion(
     max_attempts: int,
     *,
     context: str = "completion",
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
 ) -> T:
     """Invoke ``call`` with retry on transient LiteLLM errors.
 
@@ -865,6 +943,15 @@ def retry_litellm_completion(
         Human-readable label used in warning logs. Defaults to
         ``"completion"``; callers can pass ``"commit"``,
         ``"topic detector"``, etc.
+    on_retry:
+        Optional callback invoked AFTER classification and BEFORE
+        sleeping, only on retryable errors with attempts remaining.
+        Receives a dict with ``attempt`` (1-indexed), ``max_attempts``,
+        ``error_type``, ``wait_seconds``, ``message``, ``provider``,
+        ``context``. Used by the streaming path to emit UI toasts
+        showing retry progress during long backoff waits.
+        Callback exceptions are logged at debug and swallowed so a
+        faulty hook can't break retry semantics.
 
     Returns
     -------
@@ -924,6 +1011,21 @@ def retry_litellm_completion(
                 error_type,
                 wait,
             )
+            if on_retry is not None:
+                try:
+                    on_retry({
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "error_type": error_type,
+                        "wait_seconds": wait,
+                        "message": info.get("message", ""),
+                        "provider": info.get("provider"),
+                        "context": context,
+                    })
+                except Exception as cb_exc:
+                    logger.debug(
+                        "on_retry callback raised: %s", cb_exc,
+                    )
             time.sleep(wait)
             attempt += 1
 

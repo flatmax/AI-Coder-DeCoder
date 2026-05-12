@@ -780,11 +780,35 @@ def run_completion_sync(
                 timeout=request_timeout,
                 **thinking_kwargs,
             )
+
+        # Broadcast retry events to the UI so the user sees
+        # progress during the exponential backoff (which can
+        # run to minutes on pathological provider behaviour).
+        # Callback runs in the worker thread; schedule the
+        # async broadcast onto the main event loop so jrpc-oo
+        # serialises the send correctly.
+        def _on_retry(info: dict[str, Any]) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    service._broadcast_event_async(
+                        "streamRetry",
+                        request_id,
+                        info,
+                    ),
+                    loop,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "streamRetry broadcast schedule failed: %s",
+                    exc,
+                )
+
         stream = retry_litellm_completion(
             litellm,
             _open_stream,
             max_attempts=num_retries + 1,
             context="streaming completion",
+            on_retry=_on_retry,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")
