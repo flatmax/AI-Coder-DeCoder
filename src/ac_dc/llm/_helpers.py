@@ -728,8 +728,11 @@ def _classify_litellm_error(
         "UnrecognizedClientException",
     })
     seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
         seen.add(id(cur))
         if type(cur).__name__ in _CRED_EXC_NAMES:
             info["error_type"] = "authentication"
@@ -740,7 +743,22 @@ def _classify_litellm_error(
             if cred_msg:
                 info["message"] = cred_msg
             return info
-        cur = cur.__cause__ or cur.__context__
+        # Follow __cause__ and __context__ (standard chain).
+        if cur.__cause__ is not None:
+            stack.append(cur.__cause__)
+        if cur.__context__ is not None:
+            stack.append(cur.__context__)
+        # LiteLLM occasionally stuffs the original exception
+        # into args as a positional rather than chaining it.
+        # Check args elements that are themselves BaseException
+        # instances so we don't miss credential errors buried
+        # that way.
+        try:
+            for arg in cur.args:
+                if isinstance(arg, BaseException):
+                    stack.append(arg)
+        except Exception:
+            pass
 
     # Message-substring fallback. LiteLLM sometimes
     # re-raises with ``raise ... from None`` which wipes
@@ -757,15 +775,29 @@ def _classify_litellm_error(
         "ExpiredTokenException",
         "UnauthorizedSSOTokenError",
         "SSOTokenLoadError",
+        "CredentialRetrievalError",
+        "PartialCredentialsError",
         "Token for default does not exist",
         "Error loading SSO Token",
+        "Error when retrieving token from sso",
+        "Token has expired and refresh failed",
         "Token has expired",
+        "Invalid refresh token provided",
         "Invalid refresh token",
         "Unable to locate credentials",
         "The security token included in the request is expired",
         "The security token included in the request is invalid",
+        "aws sso login",
     )
+    # Scan both the flattened exception string and the
+    # repr of args — LiteLLM sometimes formats its wrapper
+    # with minimal content but the original botocore error
+    # text survives in args.
     flat = str(exc)
+    try:
+        flat = flat + " " + repr(exc.args)
+    except Exception:
+        pass
     if any(marker in flat for marker in _CRED_MSG_MARKERS):
         info["error_type"] = "authentication"
         # Try to surface a cleaner message than LiteLLM's
@@ -977,6 +1009,40 @@ def retry_litellm_completion(
 
             # Non-retryable error types fail fast.
             if error_type not in _RETRYABLE_ERROR_TYPES:
+                raise
+
+            # Safety net: if classification missed a
+            # credential error but the exception text
+            # carries an unambiguous marker, upgrade the
+            # classification and fail fast. Prevents the
+            # 11-retry cascade on expired AWS SSO tokens
+            # when LiteLLM wraps botocore's
+            # TokenRetrievalError as APIConnectionError
+            # without preserving the exception chain.
+            _UNAMBIGUOUS_AUTH_MARKERS = (
+                "Token has expired and refresh failed",
+                "Error when retrieving token from sso",
+                "Invalid refresh token provided",
+                "TokenRetrievalError",
+                "InvalidGrantException",
+                "UnauthorizedSSOTokenError",
+            )
+            try:
+                _flat = str(exc)
+                for arg in exc.args:
+                    if isinstance(arg, BaseException):
+                        _flat = _flat + " " + str(arg)
+            except Exception:
+                _flat = str(exc)
+            if any(m in _flat for m in _UNAMBIGUOUS_AUTH_MARKERS):
+                logger.warning(
+                    "%s attempt %d credential marker found "
+                    "in exception text (original type=%s); "
+                    "failing fast without retry",
+                    context,
+                    attempt + 1,
+                    error_type,
+                )
                 raise
 
             # Final attempt — propagate after exhaustion.
