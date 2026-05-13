@@ -267,6 +267,7 @@ export function render(panel) {
           renderMessage(panel, msg, index),
         )}
         ${panel._streaming ? renderStreamingMessage(panel) : ''}
+        ${panel._retryInfo ? renderRetryBanner(panel) : ''}
       </div>
       ${fileMode ? renderFileSearchOverlay(panel) : ''}
     </div>
@@ -1329,6 +1330,100 @@ export function renderStreamingMessage(panel) {
         true,
       )}
       <span class="cursor"></span>
+    </div>
+  `;
+}
+
+/**
+ * Render the retry-progress banner for the active
+ * tab. Only called when `panel._retryInfo` is
+ * truthy.
+ *
+ * Reads elapsed / remaining from
+ * (Date.now() - startedAt) every render so the
+ * 100ms ticker in streaming.js just needs to kick
+ * requestUpdate — we don't mutate state here.
+ *
+ * Layout:
+ *
+ *   [icon] Retrying (attempt N/M) — error_type
+ *   [================>          ] 4.2s remaining
+ *   provider message (smaller, muted)
+ *
+ * Bar fills as elapsed approaches waitSeconds;
+ * countdown text shows remaining to one decimal.
+ * Error-type colouring mirrors the toast path:
+ * rate_limit / api_connection / timeout get an
+ * amber accent, everything else neutral.
+ */
+function renderRetryBanner(panel) {
+  const info = panel._retryInfo;
+  if (!info) return '';
+  const now = Date.now();
+  const elapsed = Math.max(0, (now - info.startedAt) / 1000);
+  const wait = Math.max(0.001, info.waitSeconds);
+  const remaining = Math.max(0, wait - elapsed);
+  const pct = Math.min(100, (elapsed / wait) * 100);
+  // Icon + accent class by error type. Rate-limit
+  // gets a clock; connection / timeout get a retry
+  // swirl; everything else a generic warning.
+  let icon = '🔄';
+  let severity = 'neutral';
+  if (info.errorType === 'rate_limit') {
+    icon = '⏱️';
+    severity = 'amber';
+  } else if (
+    info.errorType === 'api_connection'
+    || info.errorType === 'service_unavailable'
+    || info.errorType === 'timeout'
+  ) {
+    icon = '🔄';
+    severity = 'amber';
+  }
+  // Pretty label — reuse the same mapping the
+  // toast path would have used.
+  let label;
+  switch (info.errorType) {
+    case 'rate_limit': label = 'Rate limited'; break;
+    case 'api_connection': label = 'Connection failed'; break;
+    case 'service_unavailable': label = 'Provider unavailable'; break;
+    case 'timeout': label = 'Request timed out'; break;
+    case 'authentication': label = 'Authentication failed'; break;
+    default: label = 'LLM error'; break;
+  }
+  const remainingText = remaining >= 10
+    ? `${Math.round(remaining)}s remaining`
+    : `${remaining.toFixed(1)}s remaining`;
+  const attemptText = info.maxAttempts > 0
+    ? `attempt ${info.attempt}/${info.maxAttempts}`
+    : `attempt ${info.attempt}`;
+  return html`
+    <div
+      class="retry-banner severity-${severity}"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div class="retry-banner-header">
+        <span class="retry-banner-icon">${icon}</span>
+        <span class="retry-banner-title">
+          Retrying (${attemptText}) — ${label}
+        </span>
+        <span class="retry-banner-remaining">
+          ${remainingText}
+        </span>
+      </div>
+      <div class="retry-banner-track" aria-hidden="true">
+        <div
+          class="retry-banner-fill"
+          style="width: ${pct.toFixed(1)}%"
+        ></div>
+      </div>
+      ${info.message
+        ? html`<div class="retry-banner-detail">
+            ${info.message}
+          </div>`
+        : ''}
     </div>
   `;
 }

@@ -1884,6 +1884,84 @@ export const STYLES = css`
     color: #fff;
   }
 
+  /* Retry-progress banner — inserted at the bottom of
+   * the messages list when the backend's retry wrapper
+   * emits a streamRetry event. Shows attempt counter,
+   * error-type label, a filling progress bar, and the
+   * provider's original message. Updates every 100ms
+   * via a panel-level ticker in streaming.js.
+   *
+   * Severity variants:
+   *   .severity-amber — rate_limit, api_connection,
+   *     timeout, service_unavailable. These are the
+   *     retryable-by-design cases where waiting helps.
+   *   .severity-neutral — anything else that somehow
+   *     made it into the retry loop. Muted grey so it
+   *     doesn't shout. */
+  .retry-banner {
+    margin-top: 0.5rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    background: rgba(22, 27, 34, 0.7);
+    font-size: 0.8125rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .retry-banner.severity-amber {
+    border-color: rgba(210, 153, 34, 0.5);
+    background: rgba(210, 153, 34, 0.08);
+  }
+  .retry-banner.severity-neutral {
+    border-color: rgba(240, 246, 252, 0.15);
+    background: rgba(240, 246, 252, 0.04);
+  }
+  .retry-banner-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .retry-banner-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+  .retry-banner-title {
+    flex: 1;
+    font-weight: 500;
+    color: var(--text-primary, #c9d1d9);
+  }
+  .retry-banner.severity-amber .retry-banner-title {
+    color: #d29922;
+  }
+  .retry-banner-remaining {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.75rem;
+    color: var(--text-secondary, #8b949e);
+  }
+  .retry-banner-track {
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(240, 246, 252, 0.08);
+    overflow: hidden;
+  }
+  .retry-banner-fill {
+    height: 100%;
+    background: var(--accent-primary, #58a6ff);
+    transition: width 100ms linear;
+    border-radius: 2px;
+  }
+  .retry-banner.severity-amber .retry-banner-fill {
+    background: #d29922;
+  }
+  .retry-banner-detail {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #8b949e);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
   /* Lightbox overlay — full-screen with centered content.
    * z-index above the dialog so it doesn't disappear
    * behind the chat panel. */

@@ -44,6 +44,7 @@ import {
   onStreamComplete,
   onStreamRetry,
   onUserMessage,
+  stopRetryTick,
 } from './streaming.js';
 
 // ---------------------------------------------------------------
@@ -341,6 +342,12 @@ export function detachEventListeners(panel) {
     clearTimeout(panel._urlDetectDebounceTimer);
     panel._urlDetectDebounceTimer = null;
   }
+  // Panel is unmounting — stop the retry ticker
+  // (if any). Unlike the debounce timers above
+  // this is a setInterval that would otherwise
+  // keep firing requestUpdate on a detached
+  // component.
+  stopRetryTick(panel);
 }
 
 // ---------------------------------------------------------------
