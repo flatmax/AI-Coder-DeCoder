@@ -354,6 +354,14 @@ export const FILE_PICKER_STYLES = css`
     .row.is-file.is-excluded .checkbox {
       opacity: 0.5;
     }
+    .row.is-file.is-binary .name {
+      opacity: 0.4;
+      font-style: italic;
+    }
+    .row.is-file.is-binary .checkbox {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
     .row.is-dir.all-excluded .name,
     .row.is-root.all-excluded .name {
       text-decoration: line-through;

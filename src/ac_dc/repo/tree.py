@@ -71,6 +71,26 @@ class TreeMixin:
         except OSError:
             return 0
 
+    def _probe_is_binary(self, absolute: Path) -> bool:
+        """Return True when the file looks binary at the head.
+
+        Mirrors :meth:`_count_lines`'s probe: we sniff the first
+        ``BINARY_PROBE_BYTES`` and ask the shared classifier. Used
+        by :meth:`get_file_tree` to tag file nodes so the webapp
+        picker can disable their checkboxes (binary files can't be
+        sent to the LLM, so toggling them on selection is futile).
+
+        Errors fall back to "not binary" — the picker will accept
+        the file, the backend's binary trim at sync time will catch
+        it, and the user gets the existing toast warning.
+        """
+        try:
+            with absolute.open("rb") as fh:
+                probe = fh.read(BINARY_PROBE_BYTES)
+                return self._is_binary_bytes(probe)
+        except OSError:
+            return False
+
     @staticmethod
     def _unquote_porcelain_path(raw: str) -> str:
         """Strip git porcelain quoting from a single path segment.
@@ -298,8 +318,10 @@ class TreeMixin:
             absolute = self._root / rel_path
             lines = 0
             mtime = 0.0
+            is_binary = False
             if absolute.is_file():
-                lines = self._count_lines(absolute)
+                is_binary = self._probe_is_binary(absolute)
+                lines = 0 if is_binary else self._count_lines(absolute)
                 try:
                     mtime = absolute.stat().st_mtime
                 except OSError:
@@ -310,6 +332,7 @@ class TreeMixin:
                 "type": "file",
                 "lines": lines,
                 "mtime": mtime,
+                "is_binary": is_binary,
             }
             parent_children = index[parent_path]["children"]
             assert isinstance(parent_children, list)

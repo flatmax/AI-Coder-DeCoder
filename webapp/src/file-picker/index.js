@@ -63,6 +63,7 @@ export class FilePicker extends LitElement {
     selectedFiles: { type: Object },
     excludedFiles: { type: Object },
     pinnedFiles: { type: Object },
+    binaryFiles: { type: Object },
     activePath: { type: String },
     reviewState: { type: Object },
     filterQuery: { type: String, state: true },
@@ -114,6 +115,7 @@ export class FilePicker extends LitElement {
     };
     this.excludedFiles = new Set();
     this.pinnedFiles = new Set();
+    this.binaryFiles = new Set();
     this.activePath = null;
     this.reviewState = null;
     this.filterQuery = '';
@@ -903,18 +905,22 @@ export class FilePicker extends LitElement {
     }
     const isSelected = this.selectedFiles.has(node.path);
     const isExcluded = this.excludedFiles.has(node.path);
+    const isBinary =
+      this.binaryFiles && this.binaryFiles.has(node.path);
     const indentPx = depth * 16;
     const isFocused = node.path === this._focusedPath;
     const isActive = node.path === this.activePath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
-    const tooltip = this._tooltipFor(node, isExcluded, diff);
-    const checkboxTitle = isExcluded
-      ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
-      : 'Click to select, shift+click to exclude from index.';
+    const tooltip = this._tooltipFor(node, isExcluded, diff, isBinary);
+    const checkboxTitle = isBinary
+      ? 'Binary file — cannot be sent to the LLM.'
+      : isExcluded
+        ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
+        : 'Click to select, shift+click to exclude from index.';
     return html`
       <div
-        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isActive ? 'active-in-viewer' : ''}"
+        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isBinary ? 'is-binary' : ''} ${isActive ? 'active-in-viewer' : ''}"
         style="--row-indent: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
@@ -940,6 +946,7 @@ export class FilePicker extends LitElement {
           type="checkbox"
           class="checkbox"
           .checked=${isSelected}
+          ?disabled=${isBinary}
           @click=${(e) => this._onFileCheckbox(e, node)}
           aria-label="Select ${node.name}"
           title=${checkboxTitle}
@@ -1070,7 +1077,7 @@ export class FilePicker extends LitElement {
     return { added: addedRaw, removed: removedRaw };
   }
 
-  _tooltipFor(node, isExcluded = false, diff = null) {
+  _tooltipFor(node, isExcluded = false, diff = null, isBinary = false) {
     if (!node || typeof node !== 'object') return '';
     const name = typeof node.name === 'string' ? node.name : '';
     const path = typeof node.path === 'string' ? node.path : '';
@@ -1082,6 +1089,7 @@ export class FilePicker extends LitElement {
       if (diff.removed > 0) parts.push(`-${diff.removed}`);
       base = `${base} (${parts.join(' ')})`;
     }
+    if (isBinary) return `${base} (binary — cannot be sent to LLM)`;
     return isExcluded ? `${base} (excluded)` : base;
   }
 
@@ -1103,8 +1111,18 @@ export class FilePicker extends LitElement {
 
   _collectDescendantFiles(node) {
     const paths = [];
+    const binary = this.binaryFiles || new Set();
     function walk(n) {
       if (n.type === 'file') {
+        // Binary files are excluded from select-all
+        // descendant math: they can't usefully be sent
+        // to the LLM (the backend trims them at sync
+        // time), so toggling them on bulk select would
+        // never let the root or directory checkbox
+        // reach the "fully selected" state. Render-side
+        // they still appear in the tree with disabled
+        // checkboxes — see `_renderFile`.
+        if (binary.has(n.path)) return;
         paths.push(n.path);
         return;
       }
@@ -1242,6 +1260,15 @@ export class FilePicker extends LitElement {
 
   _onFileCheckbox(event, node) {
     event.stopPropagation();
+    // Defensive: binary files render with disabled
+    // checkboxes, but any programmatic dispatch would
+    // bypass that. Skip silently — the backend would
+    // trim them anyway, but a no-op here keeps the
+    // root checkbox's all/none accounting honest.
+    if (this.binaryFiles && this.binaryFiles.has(node.path)) {
+      event.preventDefault();
+      return;
+    }
     if (event.shiftKey) {
       event.preventDefault();
       this._toggleExclusion(node.path);

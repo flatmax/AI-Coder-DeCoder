@@ -29,6 +29,33 @@ import { EMPTY_TREE } from './constants.js';
 import { flattenTreePaths } from './helpers.js';
 
 /**
+ * Walk a file tree and collect every file node's path
+ * for which `is_binary === true`. Binary files can't
+ * usefully participate in LLM context (the backend
+ * silently trims them at sync time), so the picker
+ * disables their checkboxes and excludes them from
+ * select-all / deselect-all descendant math — without
+ * that, root and directory checkboxes could never
+ * reach the "fully selected" or "fully unselected"
+ * state when binaries were present.
+ */
+function collectBinaryPaths(node) {
+  const out = new Set();
+  function walk(n) {
+    if (!n || typeof n !== 'object') return;
+    if (n.type === 'file') {
+      if (n.is_binary === true && typeof n.path === 'string') {
+        out.add(n.path);
+      }
+      return;
+    }
+    for (const child of n.children || []) walk(child);
+  }
+  walk(node);
+  return out;
+}
+
+/**
  * Fetch the file tree + branch info and update every
  * downstream consumer. Two RPCs in parallel; tree
  * failure is fatal for this load (nothing useful to
@@ -142,6 +169,12 @@ export async function loadFileTree(host) {
   // circuits on empty input, so before the first load
   // the cost is zero.
   host._repoFiles = flattenTreePaths(host._latestTree);
+  // Collect binary paths so the picker can disable
+  // their checkboxes and exclude them from select-all
+  // descendant math. Without this, root checkbox
+  // could never reach all/none state when binaries
+  // are present.
+  host._binaryFiles = collectBinaryPaths(host._latestTree);
   // First-load auto-select — picks up every file with
   // pending changes so the user doesn't have to
   // re-tick what they were just working on. Runs
@@ -295,6 +328,9 @@ export function pushChildProps(host) {
   picker.branchInfo = host._latestBranchInfo;
   picker.excludedFiles = new Set(host._excludedFiles);
   picker.pinnedFiles = computePinnedFiles(host);
+  picker.binaryFiles = host._binaryFiles
+    ? new Set(host._binaryFiles)
+    : new Set();
   picker.activePath = host._activePath;
   picker.reviewState = host._reviewState;
   picker.requestUpdate();
