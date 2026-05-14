@@ -892,6 +892,9 @@ export const STYLES = css`
     background: rgba(88, 166, 255, 0.12);
     color: var(--accent-primary, #58a6ff);
     border-color: rgba(88, 166, 255, 0.3);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   /* Search bar — sits inside the action bar between the
    * snippet-drawer toggle and the session buttons. Flex-1
@@ -949,6 +952,9 @@ export const STYLES = css`
   .search-toggle.active {
     background: rgba(88, 166, 255, 0.2);
     color: var(--accent-primary, #58a6ff);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   .search-counter {
     font-size: 0.75rem;
@@ -996,7 +1002,6 @@ export const STYLES = css`
     display: inline-flex;
     border: 1px solid rgba(240, 246, 252, 0.15);
     border-radius: 4px;
-    overflow: hidden;
   }
   .mode-segmented .mode-btn {
     background: transparent;
@@ -1007,6 +1012,15 @@ export const STYLES = css`
     line-height: 1;
     cursor: pointer;
     transition: background 120ms ease, color 120ms ease;
+  }
+  .mode-segmented .mode-btn:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+  .mode-segmented .mode-btn:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+  .mode-segmented .mode-btn.active {
+    border-radius: 3px;
   }
   .mode-segmented .mode-btn:hover:not([disabled]) {
     background: rgba(240, 246, 252, 0.06);

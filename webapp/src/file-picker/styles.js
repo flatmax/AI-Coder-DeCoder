@@ -75,6 +75,9 @@ export const FILE_PICKER_STYLES = css`
       border-color: var(--accent-primary, #58a6ff);
       color: var(--accent-primary, #58a6ff);
       font-weight: 600;
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
     }
     .sort-btn .dir {
       margin-left: 0.15rem;

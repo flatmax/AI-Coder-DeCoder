@@ -143,6 +143,13 @@ export class URLChips extends LitElement {
     .chip-checkbox {
       cursor: pointer;
       accent-color: var(--accent-primary, #58a6ff);
+      border-radius: 2px;
+      transition: box-shadow 120ms ease;
+    }
+    .chip-checkbox:checked {
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
     }
     .chip-button {
       background: transparent;
