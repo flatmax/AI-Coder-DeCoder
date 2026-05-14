@@ -790,6 +790,25 @@ class DocConvert:
 
         suffix = source_abs.suffix.lower()
 
+        # Detect password-protected OOXML files at dispatch
+        # (.docx / .xlsx / .pptx). Encrypted Office documents
+        # are wrapped in a CDFV2 (OLE compound) container with
+        # the signature D0 CF 11 E0 A1 B1 1A E1, instead of the
+        # ZIP/OPC PK\x03\x04 prefix a real OOXML file uses.
+        # Catching this at dispatch saves the user from a
+        # silent LibreOffice failure followed by a misleading
+        # "Package not found" from python-pptx — both spend
+        # real time before producing an opaque error. ODF
+        # formats (.odt / .odp) use a different ZIP-based
+        # encryption scheme that doesn't surface as CDFV2,
+        # so they're not in scope for this check.
+        if suffix in (".docx", ".xlsx", ".pptx"):
+            encrypted = self._is_encrypted_ooxml(
+                source_abs, rel_path
+            )
+            if encrypted is not None:
+                return encrypted
+
         # markitdown handles the simple formats (.docx, .rtf,
         # .odt, .csv).
         if suffix in _MARKITDOWN_EXTENSIONS:
@@ -856,6 +875,63 @@ class DocConvert:
     # ------------------------------------------------------------------
     # Result-dict builders
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_encrypted_ooxml(
+        source_abs: Path,
+        rel_path: str,
+    ) -> dict[str, Any] | None:
+        """Return an error result if the file is encrypted, else None.
+
+        Encrypted Office documents (Word, Excel, PowerPoint
+        with a password set) wrap their payload in a CDFV2
+        compound container starting with the OLE signature
+        ``D0 CF 11 E0 A1 B1 1A E1``. A normal OOXML file is a
+        ZIP archive starting with ``PK\\x03\\x04``. python-pptx
+        / openpyxl / markitdown all raise opaque errors on
+        encrypted input ("Package not found", "not a zip
+        file"), and LibreOffice's headless converter exits
+        silently without producing a PDF when no
+        ``--password`` is supplied.
+
+        Detecting encryption at dispatch saves the user from
+        a useless soffice subprocess followed by a misleading
+        downstream error. The result message tells them how
+        to resolve it (remove the password in the source
+        application, or decrypt with msoffcrypto-tool).
+
+        Returns ``None`` when the file is not encrypted (or
+        unreadable, or shorter than 8 bytes — those cases are
+        handled by the pipeline-level error paths). I/O
+        failures here fall through to the pipeline so the
+        user sees one error per file, not two.
+
+        ``rel_path`` is echoed verbatim into the result's
+        ``path`` field so the webapp can match the per-file
+        error back to the request — webapp keys progress
+        rows by the path it sent, not by the file's basename.
+        """
+        try:
+            with open(source_abs, "rb") as fh:
+                header = fh.read(8)
+        except OSError:
+            return None
+        if not header.startswith(
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        ):
+            return None
+        return {
+            "path": rel_path,
+            "status": "error",
+            "message": (
+                "File is password-protected (encrypted "
+                "CDFV2 container). Remove the password in the "
+                "source application (File → Info → Protect "
+                "Document → Encrypt with Password → clear and "
+                "save) or decrypt with msoffcrypto-tool, then "
+                "retry."
+            ),
+        }
 
     @staticmethod
     def _fail(rel_path: str, message: str) -> dict[str, Any]:

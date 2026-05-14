@@ -92,6 +92,35 @@ class PptxPipeline:
                 rel_path, f"Source hash failed: {exc}"
             )
 
+        # Detect password-protected files before python-pptx
+        # raises its opaque "Package not found" error. Encrypted
+        # Office documents are wrapped in a CDFV2 (OLE compound)
+        # container with the signature D0 CF 11 E0 A1 B1 1A E1,
+        # whereas valid .pptx files are ZIP archives starting
+        # with PK\x03\x04. The CDFV2 wrapper holds an encrypted
+        # payload that neither LibreOffice (without --password)
+        # nor python-pptx can read, so a clear early error
+        # beats a misleading "Package not found".
+        try:
+            with open(source_abs, "rb") as fh:
+                header = fh.read(8)
+        except OSError as exc:
+            return self._fail(
+                rel_path, f"Failed to read source: {exc}"
+            )
+        if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            return self._fail(
+                rel_path,
+                (
+                    "File is password-protected (encrypted "
+                    "CDFV2 container). Remove the password in "
+                    "PowerPoint (File → Info → Protect "
+                    "Presentation → Encrypt with Password → "
+                    "clear) or decrypt with msoffcrypto-tool, "
+                    "then retry."
+                ),
+            )
+
         # Open the presentation. python-pptx's failure modes on
         # invalid pptx vary — corrupt zip, missing core XML,
         # unsupported schema version. Broad catch to keep the
