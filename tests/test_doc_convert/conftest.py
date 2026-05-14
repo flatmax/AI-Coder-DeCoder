@@ -67,24 +67,6 @@ def fake_markitdown(monkeypatch):
 
 
 @pytest.fixture
-def clean_repo(scan_root):
-    """A fake repo whose `is_clean()` returns True."""
-    return SimpleNamespace(
-        root=scan_root,
-        is_clean=lambda: True,
-    )
-
-
-@pytest.fixture
-def dirty_repo(scan_root):
-    """A fake repo whose `is_clean()` returns False."""
-    return SimpleNamespace(
-        root=scan_root,
-        is_clean=lambda: False,
-    )
-
-
-@pytest.fixture
 def force_pptx_fallback(monkeypatch):
     """Force pptx to use the python-pptx fallback path.
 

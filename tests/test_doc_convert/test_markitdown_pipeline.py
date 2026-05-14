@@ -54,43 +54,6 @@ class TestConvertFilesGuards:
 
 
 # ---------------------------------------------------------------------------
-# Clean-tree gate
-# ---------------------------------------------------------------------------
-
-
-class TestCleanTreeGate:
-    def test_dirty_tree_rejected(
-        self, config, dirty_repo, scan_root
-    ):
-        _write_source(scan_root, "doc.docx", b"x")
-        svc = DocConvert(config, repo=dirty_repo)
-        result = svc.convert_files(["doc.docx"])
-        assert "error" in result
-        assert "uncommitted" in result["error"].lower()
-
-    def test_clean_tree_allowed(
-        self, config, clean_repo, scan_root, fake_markitdown
-    ):
-        _write_source(scan_root, "doc.docx", b"x")
-        fake_markitdown.outputs[str(scan_root / "doc.docx")] = "body\n"
-        svc = DocConvert(config, repo=clean_repo)
-        result = svc.convert_files(["doc.docx"])
-        # No top-level error — per-file results present.
-        assert "error" not in result
-        assert result["status"] == "ok"
-
-    def test_no_repo_skips_gate(
-        self, doc_convert, scan_root, fake_markitdown
-    ):
-        """Without a repo, the gate is skipped (CLI / test use)."""
-        # doc_convert fixture uses fake_repo which has no is_clean.
-        _write_source(scan_root, "doc.docx", b"x")
-        fake_markitdown.outputs[str(scan_root / "doc.docx")] = "body\n"
-        result = doc_convert.convert_files(["doc.docx"])
-        assert "error" not in result
-
-
-# ---------------------------------------------------------------------------
 # Extension dispatch
 # ---------------------------------------------------------------------------
 

@@ -566,36 +566,6 @@ class DocConvert:
         if restricted is not None:
             return restricted
 
-        # Clean-tree gate — refuse conversion if the repo has
-        # uncommitted changes. Without a working tree to diff
-        # against, converted output can't be reviewed before
-        # commit. Only runs when a repo with is_clean() is
-        # attached; tests and CLI use without a full repo
-        # skip the gate (caller accepts the risk).
-        if self._repo is not None:
-            is_clean_fn = getattr(self._repo, "is_clean", None)
-            if callable(is_clean_fn):
-                try:
-                    clean = is_clean_fn()
-                except Exception as exc:
-                    logger.debug(
-                        "Repo is_clean() raised: %s", exc,
-                    )
-                    return {
-                        "error": (
-                            "Could not verify working tree "
-                            f"state: {exc}"
-                        ),
-                    }
-                if not clean:
-                    return {
-                        "error": (
-                            "Working tree has uncommitted "
-                            "changes. Commit or stash before "
-                            "converting."
-                        ),
-                    }
-
         # Decide execution mode. Background requires both a
         # running loop AND a wired callback — if either is
         # missing, fall back to inline so tests and CLI callers
