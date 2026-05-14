@@ -1495,7 +1495,18 @@ export class SvgViewer extends LitElement {
     if (!file) return;
     if (this._isDirty(file)) {
       this._saveFile(file.path);
+      return;
     }
+    // Clean file — reveal in the file picker. Mirrors
+    // the diff viewer's LED behaviour so the affordance
+    // is consistent across viewers.
+    this.dispatchEvent(
+      new CustomEvent('reveal-file-in-picker', {
+        detail: { path: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   // ---------------------------------------------------------------
