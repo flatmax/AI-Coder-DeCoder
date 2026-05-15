@@ -66,6 +66,7 @@ export class FilePicker extends LitElement {
     binaryFiles: { type: Object },
     activePath: { type: String },
     reviewState: { type: Object },
+    docConvertAvailable: { type: Boolean },
     filterQuery: { type: String, state: true },
     _expanded: { type: Object, state: true },
     _focusedPath: { type: String, state: true },
@@ -120,6 +121,7 @@ export class FilePicker extends LitElement {
     this.binaryFiles = new Set();
     this.activePath = null;
     this.reviewState = null;
+    this.docConvertAvailable = false;
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
@@ -650,9 +652,33 @@ export class FilePicker extends LitElement {
           ${menuOpen ? this._renderSortMenu(modes, active) : ''}
         </div>
         ${this._renderSettingsButton()}
+        ${this._renderDocConvertButton()}
         ${this._renderGitActions()}
       </div>
     `;
+  }
+
+  _renderDocConvertButton() {
+    if (!this.docConvertAvailable) return '';
+    return html`
+      <button
+        type="button"
+        class="picker-doc-convert-btn"
+        title="Convert documents to markdown"
+        aria-label="Convert documents"
+        @click=${this._onDocConvertButtonClick}
+      >📄</button>
+    `;
+  }
+
+  _onDocConvertButtonClick() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'doc-convert' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   _renderSortMenu(modes, active) {

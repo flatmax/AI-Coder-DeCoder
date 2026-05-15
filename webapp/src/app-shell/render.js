@@ -116,14 +116,6 @@ export function renderTemplate(host) {
           Reconnecting… (attempt ${host.reconnectAttempt})
         </div>
       ` : null}
-      ${host._docConvertAvailable ? html`
-        <button
-          class="convert-fab"
-          @click=${() => host._switchTab('doc-convert')}
-          title="Convert documents to markdown"
-          aria-label="Convert"
-        >📄</button>
-      ` : null}
       ${host._minimized ? html`
         <button
           class="expand-fab"

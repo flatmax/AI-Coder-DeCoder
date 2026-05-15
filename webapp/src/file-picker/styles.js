@@ -196,6 +196,24 @@ export const FILE_PICKER_STYLES = css`
       background: rgba(240, 246, 252, 0.08);
     }
 
+    .picker-doc-convert-btn {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+      opacity: 0.7;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .picker-doc-convert-btn:hover {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.08);
+    }
+
     .picker-git-actions {
       display: inline-flex;
       align-items: center;

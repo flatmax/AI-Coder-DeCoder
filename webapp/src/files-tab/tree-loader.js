@@ -333,6 +333,7 @@ export function pushChildProps(host) {
     : new Set();
   picker.activePath = host._activePath;
   picker.reviewState = host._reviewState;
+  picker.docConvertAvailable = !!host._docConvertAvailable;
   picker.requestUpdate();
   chat.repoFiles = host._repoFiles;
   chat.requestUpdate();
@@ -429,5 +430,15 @@ export function onStateLoaded(host, event) {
       picker.reviewState = review;
       picker.requestUpdate();
     }
+  }
+  // Doc Convert availability — flagged in the state snapshot
+  // when markitdown is importable on the server. The picker's
+  // toolbar gates a doc-convert button on this flag (replaces
+  // the legacy floating FAB owned by the shell). Push through
+  // pushChildProps so a missing picker mount is retried via
+  // the orchestrator's existing updated() retry path.
+  if (typeof state.doc_convert_available === 'boolean') {
+    host._docConvertAvailable = state.doc_convert_available;
+    pushChildProps(host);
   }
 }
