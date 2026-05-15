@@ -182,6 +182,27 @@ export class SvgViewer extends LitElement {
       visibility: hidden;
       border-left: none;
     }
+    /* Keep referenced defs paintable even though the left
+     * pane is visibility-hidden. Both panes inject the same
+     * SVG content, so both contain a <defs> with the same
+     * IDs. When the right pane's content references one
+     * (e.g. marker-end="url(#arrowhead)"), the browser
+     * resolves to the first matching ID in document order
+     * — the left pane's. For gradients/patterns/filters
+     * that's fine: a hidden ancestor doesn't suppress fill
+     * painting. But <marker> is rendered at path endpoints
+     * with visibility inherited from the marker element's
+     * tree — so the right pane's arrowheads silently
+     * disappear because they're "drawn" through the
+     * hidden left pane's marker.
+     *
+     * Forcing defs subtrees back to visibility:visible
+     * keeps the marker paintable. The pane itself stays
+     * invisible — defs don't render in flow regardless. */
+    .split.present .pane-left svg defs,
+    .split.present .pane-left svg defs * {
+      visibility: visible;
+    }
     .split.present .pane-right {
       flex: 1 1 100%;
     }
