@@ -181,6 +181,8 @@ export function renderTemplate(host) {
 
     <ac-compaction-progress></ac-compaction-progress>
 
+    <ac-cache-warmup-progress></ac-cache-warmup-progress>
+
     <ac-token-hud></ac-token-hud>
   `;
 }

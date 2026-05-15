@@ -194,6 +194,18 @@ Default extensions list:
 [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"]
 ```
 
+**`cache_warmup` section:**
+
+```pseudo
+CacheWarmupConfig:
+    enabled: bool                  // Default true
+    interval_seconds: int          // Default 270 (4:30)
+```
+
+Drives the background cache warmer (see `specs-reference/3-llm/cache-tiering.md` § Cache warmer). `interval_seconds` should sit comfortably inside the 5-minute Anthropic cache TTL with margin for retry waits — values ≥ 300 would let the cache expire before the warm-up fires. Values ≤ 0 fall back to the default.
+
+The auto-disable runtime flag (flipped by the warmer on failure or retry-budget exhaustion) is independent of this config value — re-enabling after auto-disable currently requires application restart.
+
 **`doc_index` section:**
 
 ```pseudo

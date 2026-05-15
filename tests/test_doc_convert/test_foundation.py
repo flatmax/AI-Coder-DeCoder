@@ -703,7 +703,7 @@ class TestEncryptedOoxmlDetection:
         # Pipeline failure on a malformed pptx is distinct from
         # the encryption error — the message should not mention
         # password protection.
-        assert "password-protected" not in entry["message"].lower()
+        assert "password-protected" not in entry.get("message", "").lower()
 
     def test_short_file_does_not_trigger(
         self, doc_convert, scan_root
@@ -716,8 +716,11 @@ class TestEncryptedOoxmlDetection:
         result = doc_convert.convert_files(["tiny.pptx"])
         [entry] = result["results"]
         # Whatever the pipeline says, it's not the encryption
-        # error.
-        assert "password-protected" not in entry["message"].lower()
+        # error. Defensive .get() — pipelines that succeed
+        # don't necessarily produce a message field; we only
+        # care that if one is present, it doesn't claim
+        # password protection.
+        assert "password-protected" not in entry.get("message", "").lower()
 
     def test_empty_file_does_not_trigger(
         self, doc_convert, scan_root
@@ -726,7 +729,7 @@ class TestEncryptedOoxmlDetection:
         _write_source(scan_root, "empty.pptx", b"")
         result = doc_convert.convert_files(["empty.pptx"])
         [entry] = result["results"]
-        assert "password-protected" not in entry["message"].lower()
+        assert "password-protected" not in entry.get("message", "").lower()
 
     def test_pdf_with_cdfv2_bytes_skips_check(
         self, doc_convert, scan_root
@@ -740,7 +743,7 @@ class TestEncryptedOoxmlDetection:
         [entry] = result["results"]
         # The PDF pipeline will reject it, but not with the OOXML
         # encryption message.
-        assert "CDFV2 container" not in entry["message"]
+        assert "CDFV2 container" not in entry.get("message", "")
 
     def test_no_pipeline_invoked_for_encrypted_file(
         self, doc_convert, scan_root, monkeypatch

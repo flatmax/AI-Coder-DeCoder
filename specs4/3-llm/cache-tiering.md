@@ -352,3 +352,72 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 - Manual rebuild re-extracts aggregate maps for L0, preserves history entries, wipes L1/L2/L3/Active, clears pin flags, and re-distributes selected files across L1/L2/L3 deterministically. The cascade is not run post-rebuild.
 - Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape.
 - History graduates to L3 only on piggyback (L3 already broken this cycle). Token-threshold-driven history graduation is not used — `cache_target_tokens` is a caching floor, not a conversation-length cap, and using it as a graduation trigger would destabilise L3 on almost every request. Active-history size is compaction's concern, not tiering's.
+
+## Cache Warmer
+
+Anthropic's prompt cache uses a 5-minute sliding TTL — any read or write extends the window. During interactive coding sessions the user often pauses for longer than 5 minutes to think, read, or context-switch. When the user returns, the cached prefix has expired and the next turn pays the full cache-write price (1.25× input on Claude) to re-prime.
+
+The cache warmer is a background timer that issues a tiny `litellm.completion` call every `interval_seconds` seconds of inactivity. The call is shaped so the cached prefix matches the next real turn byte-for-byte, keeping L0–L3 hot at cache-read pricing rather than cache-write.
+
+### Warm-up call shape
+
+- Reuses the EXACT cached prefix that a real turn would. Messages are assembled via the same code path as `stream_chat` — same L0 snapshot, same tier dispatch, same per-tier headers, same cache-control markers.
+- Appends a minimal user message asking for a 1-token acknowledgement.
+- Sets `max_tokens=2`. Providers reject 0; 2 covers a single token plus framing.
+- Disables reasoning regardless of session config — a warm-up never benefits from hidden thinking, and a reasoning budget would defeat the cost-minimisation goal.
+- No streaming. Synchronous completion via the aux executor.
+
+The result is discarded. Warm-ups never enter conversation history, never broadcast `userMessage` or `streamComplete`, never touch the stability tracker. They are side-channel completions whose only purpose is to refresh the provider's cache TTL.
+
+### Lifecycle
+
+- `start()` schedules the first firing. Called from `complete_deferred_init` (or from the synchronous init path when `deferred_init=False`) once the L0 snapshot is ready and an event loop is available.
+- `cancel()` stops the pending timer without rescheduling. Called at the start of every `stream_chat` invocation — a real LLM request is about to fly, the warmer should not race it.
+- `reset(reason)` cancels and reschedules. Called at the end of every `stream_chat` invocation — user activity just ended, restart the idle timer.
+- `disable(reason)` cancels and stays inert until `enable()` is called explicitly. Triggered by warm-up failure or retry-budget exhaustion (see below).
+
+### Two-phase wait with visible countdown
+
+Each interval is split into two phases:
+
+1. **Silent phase** — `interval_seconds - countdown_seconds` of `asyncio.sleep`. Most of the wait. The warmer broadcasts nothing.
+2. **Visible countdown phase** — the final `countdown_seconds` (default 30s). One `cacheWarmupCountdown` event broadcast per second carrying `{seconds_remaining, total}`. The frontend renders a progress bar matching the retry-banner UX so the user sees the warm-up coming and can interrupt by sending a real message.
+
+When the countdown reaches zero, the warmer broadcasts `cacheWarmupFiring` (frontend flips bar to spinner), issues the call, and broadcasts `cacheWarmupComplete` with `{success: bool, reason?: str}`. A user-initiated stream during the countdown produces `cacheWarmupCancelled` with `{reason: "user-activity"}`; a stream already in flight when the visible phase begins produces `{reason: "stream-active"}` and reschedules.
+
+### Single-stream guard interaction
+
+Warm-ups skip when any LLM stream is in flight — both the main user-facing stream and any agent streams. Provider rate limits and serialization concerns make concurrent warm-up calls counterproductive. The warmer reschedules rather than disables in this case; the next idle window is the next chance.
+
+The warmer does NOT register itself in the single-stream guard. Its existence is invisible to `chat_streaming` — a real user request fires regardless of whether a warm-up is mid-flight (they share the same `litellm` HTTP path, but provider-level concurrency is the warmer's concern, not the guard's).
+
+### Retry budget bounded by cache TTL
+
+The wrapped `retry_litellm_completion` call honours `config.num_retries` for retryable error types (rate_limit, api_connection, service_unavailable, timeout). The warmer's `on_retry` callback adds a retry-budget guard:
+
+If the cumulative elapsed time plus the next computed wait would exceed the cache TTL (5 minutes), the callback raises early. By that point the cached prefix has already expired, so the warm-up was pointless — completing the retry sequence would just burn the rest of the retry budget on a cold cache. The early raise propagates up to the warmer's exception handler, which calls `disable("warm-up failed: ...")`.
+
+### Auto-disable on failure
+
+Any exception from the warm-up call disables the warmer. The reason is recorded on the warmer instance and logged at WARNING. Re-enabling requires explicit `enable()` (currently no UI surface; future Settings-tab toggle).
+
+The disable strategy assumes that one warm-up failure predicts more — typical causes are persistent provider outages, auth misconfigurations, or rate-limit windows that exceed the TTL. Letting the warmer keep retrying every interval would burn cycles for no benefit. A user who wants to re-enable mid-session can adjust config or wait for the future RPC.
+
+### Scope
+
+Single-instance per `LLMService`. Only the main conversation is warmed. Agent contexts have transient cache state by design — each agent spawn writes a fresh cache and consumes it within the agent's lifetime. Warming agent contexts would multiply provider load with no proportional benefit.
+
+### Configuration
+
+Two fields in the `cache_warmup` section of `app.json`:
+
+- `enabled` (default `true`) — whether the warmer runs at all. The auto-disable runtime flag is independent of this config value (the warmer flips its own `_enabled` field on failure); re-enabling after auto-disable currently requires application restart.
+- `interval_seconds` (default `270`) — seconds of idle time before each warm-up firing. 270s (4:30) sits comfortably inside the 5-minute cache TTL with margin for retry waits. Values that would push past the TTL are clamped to the default — a zero or near-TTL interval would defeat the purpose.
+
+### Invariants
+
+- Warm-ups never appear in conversation history.
+- Warm-ups never trigger stability tracker updates.
+- Warm-ups never trigger the cache cascade — they only refresh the provider's cache TTL on already-placed content.
+- The cached prefix bytes used by a warm-up are identical to those a real turn would produce. Any change to prompt assembly that affects what the LLM sees must affect warm-ups identically, or the warmer's cache hits will silently degrade.
+- A failed warm-up disables the warmer; manual re-enable required.

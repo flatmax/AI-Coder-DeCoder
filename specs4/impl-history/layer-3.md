@@ -359,3 +359,37 @@ Layer 3 (LLM engine) is complete. All of: token counter, history store, file con
 Final test totals for Layer 3:
 - Python: run `uv run pytest` — 1503 tests passing across Layers 0–3 (1501 before 3.10's 16 new tests, plus the shape-test and import-fix adjustments).
 
+### 3.11 — Cache warmer — **delivered (post-Layer-3 polish)**
+
+Background timer that keeps the Anthropic prompt cache hot during user idle periods. Anthropic's cache uses a 5-minute sliding TTL — any pause longer than that pays the full cache-write price (1.25× input on Claude) on the next turn to re-prime. The warmer issues a tiny `litellm.completion` every `interval_seconds` (default 270 = 4:30) so the cached prefix never expires.
+
+Lands as a Layer 3 polish item rather than a Layer 4 feature because it lives at the LLMService boundary and depends only on the streaming pipeline that 3.7 delivered. Conceptually adjacent to cache tiering (3.5) — the warmer keeps the tiers tracked at the provider too.
+
+- `src/ac_dc/llm/_cache_warmer.py` — new `CacheWarmer` class. Constructor takes the `LLMService`, exposes `start()` / `cancel()` / `reset(reason)` / `disable(reason)` / `enable()` lifecycle methods. Two-phase wait: silent `asyncio.sleep` for `interval - countdown` seconds, then a visible countdown phase (default 30s) that broadcasts `cacheWarmupCountdown` once per second. After countdown lands, broadcasts `cacheWarmupFiring`, runs `_fire_warmup` (which assembles messages via the same code path as `stream_chat`, calls `litellm.completion` with `max_tokens=2`, no streaming, no `thinking` kwarg), broadcasts `cacheWarmupComplete` with `{success, reason?}`, schedules the next firing.
+- Retry-budget guard: the `on_retry` callback for `retry_litellm_completion` raises early when cumulative elapsed + wait would exceed the cache TTL. By that point a fresh warm-up would write a new cache anyway, so paying the retry cost is pointless. Any exception from the warm-up call calls `disable("warm-up failed: ...")`.
+- Stream-active checks at three points: before the visible phase begins (skips and reschedules), at every countdown tick (broadcasts `cacheWarmupCancelled` with `{reason: "stream-active"}` and reschedules), and via the `stream_chat` cancel-at-start hook (broadcasts `cacheWarmupCancelled` with `{reason: "user-activity"}`).
+- `src/ac_dc/llm_service.py` — constructor builds `CacheWarmer(self)` and calls `start()` in the synchronous-init path. Deferred-init path defers `start()` to `complete_deferred_init` (event loop must be running). `shutdown()` cancels the warmer first so its sleeping task doesn't fire after the executors are gone.
+- `src/ac_dc/llm/_streaming.py` — `stream_chat` cancels the warmer at the top (real LLM request is about to fly, must not race) and resets it before returning (user activity just ended, restart idle timer).
+- `src/ac_dc/llm/_rpc_lifecycle.py` — `complete_deferred_init` calls `service._cache_warmer.start()` after the L0 freeze so the first scheduling sees a populated snapshot.
+- `src/ac_dc/config.py` — new `cache_warmup_config` property reading the `cache_warmup` section of `app.json`. Two fields: `enabled` (default true), `interval_seconds` (default 270). Values ≤ 0 fall back to the default.
+- `src/ac_dc/config/app.json` — added `cache_warmup` section with the two fields at their defaults.
+- Frontend: new `webapp/src/cache-warmup-progress.js` overlay component. State machine driven by four window events (`cache-warmup-countdown`, `cache-warmup-firing`, `cache-warmup-complete`, `cache-warmup-cancelled`), all re-dispatched by the app shell from the corresponding `AcApp` server-push callbacks. Renders a progress bar during the countdown phase (matching the retry-banner UX), spinner during firing, brief green/red flash on complete, silent close on cancel.
+- `webapp/src/app-shell/index.js` — four new `AcApp` methods (`cacheWarmupCountdown`, `cacheWarmupFiring`, `cacheWarmupComplete`, `cacheWarmupCancelled`) re-dispatching to window events.
+- `webapp/src/app-shell/render.js` — mounts `<ac-cache-warmup-progress>` next to the existing `<ac-compaction-progress>` overlay.
+- `tests/test_config_defaults.py` — new `test_cache_warmup_section_fields` validating shape and the < 300 sanity bound (the interval must sit inside the 5-minute TTL with margin).
+- `tests/test_llm_service/conftest.py` — `config` fixture force-disables the warmer post-construction by mutating the cached `_app_config` dict. The bundled default is on, but the LLM service test suite would otherwise leak a 270-second `asyncio.Task` per test. Tests that specifically exercise the warmer construct their own ConfigManager.
+
+Design points:
+
+- **Warm-ups never enter conversation history.** The warmer bypasses `add_message`, `archival_append`, and the `streamComplete` broadcast entirely. The result is parsed only enough to extract token usage for the success log; everything else is discarded.
+- **No reasoning regardless of session config.** The `_fire_warmup` path passes no `thinking` kwarg even when `config.reasoning_enabled` is true. Warm-ups don't benefit from hidden thinking, and a reasoning budget would multiply provider load for no gain.
+- **Single instance per service.** Only the main conversation is warmed. Agent contexts have transient cache state by design (each spawn writes a fresh cache); warming them would multiply provider load with no proportional benefit.
+- **Auto-disable is sticky.** A warm-up failure flips an independent runtime `_enabled` flag. Re-enabling requires application restart (no UI surface yet). The reasoning: one failure predicts more — typical causes are persistent provider outages, auth misconfigurations, or rate-limit windows that exceed the TTL. Letting the warmer keep retrying every interval would burn cycles for no benefit.
+- **Cache prefix bytes must match real turns exactly.** `_fire_warmup` calls `service._build_tiered_content` and then either `_assemble_tiered` or `_assemble_messages_flat` depending on whether the tracker is initialised — same dispatch as `stream_chat`. Any change to prompt assembly that affects what the LLM sees must affect warm-ups identically, or the warmer's cache hits silently degrade. Verification path: log `cache_read_input_tokens` on every warm-up; the second warm-up after a real turn should show cache_read > 0 (first one is a priming write).
+
+Open carried over:
+
+- **Settings-tab toggle.** Re-enabling after auto-disable currently requires application restart. A future Settings-tab card or RPC could expose `enable()` and surface the disabled state with its reason.
+- **Cost surface.** The token HUD doesn't currently distinguish warm-up calls from real requests. Session totals include warm-up token usage. Future work could add a separate counter or row.
+- **Multi-provider awareness.** The 5-minute TTL is hardcoded to Anthropic's value. OpenAI's prompt cache has a different TTL and economics. The warmer doesn't currently reason about the provider — it warms regardless. A follow-up could detect the provider via litellm's model-prefix convention and skip warming for providers without prompt cache support.
+

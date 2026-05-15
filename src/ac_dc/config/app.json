@@ -33,5 +33,9 @@
     "enabled": false,
     "budget_tokens": 10000,
     "effort": "high"
+  },
+  "cache_warmup": {
+    "enabled": true,
+    "interval_seconds": 270
   }
 }

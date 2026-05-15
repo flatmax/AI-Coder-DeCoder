@@ -44,10 +44,10 @@ class TestConvertFilesGuards:
         _assert_restricted(result)
 
     def test_guard_runs_before_clean_tree_check(
-        self, config, dirty_repo
+        self, config, fake_repo
     ):
-        """Restricted caller doesn't even see the dirty-tree error."""
-        svc = DocConvert(config, repo=dirty_repo)
+        """Restricted caller is rejected before any other check runs."""
+        svc = DocConvert(config, repo=fake_repo)
         svc._collab = _StubCollab(is_localhost=False)
         result = svc.convert_files(["any.docx"])
         _assert_restricted(result)

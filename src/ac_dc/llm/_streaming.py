@@ -100,6 +100,14 @@ async def stream_chat(
     """
     if scope is None:
         scope = service._default_scope()
+    # Cancel any pending cache-warmer call so a real LLM
+    # request doesn't race a warm-up call. The warmer's
+    # _run() also checks for active streams as a second
+    # line of defense, but cancelling here is cheaper than
+    # waking the warmer just to have it skip.
+    warmer = getattr(service, "_cache_warmer", None)
+    if warmer is not None:
+        warmer.cancel()
     error: str | None = None
     full_content = ""
     cancelled = False
@@ -570,6 +578,15 @@ async def stream_chat(
                 "Post-response processing for %s failed: %s",
                 request_id, exc,
             )
+
+    # Reset the cache warmer — request just finished, so
+    # restart the idle timer. The reset is a no-op when
+    # the warmer is disabled (auto-disabled by a prior
+    # failure, or disabled in config), so it's safe to
+    # call unconditionally on every code path.
+    warmer = getattr(service, "_cache_warmer", None)
+    if warmer is not None:
+        warmer.reset("stream-end")
 
     # Return the completion result so agent spawning's
     # asyncio.gather can collect files_modified /

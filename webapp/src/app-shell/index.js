@@ -34,6 +34,7 @@ import '../file-nav.js';
 import '../token-hud.js';
 import '../compaction-progress.js';
 import '../doc-index-progress.js';
+import '../cache-warmup-progress.js';
 
 import { APP_SHELL_STYLES } from './styles.js';
 import {
@@ -810,6 +811,59 @@ export class AppShell extends JRPCClient {
   compactionEvent(requestId, event) {
     window.dispatchEvent(new CustomEvent('compaction-event', {
       detail: { requestId, event },
+    }));
+    return true;
+  }
+
+  /**
+   * Cache-warmup countdown tick. Fired once per second
+   * during the visible 30-second lead-in to a warm-up
+   * call. Payload: {seconds_remaining, total}. Re-
+   * dispatched as a window event so
+   * <ac-cache-warmup-progress> can render a progress
+   * bar matching the retry-banner UX.
+   */
+  cacheWarmupCountdown(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-countdown', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired the moment the warm-up call goes out, after
+   * the countdown completes. Frontend flips the bar
+   * from countdown to spinner state.
+   */
+  cacheWarmupFiring(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-firing', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired after the warm-up call resolves. Payload
+   * carries {success: bool, reason?: str}. On
+   * failure the warmer auto-disables — the chat
+   * panel surfaces a toast separately.
+   */
+  cacheWarmupComplete(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-complete', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired when the visible countdown is aborted —
+   * either by a user-initiated stream (the warmer
+   * defers to the real request) or by an explicit
+   * cancel. Payload: {reason}.
+   */
+  cacheWarmupCancelled(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-cancelled', {
+      detail: payload || {},
     }));
     return true;
   }

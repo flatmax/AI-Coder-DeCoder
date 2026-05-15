@@ -403,8 +403,26 @@ def repo(repo_dir: Path) -> Repo:
 
 @pytest.fixture
 def config(config_dir: Path, repo_dir: Path) -> ConfigManager:
-    """Configured ConfigManager — triggers first-install bundle copy."""
-    return ConfigManager(repo_root=repo_dir)
+    """Configured ConfigManager — triggers first-install bundle copy.
+
+    The cache warmer is force-disabled for the LLM service test
+    suite. The bundled default is enabled-on; tests that don't
+    cancel the warmer would leak a 270-second
+    :class:`asyncio.Task` per test, producing pytest-asyncio
+    teardown warnings and (in tightly-scheduled CI runs) timing
+    flake. Tests that specifically exercise the warmer should
+    use a service constructed with their own ConfigManager
+    rather than this fixture.
+    """
+    cfg = ConfigManager(repo_root=repo_dir)
+    # Force-load the app config dict, then mutate the cached
+    # copy. The accessor reads through ``_app_config`` on every
+    # access, so this disables the warmer for the rest of the
+    # test without touching the bundled JSON.
+    _ = cfg.app_config
+    if isinstance(cfg._app_config, dict):
+        cfg._app_config.setdefault("cache_warmup", {})["enabled"] = False
+    return cfg
 
 
 @pytest.fixture

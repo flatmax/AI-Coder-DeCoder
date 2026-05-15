@@ -144,6 +144,42 @@ Broadcast to all connected clients before the stream starts, so collaborators se
 
 The sending client ignores this broadcast (it already added the message optimistically).
 
+### Cache warmer events — server → browser (broadcast)
+
+Four server-push callbacks driven by the cache warmer (see `specs4/3-llm/cache-tiering.md` § Cache Warmer for lifecycle). All four take a single `payload` dict argument; the frontend re-dispatches each as a window CustomEvent with `detail = payload`.
+
+#### `cacheWarmupCountdown(payload)`
+
+Fired once per second during the visible 30-second countdown phase before a warm-up call. The frontend renders a progress bar matching the retry-banner UX.
+
+| Field | Type | Notes |
+|---|---|---|
+| `seconds_remaining` | int | Counts down from `total` to 1 (1 is the last tick before firing) |
+| `total` | int | Initial countdown length in seconds. Drives the progress-bar denominator |
+
+#### `cacheWarmupFiring(payload)`
+
+Fired the moment the warm-up call goes out, after the countdown completes. Frontend flips the progress bar from countdown to spinner state. Empty payload `{}`.
+
+#### `cacheWarmupComplete(payload)`
+
+Fired after the warm-up call resolves. Frontend shows a brief flash and then fades out.
+
+| Field | Type | Notes |
+|---|---|---|
+| `success` | bool | `true` for a successful provider response. `false` for any exception (including retry-budget exhaustion) |
+| `reason` | string | Present when `success: false`. Human-readable failure description suitable for display |
+
+A `success: false` event is followed by an automatic warmer disable — no further `cacheWarmup*` events fire until application restart or explicit re-enable.
+
+#### `cacheWarmupCancelled(payload)`
+
+Fired when the visible countdown is aborted. Frontend dismisses the progress bar without a flash.
+
+| Field | Type | Notes |
+|---|---|---|
+| `reason` | string | `"user-activity"` (a user-initiated stream cancelled the timer) or `"stream-active"` (a stream was already in flight when the visible phase began) |
+
 ### Stream resumption snapshot
 
 The `get_current_state` RPC response carries an `active_streams` field — one entry per in-flight stream — so a refreshed browser can re-attach to its own stream rather than receive the opaque single-stream-guard rejection. Schema for the RPC envelope itself lives in `specs-reference/1-foundation/rpc-inventory.md` § Service: LLMService; this section pins the per-entry field shape.

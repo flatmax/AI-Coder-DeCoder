@@ -700,6 +700,20 @@ class LLMService:
         if not deferred_init:
             self._freeze_l0_snapshot()
 
+        # Cache warmer — keeps the provider prompt cache
+        # warm during user idle periods. Inert until
+        # ``start()`` runs. Synchronous-init path calls
+        # start here; deferred-init path calls start from
+        # ``complete_deferred_init`` once the symbol index
+        # and L0 snapshot are ready. Either way, the first
+        # actual scheduling happens once an event loop is
+        # running (i.e. after the first ``stream_chat``
+        # captures one and its trailing ``reset()`` fires).
+        from ac_dc.llm._cache_warmer import CacheWarmer
+        self._cache_warmer = CacheWarmer(self)
+        if not deferred_init:
+            self._cache_warmer.start()
+
     # ------------------------------------------------------------------
     # L0 snapshot
     # ------------------------------------------------------------------

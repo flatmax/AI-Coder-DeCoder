@@ -918,6 +918,43 @@ class ConfigManager:
         return self.reasoning_config["effort"]
 
     @property
+    def cache_warmup_config(self) -> dict[str, Any]:
+        """Cache warm-keeper section with defaults filled in.
+
+        Drives the periodic warm-up call that keeps the
+        provider's prompt cache hot during user idle
+        periods. Two fields:
+
+        - ``enabled`` — whether the warmer runs at all.
+          Default True. Auto-disable on failure or retry-
+          budget exhaustion is independent of this config
+          value (the warmer flips its own runtime flag);
+          re-enabling after auto-disable requires a manual
+          toggle via the future RPC.
+        - ``interval_seconds`` — seconds of idle time
+          before each warm-up firing. Default 270 (4:30),
+          well inside Anthropic's 5-minute cache TTL with
+          margin for retry waits. Values <= 0 fall back to
+          the default — a zero-interval warmer would burn
+          continuous cycles for no benefit.
+
+        Spec: ``cache_warmup`` section of ``app.json``.
+        """
+        section = self.app_config.get("cache_warmup", {})
+        if not isinstance(section, dict):
+            section = {}
+        try:
+            interval = int(section.get("interval_seconds", 270))
+        except (TypeError, ValueError):
+            interval = 270
+        if interval <= 0:
+            interval = 270
+        return {
+            "enabled": bool(section.get("enabled", True)),
+            "interval_seconds": interval,
+        }
+
+    @property
     def agents_config(self) -> dict[str, Any]:
         """Agent-mode section with defaults filled in.
 

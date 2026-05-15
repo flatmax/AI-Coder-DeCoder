@@ -76,6 +76,13 @@ def complete_deferred_init(
     # toggle, etc.).
     service._freeze_l0_snapshot()
 
+    # Start the cache warmer now that L0 is frozen. The
+    # warmer's first scheduling needs a running event loop;
+    # we're on one here (called from the server's startup
+    # flow), so start() can succeed even though the
+    # symmetric call in __init__ couldn't.
+    service._cache_warmer.start()
+
     # Broadcast restored session now that the event loop is up
     # and frontend subscribers are mounted.
     if service._restored_on_startup:
@@ -119,6 +126,12 @@ def schedule_doc_index_build(service: "LLMService") -> bool:
 
 def shutdown(service: "LLMService") -> None:
     """Release executor resources. Called on server shutdown."""
+    # Cancel the cache warmer first — its task may be
+    # sleeping on the event loop and we don't want it to
+    # fire after the executors are gone.
+    warmer = getattr(service, "_cache_warmer", None)
+    if warmer is not None:
+        warmer.cancel()
     # wait=False so shutdown doesn't block on in-flight work;
     # the event loop is typically already stopping at this point.
     service._stream_executor.shutdown(wait=False)

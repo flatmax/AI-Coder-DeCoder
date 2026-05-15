@@ -131,6 +131,24 @@ Not strictly a cache-tiering constant but co-resident in the same subsystem:
 |---|---|---|
 | History messages never graduated regardless of token budget | 2 exchanges | Compaction config (`app.json`), owned by history compaction — see `specs-reference/3-llm/history.md` when written |
 
+### Cache warmer
+
+Module-level constants in `src/ac_dc/llm/_cache_warmer.py`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `_WARMUP_PROMPT` | `"ping (cache warm-up — respond with 'ok')"` | User message text appended after the cached prefix. Stable across calls so the cached suffix tail matches between warm-ups |
+| `_WARMUP_MAX_TOKENS` | 2 | `max_tokens` argument to `litellm.completion`. Providers reject 0; 2 covers a single token plus framing |
+| `_CACHE_TTL_SECONDS` | 300.0 | Anthropic prompt cache TTL. Used as the retry-budget cutoff: if a retry would push elapsed + wait past this, the warmer aborts and disables |
+| `_COUNTDOWN_SECONDS` | 30.0 | Visible countdown phase before each warm-up firing. The frontend renders one tick per second |
+
+Default config values (in `app.json` under the `cache_warmup` section):
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Bundled default. Auto-disable on failure flips an independent runtime flag — re-enabling currently requires application restart |
+| `interval_seconds` | 270 | 4:30, sits inside the 5-minute TTL with margin for retry waits. Values <= 0 fall back to the default |
+
 ## Schemas
 
 ### TrackedItem shape

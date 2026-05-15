@@ -64,7 +64,18 @@ Race window: a user who sends a new message before `state-loaded` resolves still
 
 Under the L0-content-typed model, the symbol map (code mode) or doc map (document mode) in L0's system message contains every indexed file's block. Selected files appear in the map AND as full text in a lower tier — that's the design. The system prompt's authority rule instructs the LLM to treat full text in Working Files as canonical when it disagrees with the structural map. The only filter applied at map-render time is the user's index-exclusion set (file picker's three-state checkbox), since excluded files have no representation in the prompt at all.
 
+## Cache Warmer Coordination
+
+A background cache warmer (see [cache-tiering.md § Cache Warmer](cache-tiering.md#cache-warmer)) issues periodic minimal LLM calls during idle periods to keep the provider's prompt cache hot. The streaming pipeline coordinates with it at two points:
+
+- At the top of `stream_chat`: cancel any pending warm-up. A real LLM request is about to fly; the warmer should not race it. Pending countdowns close via the `cacheWarmupCancelled` broadcast (frontend dismisses the progress bar).
+- At the end of `stream_chat`: reset the warmer. User activity just completed; restart the idle timer.
+- The warmer broadcasts four events to the browser via the standard `_event_callback` channel: `cacheWarmupCountdown`, `cacheWarmupFiring`, `cacheWarmupComplete`, `cacheWarmupCancelled`. See [streaming reference](../../specs-reference/3-llm/streaming.md) for payload schemas.
+
+The warmer never registers itself in the single-stream guard — its existence is invisible to `chat_streaming`. Real user requests fire regardless of whether a warm-up is mid-flight.
+
 ## File Context Sync
+🟨🟨🟨 REPL
 🟨🟨🟨 REPL
 
 - Compare current file context against incoming selected files list
