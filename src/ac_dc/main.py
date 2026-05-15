@@ -502,6 +502,7 @@ async def run(
         event_callback=event_callback,
         history_store=history_store,
         deferred_init=True,
+        experimental=experimental,
     )
 
     # Wire the LLMService reference into Settings so

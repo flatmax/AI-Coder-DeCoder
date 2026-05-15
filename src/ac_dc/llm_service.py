@@ -174,6 +174,7 @@ class LLMService:
         event_callback: EventCallback | None = None,
         history_store: Optional["HistoryStore"] = None,
         deferred_init: bool = False,
+        experimental: bool = False,
     ) -> None:
         """Construct the service.
 
@@ -208,6 +209,13 @@ class LLMService:
             service as not-yet-ready for chat. Layer 6's startup
             sequence uses this to get the WebSocket server up
             before heavy indexing completes.
+        experimental:
+            When True, unlock experimental features that are off
+            by default. Currently gates the cache warmer — the
+            warmer requires both this flag AND
+            ``cache_warmup.enabled`` in ``app.json``. Either
+            gate closed keeps the warmer inert. Plumbed through
+            from the CLI's ``--experimental`` flag.
         """
         self._config = config
         self._repo = repo
@@ -700,6 +708,17 @@ class LLMService:
         if not deferred_init:
             self._freeze_l0_snapshot()
 
+        # Experimental features gate. The CLI's
+        # ``--experimental`` flag flows here via ``main.run``
+        # and acts as a master switch for opt-in features.
+        # Currently gates the cache warmer; future
+        # experimental features check this flag too.
+        # Stored on the service so :meth:`CacheWarmer.start`
+        # (called both here and from
+        # :func:`complete_deferred_init`) can check it
+        # without re-plumbing through every call site.
+        self._experimental = bool(experimental)
+
         # Cache warmer — keeps the provider prompt cache
         # warm during user idle periods. Inert until
         # ``start()`` runs. Synchronous-init path calls
@@ -709,6 +728,12 @@ class LLMService:
         # actual scheduling happens once an event loop is
         # running (i.e. after the first ``stream_chat``
         # captures one and its trailing ``reset()`` fires).
+        # The warmer is double-gated — both
+        # ``self._experimental`` and
+        # ``app.json::cache_warmup.enabled`` must be True
+        # for any warm-up to fire. The check happens inside
+        # ``CacheWarmer.start`` so the deferred-init path
+        # gets the same gate without re-checking here.
         from ac_dc.llm._cache_warmer import CacheWarmer
         self._cache_warmer = CacheWarmer(self)
         if not deferred_init:

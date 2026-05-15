@@ -35,7 +35,7 @@
     "effort": "high"
   },
   "cache_warmup": {
-    "enabled": true,
+    "enabled": false,
     "interval_seconds": 270
   }
 }

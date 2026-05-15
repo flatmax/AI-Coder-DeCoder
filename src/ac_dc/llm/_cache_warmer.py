@@ -63,6 +63,18 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ac_dc.llm_service import LLMService
 
+
+class _WarmupCancelled(Exception):
+    """Internal marker — warmer cancelled mid-retry.
+
+    Distinguishes "user activity arrived during a retry
+    backoff" (clean reschedule) from "warm-up failed"
+    (disable). Raised by ``_on_retry`` when the generation
+    counter has advanced; caught in ``_run``'s exception
+    chain to take the cancel branch instead of the
+    failure branch.
+    """
+
 logger = logging.getLogger("ac_dc.llm_service.cache_warmer")
 
 
@@ -182,6 +194,20 @@ class CacheWarmer:
         # firing's start so a stale snapshot can't bleed
         # into a subsequent broadcast.
         self._last_warmup_tokens: dict[str, Any] | None = None
+        # Generation counter — incremented by :meth:`cancel`.
+        # ``_completion_sync`` captures the current value
+        # when it starts and checks it on every retry. If
+        # the counter has advanced, the warm-up was cancelled
+        # while a retry was sleeping in the executor thread
+        # (which the asyncio cancel can't interrupt), so the
+        # next retry attempt raises before firing a stale
+        # provider call. Without this, a user message
+        # arriving during a rate-limit backoff would race
+        # against the warmer's in-flight retry — the user's
+        # call goes first, then the deferred warmup fires
+        # anyway, hitting the rate limiter a second time
+        # and potentially delaying subsequent user calls.
+        self._generation: int = 0
 
     # ------------------------------------------------------------------
     # Public state accessors (consumed by the future RPC + UI)
@@ -215,21 +241,66 @@ class CacheWarmer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Begin the warm-up cycle if config has it enabled."""
+        """Begin the warm-up cycle if all gates are open.
+
+        Double-gated: BOTH the CLI ``--experimental`` flag
+        AND ``app.json::cache_warmup.enabled`` must be
+        true. Either being false keeps the warmer inert
+        (logs at debug, sets ``_enabled = False`` so the
+        UI's ``get_cache_warmer_status`` reports it
+        accurately, and skips scheduling).
+
+        The experimental gate is checked first — if
+        ``--experimental`` is off, we don't even read the
+        config flag. This means operators running without
+        ``--experimental`` see "warmer disabled by
+        experimental flag" in logs rather than "warmer
+        disabled by config", which is the correct
+        diagnostic signal for that mode of operation.
+
+        Both gates default to off. Operators must opt in
+        via both the CLI flag and the app-config flag to
+        try warming. The two-key requirement is
+        deliberate — the warmer has a small but non-zero
+        risk of provider-side rate-limit interactions, so
+        a config-only opt-in is too easy to leave on by
+        accident across upgrades.
+        """
+        if not getattr(self._service, "_experimental", False):
+            logger.debug(
+                "Cache warmer disabled — "
+                "--experimental flag not set"
+            )
+            self._enabled = False
+            return
         cfg = self._service._config.cache_warmup_config
-        if not cfg.get("enabled", True):
-            logger.debug("Cache warmer disabled by config")
+        if not cfg.get("enabled", False):
+            logger.debug(
+                "Cache warmer disabled — "
+                "cache_warmup.enabled is false in app.json"
+            )
             self._enabled = False
             return
         self._enabled = True
         self._schedule()
 
     def cancel(self) -> None:
-        """Cancel the pending timer without rescheduling."""
+        """Cancel the pending timer without rescheduling.
+
+        Bumps the generation counter so any in-flight retry
+        in the executor thread aborts before its next
+        attempt — see :attr:`_generation`. The asyncio task
+        cancellation handles the silent / countdown phases
+        cleanly; the generation bump handles the case where
+        a retry is sleeping inside `litellm.completion`'s
+        backoff logic on the executor thread (which asyncio
+        cannot interrupt).
+        """
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
         self._scheduled_at = None
+        self._generation += 1
 
     def reset(self, reason: str) -> None:
         """Cancel and reschedule.
@@ -293,6 +364,14 @@ class CacheWarmer:
         if self._task is not None and not self._task.done():
             self._task.cancel()
         interval = self.interval_seconds
+        # ``_scheduled_at`` represents actual firing time —
+        # the moment ``_fire_warmup`` is invoked. The visible
+        # countdown phase (the last ``_COUNTDOWN_SECONDS`` of
+        # the interval) is NOT extra time on top of the
+        # interval; it's part of the interval itself. The
+        # UI's ``seconds_remaining`` poll-derived countdown
+        # and the popup's broadcast-derived countdown must
+        # therefore agree at firing time.
         self._scheduled_at = time.time() + interval
         self._task = loop.create_task(self._run(interval))
 
@@ -315,6 +394,13 @@ class CacheWarmer:
         ``stream_chat`` — the asyncio.CancelledError below
         propagates and the broadcast loop exits cleanly.
         """
+        # Compute the absolute firing target up front. Both
+        # the silent and visible phases anchor to this
+        # wall-clock time, so accumulated broadcast latency
+        # inside the visible-phase loop cannot drift the
+        # actual fire time later than the UI's countdown
+        # display promises.
+        scheduled_at = self._scheduled_at or (time.time() + delay)
         # Silent phase. If ``delay`` is shorter than the
         # countdown window (e.g. a config with a tiny
         # interval, or a manually-triggered run), skip
@@ -337,22 +423,40 @@ class CacheWarmer:
             self._scheduled_at = None
             self._schedule()
             return
-        # Visible countdown phase. Tick once per second,
-        # broadcasting remaining time so the frontend can
-        # animate. The broadcast is best-effort —
-        # an event-callback failure logs and continues.
+        # Visible countdown phase. Each tick computes its
+        # remaining seconds from the absolute ``scheduled_at``
+        # target rather than counting down via ``sleep(1.0)``
+        # accumulators. This means broadcast latency inside
+        # the loop cannot drift the firing time — if a tick
+        # took 1.2s instead of 1.0s, the next tick simply
+        # displays one less second and the actual fire still
+        # lands on schedule. Without this anchoring, 30
+        # ticks × small per-tick overhead compounds into
+        # multi-second drift, and the popup's "0s" frame
+        # shows several seconds before the fire actually
+        # happens.
         countdown = min(delay, _COUNTDOWN_SECONDS)
-        ticks = int(countdown)
+        total_ticks = int(countdown)
         try:
-            for i in range(ticks, 0, -1):
-                await self._broadcast(
-                    "cacheWarmupCountdown",
-                    {
-                        "seconds_remaining": i,
-                        "total": ticks,
-                    },
-                )
-                await asyncio.sleep(1.0)
+            last_displayed: int | None = None
+            while True:
+                remaining_secs = scheduled_at - time.time()
+                if remaining_secs <= 0:
+                    break
+                # Round UP so the displayed countdown reaches
+                # zero exactly at ``scheduled_at``, not one
+                # tick before. The popup's "0" frame should
+                # coincide with the firing broadcast.
+                display = max(1, int(remaining_secs + 0.999))
+                if display != last_displayed:
+                    await self._broadcast(
+                        "cacheWarmupCountdown",
+                        {
+                            "seconds_remaining": display,
+                            "total": total_ticks,
+                        },
+                    )
+                    last_displayed = display
                 # Re-check stream activity each tick so a
                 # request that starts mid-countdown
                 # cancels the visible bar via the bar's
@@ -369,6 +473,11 @@ class CacheWarmer:
                     self._scheduled_at = None
                     self._schedule()
                     return
+                # Sleep until the next whole-second boundary
+                # of the countdown, capped at 1s so we can
+                # re-check activity at least every second.
+                next_boundary = remaining_secs - (display - 1)
+                await asyncio.sleep(min(1.0, max(0.05, next_boundary)))
         except asyncio.CancelledError:
             # Clean cancel — banner closes via the chat
             # panel's own cancel handling on stream-start.
@@ -388,6 +497,19 @@ class CacheWarmer:
         try:
             await self._fire_warmup()
         except asyncio.CancelledError:
+            await self._broadcast(
+                "cacheWarmupCancelled",
+                {"reason": "user-activity"},
+            )
+            return
+        except _WarmupCancelled:
+            # Cancelled while a retry was sleeping in the
+            # executor thread — clean reschedule, NOT a
+            # disable. The asyncio CancelledError branch
+            # handles cancellation that lands during the
+            # silent or visible countdown phases; this
+            # branch handles cancellation that lands while
+            # the retry-backoff sleep is in progress.
             await self._broadcast(
                 "cacheWarmupCancelled",
                 {"reason": "user-activity"},
@@ -580,6 +702,11 @@ class CacheWarmer:
                 "litellm not installed — cache warmer cannot run"
             ) from exc
         config = self._service._config
+        # Capture the generation at start. If ``cancel()``
+        # bumps it during a retry sleep, ``_on_retry`` sees
+        # the mismatch and raises rather than letting the
+        # retry fire a stale provider call.
+        start_generation = self._generation
 
         def _call() -> Any:
             # No ``thinking`` kwarg — warm-ups never reason
@@ -593,10 +720,20 @@ class CacheWarmer:
                 timeout=config.aux_request_timeout_seconds,
             )
 
-        # Retry-budget guard. If a retry would push past the
-        # cache TTL, the warm-up was pointless — abort and
-        # let the caller disable.
+        # Retry-budget guard. Two reasons to abort a retry:
+        # (1) cumulative waits would push past the cache TTL
+        # — the warm-up was pointless. (2) the warmer was
+        # cancelled while we were sleeping in the executor
+        # thread (e.g. a user message started a real stream).
+        # The asyncio cancel can't interrupt our sleep; the
+        # generation bump signals it instead.
         def _on_retry(info: dict[str, Any]) -> None:
+            if self._generation != start_generation:
+                raise _WarmupCancelled(
+                    "warm-up cancelled during retry backoff "
+                    f"(generation {start_generation} → "
+                    f"{self._generation})"
+                )
             elapsed = time.time() - started
             wait = float(info.get("wait_seconds", 0.0))
             if elapsed + wait >= _CACHE_TTL_SECONDS:
