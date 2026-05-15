@@ -14,6 +14,22 @@
 | Hover behavior | Pauses timer; mouse leave restarts auto-hide |
 | Dismiss button | Hides immediately (no fade) |
 
+### Token HUD warm-up variant
+
+The HUD also fires on successful cache warm-ups (window event `cacheWarmupComplete` with `success: true`). Rendered identically to a per-turn HUD with two differences:
+
+| Aspect | Per-turn | Per-warmup |
+|---|---|---|
+| Header label | Configured model name | `🌡️ Cache warmup` |
+| Header tooltip | Empty | Explanation of the warm-up's billing model |
+| Request grid `Completion` row | Provider's completion_tokens | 0 (warm-ups set `max_tokens=2`) |
+| Request grid `Reasoning` row | Provider's reasoning_tokens | 0 |
+| Request grid `Prompt` / `Cache Read` / `Cache Write` rows | Real-turn values | Warm-up's values |
+| Session totals section | Reflects cumulative real-turn usage | Reflects cumulative warm-up + real-turn usage (warm-up tokens already accumulated server-side) |
+| Tier / Budget / Changes sections | Same | Same — no warm-up-specific behavior |
+
+Failure broadcasts (`success: false`) do NOT trigger the HUD. The `ac-cache-warmup-progress` floating overlay already shows the failure flash, and a HUD populated with zeros would be misleading.
+
 ### HUD geometry
 
 | Constant | Value |

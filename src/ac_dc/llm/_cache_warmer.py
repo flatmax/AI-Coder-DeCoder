@@ -95,6 +95,69 @@ _CACHE_TTL_SECONDS = 300.0
 _COUNTDOWN_SECONDS = 30.0
 
 
+def _extract_int(usage: Any, name: str) -> int:
+    """Pull a non-negative int field from a usage object.
+
+    Tolerant of dict and attribute access (LiteLLM's usage
+    objects vary by provider integration). Missing,
+    non-numeric, or null values normalise to 0.
+    """
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        val = usage.get(name)
+    else:
+        val = getattr(usage, name, None)
+    try:
+        return int(val) if val is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_cache_read(usage: Any) -> int:
+    """Cross-provider cache-read extraction.
+
+    Anthropic uses ``cache_read_input_tokens``, OpenAI
+    uses ``prompt_tokens_details.cached_tokens``, LiteLLM
+    sometimes flattens to ``cache_read_tokens``. Take the
+    max so the result reflects whatever the provider
+    actually reported.
+    """
+    if usage is None:
+        return 0
+    prompt_details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    prompt_cached = (
+        _extract_int(prompt_details, "cached_tokens")
+        if prompt_details is not None
+        else 0
+    )
+    return max(
+        _extract_int(usage, "cache_read_input_tokens"),
+        _extract_int(usage, "cache_read_tokens"),
+        prompt_cached,
+    )
+
+
+def _extract_cache_write(usage: Any) -> int:
+    """Cross-provider cache-write extraction.
+
+    Anthropic uses ``cache_creation_input_tokens``,
+    LiteLLM sometimes uses ``cache_creation_tokens``.
+    OpenAI doesn't report cache writes at all — its
+    contribution to the max is always zero.
+    """
+    if usage is None:
+        return 0
+    return max(
+        _extract_int(usage, "cache_creation_input_tokens"),
+        _extract_int(usage, "cache_creation_tokens"),
+    )
+
+
 class CacheWarmer:
     """Background timer keeping the provider cache warm."""
 
@@ -111,6 +174,14 @@ class CacheWarmer:
         # ``None`` when no timer is active. Surfaced via
         # ``seconds_remaining`` for the UI countdown in step 2.
         self._scheduled_at: float | None = None
+        # Stash for the most recent warm-up's token counts.
+        # Populated by :meth:`_fire_warmup` after successful
+        # completion; read by :meth:`_run` when broadcasting
+        # ``cacheWarmupComplete`` so the frontend can render
+        # a Token HUD for the warm-up. Cleared on the next
+        # firing's start so a stale snapshot can't bleed
+        # into a subsequent broadcast.
+        self._last_warmup_tokens: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Public state accessors (consumed by the future RPC + UI)
@@ -310,6 +381,10 @@ class CacheWarmer:
         # frontend can flip the bar from countdown to
         # spinner. The actual call follows.
         await self._broadcast("cacheWarmupFiring", {})
+        # Clear the stash so a stale snapshot from the
+        # previous firing can't leak into a failure
+        # broadcast (failures don't populate the stash).
+        self._last_warmup_tokens = None
         try:
             await self._fire_warmup()
         except asyncio.CancelledError:
@@ -328,11 +403,13 @@ class CacheWarmer:
             )
             self.disable(f"warm-up failed: {exc}")
             return
-        # Successful firing — broadcast and schedule the next.
-        await self._broadcast(
-            "cacheWarmupComplete",
-            {"success": True},
-        )
+        # Successful firing — broadcast with token data so
+        # the frontend can render a Token HUD, and
+        # schedule the next.
+        payload: dict[str, Any] = {"success": True}
+        if self._last_warmup_tokens is not None:
+            payload.update(self._last_warmup_tokens)
+        await self._broadcast("cacheWarmupComplete", payload)
         self._scheduled_at = None
         self._schedule()
 
@@ -354,29 +431,69 @@ class CacheWarmer:
             )
 
     async def _fire_warmup(self) -> None:
-        """Issue the warm-up call and log the cache stats."""
+        """Issue the warm-up call, accumulate, log, and broadcast.
+
+        Three side effects beyond the raw provider call:
+
+        - ``service._accumulate_usage(usage)`` — the
+          warm-up's prompt/cache tokens enter
+          ``_session_totals`` alongside real-turn usage. A
+          warm-up is a paid LLM call (cache writes cost
+          1.25× input on Claude); making it visible in
+          session cumulative counters keeps the cost
+          accounting honest. The Token HUD's session totals
+          section reflects warm-ups exactly the same way
+          it reflects real turns.
+        - Stats logged at INFO for operator diagnosis.
+        - ``cacheWarmupComplete`` broadcast carries the
+          tokens so the frontend can render a Token HUD
+          for the warm-up. Backwards-compatible extension
+          of the existing payload — older clients that
+          ignore the new fields keep working.
+        """
         service = self._service
         # Assemble messages exactly as a real turn would,
         # using the main scope so the cached prefix matches.
+        # ``skip_active=True`` omits the Active tier (selected
+        # files + active history) — Active sits after the last
+        # ``cache_control`` marker, so the cached prefix bytes
+        # are unchanged and L0–L3 cache hits still land. Saves
+        # Active-tier input tokens on every warm-up firing.
         scope = service._default_scope()
         tiered_content = service._build_tiered_content(scope)
         if tiered_content is None:
             messages = service._assemble_messages_flat(
-                _WARMUP_PROMPT, [], scope,
+                _WARMUP_PROMPT, [], scope, skip_active=True,
             )
         else:
             messages = service._assemble_tiered(
                 _WARMUP_PROMPT, [], tiered_content, scope,
+                skip_active=True,
             )
         loop = asyncio.get_running_loop()
         started = time.time()
-        prompt_tokens, cache_read = await loop.run_in_executor(
+        usage = await loop.run_in_executor(
             service._aux_executor,
             self._completion_sync,
             messages,
             started,
         )
         elapsed = time.time() - started
+        # Accumulate into session totals via the same
+        # extraction path that real turns use. Single source
+        # of truth for "how do we read tokens off a litellm
+        # response" — keeps Anthropic / Bedrock / OpenAI
+        # field-shape differences in one place.
+        service._accumulate_usage(usage)
+        # Pull the same numbers back out for logging and
+        # broadcasting. The accumulator wrote them into
+        # session totals using its own field-priority
+        # logic; we extract here using the warmer's
+        # narrower needs (prompt + cache_read +
+        # cache_write only).
+        prompt_tokens = _extract_int(usage, "prompt_tokens")
+        cache_read = _extract_cache_read(usage)
+        cache_write = _extract_cache_write(usage)
         hit_pct = (
             (cache_read / prompt_tokens * 100)
             if prompt_tokens else 0.0
@@ -389,18 +506,69 @@ class CacheWarmer:
         # there's a bug worth diagnosing.
         logger.info(
             "Cache warm-up: %.1fs prompt=%d cache_read=%d "
-            "(%.0f%% hit)",
-            elapsed, prompt_tokens, cache_read, hit_pct,
+            "cache_write=%d (%.0f%% hit)",
+            elapsed, prompt_tokens, cache_read, cache_write,
+            hit_pct,
         )
+        # Stash the tokens so the broadcast site can carry
+        # them in cacheWarmupComplete. _run() (the caller)
+        # owns the broadcast — we don't broadcast here
+        # because the caller already broadcasts the
+        # success/failure event and we want a single
+        # broadcast site per outcome, not two.
+        self._last_warmup_tokens = {
+            "prompt_tokens": prompt_tokens,
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "elapsed_seconds": elapsed,
+        }
+        # Print the standard post-response terminal HUD so
+        # operators see the same five-section block (cache
+        # tiers, last-request usage, history budget, tier
+        # changes, session totals) for warm-ups that they
+        # see for real chat turns. Builds a ``request_usage``
+        # dict in the same shape ``_run_completion_sync``
+        # produces — the HUD's ``Last Request`` section
+        # consumes that shape directly. Warm-ups have no
+        # completion / reasoning output (max_tokens=2,
+        # ``thinking`` disabled) so those fields are zero;
+        # cost is None because LiteLLM's pricing path was
+        # not consulted on this code path. Wrapped in
+        # try/except so an HUD bug (e.g. a future formatting
+        # change that mishandles a zero field) cannot
+        # cascade into a warm-up failure that disables the
+        # warmer.
+        try:
+            warmup_usage: dict[str, Any] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "reasoning_tokens": 0,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "prompt_cached_tokens": cache_read,
+                "cost_usd": None,
+            }
+            service._print_post_response_hud(warmup_usage)
+        except Exception as exc:
+            logger.debug(
+                "Cache warmer terminal HUD print failed: %s",
+                exc,
+            )
 
     def _completion_sync(
         self,
         messages: list[dict[str, Any]],
         started: float,
-    ) -> tuple[int, int]:
+    ) -> Any:
         """Blocking warm-up call. Runs in the aux executor.
 
-        Returns ``(prompt_tokens, cache_read_tokens)``.
+        Returns the raw provider ``usage`` object (or
+        ``None`` if the response had none). The caller
+        (:meth:`_fire_warmup`) feeds it through
+        :meth:`LLMService._accumulate_usage` and the
+        helper extractors below to pull individual
+        numeric fields.
+
         Raises on any failure — the caller's ``except``
         block disables the warmer.
         """
@@ -445,38 +613,4 @@ class CacheWarmer:
             context="cache warm-up",
             on_retry=_on_retry,
         )
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return (0, 0)
-
-        def _get(name: str, source: Any = usage) -> int:
-            if isinstance(source, dict):
-                val = source.get(name)
-            else:
-                val = getattr(source, name, None)
-            try:
-                return int(val) if val is not None else 0
-            except (TypeError, ValueError):
-                return 0
-
-        prompt = _get("prompt_tokens")
-        # Match the cache_read normalisation in
-        # _streaming.run_completion_sync — Anthropic uses
-        # cache_read_input_tokens, OpenAI uses
-        # prompt_tokens_details.cached_tokens.
-        prompt_details = (
-            usage.get("prompt_tokens_details")
-            if isinstance(usage, dict)
-            else getattr(usage, "prompt_tokens_details", None)
-        )
-        prompt_cached = (
-            _get("cached_tokens", source=prompt_details)
-            if prompt_details is not None
-            else 0
-        )
-        cache_read = max(
-            _get("cache_read_input_tokens"),
-            _get("cache_read_tokens"),
-            prompt_cached,
-        )
-        return (prompt, cache_read)
+        return getattr(response, "usage", None)

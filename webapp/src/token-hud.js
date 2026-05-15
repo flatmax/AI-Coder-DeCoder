@@ -75,6 +75,18 @@ export class TokenHud extends RpcMixin(LitElement) {
     _mapModalContent: { type: Object, state: true },
     /** Map-block modal title. */
     _mapModalTitle: { type: String, state: true },
+    /**
+     * Whether the most recent HUD invocation came from a
+     * cache warm-up rather than a real chat turn. Drives
+     * the header rendering — warm-ups show
+     * ``🌡️ Cache warmup`` in place of the model name so
+     * the user can tell at a glance whether the floating
+     * HUD they're looking at is per-turn feedback or
+     * per-warmup feedback. Reset on every event so a
+     * later real-turn HUD doesn't inherit warm-up
+     * styling.
+     */
+    _isWarmup: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -422,6 +434,7 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._collapsed = this._loadCollapsed();
     this._mapModalContent = null;
     this._mapModalTitle = '';
+    this._isWarmup = false;
     // Active tab ID — driven by `active-tab-changed`
     // events from the chat panel. Default 'main' so the
     // first fetch after construction targets the main
@@ -437,6 +450,7 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
+    this._onCacheWarmupComplete = this._onCacheWarmupComplete.bind(this);
   }
 
   connectedCallback() {
@@ -457,6 +471,15 @@ export class TokenHud extends RpcMixin(LitElement) {
     window.addEventListener(
       'active-tab-changed', this._onActiveTabChanged,
     );
+    // Cache warm-ups land here too. The warmer broadcasts
+    // ``cacheWarmupComplete`` with token counts; we render
+    // the HUD in warm-up mode (header swaps to a
+    // thermometer label, request-usage section reflects
+    // the warm-up's tokens, session totals already include
+    // them via the backend's _accumulate_usage call).
+    window.addEventListener(
+      'cacheWarmupComplete', this._onCacheWarmupComplete,
+    );
   }
 
   disconnectedCallback() {
@@ -464,6 +487,9 @@ export class TokenHud extends RpcMixin(LitElement) {
     window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener(
       'active-tab-changed', this._onActiveTabChanged,
+    );
+    window.removeEventListener(
+      'cacheWarmupComplete', this._onCacheWarmupComplete,
     );
     this._clearTimers();
     super.disconnectedCallback();
@@ -520,6 +546,7 @@ export class TokenHud extends RpcMixin(LitElement) {
       cacheRead: usage.cache_read_tokens || 0,
       cacheWrite: usage.cache_write_tokens || 0,
     };
+    this._isWarmup = false;
 
     // Show immediately with whatever data we have.
     this._visible = true;
@@ -528,6 +555,42 @@ export class TokenHud extends RpcMixin(LitElement) {
     this._startAutoHide();
 
     // Fetch full breakdown asynchronously.
+    this._fetchBreakdown();
+  }
+
+  _onCacheWarmupComplete(event) {
+    const detail = event.detail || {};
+    // Failure broadcasts have ``success: false`` plus a
+    // ``reason`` field but no token counts. Skip the HUD
+    // for failures — the cache-warmup-progress overlay
+    // already shows the failure flash, and a HUD with all
+    // zeros would be misleading.
+    if (!detail.success) return;
+    const prompt = detail.prompt_tokens || 0;
+    const cacheRead = detail.cache_read_tokens || 0;
+    const cacheWrite = detail.cache_write_tokens || 0;
+    // Warm-ups have no real "completion" or "reasoning" —
+    // ``max_tokens=2`` means the response is one or two
+    // tokens of acknowledgement. Show 0 so the HUD's
+    // request grid stays scannable; the meaningful numbers
+    // for a warm-up are prompt/cache_read/cache_write.
+    this._requestUsage = {
+      prompt,
+      completion: 0,
+      reasoning: 0,
+      cacheRead,
+      cacheWrite,
+    };
+    this._isWarmup = true;
+    this._visible = true;
+    this._fading = false;
+    this.classList.remove('fading');
+    this._startAutoHide();
+    // Fetch the breakdown so tier and session-totals
+    // sections reflect post-warmup state. The backend
+    // accumulated the warm-up's tokens into session
+    // totals, so the totals section will reflect the
+    // bump immediately.
     this._fetchBreakdown();
   }
 
@@ -810,11 +873,21 @@ export class TokenHud extends RpcMixin(LitElement) {
   }
 
   _renderHeader(d, cacheRate) {
-    const model = d?.model || '—';
+    // Warm-ups override the model line with a thermometer
+    // label so the user knows at a glance which kind of
+    // event triggered this HUD. Real turns show the
+    // configured model name, matching the prior behavior.
+    const headerLabel = this._isWarmup
+      ? '🌡️ Cache warmup'
+      : (d?.model || '—');
     const color = _cacheHitColor(cacheRate);
     return html`
       <div class="hud-header">
-        <span class="hud-model">${model}</span>
+        <span class="hud-model" title=${
+          this._isWarmup
+            ? 'A periodic background call that refreshes the provider\'s prompt cache during idle time. Tokens shown here are real provider charges; they\'re also accumulated into Session Totals.'
+            : (d?.model || '')
+        }>${headerLabel}</span>
         ${cacheRate > 0
           ? html`<span
               class="cache-badge"

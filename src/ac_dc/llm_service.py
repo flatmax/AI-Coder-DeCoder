@@ -1908,11 +1908,14 @@ class LLMService:
         images: list[str],
         tiered_content: dict[str, dict[str, Any]],
         scope: ConversationScope | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._assembly.assemble_tiered`."""
         from ac_dc.llm._assembly import assemble_tiered
         return assemble_tiered(
-            self, user_prompt, images, tiered_content, scope
+            self, user_prompt, images, tiered_content, scope,
+            skip_active=skip_active,
         )
 
     # ------------------------------------------------------------------
@@ -1924,11 +1927,14 @@ class LLMService:
         user_prompt: str,
         images: list[str],
         scope: ConversationScope | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._assembly.assemble_messages_flat`."""
         from ac_dc.llm._assembly import assemble_messages_flat
         return assemble_messages_flat(
-            self, user_prompt, images, scope
+            self, user_prompt, images, scope,
+            skip_active=skip_active,
         )
 
     # ------------------------------------------------------------------

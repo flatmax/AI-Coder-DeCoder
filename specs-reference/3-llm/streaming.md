@@ -163,14 +163,20 @@ Fired the moment the warm-up call goes out, after the countdown completes. Front
 
 #### `cacheWarmupComplete(payload)`
 
-Fired after the warm-up call resolves. Frontend shows a brief flash and then fades out.
+Fired after the warm-up call resolves. Frontend shows a brief flash and then fades out. On success, additional fields carry the warm-up's token counts so the Token HUD can render a per-warmup view; the same counts have already been accumulated into `_session_totals` server-side via `_accumulate_usage`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `success` | bool | `true` for a successful provider response. `false` for any exception (including retry-budget exhaustion) |
 | `reason` | string | Present when `success: false`. Human-readable failure description suitable for display |
+| `prompt_tokens` | int | Present when `success: true`. Total prompt tokens (cached + uncached) the provider charged for this warm-up |
+| `cache_read_tokens` | int | Present when `success: true`. Tokens read from the provider's prompt cache. High value indicates the warmer is working as intended |
+| `cache_write_tokens` | int | Present when `success: true`. Tokens written to the provider's prompt cache. Non-zero on the priming warm-up; ideally zero on subsequent warm-ups within the cache TTL |
+| `elapsed_seconds` | float | Present when `success: true`. Wall-clock duration of the call |
 
 A `success: false` event is followed by an automatic warmer disable — no further `cacheWarmup*` events fire until application restart or explicit re-enable.
+
+Backwards-compatible extension: clients that ignore the new token fields continue to work. The Token HUD's warm-up listener uses these fields to populate a `🌡️ Cache warmup`-headered HUD identical in shape to the per-turn HUD.
 
 #### `cacheWarmupCancelled(payload)`
 
@@ -438,6 +444,8 @@ The assistant message card additionally renders the error via `_formatErrorBody`
 ### Aux LLM call classification
 
 The same classifier runs for aux calls (`_generate_commit_message`, topic detector). Those paths don't surface `error_info` to the browser — they degrade to safe defaults (empty commit message falls back to `"chore: update files"`; topic detection falls back to summarize case). Classification runs only to enrich the log line so operators can distinguish rate-limit failures from auth failures from context overflows across all LiteLLM call sites.
+
+Aux calls do not interact with the cache warmer. The warmer's `cancel`/`reset` hooks are wired only to the streaming lifecycle (top and bottom of `stream_chat`); commit-message generation and topic-boundary detection use a different model with an independent provider cache, so touching the main-model warmer's timer on an aux call would shift the next firing later for no caching benefit. See `specs4/3-llm/cache-tiering.md` § Cache Warmer / Scope.
 
 ## Dependency quirks
 

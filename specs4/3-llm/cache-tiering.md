@@ -361,8 +361,9 @@ The cache warmer is a background timer that issues a tiny `litellm.completion` c
 
 ### Warm-up call shape
 
-- Reuses the EXACT cached prefix that a real turn would. Messages are assembled via the same code path as `stream_chat` — same L0 snapshot, same tier dispatch, same per-tier headers, same cache-control markers.
-- Appends a minimal user message asking for a 1-token acknowledgement.
+- Reuses the EXACT cached prefix that a real turn would. Messages up to and including the last `cache_control` marker (system + L0 history + L1/L2/L3 pairs) are byte-identical to a real turn, assembled via the same code path as `stream_chat`.
+- **Post-cache content omitted.** Everything after the last `cache_control` marker — Active tier (selected files + active history), file tree, URL context, review context — is skipped. The cached prefix bytes are unchanged so L0–L3 cache hits still land. Saves input tokens on every firing — meaningful when the user has selected a large working set or has many files in the repo (the file tree alone can be several thousand tokens). Wired through the assembly path via a `skip_active` flag honoured by both tiered and flat assembly. The flag's semantics: "skip everything after the last `cache_control` marker except the user prompt".
+- Appends a minimal user message asking for a 1-token acknowledgement. This is the entire post-cache tail.
 - Sets `max_tokens=2`. Providers reject 0; 2 covers a single token plus framing.
 - Disables reasoning regardless of session config — a warm-up never benefits from hidden thinking, and a reasoning budget would defeat the cost-minimisation goal.
 - No streaming. Synchronous completion via the aux executor.
@@ -407,6 +408,8 @@ The disable strategy assumes that one warm-up failure predicts more — typical 
 
 Single-instance per `LLMService`. Only the main conversation is warmed. Agent contexts have transient cache state by design — each agent spawn writes a fresh cache and consumes it within the agent's lifetime. Warming agent contexts would multiply provider load with no proportional benefit.
 
+Auxiliary smaller-model calls (commit-message generation, topic-boundary detection) do not interact with the warmer. They use a different model with an independent provider cache, so resetting the main-model warmer's timer on an aux call would shift the next firing later for no caching benefit. The warmer's reset hooks live only on the `stream_chat` lifecycle (cancel at start, reset at end); aux calls bypass that path entirely.
+
 ### Configuration
 
 Two fields in the `cache_warmup` section of `app.json`:
@@ -414,10 +417,17 @@ Two fields in the `cache_warmup` section of `app.json`:
 - `enabled` (default `true`) — whether the warmer runs at all. The auto-disable runtime flag is independent of this config value (the warmer flips its own `_enabled` field on failure); re-enabling after auto-disable currently requires application restart.
 - `interval_seconds` (default `270`) — seconds of idle time before each warm-up firing. 270s (4:30) sits comfortably inside the 5-minute cache TTL with margin for retry waits. Values that would push past the TTL are clamped to the default — a zero or near-TTL interval would defeat the purpose.
 
+### UI surfacing
+
+A successful warm-up triggers the floating Token HUD with the warm-up's token counts (prompt, cache read, cache write, elapsed). The HUD's header shows `🌡️ Cache warmup` instead of the model name to distinguish from per-turn HUDs. Warm-up tokens accumulate into session totals via the standard `_accumulate_usage` path — a warm-up is a paid LLM call (cache writes cost 1.25× input on Claude), and surfacing that cost cumulatively keeps session totals honest. Failure warm-ups suppress the HUD; the failure flash on the floating progress overlay is sufficient signal.
+
 ### Invariants
 
 - Warm-ups never appear in conversation history.
 - Warm-ups never trigger stability tracker updates.
 - Warm-ups never trigger the cache cascade — they only refresh the provider's cache TTL on already-placed content.
-- The cached prefix bytes used by a warm-up are identical to those a real turn would produce. Any change to prompt assembly that affects what the LLM sees must affect warm-ups identically, or the warmer's cache hits will silently degrade.
-- A failed warm-up disables the warmer; manual re-enable required.
+- Warm-up tokens DO accumulate into `_session_totals` via `_accumulate_usage`. The "side-channel" framing applies to tracker state and conversation history, not to cumulative cost accounting — a warm-up is a real provider charge and surfacing it in session totals keeps the cost row honest.
+- The cached prefix bytes used by a warm-up are identical to those a real turn would produce — everything up to and including the last `cache_control` marker. Any change to prompt assembly that affects the cached portion must affect warm-ups identically, or the warmer's cache hits will silently degrade.
+- The post-cache tail differs by design: a real turn's tail carries Active files, active history, file tree, URL context, review context, and the user prompt; a warm-up's tail carries only the ping prompt. This shrinks per-warmup input billing without disturbing cache hits.
+- Warm-ups print the same five-section terminal HUD as real turns (cache tiers, last-request usage, history budget, tier changes, session totals) so operators see the same diagnostic shape regardless of trigger.
+- A failed warm-up disables the warmer; manual re-enable required. Failure broadcasts suppress the Token HUD — the floating progress overlay's failure flash is the only UI signal for failed warm-ups.

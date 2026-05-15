@@ -995,6 +995,8 @@ class ContextManager:
         secondary_map: str = "",
         file_tree: str = "",
         tiered_content: dict[str, dict[str, Any]] | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Assemble the tiered message array for the LLM.
 
@@ -1154,69 +1156,82 @@ class ContextManager:
                 )
                 messages.extend(tier_messages)
 
-        # File tree — uncached user/assistant pair.
-        if file_tree:
-            messages.append({
-                "role": "user",
-                "content": FILE_TREE_HEADER + file_tree,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok.",
-            })
+        # File tree, URL context, review context — uncached
+        # user/assistant pairs that sit AFTER the last
+        # cache_control marker. Skipped for cache-warmer calls
+        # alongside Active files / history: they're pure
+        # post-cache overhead and billed as fresh input on
+        # every warm-up firing. ``skip_active`` is the unified
+        # "skip everything after the last cache_control marker
+        # except the user prompt" flag.
+        if not skip_active:
+            if file_tree:
+                messages.append({
+                    "role": "user",
+                    "content": FILE_TREE_HEADER + file_tree,
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok.",
+                })
 
-        # URL context — uncached user/assistant pair. Joined with a
-        # blank-line separator when multiple parts are present.
-        if self._url_context:
-            messages.append({
-                "role": "user",
-                "content": URL_CONTEXT_HEADER + "\n---\n".join(
-                    self._url_context
-                ),
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok, I've reviewed the URL content.",
-            })
+            if self._url_context:
+                messages.append({
+                    "role": "user",
+                    "content": URL_CONTEXT_HEADER + "\n---\n".join(
+                        self._url_context
+                    ),
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok, I've reviewed the URL content.",
+                })
 
-        # Review context — uncached user/assistant pair when active.
-        if self._review_context:
-            messages.append({
-                "role": "user",
-                "content": REVIEW_CONTEXT_HEADER + self._review_context,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok, I've reviewed the code changes.",
-            })
+            if self._review_context:
+                messages.append({
+                    "role": "user",
+                    "content": REVIEW_CONTEXT_HEADER + self._review_context,
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok, I've reviewed the code changes.",
+                })
 
         # Active files — files not graduated to any cached tier.
         # The file context's insertion order is preserved.
-        active_files_text = self._format_active_files(
-            tiered_content
-        )
-        if active_files_text:
-            messages.append({
-                "role": "user",
-                "content": FILES_ACTIVE_HEADER + active_files_text,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok.",
-            })
+        # Skipped for cache-warmer calls: Active sits after the
+        # last cache_control marker, so omitting it preserves
+        # the cached prefix bytes (cache hits still land) while
+        # avoiding fresh-input billing on every warm-up firing.
+        if not skip_active:
+            active_files_text = self._format_active_files(
+                tiered_content
+            )
+            if active_files_text:
+                messages.append({
+                    "role": "user",
+                    "content": FILES_ACTIVE_HEADER + active_files_text,
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok.",
+                })
 
-        # Active history — messages whose index is not in any
-        # cached tier's graduated indices.
-        history = self._history
-        for i, msg in enumerate(history):
-            if i in all_graduated_history:
-                continue
-            # Strip the last user message — that's the one we're
-            # about to render with images. The streaming handler
-            # added it before calling assembly.
-            if i == len(history) - 1 and msg.get("role") == "user":
-                continue
-            messages.append(dict(msg))
+            # Active history — messages whose index is not in any
+            # cached tier's graduated indices.
+            history = self._history
+            for i, msg in enumerate(history):
+                if i in all_graduated_history:
+                    continue
+                # Strip the last user message — that's the one we're
+                # about to render with images. The streaming handler
+                # added it before calling assembly.
+                if (
+                    i == len(history) - 1
+                    and msg.get("role") == "user"
+                ):
+                    continue
+                messages.append(dict(msg))
 
         # Current user message — text-only or multimodal.
         messages.append(self._build_user_message(user_prompt, images))

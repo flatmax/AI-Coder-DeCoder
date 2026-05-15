@@ -257,6 +257,8 @@ def assemble_tiered(
     images: list[str],
     tiered_content: dict[str, dict[str, Any]],
     scope: "ConversationScope | None" = None,
+    *,
+    skip_active: bool = False,
 ) -> list[dict[str, Any]]:
     """Build the tiered message array.
 
@@ -279,6 +281,16 @@ def assemble_tiered(
     - Code mode + cross-reference: doc is the secondary;
       assembler places it under ``DOC_MAP_HEADER``.
     - Code mode without cross-ref: doc legend suppressed.
+
+    ``skip_active`` is the cache-warmer's optimisation: when
+    True, the Active tier (selected files + active history)
+    is omitted from the assembled prompt. The cached prefix
+    bytes (everything up to and including the last
+    ``cache_control`` marker on L3) are identical to a real
+    turn, so cache hits land normally; the post-cache tail
+    shrinks to just the user prompt. Saves Active-tier
+    input tokens on every warm-up. See
+    :doc:`specs4/3-llm/cache-tiering` § Cache Warmer.
     """
     if scope is None:
         scope = service._default_scope()
@@ -356,6 +368,7 @@ def assemble_tiered(
         secondary_map=secondary_map,
         file_tree=file_tree,
         tiered_content=tiered_content,
+        skip_active=skip_active,
     )
 
 
@@ -369,6 +382,8 @@ def assemble_messages_flat(
     user_prompt: str,
     images: list[str],
     scope: "ConversationScope | None" = None,
+    *,
+    skip_active: bool = False,
 ) -> list[dict[str, Any]]:
     """Build a flat message array for the LLM call.
 
@@ -383,6 +398,15 @@ def assemble_messages_flat(
     prompt and the LLM has no view of the repo. Without this,
     the user's selection is silently dropped on every flat-
     mode request.
+
+    ``skip_active`` is the cache-warmer's optimisation. In
+    flat mode there are no cache-control markers anyway, so
+    the savings are smaller, but we still skip the active
+    files and active history (everything except the system
+    prompt and the ping) to keep warm-up cost minimal. The
+    flat path is only taken before the stability tracker
+    initialises — a narrow window — so this matters less
+    than the tiered case.
     """
     if scope is None:
         scope = service._default_scope()
@@ -445,42 +469,48 @@ def assemble_messages_flat(
             if secondary_map:
                 system_parts.append(secondary_map)
 
-    # File tree.
-    if service._repo is not None:
-        try:
-            file_tree = service._repo.get_flat_file_list()
-            if file_tree:
-                from ac_dc.context_manager import (
-                    FILE_TREE_HEADER,
+    # File tree, URL context, review context. Skipped for
+    # warm-ups alongside Active files / history: a warm-up
+    # only needs the system prompt and the ping tail.
+    # Everything else is wasted input on every firing.
+    if not skip_active:
+        if service._repo is not None:
+            try:
+                file_tree = service._repo.get_flat_file_list()
+                if file_tree:
+                    from ac_dc.context_manager import (
+                        FILE_TREE_HEADER,
+                    )
+                    system_parts.append(
+                        FILE_TREE_HEADER + file_tree
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Flat assembly: file tree fetch failed: %s",
+                    exc,
                 )
-                system_parts.append(
-                    FILE_TREE_HEADER + file_tree
-                )
-        except Exception as exc:
-            logger.warning(
-                "Flat assembly: file tree fetch failed: %s",
-                exc,
+
+        url_parts = scope.context.get_url_context()
+        if url_parts:
+            from ac_dc.context_manager import URL_CONTEXT_HEADER
+            system_parts.append(
+                URL_CONTEXT_HEADER + "\n---\n".join(url_parts)
             )
 
-    # URL context.
-    url_parts = scope.context.get_url_context()
-    if url_parts:
-        from ac_dc.context_manager import URL_CONTEXT_HEADER
-        system_parts.append(
-            URL_CONTEXT_HEADER + "\n---\n".join(url_parts)
-        )
-
-    # Review context.
-    review = scope.context.get_review_context()
-    if review:
-        from ac_dc.context_manager import REVIEW_CONTEXT_HEADER
-        system_parts.append(REVIEW_CONTEXT_HEADER + review)
+        review = scope.context.get_review_context()
+        if review:
+            from ac_dc.context_manager import REVIEW_CONTEXT_HEADER
+            system_parts.append(REVIEW_CONTEXT_HEADER + review)
 
     # Active files — full content of everything selected.
-    file_body = scope.context.file_context.format_for_prompt()
-    if file_body:
-        from ac_dc.context_manager import FILES_ACTIVE_HEADER
-        system_parts.append(FILES_ACTIVE_HEADER + file_body)
+    # Skipped for warm-up calls: a warm-up only needs the
+    # system prompt and the tail ping; active files would
+    # be billed as fresh input on every firing.
+    if not skip_active:
+        file_body = scope.context.file_context.format_for_prompt()
+        if file_body:
+            from ac_dc.context_manager import FILES_ACTIVE_HEADER
+            system_parts.append(FILES_ACTIVE_HEADER + file_body)
 
     combined_system = "\n\n".join(p for p in system_parts if p)
 
@@ -491,11 +521,12 @@ def assemble_messages_flat(
     # Active history — already includes the user message we
     # just added via add_message. Strip it off before appending
     # so we don't duplicate; we add the current prompt with
-    # images as the final message.
-    history = scope.context.get_history()
-    if history and history[-1].get("role") == "user":
-        history = history[:-1]
-    messages.extend(history)
+    # images as the final message. Skipped for warm-up calls.
+    if not skip_active:
+        history = scope.context.get_history()
+        if history and history[-1].get("role") == "user":
+            history = history[:-1]
+        messages.extend(history)
 
     # Current user message — with images attached as content
     # blocks if any.
