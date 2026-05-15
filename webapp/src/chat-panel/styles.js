@@ -908,6 +908,24 @@ export const STYLES = css`
     gap: 0.25rem;
     min-width: 0;
   }
+  /* When the search bar has focus, hide the
+   * surrounding action-bar buttons (mode +
+   * cross-ref toggle on the left, new-session +
+   * history on the right) so the search bar
+   * itself — input, mode toggle, count, prev/next
+   * — can claim the whole row.
+   *
+   * The hidden buttons get a 'search-collapsible'
+   * class. When focus leaves the search bar
+   * (Escape, click outside, Tab away), they
+   * reappear. The hide is achieved by collapsing
+   * the parent action-group / control wrapper to
+   * zero width via 'display: none', so flex gaps
+   * around them collapse too — no awkward empty
+   * space. */
+  .action-bar:has(.search-bar:focus-within) .search-collapsible {
+    display: none;
+  }
   .search-input-wrapper {
     display: flex;
     flex: 1;

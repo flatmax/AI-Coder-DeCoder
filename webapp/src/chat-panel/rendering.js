@@ -185,7 +185,7 @@ function renderModeToggle(panel) {
       ? 'Cross-reference ON — both indexes active (click to disable)'
       : 'Cross-reference OFF — click to add the other index alongside';
   return html`
-    <div class="mode-toggle" role="group"
+    <div class="mode-toggle search-collapsible" role="group"
       aria-label="Context mode">
       <div class="mode-segmented">
         <button
@@ -279,7 +279,7 @@ export function render(panel) {
     <div class="input-area">
       <div class="action-bar" role="toolbar">
         ${renderModeToggle(panel)}
-        <div class="action-group">
+        <div class="action-group search-collapsible">
           ${_EXPERIMENTAL_ENABLED
             ? html`<button
                 class="action-button reasoning-toggle ${panel
@@ -299,13 +299,13 @@ export function render(panel) {
               </button>`
             : ''}
         </div>
-        <div class="action-divider" aria-hidden="true"></div>
+        <div class="action-divider search-collapsible" aria-hidden="true"></div>
         ${renderSearchBar(panel)}
         ${panel._searchMode === 'file' || panel._activeTabId !== 'main'
           ? ''
           : html`
               <div class="action-divider" aria-hidden="true"></div>
-              <div class="action-group">
+              <div class="action-group search-collapsible">
                 <button
                   class="action-button new-session-button"
                   ?disabled=${!panel.rpcConnected || panel._streaming}

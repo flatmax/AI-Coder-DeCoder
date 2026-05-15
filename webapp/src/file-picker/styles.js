@@ -43,8 +43,9 @@ export const FILE_PICKER_STYLES = css`
 
     .sort-buttons {
       display: flex;
-      gap: 0.25rem;
+      gap: 0.4rem;
       align-items: center;
+      justify-content: space-between;
     }
     .sort-buttons .label {
       font-size: 0.6875rem;
@@ -188,7 +189,6 @@ export const FILE_PICKER_STYLES = css`
       font-size: 0.9rem;
       line-height: 1;
       opacity: 0.7;
-      margin-left: 0.4rem;
       transition: opacity 120ms ease, background 120ms ease;
     }
     .picker-settings-btn:hover {
@@ -218,7 +218,6 @@ export const FILE_PICKER_STYLES = css`
       display: inline-flex;
       align-items: center;
       gap: 0.2rem;
-      margin-left: 0.25rem;
     }
     .picker-git-actions.split {
       position: relative;
