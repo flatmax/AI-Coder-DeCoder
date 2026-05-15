@@ -387,15 +387,7 @@ export class FilePicker extends LitElement {
 
     return html`
       ${this._renderReviewBanner()}
-      <div class="filter-bar">
-        <input
-          type="text"
-          class="filter-input"
-          placeholder="Filter files (fuzzy match)…"
-          .value=${this.filterQuery}
-          @input=${this._onFilterInput}
-          aria-label="Filter files"
-        />
+      <div class="filter-bar filter-bar-top">
         ${this._renderSortButtons()}
       </div>
       <div
@@ -414,6 +406,16 @@ export class FilePicker extends LitElement {
             })
           : ''}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
+      </div>
+      <div class="filter-bar filter-bar-bottom">
+        <input
+          type="text"
+          class="filter-input"
+          placeholder="Filter files (fuzzy match)…"
+          .value=${this.filterQuery}
+          @input=${this._onFilterInput}
+          aria-label="Filter files"
+        />
       </div>
       ${this._renderContextMenu()}
       ${this._renderBranchMenu()}

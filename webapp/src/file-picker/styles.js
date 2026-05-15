@@ -26,6 +26,10 @@ export const FILE_PICKER_STYLES = css`
       flex-direction: column;
       gap: 0.35rem;
     }
+    .filter-bar.filter-bar-bottom {
+      border-bottom: none;
+      border-top: 1px solid rgba(240, 246, 252, 0.1);
+    }
     .filter-input {
       width: 100%;
       box-sizing: border-box;

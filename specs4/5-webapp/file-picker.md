@@ -39,22 +39,50 @@ Tree view of repository files with checkboxes, git status, and context menu. Lef
 - Root node falls back to repo name
 ## Toolbar Layout
 
-Top toolbar carries (left to right): three sort glyphs, ⚙️ Settings, then the git action group (📋 copy diff, 💾 commit, ⚠️ reset, 🔍 review when not active). Sort and git buttons are icon-only — text labels were dropped when the dialog header was removed and the picker toolbar absorbed Settings. Tooltips remain for discoverability.
+Top toolbar carries (left to right): a sort split-button, ⚙️ Settings, 📄 Doc Convert (when available), and a git action split-button. Buttons are icon-only — text labels were dropped when the dialog header was removed and the picker toolbar absorbed Settings. Tooltips remain for discoverability.
 
-The Settings button dispatches `request-dialog-tab` with `{tab: 'settings'}`. This is the sole entry point to Settings now that the dialog header is gone.
+The Settings button dispatches `request-dialog-tab` with `{tab: 'settings'}`. The Doc Convert button (rendered only when the backend reports markitdown is installed) dispatches the same event with `{tab: 'doc-convert'}`. These are the sole entry points to those tabs now that the dialog header is gone.
+
+### Active-State Halo
+
+Active icon-only buttons across the picker toolbar — and across the rest of the chat-panel action bar (see [chat.md](chat.md) and [search.md](search.md)) — carry a consistent visual treatment: accent-coloured background tint, a 1px ring in the same accent, and a soft outer halo. The halo is the load-bearing affordance — icon-only buttons live on a dark background where a tint shift alone is hard to read at a glance. Blue accent (#58a6ff) for primary-mode, sort, selection, and option-toggle states; amber (#d29922) for cross-reference and review-active states. The shared treatment teaches a single "this is glowing therefore active" rule across every icon-only control in the dialog.
 
 ## Sorting
-Three sort modes selectable via buttons in the filter bar:
-| Mode | Behavior |
-|---|---|
-| Name | Alphabetical by filename (default) |
-| Mtime | Most recently modified first |
-| Size | Largest line count first |
-- Clicking the active sort button toggles ascending/descending
+
+Sort UI is a split-button: a primary button showing the active mode's glyph plus a direction arrow (↑ ascending / ↓ descending), and a chevron (▾) that opens a dropdown menu. The primary button always carries the active-state halo (see above) since it represents the currently-selected sort mode.
+
+| Mode | Glyph | Behavior |
+|---|---|---|
+| Name | A | Alphabetical by filename (default) |
+| Modified | 🕐 | Most recently modified first |
+| Size | # | Largest line count first |
+
+- Clicking the primary button toggles ascending/descending for the current mode
+- Clicking the chevron opens a dropdown listing all three modes; the active row carries the same halo as the primary button. Selecting a mode either switches to it (resetting to ascending) or, if already active, toggles direction
+- Outside-click and Escape close the dropdown
 - Directories always sort alphabetically regardless of mode
 - Sort mode and direction persisted to localStorage
+
+## Git Actions
+
+Git UI in the toolbar is a split-button: a primary commit button (💾 idle, ⏳ in-flight) and a chevron (▾) opening a dropdown menu.
+
+The primary button calls the commit-all RPC. Disabled during review mode (read-only), in-flight commits, and active LLM streaming. Tooltip adapts per state. While a commit is in flight the button picks up the active-state halo and swaps its glyph to ⏳.
+
+Dropdown menu items:
+
+| Item | Glyph | Behavior |
+|---|---|---|
+| Copy diff | 📋 | Copies the working-tree diff (staged + unstaged) to the clipboard |
+| Start code review… | 🔍 | Opens the review selector modal. Hidden when a review is already active |
+| Reset to HEAD… | ⚠️ | Discards all uncommitted changes (with confirm dialog). Destructive styling — red text, hover deepens to brighter red. Visually separated from the items above by a divider |
+
+Outside-click and Escape close the dropdown. Each menu item carries its own enabled/disabled gate (Reset is gated on streaming + commit state; Start code review additionally gates on already-in-review state). The chevron is reachable even when the primary commit button is disabled, since Copy diff is always safe.
+
+The split-button dispatches a bubbling `git-action` window event carrying `{action: 'copy-diff' | 'commit' | 'reset'}`. The app shell catches and routes to the appropriate handler. Start code review dispatches `open-review-selector` instead, since it opens a modal rather than firing an RPC.
+
 ## Filtering
-- Text filter with fuzzy matching against the full path
+- Text filter with fuzzy matching against the full path, anchored to a single-row bar at the **bottom** of the picker (below the tree scroll region). The toolbar at the top holds sort, Settings, Doc Convert, and git actions — the filter input is deliberately separated so the always-on toolbar controls don't compete with the input for the user's gaze when scanning the file list
 - All characters in the query must appear in the path in order (not necessarily consecutive)
 - Case-insensitive
 - Directories auto-expand when filtered; a directory remains visible if any descendant matches

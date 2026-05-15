@@ -17,7 +17,8 @@ Both viewers live in the same background layer as absolutely positioned siblings
 ### Presentation Layout
 - Left panel and splitter hidden; right panel expands to full width
 - Editor remains active — all editing operations continue to work
-- Left panel's SVG content not injected and its pan/zoom instance not initialized (no wasted work on a hidden element)
+- Left panel hidden via `visibility: hidden` and zero-width flex, **not** `display: none`. Both panes inject the same SVG content, so both carry duplicate `<defs>` with identical IDs (gradients, patterns, filters, markers). Right-pane content uses `url(#…)` references which the browser resolves to the first matching ID in document order — the left pane's. Removing the left pane from the render tree (via `display: none`) would break those references; collapsing it via `visibility: hidden` keeps the referenced defs addressable
+- Defs subtrees in the hidden left pane are explicitly forced back to `visibility: visible`. Required because `<marker>` rendering inherits visibility from the marker element's tree — without the override, `marker-end="url(#arrowhead)"` on a right-pane path resolves to the left-pane marker, which is hidden, and the arrowhead silently disappears. Gradients/patterns/filters don't have this problem (a hidden ancestor doesn't suppress fill painting) but the override is applied uniformly across all defs children for consistency
 - Toggled via button or keyboard shortcut
 ### Empty State
 - Same watermark as diff viewer when no SVG files open
@@ -339,6 +340,7 @@ Orchestrates the switch:
 
 - Only one viewer is visible at a time — the app shell enforces this via CSS class toggling
 - Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set, and the read-only flag is the sole source of truth for which pane-level mutations are allowed
+- In presentation mode, the hidden left pane's defs subtree must remain `visibility: visible` so that `<marker>`, `<linearGradient>`, `<pattern>`, `<filter>`, and any other ID-referenced defs continue to paint when referenced from the visible right pane via `url(#…)`. Hiding the left pane via `display: none` is forbidden — it would prune the first-in-document-order ID matches and break right-pane references
 - The read-only editor never mutates any SVG element — only its own viewBox attribute for pan/zoom/fit, and never the handle overlay
 - Each editor is the sole authority for its own viewBox — no external code path writes the viewBox attribute directly
 - Handle elements are always excluded from hit-testing so clicking a handle never starts a drag on the underlying element

@@ -217,9 +217,20 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
 
 ### Dual-Mode Search
 
-- 💬 default — message search against raw message content
-- 📁 toggle — file search via repo grep
+- 💬 / 📁 segmented control — both buttons always visible when the search bar has focus; active mode shows the accent halo. Click the inactive button to switch; clicking the active button refocuses the input
+- 💬 — message search against raw message content (default)
+- 📁 — file search via repo grep
+- The whole search bar (segmented control, option toggles, counter, nav arrows) collapses to just the input when focus leaves; placeholder text indicates the active mode at rest
 - See [search.md](search.md) for the full search behavior
+
+### Focus-Driven Collapse
+
+The action bar uses a dual-direction collapse pattern keyed on whether the search bar has focus:
+
+- **Search has focus** → neighbouring action-bar controls (mode toggle, reasoning toggle, session buttons, and their dividers) hide via the `.search-collapsible` CSS rule. The search bar expands to fill the row, exposing its segmented mode control, option toggles (Aa / .* / ab), match counter, and prev/next nav arrows
+- **Search loses focus** → those controls return, and the search bar's own inner controls collapse via `.search-bar:not(:focus-within)` so only the text input remains visible. Placeholder text (`Search messages…` / `Search files…`) carries the active mode at rest
+
+The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (mode toggle, reasoning, sessions visible) — never both fighting for the same row. Active toggles inside the search bar (segmented mode, option toggles) and outside it (mode toggle, cross-reference, reasoning) share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
 
 ## Mode Toggle
 
