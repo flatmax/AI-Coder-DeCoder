@@ -555,6 +555,15 @@ export function onStreamRetry(panel, event) {
     ? info.error_type
     : 'llm_error';
 
+  // Emit a warning toast naming the error type and the
+  // wait. The on-screen banner gives precise countdown
+  // feedback inside the chat surface; the toast is
+  // belt-and-braces so users with the chat scrolled
+  // away or in a different tab still notice the retry.
+  emitRetryToast(panel, {
+    attempt, maxAttempts, waitSeconds, errorType,
+  });
+
   // Stash banner state on the tab. The render path
   // reads this on every tick to draw the progress bar.
   ownerTab.retryInfo = {
@@ -575,6 +584,43 @@ export function onStreamRetry(panel, event) {
   }
   // Start the global tick if not already running.
   startRetryTick(panel);
+}
+
+/**
+ * Emit a `warning`-severity toast describing a retry.
+ * Shape per specs-reference/5-webapp/chat.md — names
+ * the classified error type, the upcoming wait, and
+ * the attempt number so users can set expectations.
+ *
+ * Wait formatting: long waits (>= 60 s) collapse to
+ * minutes so the toast doesn't show "120 s"; short
+ * waits stay in seconds for granularity.
+ */
+function emitRetryToast(panel, info) {
+  const { attempt, maxAttempts, waitSeconds, errorType } = info;
+  let label;
+  switch (errorType) {
+    case 'rate_limit': label = 'Rate limited'; break;
+    case 'api_connection': label = 'Connection failed'; break;
+    case 'service_unavailable':
+      label = 'Provider unavailable';
+      break;
+    case 'timeout': label = 'Request timed out'; break;
+    case 'authentication':
+      label = 'Authentication failed';
+      break;
+    default: label = 'LLM error'; break;
+  }
+  const waitText = waitSeconds >= 60
+    ? `${Math.round(waitSeconds / 60)} min`
+    : `${Math.max(0, Math.round(waitSeconds))} s`;
+  const attemptText = maxAttempts > 0
+    ? `${attempt}/${maxAttempts}`
+    : `${attempt}`;
+  panel._emitToast(
+    `🔄 ${label} — retrying in ${waitText} (${attemptText})`,
+    'warning',
+  );
 }
 
 /**

@@ -1492,45 +1492,25 @@ export function renderSearchBar(panel) {
   const onNext = fileMode
     ? () => onFileSearchNext(panel)
     : () => onSearchNext(panel);
-  // Click handler for the segmented mode buttons —
-  // switches modes when target differs from current,
-  // refocuses the input otherwise. Defining inside
-  // render is cheap (Lit doesn't track equality on
-  // event handlers).
-  const onModeClick = (target) => {
-    if (panel._searchMode !== target) {
-      toggleSearchMode(panel);
-      return;
-    }
-    panel.updateComplete.then(() => {
-      const input = panel.shadowRoot?.querySelector(
-        '.search-input',
-      );
-      if (input) input.focus();
-    });
-  };
+  // The mode toggle is a single button that flips
+  // between message and file search. Its glyph shows
+  // the mode you'd switch INTO when in message mode
+  // (so 💬 actually means "currently in message
+  // mode"); when active (file mode) it switches to
+  // 📁 and gets the .active class for visual
+  // feedback.
+  const toggleTitle = fileMode
+    ? 'Switch to message search'
+    : 'Switch to file search';
   return html`
     <div class="search-bar" role="search">
-      <div
-        class="search-mode-segmented"
-        role="group"
-        aria-label="Search mode"
-      >
-        <button
-          type="button"
-          class="search-mode-btn ${!fileMode ? 'active' : ''}"
-          @click=${() => onModeClick('message')}
-          aria-pressed=${!fileMode}
-          title="Search messages"
-        >💬</button>
-        <button
-          type="button"
-          class="search-mode-btn ${fileMode ? 'active' : ''}"
-          @click=${() => onModeClick('file')}
-          aria-pressed=${fileMode}
-          title="Search files"
-        >📁</button>
-      </div>
+      <button
+        type="button"
+        class="search-mode-toggle ${fileMode ? 'active' : ''}"
+        @click=${() => toggleSearchMode(panel)}
+        aria-pressed=${fileMode}
+        title=${toggleTitle}
+      >${fileMode ? '📁' : '💬'}</button>
       <div class="search-input-wrapper">
         <input
           type="text"

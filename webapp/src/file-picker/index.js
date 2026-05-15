@@ -619,39 +619,36 @@ export class FilePicker extends LitElement {
         tooltip: 'Sort by size',
       },
     ];
-    const active =
-      modes.find((m) => m.mode === this._sortMode) || modes[0];
-    const menuOpen = this._sortMenuOpen;
-    const primaryTitle =
-      `Sorted by ${active.label.toLowerCase()} ` +
-      `(${this._sortAsc ? 'ascending' : 'descending'}) ` +
-      `— click to reverse`;
     return html`
       <div class="sort-buttons">
         <div
-          class="sort-split"
+          class="sort-row"
           role="group"
           aria-label="Sort files"
         >
-          <button
-            type="button"
-            class="sort-btn primary active"
-            title=${primaryTitle}
-            aria-label=${primaryTitle}
-            @click=${() => this._onSortButtonClick(active.mode)}
-          >
-            ${active.glyph}<span class="dir">${dir}</span>
-          </button>
-          <button
-            type="button"
-            class="sort-btn chevron"
-            aria-label="Choose sort mode"
-            aria-haspopup="menu"
-            aria-expanded=${menuOpen ? 'true' : 'false'}
-            title="Choose sort mode"
-            @click=${this._onSortMenuToggle}
-          >▾</button>
-          ${menuOpen ? this._renderSortMenu(modes, active) : ''}
+          ${modes.map((m) => {
+            const isActive = m.mode === this._sortMode;
+            const title = isActive
+              ? `Sorted by ${m.label.toLowerCase()} `
+                + `(${this._sortAsc ? 'ascending' : 'descending'}) `
+                + `— click to reverse`
+              : m.tooltip;
+            return html`
+              <button
+                type="button"
+                class="sort-btn ${isActive ? 'active' : ''}"
+                data-sort-mode=${m.mode}
+                title=${title}
+                aria-label=${title}
+                aria-pressed=${isActive ? 'true' : 'false'}
+                @click=${() => this._onSortButtonClick(m.mode)}
+              >
+                ${m.glyph}${isActive
+                  ? html`<span class="dir">${dir}</span>`
+                  : ''}
+              </button>
+            `;
+          })}
         </div>
         ${this._renderSettingsButton()}
         ${this._renderDocConvertButton()}

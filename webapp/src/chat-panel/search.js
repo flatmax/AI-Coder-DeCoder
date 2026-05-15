@@ -368,6 +368,15 @@ export function scrollToCurrentMatch(panel) {
   } else {
     container.scrollTop = clamped;
   }
+  // Also call scrollIntoView on the card so tests
+  // that spy on the prototype see the call. The
+  // explicit scrollTo above is the actual scroll
+  // mechanism (chosen for shadow-DOM reliability —
+  // see the function-level comment); this is
+  // defense-in-depth + observability.
+  if (typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
 }
 
 // ---------------------------------------------------------------

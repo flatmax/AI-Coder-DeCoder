@@ -170,6 +170,16 @@ export class DocConvertTab extends RpcMixin(LitElement) {
      * which live inside _convertResults.
      */
     _convertError: { type: String, state: true },
+    /**
+     * Working-tree cleanliness from `Repo.is_clean`:
+     *
+     *   - true   — clean tree, conversion allowed
+     *   - false  — dirty tree, banner + convert disabled
+     *   - null   — probe failed or not yet completed;
+     *              the backend is the final authority
+     *              so we don't pre-block the user
+     */
+    _treeClean: { type: Object, state: true },
   };
 
   static styles = css`
@@ -503,6 +513,16 @@ export class DocConvertTab extends RpcMixin(LitElement) {
       background: rgba(248, 81, 73, 0.08);
       margin: 0.75rem;
     }
+
+    .dirty-tree-banner {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8125rem;
+      color: #d29922;
+      border-left: 3px solid #d29922;
+      background: rgba(210, 153, 34, 0.08);
+      margin: 0.5rem 0.75rem;
+      border-radius: 3px;
+    }
   `;
 
   constructor() {
@@ -518,6 +538,7 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     this._progressByPath = new Map();
     this._convertResults = [];
     this._convertError = null;
+    this._treeClean = null;
 
     // Re-scan after commits / resets — the picker fires
     // `files-modified` as a window event after those ops,
@@ -552,15 +573,40 @@ export class DocConvertTab extends RpcMixin(LitElement) {
   onRpcReady() {
     this._loadAvailability();
     this._loadFiles();
+    this._loadTreeClean();
   }
 
   _onFilesModified() {
     if (!this.rpcConnected) return;
-    // Skip re-scan while a scan is already in flight —
-    // a back-to-back commit + reset sequence would
-    // otherwise race.
+    // Refresh cleanliness on every files-modified
+    // — commits flip dirty → clean and the banner
+    // needs to clear without a tab switch. Cheap
+    // independent RPC; doesn't collide with the
+    // scan-in-flight guard.
+    this._loadTreeClean();
+    // Skip scan re-entry while a scan is already in
+    // flight — a back-to-back commit + reset sequence
+    // would otherwise race.
     if (this._scanning) return;
     this._loadFiles();
+  }
+
+  /**
+   * Probe `Repo.is_clean` to drive the dirty-tree
+   * banner + convert-button gating. Failure (RPC
+   * not registered, restricted caller, etc.) leaves
+   * `_treeClean` at null so the UI doesn't pre-block
+   * the user — backend's own gate is the final
+   * authority when the user clicks Convert.
+   */
+  async _loadTreeClean() {
+    try {
+      const result = await this.rpcExtract('Repo.is_clean');
+      this._treeClean = !!result;
+    } catch (err) {
+      console.warn('[doc-convert] Repo.is_clean failed', err);
+      this._treeClean = null;
+    }
   }
 
   /**
@@ -895,9 +941,18 @@ export class DocConvertTab extends RpcMixin(LitElement) {
   }
 
   /**
-   * Compose the Convert button tooltip.
+   * Compose the Convert button tooltip. Dirty-tree
+   * gating wins over the empty-selection hint —
+   * "commit first" is the more specific actionable
+   * guidance when both apply.
    */
   _convertButtonTitle(selectedCount) {
+    if (this._treeClean === false) {
+      return (
+        'Commit uncommitted changes before running '
+        + 'conversion'
+      );
+    }
     if (selectedCount === 0) {
       return 'Select files to convert';
     }
@@ -917,9 +972,34 @@ export class DocConvertTab extends RpcMixin(LitElement) {
     return html`
       ${this._renderNavBar()}
       ${this._renderInfoBanner()}
+      ${this._renderDirtyTreeBanner()}
       ${this._renderToolbar()}
       ${this._renderFilterBar()}
       ${this._renderFileList()}
+    `;
+  }
+
+  /**
+   * Render the dirty-tree warning banner. Only emitted
+   * when `_treeClean === false` — null (probe failed)
+   * and true (clean) both render nothing.
+   *
+   * Conversion overwrites the converted markdown next
+   * to the source. With uncommitted changes already in
+   * the tree, a user reviewing the diff afterwards
+   * can't tell which lines came from conversion vs
+   * their own work-in-progress. Telling them up front
+   * to commit first is cheaper than untangling it
+   * later.
+   */
+  _renderDirtyTreeBanner() {
+    if (this._treeClean !== false) return null;
+    return html`
+      <div class="dirty-tree-banner" role="status">
+        ⚠ Uncommitted changes in the working tree —
+        commit them before running conversion so the
+        new output appears as a clean diff.
+      </div>
     `;
   }
 
@@ -1025,7 +1105,8 @@ export class DocConvertTab extends RpcMixin(LitElement) {
         <button
           class="toolbar-button primary"
           ?disabled=${selectedCount === 0
-            || this._convertPhase !== 'idle'}
+            || this._convertPhase !== 'idle'
+            || this._treeClean === false}
           title=${this._convertButtonTitle(selectedCount)}
           @click=${this._startConversion}
         >Convert Selected (${selectedCount})</button>
