@@ -253,6 +253,48 @@ One line per change from the stability tracker's change log. Promotions first, t
 
 Cache sub-view defaults: L0 and active expanded; L1/L2/L3 collapsed.
 
+### Cache warmer status row
+
+Always-on indicator at the top of the Cache sub-view, above the cache-hit-rate header. Complementary to the floating `ac-cache-warmup-progress` overlay (which handles the loud final-30 s heads-up regardless of which dialog tab is open) — the dialog row covers the silent 240 s before that, plus the disabled state.
+
+**Render states:**
+
+| State | Glyph | Label | Right-side affordance | Border |
+|---|---|---|---|---|
+| Active | 🌡️ | `Cache warmer active — next firing in` | Countdown `M:SS` (or `Ns` under a minute) | Blue left-border (`var(--accent-primary, #58a6ff)`) |
+| Disabled by runtime failure | ⚠️ | `Warmer disabled — <last_disabled_reason>` | Re-enable button | Red left-border (`#f85149`) |
+| Disabled by config | 🌡️ | `Warmer disabled in config` | None | Grey left-border (`#8b949e`) |
+| Pre-first-fetch | 🌡️ | `Cache warmer status…` | None | None (placeholder, prevents pop-in) |
+
+**Polling:**
+
+| Aspect | Value |
+|---|---|
+| Interval | 1000 ms |
+| Lifecycle | Started on Cache sub-view activation; stopped on sub-view switch or component unmount |
+| Inactive cost | Zero — Budget sub-view does not poll |
+| RPC | `LLMService.get_cache_warmer_status()` — read-only, safe for collaborators |
+
+**Re-enable button:**
+
+| Aspect | Value |
+|---|---|
+| RPC | `LLMService.enable_cache_warmer()` — localhost-only mutation |
+| Behavior | Calls `CacheWarmer.enable()` server-side; clears `last_disabled_reason` and reschedules next firing |
+| Feedback | Success toast `"Cache warmer re-enabled"` (`type: success`); on restricted error, info toast with the server's reason; on transport error, error toast with the message |
+| Disabled when | `!rpcConnected` |
+
+**Countdown formatting:**
+
+`_formatWarmerCountdown(seconds)` returns:
+- `"—"` when `seconds` is null/non-finite
+- `"Ns"` when `seconds < 60` (ceiled to whole seconds)
+- `"M:SS"` otherwise (minutes floored, seconds ceiled to fill, zero-padded)
+
+**Drift between layers:**
+
+The dialog row's countdown and the floating overlay's countdown can drift by ±1 s during the visible-30 s phase — the overlay updates per-broadcast (server-side ticker), the dialog row updates per-poll-tick (client-side). Drift is harmless; the two indicators agreeing reinforces the "warmer is firing" signal.
+
 ## Cross-references
 
 - Behavioral specification (Context tab, HUD lifecycle, Cache sub-view rebuild): `specs4/5-webapp/viewers-hud.md`

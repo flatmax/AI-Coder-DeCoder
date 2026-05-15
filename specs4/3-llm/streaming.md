@@ -75,8 +75,6 @@ A background cache warmer (see [cache-tiering.md § Cache Warmer](cache-tiering.
 The warmer never registers itself in the single-stream guard — its existence is invisible to `chat_streaming`. Real user requests fire regardless of whether a warm-up is mid-flight.
 
 ## File Context Sync
-🟨🟨🟨 REPL
-🟨🟨🟨 REPL
 
 - Compare current file context against incoming selected files list
 - Remove files present in context but absent from new selection

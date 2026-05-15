@@ -2003,6 +2003,68 @@ class LLMService:
         return reset_to_head(self)
 
     # ------------------------------------------------------------------
+    # Cache warmer status (read-only) and re-enable (localhost-only)
+    # ------------------------------------------------------------------
+    #
+    # The Context tab's Cache sub-view shows an always-on
+    # status row sourced from these methods. The status read
+    # is safe for collaborators (read-only, no state change);
+    # re-enable is a mutation and follows the standard
+    # localhost-only pattern.
+    #
+    # Spec: specs4/3-llm/cache-tiering.md § Cache Warmer.
+
+    def get_cache_warmer_status(self) -> dict[str, Any]:
+        """Return current cache-warmer state for the UI.
+
+        Pure read — no side effects, no localhost guard.
+        Collaborators see the same state as the host so the
+        dialog renders identically for everyone.
+
+        Returns
+        -------
+        dict
+            ``enabled`` (bool) — whether the warmer is
+            currently active. False means either disabled by
+            config or auto-disabled by a runtime failure;
+            ``last_disabled_reason`` distinguishes.
+            ``seconds_remaining`` (float | None) — wall-clock
+            seconds until the next firing, or None when no
+            timer is scheduled (warmer not yet started, or
+            disabled).
+            ``interval_seconds`` (float) — configured idle
+            interval between firings.
+            ``last_disabled_reason`` (str | None) — populated
+            when ``enabled`` is False due to runtime failure.
+            None when disabled by config or never disabled.
+        """
+        warmer = self._cache_warmer
+        return {
+            "enabled": warmer.enabled,
+            "seconds_remaining": warmer.seconds_remaining,
+            "interval_seconds": warmer.interval_seconds,
+            "last_disabled_reason": warmer.last_disabled_reason,
+        }
+
+    def enable_cache_warmer(self) -> dict[str, Any]:
+        """Re-enable the cache warmer after a runtime disable.
+
+        Localhost-only — affects shared session state. Calls
+        :meth:`CacheWarmer.enable` which clears the
+        disabled-reason and reschedules the next firing.
+
+        Idempotent when the warmer is already enabled — the
+        underlying ``enable()`` call clears state and
+        reschedules unconditionally, but the visible effect
+        is just a re-scheduling.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        self._cache_warmer.enable()
+        return {"enabled": True}
+
+    # ------------------------------------------------------------------
     # Event broadcast
     # ------------------------------------------------------------------
 
