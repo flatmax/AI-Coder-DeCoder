@@ -77,6 +77,7 @@ export class FilePicker extends LitElement {
     _creating: { type: Object, state: true },
     _branchMenu: { type: Object, state: true },
     _gitMenuOpen: { type: Boolean, state: true },
+    _sortMenuOpen: { type: Boolean, state: true },
     _committing: { type: Boolean, state: true },
     _reviewActive: { type: Boolean, state: true },
     _streaming: { type: Boolean, state: true },
@@ -140,6 +141,11 @@ export class FilePicker extends LitElement {
       this._onDocumentClickForGitMenu.bind(this);
     this._onDocumentKeyDownForGitMenu =
       this._onDocumentKeyDownForGitMenu.bind(this);
+    this._onDocumentClickForSortMenu =
+      this._onDocumentClickForSortMenu.bind(this);
+    this._onDocumentKeyDownForSortMenu =
+      this._onDocumentKeyDownForSortMenu.bind(this);
+    this._sortMenuOpen = false;
     this._committing = false;
     this._reviewActive = false;
     this._streaming = false;
@@ -184,6 +190,7 @@ export class FilePicker extends LitElement {
     this._closeContextMenu();
     this._closeBranchMenu();
     this._closeGitMenu();
+    this._closeSortMenu();
     window.removeEventListener(
       'stream-chunk', this._onStreamChunkGit,
     );
@@ -588,44 +595,168 @@ export class FilePicker extends LitElement {
 
   _renderSortButtons() {
     const dir = this._sortAsc ? '↑' : '↓';
-    const button = (mode, glyph, tooltip) => {
-      const isActive = this._sortMode === mode;
-      return html`
-        <button
-          type="button"
-          class="sort-btn ${isActive ? 'active' : ''}"
-          data-sort-mode=${mode}
-          title=${tooltip}
-          aria-pressed=${isActive}
-          @click=${() => this._onSortButtonClick(mode)}
-        >
-          ${glyph}${isActive
-            ? html`<span class="dir">${dir}</span>`
-            : ''}
-        </button>
-      `;
-    };
+    const modes = [
+      {
+        mode: SORT_MODE_NAME,
+        glyph: 'A',
+        label: 'Name',
+        tooltip: 'Sort by name',
+      },
+      {
+        mode: SORT_MODE_MTIME,
+        glyph: '🕐',
+        label: 'Modified',
+        tooltip: 'Sort by modification time',
+      },
+      {
+        mode: SORT_MODE_SIZE,
+        glyph: '#',
+        label: 'Size',
+        tooltip: 'Sort by size',
+      },
+    ];
+    const active =
+      modes.find((m) => m.mode === this._sortMode) || modes[0];
+    const menuOpen = this._sortMenuOpen;
+    const primaryTitle =
+      `Sorted by ${active.label.toLowerCase()} ` +
+      `(${this._sortAsc ? 'ascending' : 'descending'}) ` +
+      `— click to reverse`;
     return html`
       <div class="sort-buttons">
-        ${button(
-          SORT_MODE_NAME,
-          'A',
-          'Sort by name (click again to reverse)',
-        )}
-        ${button(
-          SORT_MODE_MTIME,
-          '🕐',
-          'Sort by modification time (click again to reverse)',
-        )}
-        ${button(
-          SORT_MODE_SIZE,
-          '#',
-          'Sort by size (click again to reverse)',
-        )}
+        <div
+          class="sort-split"
+          role="group"
+          aria-label="Sort files"
+        >
+          <button
+            type="button"
+            class="sort-btn primary active"
+            title=${primaryTitle}
+            aria-label=${primaryTitle}
+            @click=${() => this._onSortButtonClick(active.mode)}
+          >
+            ${active.glyph}<span class="dir">${dir}</span>
+          </button>
+          <button
+            type="button"
+            class="sort-btn chevron"
+            aria-label="Choose sort mode"
+            aria-haspopup="menu"
+            aria-expanded=${menuOpen ? 'true' : 'false'}
+            title="Choose sort mode"
+            @click=${this._onSortMenuToggle}
+          >▾</button>
+          ${menuOpen ? this._renderSortMenu(modes, active) : ''}
+        </div>
         ${this._renderSettingsButton()}
         ${this._renderGitActions()}
       </div>
     `;
+  }
+
+  _renderSortMenu(modes, active) {
+    const dir = this._sortAsc ? '↑' : '↓';
+    return html`
+      <div
+        class="sort-menu"
+        role="menu"
+        aria-label="Sort files"
+      >
+        ${modes.map((m) => {
+          const isActive = m.mode === active.mode;
+          return html`
+            <button
+              type="button"
+              class="sort-menu-item ${isActive ? 'active' : ''}"
+              role="menuitemradio"
+              aria-checked=${isActive ? 'true' : 'false'}
+              title=${isActive
+                ? `${m.tooltip} (click to reverse direction)`
+                : m.tooltip}
+              @click=${() => this._onSortMenuItemClick(m.mode)}
+            >
+              <span class="icon">${m.glyph}</span>
+              <span class="label">${m.label}</span>
+              ${isActive
+                ? html`<span class="dir">${dir}</span>`
+                : ''}
+            </button>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  _onSortMenuToggle(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._sortMenuOpen) {
+      this._closeSortMenu();
+    } else {
+      this._openSortMenu();
+    }
+  }
+
+  _openSortMenu() {
+    if (this._sortMenuOpen) return;
+    this._sortMenuOpen = true;
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForSortMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForSortMenu,
+      true,
+    );
+  }
+
+  _closeSortMenu() {
+    if (!this._sortMenuOpen) return;
+    this._sortMenuOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForSortMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForSortMenu,
+      true,
+    );
+  }
+
+  _onSortMenuItemClick(mode) {
+    this._closeSortMenu();
+    this._onSortButtonClick(mode);
+  }
+
+  _onDocumentClickForSortMenu(event) {
+    if (!this._sortMenuOpen) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const inside = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        (el.classList.contains('sort-menu') ||
+          el.classList.contains('sort-split')),
+    );
+    if (!inside) {
+      this._closeSortMenu();
+    }
+  }
+
+  _onDocumentKeyDownForSortMenu(event) {
+    if (!this._sortMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeSortMenu();
+    }
   }
 
   _renderSettingsButton() {

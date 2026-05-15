@@ -84,6 +84,99 @@ export const FILE_PICKER_STYLES = css`
       opacity: 0.8;
     }
 
+    .sort-split {
+      position: relative;
+      display: inline-flex;
+      align-items: stretch;
+      gap: 0;
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      border-radius: 3px;
+      overflow: visible;
+    }
+    .sort-split .sort-btn {
+      border-radius: 0;
+      border: none;
+    }
+    .sort-split .sort-btn.primary {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+      padding: 0.2rem 0.5rem;
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
+    }
+    .sort-split .sort-btn.primary:hover {
+      background: rgba(88, 166, 255, 0.2);
+    }
+    .sort-split .sort-btn.chevron {
+      padding: 0.2rem 0.3rem;
+      font-size: 0.7rem;
+      color: var(--text-secondary, #8b949e);
+      border-left: 1px solid rgba(240, 246, 252, 0.12);
+      box-shadow: none;
+    }
+    .sort-split .sort-btn.chevron:hover {
+      color: var(--text-primary, #c9d1d9);
+      background: rgba(240, 246, 252, 0.05);
+    }
+    .sort-split .sort-btn.chevron[aria-expanded="true"] {
+      color: var(--accent-primary, #58a6ff);
+      background: rgba(88, 166, 255, 0.12);
+    }
+
+    .sort-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 1000;
+      min-width: 160px;
+      padding: 0.25rem 0;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+    .sort-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+      background: transparent;
+      border: none;
+      width: 100%;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: left;
+    }
+    .sort-menu-item:hover {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .sort-menu-item.active {
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+    }
+    .sort-menu-item .icon {
+      display: inline-flex;
+      width: 1rem;
+      justify-content: center;
+      opacity: 0.85;
+    }
+    .sort-menu-item .label {
+      flex: 1;
+    }
+    .sort-menu-item .dir {
+      opacity: 0.8;
+    }
+
     .picker-settings-btn {
       flex-shrink: 0;
       background: transparent;
