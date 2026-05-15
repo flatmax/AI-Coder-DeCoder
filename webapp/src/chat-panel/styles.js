@@ -926,6 +926,25 @@ export const STYLES = css`
   .action-bar:has(.search-bar:focus-within) .search-collapsible {
     display: none;
   }
+  /* Symmetric rule: when the search bar does NOT
+   * have focus, hide its internal affordances —
+   * the option toggles (Aa / .* / ab), the match
+   * counter, and the prev/next arrows. The input
+   * box and the 💬/📁 mode-toggle button stay
+   * visible so the user can still see what they
+   * searched and click to refocus. As soon as
+   * focus enters the search bar (click on the
+   * input or any button inside it) the toggles,
+   * counter, and arrows reappear via the
+   * :focus-within branch above. Result: a clean
+   * "icon + input" rest state, expanding to the
+   * full search toolbar only when the user is
+   * actively searching. */
+  .search-bar:not(:focus-within) .search-toggle,
+  .search-bar:not(:focus-within) .search-counter,
+  .search-bar:not(:focus-within) .search-nav {
+    display: none;
+  }
   .search-input-wrapper {
     display: flex;
     flex: 1;
