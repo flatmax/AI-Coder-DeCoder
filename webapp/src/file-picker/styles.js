@@ -109,6 +109,35 @@ export const FILE_PICKER_STYLES = css`
       gap: 0.2rem;
       margin-left: 0.25rem;
     }
+    .picker-git-actions.split {
+      position: relative;
+      gap: 0;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 3px;
+      overflow: visible;
+    }
+    .picker-git-actions.split .picker-git-btn {
+      border-radius: 0;
+      border: none;
+      opacity: 1;
+    }
+    .picker-git-actions.split .picker-git-btn.primary {
+      padding: 0.2rem 0.5rem;
+    }
+    .picker-git-actions.split .picker-git-btn.chevron {
+      padding: 0.2rem 0.3rem;
+      font-size: 0.7rem;
+      opacity: 0.7;
+      border-left: 1px solid rgba(240, 246, 252, 0.12);
+    }
+    .picker-git-actions.split .picker-git-btn.chevron:hover:not([disabled]) {
+      opacity: 1;
+    }
+    .picker-git-actions.split .picker-git-btn.chevron[aria-expanded="true"] {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+    }
     .picker-git-btn {
       background: transparent;
       border: 1px solid transparent;
@@ -137,6 +166,68 @@ export const FILE_PICKER_STYLES = css`
     .picker-git-btn[disabled] {
       opacity: 0.3;
       cursor: not-allowed;
+    }
+
+    .git-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      z-index: 1000;
+      min-width: 200px;
+      padding: 0.25rem 0;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+    .git-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+      background: transparent;
+      border: none;
+      width: 100%;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: left;
+    }
+    .git-menu-item:hover:not([disabled]) {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .git-menu-item[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .git-menu-item.destructive {
+      color: #f85149;
+    }
+    .git-menu-item.destructive:hover:not([disabled]) {
+      background: rgba(248, 81, 73, 0.15);
+      color: #ff6b6b;
+    }
+    .git-menu-item .icon {
+      display: inline-flex;
+      width: 1rem;
+      justify-content: center;
+      opacity: 0.85;
+      font-size: 0.85rem;
+    }
+    .git-menu-item .label {
+      flex: 1;
+    }
+    .git-menu-separator {
+      height: 1px;
+      margin: 0.25rem 0.4rem;
+      background: rgba(240, 246, 252, 0.1);
     }
 
     .tree-scroll {

@@ -76,6 +76,7 @@ export class FilePicker extends LitElement {
     _duplicating: { type: String, state: true },
     _creating: { type: Object, state: true },
     _branchMenu: { type: Object, state: true },
+    _gitMenuOpen: { type: Boolean, state: true },
     _committing: { type: Boolean, state: true },
     _reviewActive: { type: Boolean, state: true },
     _streaming: { type: Boolean, state: true },
@@ -127,6 +128,7 @@ export class FilePicker extends LitElement {
     this._expandedSnapshot = null;
     this._contextMenu = null;
     this._branchMenu = null;
+    this._gitMenuOpen = false;
     this._onDocumentClickForMenu = this._onDocumentClickForMenu.bind(this);
     this._onDocumentKeyDownForMenu =
       this._onDocumentKeyDownForMenu.bind(this);
@@ -134,6 +136,10 @@ export class FilePicker extends LitElement {
       this._onDocumentClickForBranchMenu.bind(this);
     this._onDocumentKeyDownForBranchMenu =
       this._onDocumentKeyDownForBranchMenu.bind(this);
+    this._onDocumentClickForGitMenu =
+      this._onDocumentClickForGitMenu.bind(this);
+    this._onDocumentKeyDownForGitMenu =
+      this._onDocumentKeyDownForGitMenu.bind(this);
     this._committing = false;
     this._reviewActive = false;
     this._streaming = false;
@@ -177,6 +183,7 @@ export class FilePicker extends LitElement {
   disconnectedCallback() {
     this._closeContextMenu();
     this._closeBranchMenu();
+    this._closeGitMenu();
     window.removeEventListener(
       'stream-chunk', this._onStreamChunkGit,
     );
@@ -669,43 +676,174 @@ export class FilePicker extends LitElement {
         : this._committing
           ? 'Review disabled during commit'
           : 'Start a code review of a branch';
+    // Chevron is enabled even when the primary action is
+    // disabled — Copy diff is always safe, and the user
+    // may want to inspect the menu while a commit is in
+    // flight. Items inside the menu carry their own
+    // disabled state.
+    const menuOpen = this._gitMenuOpen;
     return html`
       <div
-        class="picker-git-actions"
+        class="picker-git-actions split"
         role="group"
         aria-label="Git actions"
       >
         <button
-          class="picker-git-btn"
-          title="Copy working-tree diff to clipboard"
-          aria-label="Copy diff"
-          @click=${() => this._dispatchGitAction('copy-diff')}
-        >📋</button>
-        <button
-          class="picker-git-btn ${this._committing ? 'in-flight' : ''}"
+          class="picker-git-btn primary ${this._committing ? 'in-flight' : ''}"
           ?disabled=${commitDisabled}
           title=${commitTitle}
           aria-label="Commit all changes"
           @click=${() => this._dispatchGitAction('commit')}
         >${this._committing ? '⏳' : '💾'}</button>
         <button
-          class="picker-git-btn danger"
-          ?disabled=${resetDisabled}
-          title=${resetTitle}
-          aria-label="Reset to HEAD"
-          @click=${() => this._dispatchGitAction('reset')}
-        >⚠️</button>
-        ${reviewActive ? '' : html`
-          <button
-            class="picker-git-btn"
-            ?disabled=${reviewDisabled}
-            title=${reviewTitle}
-            aria-label="Start code review"
-            @click=${this._onReviewButtonClick}
-          >🔍</button>
-        `}
+          class="picker-git-btn chevron"
+          aria-label="More git actions"
+          aria-haspopup="menu"
+          aria-expanded=${menuOpen ? 'true' : 'false'}
+          title="More git actions"
+          @click=${this._onGitMenuToggle}
+        >▾</button>
+        ${menuOpen
+          ? this._renderGitMenu({
+              resetDisabled,
+              resetTitle,
+              reviewActive,
+              reviewDisabled,
+              reviewTitle,
+            })
+          : ''}
       </div>
     `;
+  }
+
+  _renderGitMenu({
+    resetDisabled,
+    resetTitle,
+    reviewActive,
+    reviewDisabled,
+    reviewTitle,
+  }) {
+    return html`
+      <div
+        class="git-menu"
+        role="menu"
+        aria-label="Git actions"
+      >
+        <button
+          type="button"
+          class="git-menu-item"
+          role="menuitem"
+          title="Copy working-tree diff to clipboard"
+          @click=${() => this._onGitMenuItemClick('copy-diff')}
+        >
+          <span class="icon">📋</span>
+          <span class="label">Copy diff</span>
+        </button>
+        ${reviewActive
+          ? ''
+          : html`
+              <button
+                type="button"
+                class="git-menu-item"
+                role="menuitem"
+                ?disabled=${reviewDisabled}
+                title=${reviewTitle}
+                @click=${this._onGitMenuReviewClick}
+              >
+                <span class="icon">🔍</span>
+                <span class="label">Start code review…</span>
+              </button>
+            `}
+        <div class="git-menu-separator"></div>
+        <button
+          type="button"
+          class="git-menu-item destructive"
+          role="menuitem"
+          ?disabled=${resetDisabled}
+          title=${resetTitle}
+          @click=${() => this._onGitMenuItemClick('reset')}
+        >
+          <span class="icon">⚠️</span>
+          <span class="label">Reset to HEAD…</span>
+        </button>
+      </div>
+    `;
+  }
+
+  _onGitMenuToggle(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._gitMenuOpen) {
+      this._closeGitMenu();
+    } else {
+      this._openGitMenu();
+    }
+  }
+
+  _openGitMenu() {
+    if (this._gitMenuOpen) return;
+    this._gitMenuOpen = true;
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForGitMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForGitMenu,
+      true,
+    );
+  }
+
+  _closeGitMenu() {
+    if (!this._gitMenuOpen) return;
+    this._gitMenuOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForGitMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForGitMenu,
+      true,
+    );
+  }
+
+  _onGitMenuItemClick(action) {
+    this._closeGitMenu();
+    this._dispatchGitAction(action);
+  }
+
+  _onGitMenuReviewClick() {
+    this._closeGitMenu();
+    this._onReviewButtonClick();
+  }
+
+  _onDocumentClickForGitMenu(event) {
+    if (!this._gitMenuOpen) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const inside = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        (el.classList.contains('git-menu') ||
+          el.classList.contains('picker-git-actions')),
+    );
+    if (!inside) {
+      this._closeGitMenu();
+    }
+  }
+
+  _onDocumentKeyDownForGitMenu(event) {
+    if (!this._gitMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeGitMenu();
+    }
   }
 
   _onReviewButtonClick() {
