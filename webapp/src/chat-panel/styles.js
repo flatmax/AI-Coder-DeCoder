@@ -927,19 +927,19 @@ export const STYLES = css`
     display: none;
   }
   /* Symmetric rule: when the search bar does NOT
-   * have focus, hide its internal affordances —
-   * the option toggles (Aa / .* / ab), the match
-   * counter, and the prev/next arrows. The input
-   * box and the 💬/📁 mode-toggle button stay
-   * visible so the user can still see what they
-   * searched and click to refocus. As soon as
-   * focus enters the search bar (click on the
-   * input or any button inside it) the toggles,
-   * counter, and arrows reappear via the
-   * :focus-within branch above. Result: a clean
-   * "icon + input" rest state, expanding to the
-   * full search toolbar only when the user is
-   * actively searching. */
+   * have focus, hide every affordance except the
+   * input itself — the 💬/📁 segmented mode
+   * toggle, the option toggles (Aa / .* / ab),
+   * the match counter, and the prev/next arrows.
+   * Rest state collapses to a single text box
+   * whose placeholder ("Search messages…" /
+   * "Search files…") indicates the active mode.
+   * As soon as focus enters the search bar
+   * (clicking the input itself counts), the full
+   * toolbar reappears via the :focus-within
+   * branch above so the user can pick a mode,
+   * flip an option, or step through matches. */
+  .search-bar:not(:focus-within) .search-mode-segmented,
   .search-bar:not(:focus-within) .search-toggle,
   .search-bar:not(:focus-within) .search-counter,
   .search-bar:not(:focus-within) .search-nav {
@@ -1025,6 +1025,47 @@ export const STYLES = css`
   .search-nav-button:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+  /* Search mode segmented control — two side-by-side
+   * buttons at the left of the search bar
+   * (💬 messages / 📁 files). Always visible
+   * regardless of focus state so the active mode and
+   * the toggle to the other mode are both immediately
+   * discoverable. Mirrors the .mode-segmented pattern
+   * used for the code/doc toggle. */
+  .search-mode-segmented {
+    display: inline-flex;
+    flex-shrink: 0;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    border-radius: 4px;
+  }
+  .search-mode-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    padding: 0.25rem 0.4rem;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .search-mode-btn:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+  .search-mode-btn:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+  .search-mode-btn:hover {
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-primary, #c9d1d9);
+  }
+  .search-mode-btn.active {
+    background: rgba(88, 166, 255, 0.22);
+    color: var(--accent-primary, #58a6ff);
+    border-radius: 3px;
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   /* Mode + cross-ref buttons — sit at the right end of
    * the search bar. Compact icon-only presentation

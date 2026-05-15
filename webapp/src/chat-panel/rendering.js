@@ -1492,22 +1492,45 @@ export function renderSearchBar(panel) {
   const onNext = fileMode
     ? () => onFileSearchNext(panel)
     : () => onSearchNext(panel);
+  // Click handler for the segmented mode buttons —
+  // switches modes when target differs from current,
+  // refocuses the input otherwise. Defining inside
+  // render is cheap (Lit doesn't track equality on
+  // event handlers).
+  const onModeClick = (target) => {
+    if (panel._searchMode !== target) {
+      toggleSearchMode(panel);
+      return;
+    }
+    panel.updateComplete.then(() => {
+      const input = panel.shadowRoot?.querySelector(
+        '.search-input',
+      );
+      if (input) input.focus();
+    });
+  };
   return html`
     <div class="search-bar" role="search">
-      <button
-        class="action-button search-mode-toggle ${fileMode
-          ? 'active'
-          : ''}"
-        @click=${() => toggleSearchMode(panel)}
-        aria-label=${fileMode
-          ? 'Switch to message search'
-          : 'Switch to file search'}
-        title=${fileMode
-          ? 'File search — click to switch to messages'
-          : 'Message search — click to switch to files'}
+      <div
+        class="search-mode-segmented"
+        role="group"
+        aria-label="Search mode"
       >
-        ${fileMode ? '📁' : '💬'}
-      </button>
+        <button
+          type="button"
+          class="search-mode-btn ${!fileMode ? 'active' : ''}"
+          @click=${() => onModeClick('message')}
+          aria-pressed=${!fileMode}
+          title="Search messages"
+        >💬</button>
+        <button
+          type="button"
+          class="search-mode-btn ${fileMode ? 'active' : ''}"
+          @click=${() => onModeClick('file')}
+          aria-pressed=${fileMode}
+          title="Search files"
+        >📁</button>
+      </div>
       <div class="search-input-wrapper">
         <input
           type="text"
