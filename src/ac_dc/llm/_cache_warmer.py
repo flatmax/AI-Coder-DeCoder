@@ -232,9 +232,41 @@ class CacheWarmer:
 
     @property
     def interval_seconds(self) -> float:
-        """Configured interval between warm-up firings."""
+        """Configured interval between warm-up firings.
+
+        Clamped to ``_CACHE_TTL_SECONDS - 30`` (270s) at the
+        upper end. Anthropic's prompt cache uses a 5-minute
+        sliding TTL — a warm-up at the 300-second mark or
+        beyond fires *after* the cached prefix has already
+        expired, so every firing becomes a cold cache write
+        and the warmer becomes pure cost with no payoff. The
+        30-second margin covers the visible countdown phase
+        (``_COUNTDOWN_SECONDS``) and provider request latency
+        so the actual provider call lands well inside the
+        TTL window.
+
+        A user config with ``interval_seconds: 600`` would
+        otherwise produce 0% cache hit on every warm-up
+        (observed in the field). Clamping silently here is
+        safer than raising — operators see "warmer running
+        every 4:30 instead of every 10 min" in the HUD and
+        can investigate, whereas a startup error would just
+        disable the warmer entirely.
+        """
         cfg = self._service._config.cache_warmup_config
-        return float(cfg.get("interval_seconds", 270))
+        configured = float(cfg.get("interval_seconds", 270))
+        ceiling = _CACHE_TTL_SECONDS - 30.0
+        if configured > ceiling:
+            logger.warning(
+                "Cache warmer interval_seconds=%.0f exceeds "
+                "Anthropic's 5-minute cache TTL — clamping to "
+                "%.0fs to keep warm-ups inside the TTL window. "
+                "Update cache_warmup.interval_seconds in app.json "
+                "to a value <= %.0f to silence this warning.",
+                configured, ceiling, ceiling,
+            )
+            return ceiling
+        return configured
 
     # ------------------------------------------------------------------
     # Lifecycle
