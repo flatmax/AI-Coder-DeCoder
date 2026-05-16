@@ -396,10 +396,23 @@ class LLMService:
             "pre_change_symbol_map": "",
         }
 
-        # Executors. Streaming gets its own pool so aux work doesn't
-        # starve it. Aux pool handles commit-message generation and
-        # topic detection — both blocking LLM calls that should run
-        # off the event loop but can overlap with a stream.
+        # Executors. Three pools, isolated by deadline class:
+        #
+        # - ``_stream_executor`` — user-facing streaming LLM calls.
+        #   Hot path. Latency-sensitive.
+        # - ``_aux_executor`` — soft-deadline batch work: commit
+        #   message generation, topic detection, doc-index build,
+        #   keyword enrichment, URL fetching during streaming.
+        # - ``_warmer_executor`` — cache warmer ONLY. Single
+        #   worker, dedicated. The warmer has a hard wall-clock
+        #   deadline (Anthropic's 5-minute prompt-cache TTL); it
+        #   used to share ``_aux_executor`` and was observed in
+        #   the field queueing behind KeyBERT enrichment, drifting
+        #   +50 to +170 seconds past its scheduled fire time and
+        #   missing the cache window every cycle (0% hit rate,
+        #   pure cache writes). Isolating to a dedicated pool
+        #   removes the queueing path entirely. See decision D34
+        #   and ``specs4/3-llm/cache-tiering.md`` § Cache Warmer.
         self._stream_executor = ThreadPoolExecutor(
             max_workers=_STREAM_EXECUTOR_WORKERS,
             thread_name_prefix="ac-dc-stream",
@@ -407,6 +420,10 @@ class LLMService:
         self._aux_executor = ThreadPoolExecutor(
             max_workers=_AUX_EXECUTOR_WORKERS,
             thread_name_prefix="ac-dc-aux",
+        )
+        self._warmer_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="ac-dc-warmer",
         )
 
         # History compactor — with an injected topic detector that
@@ -2081,19 +2098,29 @@ class LLMService:
         """Re-enable the cache warmer after a runtime disable.
 
         Localhost-only — affects shared session state. Calls
-        :meth:`CacheWarmer.enable` which clears the
-        disabled-reason and reschedules the next firing.
+        :meth:`CacheWarmer.enable`, which today is a no-op
+        because the warmer is unplugged at the entry point
+        (see :meth:`CacheWarmer.start` UNPLUG comment).
+        Returns the actual post-call ``enabled`` state plus
+        the disabled reason when present so the frontend
+        can render an accurate toast — clicking Re-enable
+        on a parked warmer surfaces the parking reason
+        rather than a misleading success message.
 
-        Idempotent when the warmer is already enabled — the
-        underlying ``enable()`` call clears state and
-        reschedules unconditionally, but the visible effect
-        is just a re-scheduling.
+        When the warmer is revived, :meth:`CacheWarmer.enable`
+        starts succeeding and this RPC continues to return
+        the current ``enabled`` state truthfully.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
         self._cache_warmer.enable()
-        return {"enabled": True}
+        return {
+            "enabled": self._cache_warmer.enabled,
+            "last_disabled_reason": (
+                self._cache_warmer.last_disabled_reason
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Event broadcast

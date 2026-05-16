@@ -78,6 +78,61 @@ class _WarmupCancelled(Exception):
 logger = logging.getLogger("ac_dc.llm_service.cache_warmer")
 
 
+# ---------------------------------------------------------------------------
+# Event-loop heartbeat (diagnostic for D34a follow-up)
+# ---------------------------------------------------------------------------
+#
+# Field observation post-D34a: every third or fourth cycle
+# stalls for ~120s with the broadcast `await` taking 119s
+# despite (a) no executor queueing (queue_duration=0),
+# (b) a clean LiteLLM call (3s), (c) sub-millisecond
+# broadcasts on the immediately-prior cycles. The pattern
+# rules out the warmer's own code paths and points at the
+# event loop being held by something else for the duration.
+#
+# This heartbeat task wakes up every 100ms and logs at
+# WARNING when the gap between wakes exceeds 1 second. A
+# 100ms cadence is small enough to catch sub-second stalls
+# but large enough that the heartbeat itself doesn't
+# dominate scheduler time. The 1-second WARNING threshold
+# is large enough that ordinary scheduler jitter (50-150ms
+# under load) doesn't trigger noise.
+#
+# Heartbeat runs forever once started — it's a service-
+# wide diagnostic, not a per-warmer thing. Started from
+# the warmer's `start()` so it only runs when the warmer
+# is enabled. Cancelled by `cancel()` and `disable()`.
+#
+# This is INSTRUMENTATION, not a fix. The goal is to
+# narrow down what's holding the loop. Once we know,
+# remove this code.
+
+_HEARTBEAT_INTERVAL_SECONDS = 0.1
+_HEARTBEAT_WARN_THRESHOLD_SECONDS = 1.0
+
+
+async def _heartbeat_loop() -> None:
+    """Wake every 100ms; log when the gap exceeds 1s.
+
+    The expected gap is `_HEARTBEAT_INTERVAL_SECONDS` plus
+    small scheduler jitter. A gap of >1s means the event
+    loop was held — by a blocking call, a long synchronous
+    code path, or OS-level process suspension.
+    """
+    last_wake = time.monotonic()
+    while True:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+        now = time.monotonic()
+        gap = now - last_wake
+        if gap > _HEARTBEAT_WARN_THRESHOLD_SECONDS:
+            logger.warning(
+                "Event loop stalled: %.1fs gap (expected "
+                "%.1fs). Something held the loop.",
+                gap, _HEARTBEAT_INTERVAL_SECONDS,
+            )
+        last_wake = now
+
+
 # Tiny user prompt that doesn't meaningfully change the
 # cached prefix tail. The exact wording matters less than
 # the fact that it's the same every time — a stable suffix
@@ -105,6 +160,28 @@ _CACHE_TTL_SECONDS = 300.0
 # give the user time to read the banner and decide whether
 # to interrupt by sending a real message.
 _COUNTDOWN_SECONDS = 30.0
+
+# Maximum chunk size for the silent-phase polling loop.
+# ``asyncio.sleep(270)`` doesn't guarantee wall-clock
+# fidelity — OS suspensions (laptop sleep, App Nap,
+# container pause) stretch one big sleep by the suspension
+# duration. Polling in ~5-second chunks against a monotonic
+# deadline means the worst-case overshoot is bounded by
+# this constant plus whatever the OS held us paused for.
+# Small enough to keep drift trivial, large enough that we
+# don't waste CPU waking up the loop unnecessarily during
+# a normal 270-second idle window (~54 wakes vs ~0 with
+# one big sleep — still negligible).
+_DRIFT_POLL_SECONDS = 5.0
+
+# Circuit breaker — number of consecutive cycles where the
+# firing drifted past ``_CACHE_TTL_SECONDS`` before we
+# auto-disable. A single drift can be a transient pause
+# (NTP step, brief CPU spike, container freezer); three
+# in a row is the clear "this environment is broken" signal
+# and we should stop bleeding tokens until the operator
+# investigates. Reset to zero on any in-TTL cycle.
+_CIRCUIT_BREAKER_STRIKES = 3
 
 
 def _extract_int(usage: Any, name: str) -> int:
@@ -176,6 +253,10 @@ class CacheWarmer:
     def __init__(self, service: "LLMService") -> None:
         self._service = service
         self._task: asyncio.Task[Any] | None = None
+        # Diagnostic heartbeat — see module-level comment.
+        # Lifecycle parallels `_task`: started by `start()`,
+        # cancelled by `cancel()` and `disable()`.
+        self._heartbeat_task: asyncio.Task[Any] | None = None
         # Mirrors config at start time. ``disable()`` flips
         # this independently of config so a runtime failure
         # can turn the warmer off without rewriting config.
@@ -208,6 +289,29 @@ class CacheWarmer:
         # anyway, hitting the rate limiter a second time
         # and potentially delaying subsequent user calls.
         self._generation: int = 0
+        # Circuit breaker — counts consecutive cycles where
+        # the firing drifted past the cache TTL. After
+        # ``_CIRCUIT_BREAKER_STRIKES`` strikes the warmer
+        # auto-disables. Reset to 0 on any in-TTL cycle.
+        # A perpetually-drifting warmer is strictly negative
+        # ROI (every firing is a full cache write at 1.25x
+        # input cost with 0% hit rate); the breaker stops
+        # the bleed when the underlying execution
+        # environment is bad enough that even the polling
+        # loop and dedicated executor can't recover.
+        self._consecutive_drift_strikes: int = 0
+        # Last clamped interval value we logged a warning
+        # for. The ``interval_seconds`` property is read
+        # by the HUD's poll loop (once per second from
+        # ``seconds_remaining``), so a naive log-every-call
+        # produces a flood of warnings when the user's
+        # ``app.json`` carries a stale value above the
+        # TTL-margin clamp. Tracking the last-warned value
+        # lets us log once per distinct stale value: if the
+        # user edits config from 600 → 500 → 240, that's
+        # two warnings (600 and 500), then silence after
+        # 240 lands inside the clamp.
+        self._last_warned_clamp_value: float | None = None
 
     # ------------------------------------------------------------------
     # Public state accessors (consumed by the future RPC + UI)
@@ -234,38 +338,67 @@ class CacheWarmer:
     def interval_seconds(self) -> float:
         """Configured interval between warm-up firings.
 
-        Clamped to ``_CACHE_TTL_SECONDS - 30`` (270s) at the
+        Clamped to ``_CACHE_TTL_SECONDS - 60`` (240s) at the
         upper end. Anthropic's prompt cache uses a 5-minute
         sliding TTL — a warm-up at the 300-second mark or
         beyond fires *after* the cached prefix has already
         expired, so every firing becomes a cold cache write
-        and the warmer becomes pure cost with no payoff. The
-        30-second margin covers the visible countdown phase
-        (``_COUNTDOWN_SECONDS``) and provider request latency
-        so the actual provider call lands well inside the
-        TTL window.
+        and the warmer becomes pure cost with no payoff.
+
+        The 60-second margin (raised from 30s) covers the
+        visible countdown phase (``_COUNTDOWN_SECONDS`` =
+        30s), provider request latency (typically 1-5s),
+        AND a budget for system-level drift (event-loop
+        scheduling jitter, brief OS-level pauses, NTP
+        adjustments). Field observation showed +50 to +170s
+        of drift in cycles where the 30s margin produced
+        100% miss rate; the larger margin absorbs the
+        observed range without making the warmer fire so
+        early that consecutive warm-ups overlap.
 
         A user config with ``interval_seconds: 600`` would
         otherwise produce 0% cache hit on every warm-up
         (observed in the field). Clamping silently here is
         safer than raising — operators see "warmer running
-        every 4:30 instead of every 10 min" in the HUD and
+        every 4:00 instead of every 10 min" in the HUD and
         can investigate, whereas a startup error would just
         disable the warmer entirely.
         """
         cfg = self._service._config.cache_warmup_config
-        configured = float(cfg.get("interval_seconds", 270))
-        ceiling = _CACHE_TTL_SECONDS - 30.0
+        configured = float(cfg.get("interval_seconds", 240))
+        ceiling = _CACHE_TTL_SECONDS - 60.0
         if configured > ceiling:
-            logger.warning(
-                "Cache warmer interval_seconds=%.0f exceeds "
-                "Anthropic's 5-minute cache TTL — clamping to "
-                "%.0fs to keep warm-ups inside the TTL window. "
-                "Update cache_warmup.interval_seconds in app.json "
-                "to a value <= %.0f to silence this warning.",
-                configured, ceiling, ceiling,
-            )
+            # Deduplicate the warning. The HUD polls this
+            # property once per second; logging on every
+            # call floods stderr. Log once per distinct
+            # stale value — if the user edits the config
+            # to a different (still-stale) value, that's
+            # worth a fresh warning. A user who fixes the
+            # config to <= ceiling sees the warning stop
+            # immediately on next poll. Stored as a float
+            # so re-equal comparisons are exact (the
+            # config read produces the same float every
+            # call when the underlying value is unchanged).
+            if self._last_warned_clamp_value != configured:
+                logger.warning(
+                    "Cache warmer interval_seconds=%.0f "
+                    "exceeds Anthropic's 5-minute cache TTL "
+                    "minus the 60s drift margin — clamping "
+                    "to %.0fs to keep warm-ups inside the "
+                    "TTL window. Update "
+                    "cache_warmup.interval_seconds in "
+                    "app.json to a value <= %.0f to silence "
+                    "this warning.",
+                    configured, ceiling, ceiling,
+                )
+                self._last_warned_clamp_value = configured
             return ceiling
+        # Configured value is within bounds — clear the
+        # warning state so a future hot-reload that pushes
+        # the value back above the ceiling produces a
+        # fresh warning rather than being silently
+        # suppressed.
+        self._last_warned_clamp_value = None
         return configured
 
     # ------------------------------------------------------------------
@@ -273,48 +406,58 @@ class CacheWarmer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Begin the warm-up cycle if all gates are open.
+        """Cache warmer is unplugged — see UNPLUG comment below.
 
-        Double-gated: BOTH the CLI ``--experimental`` flag
-        AND ``app.json::cache_warmup.enabled`` must be
-        true. Either being false keeps the warmer inert
-        (logs at debug, sets ``_enabled = False`` so the
-        UI's ``get_cache_warmer_status`` reports it
-        accurately, and skips scheduling).
+        **UNPLUG (2025).** The cache warmer is currently
+        disabled at the entry point regardless of any
+        flag. Field testing showed that every firing
+        stalled the event loop for ~120 seconds inside
+        the ``await self._broadcast_event_async(...)``
+        calls — broadcasts that complete in
+        sub-milliseconds for normal user-turn events take
+        2 minutes during a warm-up cycle. The cause is
+        not in the warmer's own code (assembly is
+        instant, executor handoff is instant, the
+        LiteLLM call itself is fast); the broadcasts are
+        being queued or held somewhere in the WebSocket
+        / jrpc-oo path during warm-up firings.
 
-        The experimental gate is checked first — if
-        ``--experimental`` is off, we don't even read the
-        config flag. This means operators running without
-        ``--experimental`` see "warmer disabled by
-        experimental flag" in logs rather than "warmer
-        disabled by config", which is the correct
-        diagnostic signal for that mode of operation.
+        Combined with timing drift that produces 0% cache
+        hit rate on the firings that do complete (the
+        traces showed ``Cache ROI: -100.0%``), the warmer
+        is currently negative-value: every cycle costs a
+        full cache write at 1.25× input pricing AND
+        stalls every other broadcast event for 2 minutes.
 
-        Both gates default to off. Operators must opt in
-        via both the CLI flag and the app-config flag to
-        try warming. The two-key requirement is
-        deliberate — the warmer has a small but non-zero
-        risk of provider-side rate-limit interactions, so
-        a config-only opt-in is too easy to leave on by
-        accident across upgrades.
+        Until the WebSocket-side stall is diagnosed and
+        fixed, the warmer is unconditionally disabled
+        here. The full code path remains in place
+        (heartbeat instrumentation, circuit breaker,
+        wall-clock anchoring, dedicated executor) so a
+        future fix can re-enable by removing this early
+        return — none of the diagnostics or D34 / D34a
+        infrastructure has to be rebuilt.
+
+        To re-enable for diagnosis: remove this early
+        return AND set ``cache_warmup.enabled: true`` in
+        ``app.json`` AND pass ``--experimental`` on the
+        CLI.
+
+        Spec authority: ``specs4/3-llm/cache-tiering.md``
+        § Cache Warmer notes the parked status and the
+        WebSocket-stall observation.
         """
-        if not getattr(self._service, "_experimental", False):
-            logger.debug(
-                "Cache warmer disabled — "
-                "--experimental flag not set"
-            )
-            self._enabled = False
-            return
-        cfg = self._service._config.cache_warmup_config
-        if not cfg.get("enabled", False):
-            logger.debug(
-                "Cache warmer disabled — "
-                "cache_warmup.enabled is false in app.json"
-            )
-            self._enabled = False
-            return
-        self._enabled = True
-        self._schedule()
+        logger.info(
+            "Cache warmer is currently unplugged — "
+            "see UNPLUG comment in CacheWarmer.start. "
+            "All warm-up activity is suppressed regardless "
+            "of config flags."
+        )
+        self._enabled = False
+        self._last_disabled_reason = (
+            "unplugged at entry — see UNPLUG comment"
+        )
+        return
 
     def cancel(self) -> None:
         """Cancel the pending timer without rescheduling.
@@ -327,6 +470,12 @@ class CacheWarmer:
         a retry is sleeping inside `litellm.completion`'s
         backoff logic on the executor thread (which asyncio
         cannot interrupt).
+
+        Heartbeat is NOT cancelled here — `cancel()` is
+        called between cycles (e.g., on every user stream
+        start) and we want the diagnostic running continuously
+        across the warmer's enabled lifetime. Heartbeat
+        cancellation lives in `disable()`.
         """
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -353,18 +502,73 @@ class CacheWarmer:
         """Cancel and stay inert until ``enable()`` is called."""
         logger.warning("Cache warmer disabled: %s", reason)
         self.cancel()
+        self._stop_heartbeat()
         self._enabled = False
         self._last_disabled_reason = reason
 
     def enable(self) -> None:
         """Re-enable after a runtime disable.
 
-        Used by the future RPC. Clears the disabled-reason
-        and reschedules.
+        **Unplugged.** While the warmer is unplugged at the
+        entry point (see :meth:`start`), this RPC is a no-op
+        — re-enabling at runtime would re-introduce the
+        broadcast-stall behaviour that motivated the
+        unplug. The RPC remains wired so the frontend
+        affordance doesn't 404, but it logs the unplug
+        reason and stays disabled.
+
+        When the broadcast stall is diagnosed and the
+        unplug is removed from :meth:`start`, this method
+        reverts to its original behaviour (clear the
+        disabled-reason, schedule the next firing, start
+        the heartbeat).
         """
-        self._enabled = True
-        self._last_disabled_reason = None
-        self._schedule()
+        logger.info(
+            "Cache warmer enable() called but warmer is "
+            "currently unplugged — see UNPLUG comment in "
+            "CacheWarmer.start. No-op."
+        )
+        self._enabled = False
+        self._last_disabled_reason = (
+            "unplugged at entry — see UNPLUG comment"
+        )
+
+    def _start_heartbeat(self) -> None:
+        """Spawn the diagnostic heartbeat task.
+
+        Idempotent — a stale task gets cancelled first.
+        No-op when no event loop is running yet (the same
+        deferral logic as `_schedule`).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "Cache warmer heartbeat NOT started: no "
+                "running event loop. Loop-stall diagnostic "
+                "will be silent until next reset()."
+            )
+            return
+        if (
+            self._heartbeat_task is not None
+            and not self._heartbeat_task.done()
+        ):
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = loop.create_task(_heartbeat_loop())
+        logger.info(
+            "Cache warmer heartbeat started — will warn on "
+            "event-loop gaps > %.1fs",
+            _HEARTBEAT_WARN_THRESHOLD_SECONDS,
+        )
+
+    def _stop_heartbeat(self) -> None:
+        """Cancel the diagnostic heartbeat task."""
+        if (
+            self._heartbeat_task is not None
+            and not self._heartbeat_task.done()
+        ):
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = None
 
     # ------------------------------------------------------------------
     # Internal — scheduling and firing
@@ -405,14 +609,19 @@ class CacheWarmer:
         # and the popup's broadcast-derived countdown must
         # therefore agree at firing time.
         self._scheduled_at = time.time() + interval
+        logger.info(
+            "Cache warmer scheduled: interval=%.1fs, "
+            "expected fire at T+%.1fs (epoch=%.1f)",
+            interval, interval, self._scheduled_at,
+        )
         self._task = loop.create_task(self._run(interval))
 
     async def _run(self, delay: float) -> None:
         """Sleep ``delay``, run the visible countdown, fire warm-up.
 
         Two-phase wait. Most of the interval is silent:
-        ``sleep(delay - countdown)``. The final
-        ``_COUNTDOWN_SECONDS`` are visible — one
+        a polling loop against a monotonic-clock deadline.
+        The final ``_COUNTDOWN_SECONDS`` are visible — one
         ``cacheWarmupCountdown`` broadcast per second so
         the frontend can render a progress bar matching
         the retry-banner UX. After the countdown lands,
@@ -425,22 +634,64 @@ class CacheWarmer:
         cancels the timer via the ``cancel()`` call in
         ``stream_chat`` — the asyncio.CancelledError below
         propagates and the broadcast loop exits cleanly.
+
+        **Drift resistance.** ``asyncio.sleep(N)`` does NOT
+        guarantee wall-clock fidelity: if the OS suspends
+        the process (laptop sleep, App Nap, container
+        pause), one big sleep stretches by the suspension
+        duration. Anthropic's prompt cache has a 5-minute
+        TTL — a +75s drift on a 270s interval (observed in
+        the field) pushes the firing past 300s and every
+        warm-up becomes a cold cache write.
+
+        We mitigate by polling against a monotonic-clock
+        deadline with short ``asyncio.sleep`` chunks
+        (``_DRIFT_POLL_SECONDS``). After every wake we
+        reassess: if the OS suspended us mid-sleep, the
+        next wake sees the deadline has passed (or is
+        about to) and we proceed to the firing phase.
+        Catastrophic drift past the cache TTL is detected
+        post-fire and logged at WARNING; the firing still
+        runs (the warm-up writes a fresh cache for the
+        next window).
         """
         # Compute the absolute firing target up front. Both
         # the silent and visible phases anchor to this
-        # wall-clock time, so accumulated broadcast latency
-        # inside the visible-phase loop cannot drift the
-        # actual fire time later than the UI's countdown
-        # display promises.
+        # wall-clock time. ``scheduled_at`` is the absolute
+        # ``time.time()`` epoch at which the warmer is
+        # supposed to fire; the silent phase ends one
+        # ``_COUNTDOWN_SECONDS`` window before that.
+        #
+        # Wall-clock anchoring (``time.time``), not monotonic.
+        # On macOS / Linux the process can be suspended (App
+        # Nap, container freezer, laptop sleep). During
+        # suspension ``time.monotonic`` may not advance — the
+        # polling loop wakes up post-resume, sees the deadline
+        # is still in the future against monotonic time, and
+        # sleeps another 5s of post-resume wall-clock time
+        # before re-checking. The firing then lands long after
+        # the cached prefix expired. Field observation: an
+        # 84s drift past the cache TTL with a 5s polling
+        # cadence and 60s margin — only explicable if the
+        # monotonic clock paused during a system suspension.
+        #
+        # ``time.time`` always advances. NTP jumps could in
+        # principle perturb the deadline, but at the
+        # 240s-interval scale realistic NTP step magnitudes
+        # are well below the 60s margin we already build in.
         scheduled_at = self._scheduled_at or (time.time() + delay)
-        # Silent phase. If ``delay`` is shorter than the
-        # countdown window (e.g. a config with a tiny
-        # interval, or a manually-triggered run), skip
-        # straight to the visible phase.
-        silent = max(0.0, delay - _COUNTDOWN_SECONDS)
+        silent_deadline = scheduled_at - _COUNTDOWN_SECONDS
+        # Silent phase — poll the deadline in short chunks so
+        # OS-level suspensions can't stretch a single long
+        # sleep past the cache TTL. If ``delay`` is shorter
+        # than the countdown window, the deadline is already
+        # past and we skip straight to the visible phase.
         try:
-            if silent > 0:
-                await asyncio.sleep(silent)
+            while True:
+                remaining = silent_deadline - time.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(_DRIFT_POLL_SECONDS, remaining))
         except asyncio.CancelledError:
             return
         # Stream-active check before the visible phase
@@ -455,29 +706,26 @@ class CacheWarmer:
             self._scheduled_at = None
             self._schedule()
             return
-        # Visible countdown phase. Each tick computes its
-        # remaining seconds from the absolute ``scheduled_at``
-        # target rather than counting down via ``sleep(1.0)``
-        # accumulators. This means broadcast latency inside
-        # the loop cannot drift the firing time — if a tick
-        # took 1.2s instead of 1.0s, the next tick simply
-        # displays one less second and the actual fire still
-        # lands on schedule. Without this anchoring, 30
-        # ticks × small per-tick overhead compounds into
-        # multi-second drift, and the popup's "0s" frame
-        # shows several seconds before the fire actually
-        # happens.
+        # Visible countdown phase. Anchored on
+        # ``scheduled_at`` (a wall-clock epoch) for the same
+        # reason the silent phase is — OS suspensions
+        # mid-countdown must overshoot the deadline rather
+        # than stretch it. The countdown window is the last
+        # ``_COUNTDOWN_SECONDS`` before the firing target;
+        # the loop exits when wall-clock time crosses the
+        # firing deadline.
         countdown = min(delay, _COUNTDOWN_SECONDS)
         total_ticks = int(countdown)
+        fire_deadline = scheduled_at
         try:
             last_displayed: int | None = None
             while True:
-                remaining_secs = scheduled_at - time.time()
+                remaining_secs = fire_deadline - time.time()
                 if remaining_secs <= 0:
                     break
                 # Round UP so the displayed countdown reaches
-                # zero exactly at ``scheduled_at``, not one
-                # tick before. The popup's "0" frame should
+                # zero exactly at the deadline, not one tick
+                # before. The popup's "0" frame should
                 # coincide with the firing broadcast.
                 display = max(1, int(remaining_secs + 0.999))
                 if display != last_displayed:
@@ -521,11 +769,101 @@ class CacheWarmer:
         # Firing phase. Broadcast the transition so the
         # frontend can flip the bar from countdown to
         # spinner. The actual call follows.
+        if scheduled_at is not None:
+            actual_delay = time.time() - (scheduled_at - delay)
+            drift = actual_delay - delay
+            log_fn = logger.info
+            ttl_exceeded = actual_delay >= _CACHE_TTL_SECONDS
+            # Drift past the cache TTL means the cached
+            # prefix expired before we got around to
+            # warming it — the call about to fire would be
+            # a pure cache write at 0% hit rate. We skip
+            # the firing entirely on the TTL-exceeded path:
+            # writing a fresh cache here just to prime the
+            # next 5-minute window is the same outcome as
+            # letting the next user turn write the cache,
+            # at the same provider cost, with no benefit.
+            # The skip path still counts as a strike so
+            # repeated suspensions trip the circuit breaker.
+            if ttl_exceeded:
+                log_fn = logger.warning
+                self._consecutive_drift_strikes += 1
+            else:
+                # In-TTL cycle resets the strike counter.
+                # A single recovered cycle is enough — we
+                # don't want a one-off transient pause to
+                # accumulate strikes across an otherwise
+                # healthy session.
+                self._consecutive_drift_strikes = 0
+            log_fn(
+                "Cache warmer firing: planned=%.1fs, "
+                "actual=%.1fs, drift=%+.1fs%s",
+                delay, actual_delay, drift,
+                " (drift exceeded cache TTL — skipping "
+                "firing; strikes=%d/%d)" % (
+                    self._consecutive_drift_strikes,
+                    _CIRCUIT_BREAKER_STRIKES,
+                )
+                if ttl_exceeded else "",
+            )
+            # Circuit breaker: trip after N consecutive
+            # TTL-exceeded cycles. Disabling here BEFORE
+            # the firing means we don't fire the broken
+            # warmup; the next call would be wasted spend.
+            if (
+                self._consecutive_drift_strikes
+                >= _CIRCUIT_BREAKER_STRIKES
+            ):
+                await self._broadcast(
+                    "cacheWarmupComplete",
+                    {
+                        "success": False,
+                        "reason": (
+                            f"circuit breaker tripped — "
+                            f"{_CIRCUIT_BREAKER_STRIKES} "
+                            f"consecutive cycles drifted past "
+                            f"the {_CACHE_TTL_SECONDS:.0f}s "
+                            f"cache TTL"
+                        ),
+                    },
+                )
+                self.disable(
+                    f"circuit breaker — drift exceeded TTL "
+                    f"{_CIRCUIT_BREAKER_STRIKES} times in a row"
+                )
+                return
+            # TTL-exceeded but breaker not tripped — skip
+            # this firing and reschedule for the next
+            # window. The fresh schedule re-computes
+            # ``scheduled_at`` from the current time, so
+            # the next interval starts cleanly.
+            if ttl_exceeded:
+                self._scheduled_at = None
+                self._schedule()
+                return
+        # D34a-followup diagnostic: the broadcast and
+        # the executor handoff both run on the event
+        # loop thread. Field traces show 80+ seconds
+        # between the "firing" log and the
+        # "queue_duration" log inside the executor —
+        # somewhere in this synchronous-ish stretch the
+        # loop is being held. These four log lines
+        # narrow it to a specific step.
+        _t0 = time.monotonic()
+        logger.info(
+            "Cache warmer: about to broadcast cacheWarmupFiring",
+        )
         await self._broadcast("cacheWarmupFiring", {})
+        _t1 = time.monotonic()
+        logger.info(
+            "Cache warmer: cacheWarmupFiring broadcast took %.1fs",
+            _t1 - _t0,
+        )
         # Clear the stash so a stale snapshot from the
         # previous firing can't leak into a failure
         # broadcast (failures don't populate the stash).
         self._last_warmup_tokens = None
+        logger.info("Cache warmer: about to call _fire_warmup")
         try:
             await self._fire_warmup()
         except asyncio.CancelledError:
@@ -557,13 +895,32 @@ class CacheWarmer:
             )
             self.disable(f"warm-up failed: {exc}")
             return
+        # D34a-followup diagnostic: the gap between
+        # "_fire_warmup returned" and "next schedule" was
+        # the second 116-second stall in the field trace.
+        # Same instrumentation pattern as the firing-side
+        # broadcast.
+        _t2 = time.monotonic()
+        logger.info(
+            "Cache warmer: _fire_warmup returned in %.1fs",
+            _t2 - _t1,
+        )
         # Successful firing — broadcast with token data so
         # the frontend can render a Token HUD, and
         # schedule the next.
         payload: dict[str, Any] = {"success": True}
         if self._last_warmup_tokens is not None:
             payload.update(self._last_warmup_tokens)
+        logger.info(
+            "Cache warmer: about to broadcast cacheWarmupComplete",
+        )
+        _t3 = time.monotonic()
         await self._broadcast("cacheWarmupComplete", payload)
+        _t4 = time.monotonic()
+        logger.info(
+            "Cache warmer: cacheWarmupComplete broadcast took %.1fs",
+            _t4 - _t3,
+        )
         self._scheduled_at = None
         self._schedule()
 
@@ -614,6 +971,12 @@ class CacheWarmer:
         # are unchanged and L0–L3 cache hits still land. Saves
         # Active-tier input tokens on every warm-up firing.
         scope = service._default_scope()
+        # D34a-followup diagnostic: tier assembly is
+        # synchronous on the event loop. For a 100K+ token
+        # prompt it does real work (string concatenation,
+        # token counting). Worth knowing if it's the
+        # source of the stall.
+        _ta0 = time.monotonic()
         tiered_content = service._build_tiered_content(scope)
         if tiered_content is None:
             messages = service._assemble_messages_flat(
@@ -624,13 +987,28 @@ class CacheWarmer:
                 _WARMUP_PROMPT, [], tiered_content, scope,
                 skip_active=True,
             )
+        _ta1 = time.monotonic()
+        logger.info(
+            "Cache warmer: prompt assembly took %.1fs",
+            _ta1 - _ta0,
+        )
         loop = asyncio.get_running_loop()
         started = time.time()
+        # Submit to the dedicated warmer executor. ``queue_submitted``
+        # is captured here so the worker can measure how long the
+        # task waited before a worker picked it up — with a
+        # single-worker dedicated pool this should be ~0; if the
+        # measurement ever shows non-trivial queue time it means
+        # something has accidentally been routed onto the warmer
+        # pool, or the warmer's previous firing is somehow still
+        # in flight. Either way the log surfaces the regression.
+        queue_submitted = time.monotonic()
         usage = await loop.run_in_executor(
-            service._aux_executor,
+            service._warmer_executor,
             self._completion_sync,
             messages,
             started,
+            queue_submitted,
         )
         elapsed = time.time() - started
         # Accumulate into session totals via the same
@@ -713,8 +1091,9 @@ class CacheWarmer:
         self,
         messages: list[dict[str, Any]],
         started: float,
+        queue_submitted: float | None = None,
     ) -> Any:
-        """Blocking warm-up call. Runs in the aux executor.
+        """Blocking warm-up call. Runs in the warmer executor.
 
         Returns the raw provider ``usage`` object (or
         ``None`` if the response had none). The caller
@@ -723,9 +1102,34 @@ class CacheWarmer:
         helper extractors below to pull individual
         numeric fields.
 
+        ``queue_submitted`` is the ``time.monotonic()``
+        timestamp from the moment the caller submitted
+        the task to ``run_in_executor``. We log the
+        ``entry - queue_submitted`` duration as a queue-
+        wait metric. With the dedicated single-worker
+        warmer pool this should always be near zero. A
+        non-trivial reading is the load-bearing signal
+        that something is wrong with executor isolation
+        and the warmer is queueing again.
+
         Raises on any failure — the caller's ``except``
         block disables the warmer.
         """
+        # Measure queue-wait first thing on entry, before
+        # any other work. Logged at INFO so it's visible in
+        # default-verbosity operator runs.
+        if queue_submitted is not None:
+            queue_duration = time.monotonic() - queue_submitted
+            log_fn = (
+                logger.warning if queue_duration > 1.0
+                else logger.info
+            )
+            log_fn(
+                "Cache warmer: queue_duration=%.3fs%s",
+                queue_duration,
+                " (warmer queueing detected — check executor "
+                "isolation)" if queue_duration > 1.0 else "",
+            )
         from ac_dc.llm._helpers import retry_litellm_completion
         try:
             import litellm

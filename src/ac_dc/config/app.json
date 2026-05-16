@@ -36,6 +36,6 @@
   },
   "cache_warmup": {
     "enabled": false,
-    "interval_seconds": 270
+    "interval_seconds": 240
   }
 }

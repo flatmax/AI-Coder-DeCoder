@@ -141,13 +141,29 @@ Module-level constants in `src/ac_dc/llm/_cache_warmer.py`:
 | `_WARMUP_MAX_TOKENS` | 2 | `max_tokens` argument to `litellm.completion`. Providers reject 0; 2 covers a single token plus framing |
 | `_CACHE_TTL_SECONDS` | 300.0 | Anthropic prompt cache TTL. Used as the retry-budget cutoff: if a retry would push elapsed + wait past this, the warmer aborts and disables |
 | `_COUNTDOWN_SECONDS` | 30.0 | Visible countdown phase before each warm-up firing. The frontend renders one tick per second |
+| `_DRIFT_POLL_SECONDS` | 5.0 | Silent-phase polling chunk size against a monotonic deadline. Bounds OS-suspension drift overshoot |
+| `_CIRCUIT_BREAKER_STRIKES` | 3 | Consecutive TTL-exceeded cycles before auto-disable. Resets to 0 on any in-TTL cycle |
 
 Default config values (in `app.json` under the `cache_warmup` section):
 
 | Field | Default | Notes |
 |---|---|---|
-| `enabled` | `true` | Bundled default. Auto-disable on failure flips an independent runtime flag — re-enabling currently requires application restart |
-| `interval_seconds` | 270 | 4:30, sits inside the 5-minute TTL with margin for retry waits. Values <= 0 fall back to the default |
+| `enabled` | `false` | Bundled default. Operators must opt in via both this flag AND the CLI `--experimental` flag for any warm-up to fire. Auto-disable on failure flips an independent runtime flag — re-enabling currently requires application restart |
+| `interval_seconds` | 240 | 4:00, sits inside the 5-minute TTL with a 60s margin for countdown + provider latency + system drift. Clamped at upper bound (`_CACHE_TTL_SECONDS - 60` = 240s); values above this are silently lowered with a WARNING log |
+
+**Executor isolation (D34).** The warmer runs on a dedicated single-worker `ThreadPoolExecutor` (`_warmer_executor`), separate from the `_aux_executor` used by KeyBERT enrichment, commit-message generation, topic detection, and URL fetching. Pre-D34, the warmer shared `_aux_executor`; in 15-file doc-mode sessions, KeyBERT enrichment saturated both aux workers, queueing the warmer's LiteLLM call for ~120s and producing 100% cache-write rate. The dedicated pool removes the queueing path entirely. `_completion_sync` measures and logs `queue_duration` on entry — non-trivial readings indicate the executor isolation has regressed.
+
+**Wall-clock deadline anchoring (D34 follow-up).** The silent-phase polling loop and the visible-phase countdown both anchor on `time.time()` (wall-clock epoch) rather than `time.monotonic()`. On macOS / Linux the process can be suspended (App Nap, container freezer, laptop sleep). During suspension `time.monotonic()` may not advance — a polling loop using monotonic deadlines wakes up post-resume, sees the deadline as still in the future against a frozen monotonic clock, sleeps another `_DRIFT_POLL_SECONDS` chunk against post-resume wall-clock time, and the firing lands long after the cached prefix expired. Field observation: 84-second drift past TTL on a 240-second interval with 5-second polling cadence — only explicable if the monotonic clock paused during system suspension. Wall-clock anchoring makes the post-resume wake see the deadline as already passed and exits immediately. NTP step magnitudes at the 240-second-interval scale stay well below the 60-second TTL margin. TTL-exceeded firings (long suspension that crosses the cache window) are skipped rather than fired — writing a fresh cache here just to prime the next 5-minute window is the same outcome as letting the next user turn write the cache, at the same provider cost, with no benefit. Skipped cycles still count as strikes against the circuit breaker so repeated suspensions trip it.
+
+**Trade-offs of wall-clock anchoring.** The choice between `time.time()` and `time.monotonic()` is not free. Wall-clock anchoring is correct under OS-level process suspension on every platform that exposes a wall clock (Linux, macOS, Windows, BSD, container runtimes). It is *not* correct under arbitrary clock manipulation:
+
+- **NTP step backward** (chronyd / ntpd performing a corrective step rather than a slew, manual `date -s` from user-space, VM resume from a snapshot with badly-skewed clock): the deadline recedes by the step magnitude and the warmer fires late by the same amount. Modern distros disable steps after initial sync (chronyd's `makestep 1.0 3` defaults), so steady-state steps are rare in normal operation. The 60-second TTL margin absorbs typical multi-second steps.
+- **NTP step forward**: symmetric — the warmer fires early. Harmless (a slightly-early warm-up still hits the cache).
+- **Linux-specific monotonic semantics.** Python's `time.monotonic()` maps to `CLOCK_MONOTONIC` on Linux, which historically does NOT advance during system suspend (`CLOCK_BOOTTIME` does). The user's observed bug was on Ubuntu; other Linux configurations with `CLOCK_MONOTONIC_RAW` semantics may have been fine on the original code. Wall-clock anchoring is correct in both cases.
+
+For pathological clock-manipulation environments (VM-snapshot-restoration without time-sync coordination, embedded Linux without NTP, hand-edited system clocks), the circuit breaker remains the safety net: three consecutive cycles drifting past TTL trips the breaker, the warmer auto-disables, the operator sees the disable reason in logs. Operators in those environments either fix their clock discipline or accept that the warmer is best-effort. The alternative — building a hybrid anchor that uses monotonic time for "is this clock manipulation?" detection — adds complexity for an exotic case.
+
+**Circuit breaker (D34).** After every firing the warmer compares `actual_delay` against `_CACHE_TTL_SECONDS`. A drift past the TTL increments `_consecutive_drift_strikes`; a successful in-TTL cycle resets it. After `_CIRCUIT_BREAKER_STRIKES` (3) strikes in a row the warmer auto-disables via `disable("circuit breaker — drift exceeded TTL N times")`, broadcasting `cacheWarmupComplete` with `success=false` first so the UI can render a failure flash. Operators see the strike count in the per-cycle WARNING log (`strikes=N/3`) so escalation is visible before the breaker trips.
 
 ## Schemas
 

@@ -790,6 +790,55 @@ In two-turn sessions the bug compounded — turn 2's pair of calls each hit the 
 
 ---
 
+### D34 — Cache warmer isolated to dedicated executor; interval shortened; circuit breaker added
+
+Field observation in 15-file doc-mode sessions: the cache warmer was firing +54 to +170 seconds past its scheduled 270s interval, producing 0% cache hit rate on every warm-up. The cached prefix had already expired by the time the LiteLLM call landed, so each "warm-up" was actually a full cache write at 1.25× input pricing — pure cost, no payoff.
+
+Diagnostic logs showed symmetric ~2-minute gaps between four points in the warmer's lifecycle: (1) `cacheWarmerFiring` event broadcast, (2) `litellm.completion` start, (3) `litellm.completion` return, (4) next-cycle scheduling. The symmetry ruled out provider-side latency (the call itself completed quickly when it eventually ran) and pointed at executor saturation: the warmer's `loop.run_in_executor(_aux_executor, _completion_sync, ...)` was queueing behind something else.
+
+Root cause: KeyBERT keyword enrichment runs in `_aux_executor` (2 workers) per `_doc_index_background.run_enrichment_background`. A 15-file doc-mode session enriches 15 sections sequentially, each taking ~10–60 seconds depending on section size. With both workers occupied by enrichment and the warmer's submission joining the queue, the warmer's actual provider call landed only after both workers finished their current enrichment tasks — a delay of ~2 minutes that shifted every subsequent firing later by the same amount, accumulating into the observed +170s drift.
+
+**Three coordinated fixes shipped in one decision.**
+
+1. **Dedicated single-worker executor for the warmer.** New `_warmer_executor: ThreadPoolExecutor(max_workers=1, thread_name_prefix="ac-dc-warmer")` on `LLMService`. `CacheWarmer._fire_warmup` switches from `_aux_executor` to this pool. Single worker is correct: only one warm-up is ever in flight at a time (the cancel-on-stream-start path guarantees serialisation), so a single worker matches the actual concurrency. Isolating to a dedicated pool removes the queueing path entirely — KeyBERT enrichment, URL fetches, commit-message generation, and topic detection continue to share `_aux_executor` as before.
+
+2. **Interval shortened from 270s to 240s; clamp tightened from `TTL - 30` to `TTL - 60`.** The 30s margin (covering only `_COUNTDOWN_SECONDS = 30s`) left no budget for system-level drift. Field observation showed +50 to +170s of drift in cycles where the 30s margin produced 100% miss rate. Raising the margin to 60s absorbs the observed drift range without consecutive warm-ups overlapping. The interval default also drops correspondingly: 240s = 4:00 with a 60s margin to the 5-minute TTL.
+
+3. **Circuit breaker after 3 consecutive drift-past-TTL cycles.** Even with the dedicated executor, system-level drift (laptop sleep, container freezer, NTP step) can push individual firings past the TTL. A single drift can be a transient pause and shouldn't disable the warmer. Three in a row is the clear "this execution environment is broken" signal — the warmer auto-disables via `disable("circuit breaker — drift exceeded TTL N times")` and broadcasts `cacheWarmupComplete` with `success=false`. Reset to zero on any in-TTL cycle so a recovered session doesn't accumulate strikes from earlier transient pauses. Operators see the strike count in per-cycle WARNING logs (`strikes=N/3`) before the breaker trips.
+
+**Queue-duration instrumentation.** `_completion_sync` accepts a `queue_submitted: float | None` parameter (the `time.monotonic()` timestamp from the moment `loop.run_in_executor` was called) and logs `queue_duration = entry - queue_submitted` on entry. With the dedicated single-worker pool this should always be ~0; a non-trivial reading is the load-bearing diagnostic signal that something has accidentally been routed onto the warmer pool, or the previous firing is somehow still in flight. Logged at INFO when ≤1.0s, WARNING with explanatory tail when >1.0s.
+
+**What this does NOT do.** KeyBERT enrichment is still in `_aux_executor` (2 workers). A future change may move it to a `ProcessPoolExecutor` for true GIL-free parallelism, but that's a separate decision — the warmer-isolation fix removes the immediate user-visible problem (cache misses) without touching enrichment's concurrency model. Enrichment's 10-60s per file is acceptable while it's not blocking cache warming.
+
+**Backwards compatibility.** Tests that don't invoke `LLMService.shutdown` continue to pass — the executor closure is best-effort (`wait=False`) and Python's process exit cleans up unreferenced thread pools. The `_rpc_lifecycle.shutdown` cleanup uses `getattr` to tolerate older test fixtures without `_warmer_executor`. Configurations with `interval_seconds: 600` (or any value above `TTL - 60`) get clamped to 240s with a WARNING log explaining the change; the warning recommends updating `app.json` to silence it.
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (Lifecycle and Configuration subsections); `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table; default config values).
+
+---
+
+### D34a — Cache warmer deadline anchoring uses wall-clock time, not monotonic
+
+D34's executor-isolation fix removed the queueing path that was producing 2-minute broadcast stalls. Field testing afterwards still showed +44s and +84s firing drifts on a 240-second interval with 5-second polling cadence. Diagnostic instrumentation around the broadcast calls confirmed broadcasts were sub-millisecond — the drift was inside the silent-phase polling loop itself, not in any code path that could be GIL-contended or executor-saturated.
+
+Root cause: the polling loop used `time.monotonic()` deadlines. On the operator's macOS laptop, `time.monotonic()` was pausing during system-level process suspension (App Nap or similar), then resuming with the monotonic clock having advanced by less than the wall-clock duration of the suspension. The polling loop's wake-up logic — "if `silent_deadline - time.monotonic() <= 0`, exit" — kept seeing the deadline as still in the future, sleeping another 5-second polling chunk, repeating. By the time the firing landed, the actual elapsed wall-clock time was 280-320 seconds, well past the 300-second cache TTL.
+
+The fix swaps both the silent-phase and visible-phase deadlines to `time.time()` (wall-clock epoch). After resume, the next polling wake sees the deadline as already passed and exits the loop immediately — firing happens within `_DRIFT_POLL_SECONDS` of resume rather than `suspension_duration + _DRIFT_POLL_SECONDS` later. NTP step magnitudes are bounded well below the 60-second TTL margin at the 240-second-interval scale, so the wall-clock anchor's theoretical sensitivity to clock adjustments is not observable in practice.
+
+The TTL-exceeded path also changed shape. Pre-fix, drifts past the TTL still fired the warmup ("writing a fresh cache primes the next 5-minute window"). Post-fix, TTL-exceeded firings are skipped — writing a fresh cache here at provider cost is the same outcome as letting the next user turn do it, at the same provider cost, with no benefit. The skip path still increments the circuit-breaker strike counter so repeated long suspensions trip the breaker.
+
+Two-cycle field test post-fix:
+
+```
+13:33:31 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
+13:37:34 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
+```
+
+Diagnostic instrumentation removed after confirmation. The `Cache warmer firing: planned=Xs, actual=Ys, drift=±Zs` log line stays as the load-bearing signal — a future regression in deadline anchoring will surface as drift-line WARNINGs.
+
+**Spec authority.** `specs-reference/3-llm/cache-tiering.md` § Cache warmer — "Wall-clock deadline anchoring" paragraph appended to the "Executor isolation" discussion.
+
+---
+
 ### D33 — Stream resumption on reconnect via `active_streams` snapshot
 
 User-observed bug: refreshing the browser mid-stream produced an opaque "Another stream is active (request {id})" rejection on the next send attempt. The single-stream guard correctly identified that the prior stream was still running server-side (worker thread independent of WebSocket lifecycle, by design — D10's guard scoping covers this), but the originating client had no way to discover the in-flight stream's identity, observe its accumulated content, or recover gracefully. The user's only options were waiting for an unknown duration or starting a new session and losing the in-flight response.

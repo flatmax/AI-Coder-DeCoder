@@ -1218,7 +1218,24 @@ export class ContextTab extends RpcMixin(LitElement) {
         );
         return;
       }
-      this._emitToast('Cache warmer re-enabled', 'success');
+      // Backend returns the actual post-enable state. When
+      // the warmer is unplugged at the entry point, enable()
+      // is a no-op and `result.enabled` stays false; surface
+      // the disabled reason so the user sees what actually
+      // happened rather than a misleading success message.
+      const actuallyEnabled = !!(
+        result && typeof result === 'object' && result.enabled
+      );
+      if (actuallyEnabled) {
+        this._emitToast('Cache warmer re-enabled', 'success');
+      } else {
+        const reason = result?.last_disabled_reason
+          || 'warmer is currently disabled';
+        this._emitToast(
+          `Cache warmer stayed disabled: ${reason}`,
+          'info',
+        );
+      }
       this._fetchWarmerStatus();
     } catch (err) {
       const msg = err?.message || String(err);

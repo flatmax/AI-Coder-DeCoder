@@ -353,7 +353,11 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 - Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape.
 - History graduates to L3 only on piggyback (L3 already broken this cycle). Token-threshold-driven history graduation is not used — `cache_target_tokens` is a caching floor, not a conversation-length cap, and using it as a graduation trigger would destabilise L3 on almost every request. Active-history size is compaction's concern, not tiering's.
 
-## Cache Warmer
+## Cache Warmer — Currently Unplugged
+**Status (2025).** The cache warmer is currently disabled at the entry point regardless of any config flag. Field testing of the D34 / D34a stack revealed that every firing stalls the event loop for ~120 seconds inside the ``await self._broadcast_event_async(...)`` calls. Broadcasts that complete in sub-milliseconds for normal user-turn events take roughly 2 minutes when the warmer is mid-cycle. The cause is not in the warmer's own code paths (prompt assembly is instant, executor handoff is instant, the LiteLLM call itself completes in 3-15 seconds); the broadcasts are being queued or held somewhere in the WebSocket / jrpc-oo serialization path during warm-up firings. Combined with the timing drift that produces 0% cache hit rate on the firings that do complete (traces showed cache ROI of -100%), the warmer is currently negative-value: every cycle costs a full cache write at 1.25× input pricing AND stalls every other broadcast event for ~2 minutes.
+The D34 (executor isolation, circuit breaker, dedicated thread pool) and D34a (wall-clock deadline anchoring) infrastructure remains in place. Re-enabling requires diagnosing the WebSocket-side stall — that work is parked, not abandoned.
+To re-enable for diagnosis: remove the early return in :meth:`CacheWarmer.start`, set ``cache_warmup.enabled: true`` in ``app.json``, and pass ``--experimental`` on the CLI.
+## Cache Warmer (parked design — does not currently fire)
 
 Anthropic's prompt cache uses a 5-minute sliding TTL — any read or write extends the window. During interactive coding sessions the user often pauses for longer than 5 minutes to think, read, or context-switch. When the user returns, the cached prefix has expired and the next turn pays the full cache-write price (1.25× input on Claude) to re-prime.
 

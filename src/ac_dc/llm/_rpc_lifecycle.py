@@ -136,6 +136,13 @@ def shutdown(service: "LLMService") -> None:
     # the event loop is typically already stopping at this point.
     service._stream_executor.shutdown(wait=False)
     service._aux_executor.shutdown(wait=False)
+    # ``_warmer_executor`` was added in D34; getattr-guard
+    # so a future LLMService construction path that skips
+    # it (or older test fixtures that don't carry it) doesn't
+    # raise during shutdown.
+    warmer_pool = getattr(service, "_warmer_executor", None)
+    if warmer_pool is not None:
+        warmer_pool.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
