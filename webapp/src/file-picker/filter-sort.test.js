@@ -155,83 +155,119 @@ describe('FilePicker component', () => {
   });
 
   // ---------------------------------------------------------------
-  // Sort buttons (Increment 3)
+  // Sort buttons (Increment 3) — split-button-with-pulldown
   // ---------------------------------------------------------------
+  //
+  // Spec: specs4/5-webapp/file-picker.md (Sorting section).
+  // The toolbar exposes one primary button for the active sort
+  // mode (with its direction glyph) plus a chevron that opens
+  // a popup menu listing all three modes. Clicking the primary
+  // button toggles direction; choosing a different mode from the
+  // menu switches mode and resets to ascending.
+
+  const openSortMenu = async (p) => {
+    const chevron = p.shadowRoot.querySelector(
+      '.sort-btn.chevron',
+    );
+    chevron.click();
+    await p.updateComplete;
+  };
+
+  const clickMenuItem = async (p, mode) => {
+    await openSortMenu(p);
+    const items = Array.from(
+      p.shadowRoot.querySelectorAll('.sort-menu-item'),
+    );
+    const item = items.find((el) =>
+      (el.textContent || '').toLowerCase().includes(mode),
+    );
+    item.click();
+    await p.updateComplete;
+  };
 
   describe('sort buttons', () => {
-    it('renders three sort-mode buttons in the filter bar', async () => {
+    it('renders a primary sort button plus a chevron', async () => {
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
       const btns = p.shadowRoot.querySelectorAll('.sort-btn');
-      expect(btns).toHaveLength(3);
-      const modes = Array.from(btns).map((b) =>
-        b.getAttribute('data-sort-mode'),
+      expect(btns).toHaveLength(2);
+      const primary = p.shadowRoot.querySelector(
+        '.sort-btn.primary',
       );
-      expect(modes).toEqual(['name', 'mtime', 'size']);
+      const chevron = p.shadowRoot.querySelector(
+        '.sort-btn.chevron',
+      );
+      expect(primary).toBeTruthy();
+      expect(chevron).toBeTruthy();
     });
 
     it('defaults to name mode ascending on first mount', async () => {
-      // Fresh localStorage → name mode, ascending. The active
-      // button has .active and aria-pressed=true, and shows
-      // the ↑ direction glyph.
+      // Fresh localStorage → name mode, ascending. The primary
+      // button reflects the active mode with .active and
+      // aria-pressed=true, and shows the ↑ direction glyph.
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      const nameBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="name"]',
+      const primary = p.shadowRoot.querySelector(
+        '.sort-btn.primary',
       );
-      expect(nameBtn.classList.contains('active')).toBe(true);
-      expect(nameBtn.getAttribute('aria-pressed')).toBe('true');
-      expect(nameBtn.textContent).toContain('↑');
+      expect(primary.getAttribute('data-sort-mode')).toBe('name');
+      expect(primary.classList.contains('active')).toBe(true);
+      expect(primary.getAttribute('aria-pressed')).toBe('true');
+      expect(primary.textContent).toContain('↑');
     });
 
-    it('only one button is active at a time', async () => {
+    it('chevron opens a menu listing all three modes', async () => {
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      const actives = p.shadowRoot.querySelectorAll(
-        '.sort-btn.active',
+      // Menu absent until chevron is clicked.
+      expect(
+        p.shadowRoot.querySelector('.sort-menu'),
+      ).toBeNull();
+      await openSortMenu(p);
+      const items = p.shadowRoot.querySelectorAll(
+        '.sort-menu-item',
       );
-      expect(actives).toHaveLength(1);
+      expect(items).toHaveLength(3);
+      const labels = Array.from(items).map((el) =>
+        (el.textContent || '').trim().toLowerCase(),
+      );
+      expect(labels.some((l) => l.includes('name'))).toBe(true);
+      expect(labels.some((l) => l.includes('modified'))).toBe(true);
+      expect(labels.some((l) => l.includes('size'))).toBe(true);
     });
 
-    it('clicking a different mode switches and resets to ascending', async () => {
+    it('selecting a different mode from the menu switches and resets to ascending', async () => {
       // Name → mtime: mtime becomes active, asc=true (fresh
       // sort starts at the familiar anchor — oldest-first
       // for mtime).
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      const mtimeBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="mtime"]',
-      );
-      mtimeBtn.click();
-      await p.updateComplete;
+      await clickMenuItem(p, 'modified');
       expect(p._sortMode).toBe('mtime');
       expect(p._sortAsc).toBe(true);
-      // Name button no longer active.
-      const nameBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="name"]',
+      const primary = p.shadowRoot.querySelector(
+        '.sort-btn.primary',
       );
-      expect(nameBtn.classList.contains('active')).toBe(false);
-      expect(mtimeBtn.classList.contains('active')).toBe(true);
+      expect(primary.getAttribute('data-sort-mode')).toBe('mtime');
     });
 
-    it('clicking the active mode toggles direction', async () => {
-      // Click name twice (starting as default active+asc):
-      // first click toggles to descending.
+    it('clicking the primary button toggles direction', async () => {
+      // Click primary twice (starting as name+asc): first click
+      // toggles to descending.
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      const nameBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="name"]',
-      );
-      nameBtn.click();
+      const primary = () =>
+        p.shadowRoot.querySelector('.sort-btn.primary');
+      primary().click();
       await p.updateComplete;
       expect(p._sortMode).toBe('name');
       expect(p._sortAsc).toBe(false);
-      expect(nameBtn.textContent).toContain('↓');
+      expect(primary().textContent).toContain('↓');
       // Click again — back to ascending.
-      nameBtn.click();
+      primary().click();
       await p.updateComplete;
       expect(p._sortAsc).toBe(true);
-      expect(nameBtn.textContent).toContain('↑');
+      expect(primary().textContent).toContain('↑');
     });
 
     it('files render in the selected sort order', async () => {
@@ -249,22 +285,14 @@ describe('FilePicker component', () => {
         ).map((el) => el.textContent);
       expect(namesFor()).toEqual(['a.md', 'b.md', 'c.md']);
       // Switch to size ascending: smallest first.
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="size"]')
-        .click();
-      await p.updateComplete;
+      await clickMenuItem(p, 'size');
       expect(namesFor()).toEqual(['c.md', 'b.md', 'a.md']);
-      // Click size again — descending (largest first).
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="size"]')
-        .click();
+      // Click primary — descending (largest first).
+      p.shadowRoot.querySelector('.sort-btn.primary').click();
       await p.updateComplete;
       expect(namesFor()).toEqual(['a.md', 'b.md', 'c.md']);
       // Switch to mtime ascending: oldest first.
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="mtime"]')
-        .click();
-      await p.updateComplete;
+      await clickMenuItem(p, 'modified');
       expect(namesFor()).toEqual(['c.md', 'b.md', 'a.md']);
     });
 
@@ -280,29 +308,41 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree });
       await p.updateComplete;
       // Check every mode and both directions.
-      const modes = ['name', 'mtime', 'size'];
-      for (const mode of modes) {
-        // Activate the mode. If already active, this toggles
-        // direction; click it twice to get a known state.
-        const btn = p.shadowRoot.querySelector(
-          `.sort-btn[data-sort-mode="${mode}"]`,
-        );
-        btn.click();
-        await p.updateComplete;
+      const modeLabels = [
+        ['name', 'name'],
+        ['mtime', 'modified'],
+        ['size', 'size'],
+      ];
+      for (const [mode, label] of modeLabels) {
+        // Activate the mode via the menu. Selecting the
+        // already-active mode toggles direction, so only
+        // dispatch when actually switching modes — and if
+        // the prior iteration left us on desc, click the
+        // primary button to flip back to asc.
+        if (p._sortMode !== mode) {
+          await clickMenuItem(p, label);
+        }
         if (!p._sortAsc) {
-          btn.click();
+          p.shadowRoot.querySelector('.sort-btn.primary').click();
           await p.updateComplete;
         }
+        expect(p._sortMode).toBe(mode);
+        expect(p._sortAsc).toBe(true);
         // Ascending — dirs must be alphabetical.
         const dirNames = Array.from(
-          p.shadowRoot.querySelectorAll('.row.is-dir:not(.is-root) .name'),
+          p.shadowRoot.querySelectorAll(
+            '.row.is-dir:not(.is-root) .name',
+          ),
         ).map((el) => el.textContent);
         expect(dirNames).toEqual(['a_dir', 'm_dir', 'z_dir']);
-        // Toggle to descending — still alphabetical.
-        btn.click();
+        // Toggle to descending via the primary button —
+        // still alphabetical.
+        p.shadowRoot.querySelector('.sort-btn.primary').click();
         await p.updateComplete;
         const dirNamesDesc = Array.from(
-          p.shadowRoot.querySelectorAll('.row.is-dir:not(.is-root) .name'),
+          p.shadowRoot.querySelectorAll(
+            '.row.is-dir:not(.is-root) .name',
+          ),
         ).map((el) => el.textContent);
         expect(dirNamesDesc).toEqual(['a_dir', 'm_dir', 'z_dir']);
       }
@@ -311,10 +351,7 @@ describe('FilePicker component', () => {
     it('persists mode to localStorage on change', async () => {
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="mtime"]')
-        .click();
-      await p.updateComplete;
+      await clickMenuItem(p, 'modified');
       expect(localStorage.getItem('ac-dc-sort-mode')).toBe('mtime');
       expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
     });
@@ -322,16 +359,14 @@ describe('FilePicker component', () => {
     it('persists direction to localStorage on toggle', async () => {
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
+      const primary = () =>
+        p.shadowRoot.querySelector('.sort-btn.primary');
       // Toggle name to descending.
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="name"]')
-        .click();
+      primary().click();
       await p.updateComplete;
       expect(localStorage.getItem('ac-dc-sort-asc')).toBe('0');
       // Back to ascending.
-      p.shadowRoot
-        .querySelector('.sort-btn[data-sort-mode="name"]')
-        .click();
+      primary().click();
       await p.updateComplete;
       expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
     });
@@ -345,11 +380,12 @@ describe('FilePicker component', () => {
       await p.updateComplete;
       expect(p._sortMode).toBe('size');
       expect(p._sortAsc).toBe(false);
-      const sizeBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="size"]',
+      const primary = p.shadowRoot.querySelector(
+        '.sort-btn.primary',
       );
-      expect(sizeBtn.classList.contains('active')).toBe(true);
-      expect(sizeBtn.textContent).toContain('↓');
+      expect(primary.getAttribute('data-sort-mode')).toBe('size');
+      expect(primary.classList.contains('active')).toBe(true);
+      expect(primary.textContent).toContain('↓');
     });
 
     it('ignores unknown mode in localStorage', async () => {
@@ -369,34 +405,23 @@ describe('FilePicker component', () => {
       expect(p._sortAsc).toBe(true);
     });
 
-    it('active button shows direction glyph; inactive buttons do not', async () => {
+    it('primary button always shows the direction glyph', async () => {
+      // Spec: the primary button renders the active mode's
+      // glyph plus the direction arrow. The chevron does not
+      // carry a direction glyph.
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
-      // Default: name is active, shows ↑; mtime and size have
-      // no direction glyph.
-      const nameBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="name"]',
-      );
-      const mtimeBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="mtime"]',
-      );
-      const sizeBtn = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="size"]',
-      );
-      expect(nameBtn.querySelector('.dir')).toBeTruthy();
-      expect(mtimeBtn.querySelector('.dir')).toBeNull();
-      expect(sizeBtn.querySelector('.dir')).toBeNull();
-      // Switch to mtime — only mtime shows the glyph now.
-      mtimeBtn.click();
-      await p.updateComplete;
-      const nameBtnAfter = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="name"]',
-      );
-      const mtimeBtnAfter = p.shadowRoot.querySelector(
-        '.sort-btn[data-sort-mode="mtime"]',
-      );
-      expect(nameBtnAfter.querySelector('.dir')).toBeNull();
-      expect(mtimeBtnAfter.querySelector('.dir')).toBeTruthy();
+      const primary = () =>
+        p.shadowRoot.querySelector('.sort-btn.primary');
+      const chevron = () =>
+        p.shadowRoot.querySelector('.sort-btn.chevron');
+      expect(primary().querySelector('.dir')).toBeTruthy();
+      expect(chevron().querySelector('.dir')).toBeNull();
+      // Switch to mtime — primary still shows the glyph,
+      // now reflecting the new mode.
+      await clickMenuItem(p, 'modified');
+      expect(primary().getAttribute('data-sort-mode')).toBe('mtime');
+      expect(primary().querySelector('.dir')).toBeTruthy();
     });
   });
 });
