@@ -10,6 +10,10 @@
 
 import { ALT_ARROW_DEBOUNCE_MS } from './constants.js';
 import { viewerForPath } from '../viewer-routing.js';
+import {
+  captureDiffViewportState,
+  applyDiffViewportState,
+} from './viewport.js';
 
 export function getFileNav(host) {
   return host.shadowRoot?.querySelector('ac-file-nav') || null;
@@ -84,6 +88,23 @@ export function onGridKeyDown(host, event) {
  * Fire the pending Alt+Arrow navigation. Called from the
  * debounce timer and from Alt release (`_onGridKeyUp`).
  * No-op when nothing is pending.
+ *
+ * For diff-viewer targets, this captures the outgoing
+ * file's scroll/cursor/preview state into an in-session
+ * per-path map keyed on the host (`_diffViewportMemory`),
+ * then restores the incoming file's stored state after
+ * `openFile` resolves. The SVG viewer is multi-file in
+ * memory (`_files[]` with per-entry viewBox) so it
+ * already preserves viewport across alt-arrow swaps —
+ * the diff viewer is single-file (D18) and discards
+ * Monaco model state on `swapModel`, so we mirror the
+ * SVG viewer's behaviour at the shell level for the
+ * diff path.
+ *
+ * The map is in-memory only; it does not persist across
+ * page reloads. `loadViewportState` / `doReopenLastFile`
+ * cover the reload case via the single localStorage slot
+ * keyed by repo + last-open-file.
  */
 export function flushAltArrowPending(host) {
   const targetPath = host._altArrowPending;
@@ -91,13 +112,36 @@ export function flushAltArrowPending(host) {
   if (!targetPath) return;
   const target = viewerForPath(targetPath);
   if (!target) return;
+  if (!host._diffViewportMemory) {
+    host._diffViewportMemory = new Map();
+  }
+  // Capture the outgoing diff-viewer state synchronously,
+  // before updateComplete resolves and openFile runs.
+  // Reading after openFile would see the new file's
+  // (zero) scroll, not the outgoing file's.
+  const outgoing = captureDiffViewportState(host);
+  if (outgoing && outgoing.path && outgoing.path !== targetPath) {
+    host._diffViewportMemory.set(outgoing.path, outgoing);
+  }
   host.updateComplete.then(() => {
     const viewer =
       target === 'svg'
         ? host.shadowRoot?.querySelector('ac-svg-viewer')
         : host.shadowRoot?.querySelector('ac-diff-viewer');
-    if (viewer) {
-      viewer.openFile({ path: targetPath });
+    if (!viewer) return;
+    const result = viewer.openFile({ path: targetPath });
+    if (target !== 'diff') return;
+    const stored = host._diffViewportMemory.get(targetPath);
+    if (!stored) return;
+    // openFile is async on the diff viewer (fetches file
+    // content). Wait for it before restoring; if it isn't
+    // a thenable for some reason, fall back to a one-frame
+    // delay so the editor at least has a chance to mount.
+    const apply = () => applyDiffViewportState(host, stored);
+    if (result && typeof result.then === 'function') {
+      result.then(apply);
+    } else {
+      requestAnimationFrame(apply);
     }
   });
 }
