@@ -932,9 +932,6 @@ export class ContextTab extends RpcMixin(LitElement) {
 
   connectedCallback() {
     super.connectedCallback();
-    if (this._subview === 'cache') {
-      this._startWarmerPolling();
-    }
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('mode-changed', this._onModeChanged);
@@ -1342,11 +1339,6 @@ export class ContextTab extends RpcMixin(LitElement) {
     try {
       localStorage.setItem(_SUBVIEW_KEY, v);
     } catch (_) {}
-    if (v === 'cache') {
-      this._startWarmerPolling();
-    } else {
-      this._stopWarmerPolling();
-    }
   }
 
   /**
@@ -1922,8 +1914,6 @@ export class ContextTab extends RpcMixin(LitElement) {
           ${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}
         </button>
       </div>
-
-      ${this._renderWarmerStatus()}
 
       <div class="cache-header">
         <div class="cache-hit-label">
