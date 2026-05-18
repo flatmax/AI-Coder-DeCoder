@@ -526,13 +526,27 @@ def assemble_messages_flat(
         history = scope.context.get_history()
         if history and history[-1].get("role") == "user":
             history = history[:-1]
-        messages.extend(history)
+        # Sanitise replayed history — Bedrock rejects blank
+        # text blocks in multimodal messages, which can occur
+        # when a past turn was an image-only submission. See
+        # ContextManager._sanitise_message_text_blocks.
+        for msg in history:
+            messages.append(
+                scope.context._sanitise_message_text_blocks(
+                    dict(msg)
+                )
+            )
 
     # Current user message — with images attached as content
-    # blocks if any.
+    # blocks if any. Sanitise the text block so Bedrock
+    # accepts image-only turns (empty user_prompt + images).
     if images:
+        from ac_dc.context_manager import _sanitise_text_block
         content_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": augmented_prompt}
+            {
+                "type": "text",
+                "text": _sanitise_text_block(augmented_prompt),
+            }
         ]
         for uri in images:
             if isinstance(uri, str) and uri.startswith("data:"):

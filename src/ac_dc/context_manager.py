@@ -158,6 +158,23 @@ class Mode(str, Enum):
     DOC = "doc"
 
 
+def _sanitise_text_block(text: str) -> str:
+    """Replace blank text with a single space.
+
+    Bedrock rejects empty/whitespace-only text content blocks
+    with a 400 error: "The text field in the ContentBlock object
+    is blank." This happens when a user submits an image-only
+    turn (text input empty, image attached). Anthropic-direct
+    and OpenAI tolerate blank text; Bedrock does not.
+
+    Returns the input unchanged when non-blank, else a single
+    space. Idempotent.
+    """
+    if isinstance(text, str) and text.strip():
+        return text
+    return " "
+
+
 # ---------------------------------------------------------------------------
 # Budget enforcement — module constants
 # ---------------------------------------------------------------------------
@@ -940,6 +957,52 @@ class ContextManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _sanitise_message_text_blocks(msg: dict[str, Any]) -> dict[str, Any]:
+        """Replace blank text blocks and blank string content.
+
+        Bedrock rejects ``{"type": "text", "text": ""}`` content
+        blocks with a 400 error, and also rejects user messages
+        whose top-level ``content`` is an empty string. Both
+        shapes can occur in replayed history when a past turn
+        was an image-only user message (text prompt was empty
+        but an image was attached). Anthropic-direct and OpenAI
+        tolerate empty text; Bedrock is strict.
+
+        Two cases handled:
+
+        - Plain-string content that's blank or whitespace-only
+          for a user message — substituted with a single space.
+          Assistant messages are left alone (they may legitimately
+          have empty content during streaming).
+        - Multimodal list content with blank text blocks —
+          each blank text block's ``text`` field replaced with
+          a single space.
+
+        Idempotent — non-blank text passes through unchanged.
+
+        Substitutes a single space rather than dropping the block:
+        some providers require at least one text block per user
+        message, and a space minimises any steering effect on the
+        model.
+        """
+        content = msg.get("content")
+        if isinstance(content, str):
+            if msg.get("role") == "user" and not content.strip():
+                msg["content"] = " "
+            return msg
+        if not isinstance(content, list):
+            return msg
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+            ):
+                text = block.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    block["text"] = " "
+        return msg
+
+    @staticmethod
     def _with_cache_control(msg: dict[str, Any]) -> dict[str, Any]:
         """Wrap a message's content in the structured cache-control form.
 
@@ -1103,7 +1166,7 @@ class ContextManager:
                 "content": system_content,
             })
             for i, msg in enumerate(l0_history):
-                copied = dict(msg)
+                copied = self._sanitise_message_text_blocks(dict(msg))
                 if i == len(l0_history) - 1:
                     messages.append(self._with_cache_control(copied))
                 else:
@@ -1147,7 +1210,9 @@ class ContextManager:
                     "content": "Ok.",
                 })
             for msg in tier_history:
-                tier_messages.append(dict(msg))
+                tier_messages.append(
+                    self._sanitise_message_text_blocks(dict(msg))
+                )
 
             # Mark the last message of the tier as the breakpoint.
             if tier_messages:
@@ -1231,7 +1296,9 @@ class ContextManager:
                     and msg.get("role") == "user"
                 ):
                     continue
-                messages.append(dict(msg))
+                messages.append(
+                    self._sanitise_message_text_blocks(dict(msg))
+                )
 
         # Current user message — text-only or multimodal.
         messages.append(self._build_user_message(user_prompt, images))
@@ -1274,7 +1341,7 @@ class ContextManager:
         if not images:
             return {"role": "user", "content": user_prompt}
         content_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": user_prompt}
+            {"type": "text", "text": _sanitise_text_block(user_prompt)}
         ]
         for uri in images:
             if isinstance(uri, str) and uri.startswith("data:"):
