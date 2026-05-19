@@ -123,14 +123,15 @@ export async function send(panel) {
   // Record this message in input history before
   // we clear the textarea — up-arrow recall
   // wants the full text, not the empty string
-  // we're about to replace it with. Only text
-  // goes into recall; images don't round-trip
-  // through a plain textarea.
-  if (text) {
+  // we're about to replace it with. Both text
+  // and pending images are recorded so a recall
+  // restores the full composition (image-only
+  // messages are also recallable).
+  if (text || images.length > 0) {
     const history = panel.shadowRoot?.querySelector(
       'ac-input-history',
     );
-    if (history) history.addEntry(text);
+    if (history) history.addEntry(text, images);
   }
 
   // Add the user message optimistically. The
@@ -515,13 +516,36 @@ export function onInputKeyDown(panel, event) {
 
 /**
  * Handle `history-select` from the input-history
- * component. The event carries the selected
- * text; we replace the textarea content and
- * focus it so the user can edit before sending.
+ * component. The event carries the selected text
+ * and any images that were attached when the
+ * message was originally sent. We replace the
+ * textarea content with the text, replace the
+ * pending-image strip with the recalled images,
+ * and focus the textarea so the user can edit
+ * before re-sending.
+ *
+ * Image restore goes through `addPendingImage`
+ * one-by-one so the standard limit / dedup /
+ * size checks apply uniformly. If a stored
+ * image now exceeds the size cap (e.g. config
+ * was tightened since the original send) it
+ * silently drops with a toast — better than
+ * surfacing a recalled message in an
+ * un-sendable state.
  */
 export function onHistorySelect(panel, event) {
   const text = event.detail?.text ?? '';
+  const images = Array.isArray(event.detail?.images)
+    ? event.detail.images
+    : [];
   panel._input = text;
+  // Replace pending images with the recalled set.
+  // Clear first so a recall doesn't accumulate
+  // on top of whatever the user had drafted.
+  panel._pendingImages = [];
+  for (const dataUri of images) {
+    addPendingImage(panel, dataUri);
+  }
   panel.updateComplete.then(() => {
     const ta = panel.shadowRoot?.querySelector('.input-textarea');
     if (ta) {

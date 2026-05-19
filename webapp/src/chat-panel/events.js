@@ -534,18 +534,40 @@ function seedIntoHistory(historyEl, msgs) {
   for (const m of msgs) {
     if (m.role !== 'user' || m.system_event) continue;
     let text;
+    let images = [];
     if (typeof m.content === 'string') {
       text = m.content;
     } else if (Array.isArray(m.content)) {
-      text = m.content
-        .filter((b) => b && b.type === 'text' && b.text)
-        .map((b) => b.text)
-        .join('\n');
+      // Multimodal user message — concatenate
+      // text blocks, harvest image_url blocks
+      // for recall.
+      const textParts = [];
+      for (const b of m.content) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'text' && typeof b.text === 'string') {
+          textParts.push(b.text);
+        } else if (
+          b.type === 'image_url' &&
+          b.image_url &&
+          typeof b.image_url.url === 'string'
+        ) {
+          images.push(b.image_url.url);
+        }
+      }
+      text = textParts.join('\n');
     } else {
       continue;
     }
-    if (text && text.trim()) {
-      historyEl.addEntry(text);
+    // Persisted records may also carry a sibling
+    // `images` array (older shape) — prefer it
+    // when present.
+    if (Array.isArray(m.images) && m.images.length > 0) {
+      images = m.images.filter(
+        (s) => typeof s === 'string' && s,
+      );
+    }
+    if ((text && text.trim()) || images.length > 0) {
+      historyEl.addEntry(text || '', images);
     }
   }
 }

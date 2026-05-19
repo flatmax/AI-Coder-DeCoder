@@ -150,6 +150,16 @@ export class InputHistory extends LitElement {
       border-left: 3px solid var(--accent-primary, #58a6ff);
       padding-left: calc(0.6rem - 3px);
     }
+    .image-marker {
+      display: inline-block;
+      margin-right: 0.4rem;
+      padding: 0.05rem 0.3rem;
+      background: rgba(88, 166, 255, 0.15);
+      border-radius: 3px;
+      font-size: 0.75rem;
+      color: var(--accent-primary, #58a6ff);
+      vertical-align: baseline;
+    }
     .empty {
       padding: 0.75rem;
       color: var(--text-secondary, #8b949e);
@@ -189,26 +199,42 @@ export class InputHistory extends LitElement {
 
   /**
    * Record a sent message. Deduplicates by moving any existing
-   * identical entry to the end. Caps the history at
-   * MAX_ENTRIES, discarding the oldest.
+   * entry with identical text to the end. Caps the history
+   * at MAX_ENTRIES, discarding the oldest.
    *
-   * Empty / whitespace-only strings are ignored — they're
-   * never useful to recall and would clutter the list.
+   * Empty / whitespace-only strings with no images are
+   * ignored — they're never useful to recall and would
+   * clutter the list. An image-only message (no text) is
+   * still recorded because re-sending the image is a
+   * legitimate recall target.
+   *
+   * `images` is an optional array of data-URI strings. They
+   * are stored alongside the text so that selecting a
+   * history entry restores both the prompt and its
+   * attachments. Dedup is keyed on text alone — re-sending
+   * the same text with different images moves the entry to
+   * the end and updates the stored images to the new set.
    */
-  addEntry(text) {
+  addEntry(text, images) {
     if (typeof text !== 'string') return;
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    const safeText = text;
+    const safeImages = Array.isArray(images)
+      ? images.filter((s) => typeof s === 'string' && s)
+      : [];
+    const trimmed = safeText.trim();
+    if (!trimmed && safeImages.length === 0) return;
     // Dedup — if this exact text is already in history,
     // remove the old entry and let the new one land at the
     // end. The "same text, different time" case is more
     // usefully represented as "most recent", not as two
     // identical list items.
-    const existingIdx = this._entries.indexOf(text);
+    const existingIdx = this._entries.findIndex(
+      (e) => e.text === safeText,
+    );
     if (existingIdx !== -1) {
       this._entries.splice(existingIdx, 1);
     }
-    this._entries.push(text);
+    this._entries.push({ text: safeText, images: safeImages });
     // Cap — discard oldest. splice rather than shift for
     // consistency with the dedup path, though shift would
     // work too.
@@ -242,10 +268,20 @@ export class InputHistory extends LitElement {
     this._focusedIndex = filtered.length - 1;
     // Focus the filter input after Lit renders. Typing in
     // the overlay goes through the filter input, not the
-    // main textarea, so stealing focus is essential.
+    // main textarea, so stealing focus is essential. Also
+    // scroll the focused (newest) entry into view — when
+    // the entry list overflows its max-height the scroll
+    // container opens at the top by default, but the
+    // focus is on the bottom entry; without this the user
+    // sees the oldest items and has to scroll to find
+    // their just-sent prompt.
     this.updateComplete.then(() => {
       const input = this.shadowRoot?.querySelector('.filter-input');
       if (input) input.focus();
+      const focused = this.shadowRoot?.querySelector('.entry.focused');
+      if (focused && typeof focused.scrollIntoView === 'function') {
+        focused.scrollIntoView({ block: 'nearest' });
+      }
     });
     return true;
   }
@@ -327,7 +363,7 @@ export class InputHistory extends LitElement {
     if (!this._filter) return this._entries;
     const needle = this._filter.toLowerCase();
     return this._entries.filter((e) =>
-      e.toLowerCase().includes(needle),
+      e.text.toLowerCase().includes(needle),
     );
   }
 
@@ -358,14 +394,19 @@ export class InputHistory extends LitElement {
       this._focusedIndex >= 0 && this._focusedIndex < filtered.length
         ? this._focusedIndex
         : filtered.length - 1;
-    const text = filtered[idx];
+    const entry = filtered[idx];
     this._open = false;
     this._filter = '';
     this._focusedIndex = -1;
     this._savedInput = '';
     this.dispatchEvent(
       new CustomEvent('history-select', {
-        detail: { text },
+        detail: {
+          text: entry.text,
+          images: Array.isArray(entry.images)
+            ? entry.images.slice()
+            : [],
+        },
         bubbles: true,
         composed: true,
       }),
@@ -432,18 +473,29 @@ export class InputHistory extends LitElement {
                 : 'History is empty'}
             </div>`
           : html`<div class="entries">
-              ${visibleEntries.map((text, i) => {
+              ${visibleEntries.map((entry, i) => {
                 const realIdx = visibleOffset + i;
                 const isFocused = realIdx === this._focusedIndex;
+                const imageCount = Array.isArray(entry.images)
+                  ? entry.images.length
+                  : 0;
+                const displayText = entry.text || '(image only)';
+                const titleText =
+                  imageCount > 0
+                    ? `${entry.text}\n\n📎 ${imageCount} image${imageCount === 1 ? '' : 's'} attached`
+                    : entry.text;
                 return html`
                   <div
                     class="entry ${isFocused ? 'focused' : ''}"
                     role="option"
                     aria-selected=${isFocused}
-                    title=${text}
+                    title=${titleText}
                     @click=${() => this._onEntryClick(realIdx, filtered)}
                   >
-                    ${text}
+                    ${imageCount > 0
+                      ? html`<span class="image-marker" aria-label="${imageCount} image${imageCount === 1 ? '' : 's'} attached">📎${imageCount > 1 ? imageCount : ''}</span>`
+                      : ''}
+                    ${displayText}
                   </div>
                 `;
               })}
