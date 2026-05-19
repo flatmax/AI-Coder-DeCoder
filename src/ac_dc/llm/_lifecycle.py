@@ -120,6 +120,50 @@ def sync_file_context(
                 path, exc,
             )
 
+    # Refresh content for files that stayed selected across
+    # turns. Without this step, externally-edited files
+    # (changes made outside the webapp — another editor,
+    # a script, a `git checkout`) are never re-read: the
+    # membership-only diff above sees them in both `current`
+    # and `selected` and skips them. The cached L3 copy then
+    # stays stale until the user deselects + reselects, which
+    # the picker forbids while the file is dirty.
+    #
+    # We re-read every selected file every turn and let
+    # FileContext.add_file overwrite the in-memory copy. The
+    # tracker's hash-mismatch demotion in _update_stability
+    # then naturally invalidates the cached entry.
+    #
+    # Cost: one disk read per selected file per turn. Cheap
+    # next to LLM round-trip; revisit with mtime gating if
+    # large selections become a hotspot. The repo layer
+    # already enforces binary rejection, so the same
+    # exception path applies.
+    for path in selected & current:
+        if service._repo is None:
+            continue
+        try:
+            old_content = file_context.get_content(path)
+            file_context.add_file(path)
+            new_content = file_context.get_content(path)
+            if old_content != new_content:
+                logger.debug(
+                    "Refreshed disk content for selected "
+                    "file %s (size %d -> %d)",
+                    path,
+                    len(old_content) if old_content else 0,
+                    len(new_content) if new_content else 0,
+                )
+        except Exception as exc:
+            if "Binary file cannot be read as text" in str(exc):
+                binary_skipped.append(path)
+            logger.warning(
+                "Selected file %s could not be refreshed "
+                "from disk: %s. The LLM may see a stale "
+                "version of this file.",
+                path, exc,
+            )
+
     if binary_skipped:
         # Trim the rejected paths from the scope's
         # selection list so the picker's checkboxes
