@@ -98,6 +98,24 @@ def sync_file_context(
     # toast at the end rather than one per file.
     binary_skipped: list[str] = []
 
+    # Track externally-deleted paths so we can broadcast
+    # filesChanged once after the loop completes. Per
+    # specs4/3-llm/cache-tiering.md § Item Removal and
+    # § Order of Operations Phase 0, a file deleted from
+    # disk during the session must transition to a
+    # deletion-marker entry in the stability tracker.
+    # That mechanism already works at the tracker layer
+    # (update_stability passes a fresh existing_files set
+    # to tracker.update, which calls _remove_stale →
+    # mark_deleted). The bug it fixes here is upstream:
+    # without this trim, FileContext keeps the file's
+    # pre-deletion bytes AND scope.selected_files keeps
+    # the path, so update_stability re-registers
+    # file:<path> in active_items every turn and prompt
+    # assembly renders stale content instead of the
+    # deletion-marker text.
+    deleted_from_disk: list[str] = []
+
     # Add newly-selected files.
     for path in selected - current:
         if service._repo is None:
@@ -142,6 +160,27 @@ def sync_file_context(
     for path in selected & current:
         if service._repo is None:
             continue
+        # Probe disk before attempting to read. file_exists
+        # is a cheap stat (no content read) and gives us a
+        # clean signal for "user removed this file outside
+        # the app" — distinct from binary rejection or
+        # transient read errors. Without this probe, a
+        # missing file would raise RepoError from add_file,
+        # the exception handler would log a warning, and
+        # FileContext would keep its pre-deletion snapshot
+        # — leaving the prompt stale until session restart.
+        if not service._repo.file_exists(path):
+            deleted_from_disk.append(path)
+            file_context.remove_file(path)
+            logger.warning(
+                "Selected file %s was deleted from disk "
+                "outside the application; clearing from "
+                "context. The stability tracker will "
+                "transition its entry to a deletion "
+                "marker on the next update cycle.",
+                path,
+            )
+            continue
         try:
             old_content = file_context.get_content(path)
             file_context.add_file(path)
@@ -163,6 +202,48 @@ def sync_file_context(
                 "version of this file.",
                 path, exc,
             )
+
+    if deleted_from_disk:
+        # Mirror the binary-skip path: trim the deleted
+        # paths from scope.selected_files so the picker
+        # checkbox clears and update_stability stops
+        # seeing the path in its active_items build.
+        # The tracker's _remove_stale runs against the
+        # fresh existing_files set computed by
+        # update_stability and transitions the entry to
+        # a deletion marker. With selected_files no
+        # longer carrying the path, the next turn's
+        # active_items dict won't re-register it, so
+        # the marker survives in the tracker and prompt
+        # assembly renders the marker text instead of
+        # stale FileContext content.
+        for path in deleted_from_disk:
+            try:
+                scope.selected_files.remove(path)
+            except ValueError:
+                pass
+
+        broadcast_event(
+            service,
+            "filesChanged",
+            list(scope.selected_files),
+        )
+        # Reuse the binaryFilesSkipped channel for the
+        # toast. The frontend's app-shell handler renders
+        # a generic "files removed from context" message;
+        # we extend the payload with a kind hint so the
+        # shell can differentiate the wording. Keeping
+        # the channel shared avoids a second event type
+        # for what's structurally the same UX: "these
+        # paths just left your selection, here's why".
+        broadcast_event(
+            service,
+            "binaryFilesSkipped",
+            {
+                "paths": sorted(deleted_from_disk),
+                "kind": "deleted",
+            },
+        )
 
     if binary_skipped:
         # Trim the rejected paths from the scope's

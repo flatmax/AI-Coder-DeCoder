@@ -230,6 +230,27 @@ def get_file_map_block(
                 }
             except Exception:
                 pass
+        # Deletion-marker fallback. The tracker is the
+        # source of truth: ``is_deleted`` returns True for
+        # entries that were transitioned by Phase 0 stale
+        # removal. Surface the same marker text the LLM
+        # sees in the prompt so the cache viewer's
+        # click-to-view stays consistent with what the
+        # model actually receives. Per
+        # specs4/3-llm/cache-tiering.md § Deletion Markers.
+        from ac_dc.stability_tracker import (
+            DELETION_MARKER_TEXT,
+        )
+        tracker = service._stability_tracker
+        if (
+            tracker is not None
+            and tracker.is_deleted(path)
+        ):
+            return {
+                "path": file_path,
+                "content": DELETION_MARKER_TEXT,
+                "mode": service._context.mode.value,
+            }
         return {
             "error": (
                 f"File content for {file_path} not "
