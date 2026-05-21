@@ -30,11 +30,48 @@ class TreeMixin:
 
         Combines tracked files (``git ls-files``) with untracked
         non-ignored files (``git ls-files --others --exclude-standard``).
-        Used as the file-tree section in LLM prompts — flat, one per
-        line, no tree indentation.
+        Filters out paths that no longer exist on disk — git's
+        index keeps tracked files in ``ls-files`` output until
+        their deletion is staged with ``git rm``, so a plain
+        ``rm path`` in a terminal leaves the path in the index
+        listing for one or more turns. Without the on-disk
+        filter, three subsystems silently feed stale paths to
+        downstream consumers:
 
-        Returns an empty string when the repo has no files (fresh
-        init, no commits, nothing untracked).
+        - The LLM-facing file tree section (assembled in both
+          tiered and flat prompt paths) lists the deleted file
+          — and after :meth:`rebuild_cache` this is the ONLY
+          place the LLM sees its name, with no deletion-marker
+          context to explain its absence.
+        - :func:`update_stability` builds its ``existing_files``
+          set from this output and passes it to
+          :meth:`StabilityTracker.update`. A path that's
+          tracked-but-deleted-on-disk shows up as "still
+          existing" to the tracker's stale-removal pass, so
+          :meth:`mark_deleted` never fires and the deletion
+          marker mechanism (specs4/3-llm/cache-tiering.md
+          § Deletion Markers) silently skips this entire class
+          of file. Untracked-and-deleted files were already
+          handled correctly because git drops them from
+          ``ls-files`` output the moment they vanish.
+        - The per-turn ``index_repo`` call in
+          :func:`stream_chat` would re-extract symbols from a
+          path that no longer exists — defended downstream by
+          the symbol index's own mtime-based pruning, but the
+          spurious work is wasted.
+
+        Used as the file-tree section in LLM prompts — flat,
+        one per line, no tree indentation. Returns an empty
+        string when the repo has no files (fresh init, no
+        commits, nothing untracked) or when every listed file
+        has been deleted on disk.
+
+        Cost note: one ``Path.exists()`` (stat) per listed
+        file per call. On a 5K-file repo, this is well under
+        10ms. The picker's :meth:`get_file_tree` deliberately
+        keeps deleted files visible with a "deleted" badge so
+        the user can recover them — that path uses a different
+        source set and is unaffected.
         """
         tracked = self._run_git(
             ["ls-files"],
@@ -45,7 +82,11 @@ class TreeMixin:
             check=True,
         ).stdout.splitlines()
         all_files = sorted(set(tracked) | set(untracked))
-        return "\n".join(all_files)
+        existing = [
+            rel for rel in all_files
+            if (self._root / rel).exists()
+        ]
+        return "\n".join(existing)
 
     def _count_lines(self, absolute: Path) -> int:
         """Count newlines in a file for the tree-line-count badge.

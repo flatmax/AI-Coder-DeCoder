@@ -1315,6 +1315,19 @@ class ContextManager:
         ``graduated_files`` list, then renders every file context
         entry whose path is not in that set. Order is the file
         context's insertion order (preserved across requests).
+
+        Also walks the stability tracker for active-tier
+        ``file:<path>`` entries that have transitioned to
+        deletion markers but aren't in FileContext (because
+        ``sync_file_context`` removed them when the file
+        vanished from disk). Per
+        specs4/3-llm/cache-tiering.md § Deletion Markers,
+        the marker text MUST appear in the prompt wherever
+        the file would have been; otherwise L0's stale
+        aggregate symbol/doc map references a phantom with
+        no full-text counterpart and the LLM has no way to
+        resolve the contradiction. The tracker is the
+        source of truth for marker state.
         """
         graduated: set[str] = set()
         for tier_name in _CACHED_TIERS:
@@ -1323,6 +1336,7 @@ class ContextManager:
                 graduated.add(path)
 
         blocks: list[str] = []
+        rendered_paths: set[str] = set()
         for path in self._file_context.get_files():
             if path in graduated:
                 continue
@@ -1330,6 +1344,35 @@ class ContextManager:
             if content is None:
                 continue
             blocks.append(f"{path}\n```\n{content}\n```")
+            rendered_paths.add(path)
+
+        # Append deletion markers for active-tier ``file:``
+        # entries that aren't in FileContext. These are
+        # files that were deleted from disk during the
+        # session and survive in the tracker as markers
+        # until the next ``rebuild_cache``.
+        tracker = self._stability_tracker
+        if tracker is not None:
+            from ac_dc.stability_tracker import (
+                DELETION_MARKER_TEXT,
+                Tier,
+            )
+            try:
+                active_items = tracker.get_tier_items(Tier.ACTIVE)
+            except Exception:
+                active_items = {}
+            for key in active_items:
+                if not key.startswith("file:"):
+                    continue
+                path = key[len("file:"):]
+                if path in graduated or path in rendered_paths:
+                    continue
+                if not tracker.is_deleted(key):
+                    continue
+                blocks.append(
+                    f"{path}\n```\n{DELETION_MARKER_TEXT}\n```"
+                )
+                rendered_paths.add(path)
         return "\n\n".join(blocks)
 
     def _build_user_message(

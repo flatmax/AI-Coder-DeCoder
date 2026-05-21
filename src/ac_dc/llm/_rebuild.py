@@ -117,6 +117,42 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     tracker = service._stability_tracker
     mode = service._context.mode
 
+    # Refresh both indexes BEFORE any step that reads
+    # index state. The per-turn streaming pipeline does
+    # this on every chat request, so the common path
+    # never hits stale indexes — but rebuild can fire
+    # without a chat turn since the last filesystem
+    # change (user deletes files in a terminal, switches
+    # to AC-DC, clicks Rebuild). Without this pass the
+    # symbol/doc indexes still hold deleted files'
+    # blocks, ``register_system_prompt`` hashes a stale
+    # legend, and ``_freeze_l0_snapshot`` (step 10
+    # below) captures stale aggregate maps into L0 —
+    # defeating rebuild's purpose as the explicit "L0
+    # refresh" gesture per
+    # specs4/3-llm/cache-tiering.md § What invalidates
+    # L0 (item 2). Same file-list shape and same
+    # try/except discipline as
+    # :func:`ac_dc.llm._streaming.stream_chat`.
+    try:
+        file_list_raw = service._repo.get_flat_file_list()
+        file_list = [
+            f for f in file_list_raw.split("\n") if f
+        ]
+        service._symbol_index.index_repo(file_list)
+        if service._doc_index_ready:
+            doc_files = [
+                f for f in file_list
+                if service._doc_index._extension_of(f)
+                in service._doc_index._extractors
+            ]
+            service._doc_index.index_repo(doc_files)
+    except Exception as exc:
+        logger.warning(
+            "Index refresh during cache rebuild failed: %s",
+            exc,
+        )
+
     items_before = len(tracker.get_all_items())
 
     # Step 1-2: preserve history, wipe everything else.

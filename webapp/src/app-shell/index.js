@@ -916,35 +916,64 @@ export class AppShell extends JRPCClient {
 
   binaryFilesSkipped(data) {
     // Fired during sync_file_context when one or more
-    // selected files fail binary detection. The picker's
-    // selection state is unchanged — the file stays
-    // checked — but the LLM never sees the file's
-    // content because the repo layer refuses to decode
-    // binary bytes as text. Without this toast the
-    // rejection is invisible to the user.
+    // selected files are dropped from context. Two distinct
+    // causes share this channel:
+    //
+    //   - kind="binary" (default when absent): the file is
+    //     selected but the repo layer refused to decode its
+    //     bytes as text. Selection state is unchanged
+    //     server-side until the trim broadcast that
+    //     accompanies this event.
+    //   - kind="deleted": the file was removed from disk
+    //     outside the application (terminal `rm`, another
+    //     editor, branch checkout). The backend trims it
+    //     from selected_files and the stability tracker
+    //     transitions the entry to a deletion marker on
+    //     the next update cycle.
+    //
+    // Both paths fire a `filesChanged` broadcast just
+    // before this one, so the picker checkbox is already
+    // clearing by the time the toast renders. The
+    // `binary-files-skipped` window event is dispatched
+    // for any subscriber that wants the path list — the
+    // detail carries `kind` so subscribers can branch too.
     //
     // Spec: specs4/5-webapp/file-picker.md
     // § Binary File Selection
+    // Spec: specs4/3-llm/cache-tiering.md
+    // § Item Removal and § Deletion Markers
     // Spec: specs-reference/5-webapp/shell.md
     // § binaryFilesSkipped server-push event
     const paths = Array.isArray(data?.paths) ? data.paths : [];
     if (paths.length === 0) return true;
+    const kind = typeof data?.kind === 'string' ? data.kind : 'binary';
     window.dispatchEvent(new CustomEvent('binary-files-skipped', {
-      detail: { paths },
+      detail: { paths, kind },
     }));
     // Toast wording: lead with the first file, append a
     // "(+N more)" suffix when the list is long. Keeps the
-    // toast a single line. The Doc Convert hint is
-    // appended unconditionally since that's the standard
-    // resolution path.
+    // toast a single line.
     const head = paths[0];
     const extra = paths.length > 1
       ? ` (+${paths.length - 1} more)`
       : '';
-    this._showToast(
-      `Binary file not loaded: ${head}${extra}. Convert via the Doc Convert tab.`,
-      'warning',
-    );
+    let message;
+    if (kind === 'deleted') {
+      // Deleted files: the LLM will see a deletion marker
+      // in place of the file's content on the next turn.
+      // No "convert via Doc Convert" hint — the resolution
+      // is to either restore the file or accept the marker.
+      message = (
+        `File removed from context (deleted from disk): `
+        + `${head}${extra}.`
+      );
+    } else {
+      message = (
+        `Binary file not loaded: ${head}${extra}. `
+        + `Convert via the Doc Convert tab.`
+      );
+    }
+    this._showToast(message, 'warning');
     return true;
   }
 

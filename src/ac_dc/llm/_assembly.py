@@ -202,6 +202,36 @@ def build_tiered_content(
             path = key[len("file:"):]
             content = scope.context.file_context.get_content(path)
             if content is None:
+                # The tracker may hold this entry as a
+                # deletion marker — file was on disk earlier
+                # in the session, then deleted (LLM edit,
+                # `git rm`, terminal `rm`, agent edit). Per
+                # specs4/3-llm/cache-tiering.md § Deletion
+                # Markers, the marker text MUST be rendered
+                # in the prompt wherever the file would have
+                # appeared. Without this branch, deletion
+                # markers are invisible to the LLM and L0's
+                # stale aggregate map shows a phantom file
+                # with no full-text counterpart anywhere —
+                # exactly the contradiction the marker
+                # mechanism is supposed to resolve.
+                #
+                # Probe via tracker.is_deleted(); the
+                # tracker is the source of truth for marker
+                # state, FileContext is not (sync_file_context
+                # removes deleted files from FileContext, so
+                # get_content returning None doesn't tell us
+                # whether the file is "merely missing" or
+                # "marked deleted").
+                from ac_dc.stability_tracker import (
+                    DELETION_MARKER_TEXT,
+                )
+                if scope.tracker.is_deleted(key):
+                    tier_file_fragments[tier_name].append(
+                        f"{path}\n```\n{DELETION_MARKER_TEXT}\n```"
+                    )
+                    result[tier_name]["graduated_files"].append(path)
+                    continue
                 logger.debug(
                     "Tier content for %s skipped: no "
                     "content in file context (stale "
