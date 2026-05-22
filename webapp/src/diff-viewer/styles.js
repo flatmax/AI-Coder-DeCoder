@@ -124,6 +124,78 @@ export const DIFF_VIEWER_STYLES = css`
       right: 46px;
     }
 
+    /* Split-button group: [✕ Preview][▾] fused into one
+     * pill. Outer corners round; the chevron sits flush
+     * against the main label with a divider line. */
+    .preview-button-group {
+      position: absolute;
+      top: 8px;
+      right: 46px;
+      z-index: 10;
+      display: inline-flex;
+      align-items: stretch;
+    }
+    .preview-button-group-split {
+      right: 46px;
+    }
+    .preview-button-group .preview-button {
+      position: static;
+      top: auto;
+      right: auto;
+    }
+    .preview-button-group .preview-button-main {
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+      border-right: 0;
+    }
+    .preview-button-group .preview-button-chevron {
+      width: 24px;
+      padding: 0.25rem 0;
+      text-align: center;
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+      border-left: 1px solid rgba(240, 246, 252, 0.2);
+      font-size: 0.7rem;
+    }
+
+    /* Dropdown panel. Anchored under the trigger group.
+     * Right-aligned with the group's right edge so the
+     * chevron sits visually atop the menu's corner. */
+    .export-menu {
+      position: absolute;
+      top: 38px;
+      right: 46px;
+      z-index: 12;
+      min-width: 160px;
+      background: rgba(22, 27, 34, 0.96);
+      border: 1px solid rgba(240, 246, 252, 0.2);
+      border-radius: 4px;
+      backdrop-filter: blur(4px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      padding: 0.25rem 0;
+    }
+    .export-menu-split {
+      right: 46px;
+    }
+    .export-menu-item {
+      background: transparent;
+      border: 0;
+      color: var(--text-primary, #c9d1d9);
+      font: inherit;
+      font-size: 0.8125rem;
+      text-align: left;
+      padding: 0.4rem 0.85rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .export-menu-item:hover,
+    .export-menu-item:focus {
+      background: rgba(240, 246, 252, 0.12);
+      outline: none;
+    }
+
     /* Split layout for preview mode. Editor on the left,
      * preview on the right, equal width. */
     .split-root {

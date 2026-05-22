@@ -168,6 +168,59 @@ DOM nodes cloned into the diff viewer's shadow root carry dataset attributes for
 | `data-monaco-injected="true"` | Applied to every `<style>` and `<link rel="stylesheet">` cloned from `document.head` into the shadow root. The full-resync path finds these by attribute to remove prior clones before re-cloning. |
 | `data-katex-css="true"` | Applied to the single KaTeX stylesheet node. KaTeX CSS is imported as a raw string (via Vite's `?raw` suffix) and injected manually rather than via the document-head sync path. Dedup check uses `shadowRoot.querySelector('[data-katex-css]')`. |
 
+### Preview export HTML envelope
+
+`buildExportHtml(host)` produces a self-contained document with this exact structure:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escaped source path}</title>
+<style>
+{katexCssText}
+
+{minimal stylesheet}
+</style>
+</head>
+<body>
+{cloned preview-pane innerHTML}
+</body>
+</html>
+```
+
+- Title is the source file path, HTML-escaped (`&`, `<`, `>`, `"`, `'`).
+- `<style>` is a single block; KaTeX CSS first, blank line, then the minimal stylesheet.
+- Body is a clone of the live preview pane's `innerHTML`. Math has already been rendered to KaTeX output by the live pipeline; images already mutated to data URIs by `resolvePreviewImages`. The export does not re-run markdown rendering or KaTeX.
+- Filename derivation: split path at last `/`, strip trailing `.md` or `.markdown` (case-insensitive) from the last segment, append `.html`. Empty paths fall back to `preview.html`.
+
+### Minimal export stylesheet
+
+Hand-written, ~50 declarations. Targets:
+- Body: system font stack, max-width 48rem, padding 2rem 1.5rem, light theme.
+- Headings: weight 600, line-height 1.25; H1/H2 with bottom border.
+- Code: monospace stack, `rgba(175,184,193,0.2)` inline background.
+- `<pre>`: `#f6f8fa` background, 6px radius.
+- Blockquotes: 0.25em left border, muted text.
+- Tables: 1px `#d0d7de` borders, `#f6f8fa` header background.
+- `<hr>`: 1px `#d0d7de` top border.
+- `<img>`: max-width 100%.
+
+Reimplementations may substitute github-markdown-css or any equivalent stylesheet; the only contract is that the exported document is readable in any modern browser without external resources.
+
+### Clipboard write contract
+
+`copyPreviewAsHtml(host)`:
+
+1. Builds the HTML via `buildExportHtml`.
+2. If `ClipboardItem` and `navigator.clipboard.write` are both available, writes a `ClipboardItem` containing both `text/html` and `text/plain` blobs (the latter is the raw HTML source).
+3. On `ClipboardItem.write` failure or unavailability, falls back to `navigator.clipboard.writeText(html)`.
+4. Returns `{ok: true, mode: 'rich' | 'plain', unresolvedImages}` on success or `{ok: false, error}` on failure.
+
+`text/plain` fallback contents are the HTML source (not the original markdown) — this is intentional, so a recipient pasting into a plain-text editor sees something they can save as `.html`.
+
 ## Numeric constants
 
 ### Diff-ready timeout

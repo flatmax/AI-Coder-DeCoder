@@ -213,6 +213,16 @@ Image resolution runs as a post-processing step after the preview renders.
 ### Toggle Behavior
 - Toggling preview mode disposes and recreates the editor — switches between side-by-side diff and inline diff
 - After disposal, waits for re-render, updates editor container reference from the new DOM structure, reattaches resize observer, rebuilds the editor in the new layout
+### Exporting the Preview
+While preview mode is active for a markdown file, the exit-preview button becomes a split-button: the main `✕ Preview` label still toggles preview off, and a flush `▾` chevron on its right edge opens a dropdown with two actions:
+- **Export as HTML…** — downloads a self-contained HTML file. Filename derives from the source path (e.g., `README.md` → `README.html`, `docs/spec.markdown` → `spec.html`). On success a toast confirms the filename; if any relative `<img>` references could not be resolved to data URIs they are listed in the toast and left in the document with their original `src`.
+- **Copy as HTML** — places the rendered preview on the clipboard as `text/html` (with a `text/plain` fallback containing the same HTML source). Recipient pastes into Gmail, Slack, Notion, etc., and gets formatted output. When the rich-clipboard API is unavailable, the action falls back to plain-text and the toast notes "(plain text)".
+The exported document is bare — no filename header, no chrome — so the markdown's own H1 carries the title. Both actions reuse the live preview DOM:
+- Trigger a fresh image-resolution pass and await it; `<img>` elements already mutated to data URIs by the live preview keep their URIs.
+- Clone the preview pane, walk the clone for unresolved relative image references, report them to the caller for toast surfacing.
+- Inline KaTeX CSS plus a minimal stylesheet (system font stack, light theme, code blocks, tables, blockquotes, headings) into a single `<style>` block in `<head>`.
+- Wrap the body in `<!DOCTYPE html>` with the source path as `<title>`.
+The dropdown is dismissed by clicking outside the diff viewer, by selecting an action, or by re-clicking the chevron. Export is markdown-only — TeX preview's pipeline (make4ht output, source-line anchors) is not currently exportable through this affordance.
 ## TeX Preview
 For TeX files, the same Preview button activates a live TeX preview via make4ht compilation on the server and KaTeX rendering on the client. See [tex-preview.md](tex-preview.md) for the full specification.
 ## Event Routing
@@ -308,6 +318,7 @@ At most one of the two slots is active at any time; opening a real file clears t
 - Cross-file Monaco Go-to-Definition dispatches `navigate-file` on the window; it never calls the viewer's `openFile` directly, so the app shell's full pipeline (grid registration, collab broadcast, last-open persistence, viewer switch) always runs
 - Scroll-lock mutex in markdown preview prevents infinite feedback loops between editor and preview scrolling
 - Preview image resolution runs as a post-processing step; never blocks initial render
+- Preview export reuses the live DOM after awaiting image resolution; it never re-renders from the source markdown, so anything visible in the preview pane is what gets exported (and vice versa — anything not in the live DOM is not in the export)
 specs4/5-webapp/tex-preview.md
 ↗
 ⏳ pending
