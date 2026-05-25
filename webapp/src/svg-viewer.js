@@ -337,6 +337,43 @@ export class SvgViewer extends LitElement {
     .context-menu-item:hover {
       background: rgba(88, 166, 255, 0.12);
     }
+    .context-menu-divider {
+      height: 1px;
+      background: rgba(240, 246, 252, 0.12);
+      margin: 0.25rem 0;
+    }
+    .context-menu-section-label {
+      padding: 0.3rem 0.75rem 0.15rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-secondary, #8b949e);
+      user-select: none;
+    }
+    .align-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 2px;
+      padding: 0 0.5rem 0.25rem;
+    }
+    .align-btn {
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0;
+      font-family: inherit;
+      font-size: 0.95rem;
+      line-height: 1;
+      cursor: pointer;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .align-btn:hover {
+      background: rgba(88, 166, 255, 0.18);
+      border-color: rgba(88, 166, 255, 0.5);
+    }
   `;
 
   constructor() {
@@ -1723,6 +1760,58 @@ export class SvgViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Copy as SVG
+  // ---------------------------------------------------------------
+
+  /**
+   * Copy the current modified SVG source to the
+   * clipboard as text. Uses the same serialised form
+   * `_onEditorChange` produces — handle overlay stripped,
+   * pan-zoom viewport wrapper unwrapped, inlined
+   * data-URI hrefs swapped back to their externalised
+   * on-disk paths. The user gets exactly what would
+   * land in the file on save.
+   *
+   * Calling `_onEditorChange` first guarantees
+   * `file.modified` is current — there may be
+   * uncommitted edits in the SvgEditor that haven't
+   * been serialised yet (the editor calls onChange on
+   * mutation commits, but a paranoid refresh is cheap
+   * and matches the `_switchToTextDiff` precedent).
+   */
+  async _copyAsSvg() {
+    this._contextMenu = null;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    // Refresh file.modified from the live editor state.
+    // Idempotent — re-reads the same bytes when nothing
+    // has changed since the last commit.
+    this._onEditorChange();
+    const svgText = file.modified || '';
+    if (!svgText) {
+      this._emitToast('Nothing to copy', 'info');
+      return;
+    }
+    if (
+      !navigator.clipboard ||
+      typeof navigator.clipboard.writeText !== 'function'
+    ) {
+      this._emitToast('Clipboard not available', 'error');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(svgText);
+      this._emitToast('SVG copied to clipboard', 'success');
+    } catch (err) {
+      this._emitToast(
+        `Failed to copy SVG: ${err?.message || 'unknown error'}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
   // SVG ↔ text diff toggle
   // ---------------------------------------------------------------
 
@@ -1946,10 +2035,157 @@ export class SvgViewer extends LitElement {
               >
                 📋 Copy as PNG
               </button>
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                @click=${this._copyAsSvg}
+              >
+                📄 Copy as SVG
+              </button>
+              ${this._canSnapToAxis()
+                ? html`
+                    <div class="context-menu-divider"></div>
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      title="Snap line to horizontal"
+                      @click=${() => this._onSnapToAxis('horizontal')}
+                    >
+                      ━ Make horizontal
+                    </button>
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      title="Snap line to vertical"
+                      @click=${() => this._onSnapToAxis('vertical')}
+                    >
+                      ┃ Make vertical
+                    </button>
+                  `
+                : ''}
+              ${this._canAlign()
+                ? html`
+                    <div class="context-menu-divider"></div>
+                    <div class="context-menu-section-label">
+                      Align horizontal
+                    </div>
+                    <div class="align-grid" role="group" aria-label="Align horizontal">
+                      <button
+                        class="align-btn"
+                        title="Align left edges"
+                        aria-label="Align left edges"
+                        @click=${() => this._onAlign('horizontal', 'left')}
+                      >⇤</button>
+                      <button
+                        class="align-btn"
+                        title="Align horizontal centers"
+                        aria-label="Align horizontal centers"
+                        @click=${() => this._onAlign('horizontal', 'center')}
+                      >⇔</button>
+                      <button
+                        class="align-btn"
+                        title="Align right edges"
+                        aria-label="Align right edges"
+                        @click=${() => this._onAlign('horizontal', 'right')}
+                      >⇥</button>
+                    </div>
+                    <div class="context-menu-section-label">
+                      Align vertical
+                    </div>
+                    <div class="align-grid" role="group" aria-label="Align vertical">
+                      <button
+                        class="align-btn"
+                        title="Align top edges"
+                        aria-label="Align top edges"
+                        @click=${() => this._onAlign('vertical', 'top')}
+                      >⤒</button>
+                      <button
+                        class="align-btn"
+                        title="Align vertical middles"
+                        aria-label="Align vertical middles"
+                        @click=${() => this._onAlign('vertical', 'middle')}
+                      >⇕</button>
+                      <button
+                        class="align-btn"
+                        title="Align bottom edges"
+                        aria-label="Align bottom edges"
+                        @click=${() => this._onAlign('vertical', 'bottom')}
+                      >⤓</button>
+                    </div>
+                  `
+                : ''}
             </div>
           `
         : ''}
     `;
+  }
+
+  /**
+   * Whether the alignment section should appear in the
+   * context menu. Requires the right (editable) editor
+   * to be live AND at least two selected elements —
+   * single-element alignment has no group reference and
+   * the editor itself no-ops on it, so we hide the UI
+   * rather than show disabled buttons.
+   */
+  _canAlign() {
+    if (!this._editorRight) return false;
+    try {
+      return this._editorRight.getSelectionSet().size >= 2;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the snap-to-axis entries should appear.
+   * The editor's own `canSnapSelectionToAxis` checks
+   * for exactly-one selection of a snappable shape
+   * (line, two-point polyline, or single-segment
+   * straight path).
+   */
+  _canSnapToAxis() {
+    if (!this._editorRight) return false;
+    try {
+      return this._editorRight.canSnapSelectionToAxis();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Context-menu snap-to-axis click. Delegates to the
+   * editor and lets its onChange callback handle
+   * dirty-tracking + re-render. Same dispatch shape as
+   * `_onAlign`.
+   */
+  _onSnapToAxis(axis) {
+    if (!this._editorRight) return;
+    this._contextMenu = null;
+    try {
+      this._editorRight.snapSelectionToAxis(axis);
+    } catch (err) {
+      console.warn('[svg-viewer] snapSelectionToAxis failed', err);
+    }
+    this.requestUpdate();
+  }
+
+  /**
+   * Context-menu alignment click. Dispatches to the
+   * editor's `alignSelection`, dismisses the menu, and
+   * lets the editor's own onChange callback handle
+   * dirty-tracking and re-render — same path as drag,
+   * delete, paste.
+   */
+  _onAlign(axis, mode) {
+    if (!this._editorRight) return;
+    this._contextMenu = null;
+    try {
+      this._editorRight.alignSelection(axis, mode);
+    } catch (err) {
+      console.warn('[svg-viewer] alignSelection failed', err);
+    }
+    this.requestUpdate();
   }
 }
 
