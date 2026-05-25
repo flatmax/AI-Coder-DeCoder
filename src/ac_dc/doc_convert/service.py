@@ -521,13 +521,10 @@ class DocConvert:
         available, falling back to python-pptx (pptx) or
         markitdown (odp); ``.pdf`` uses PyMuPDF directly.
 
-        Runs the clean-tree gate first: refuses if the repo has
-        uncommitted changes. Without a git working tree to diff
-        against, the converted output wouldn't be reviewable
-        before commit. The gate requires a repo with an
-        ``is_clean()`` method; when constructed without a repo
-        (tests, standalone CLI use), the gate is skipped —
-        caller accepts the risk.
+        Does not require a clean working tree. Converted files
+        appear in the file picker as new/modified entries the
+        user reviews and stages like any other edit; there is
+        no reason to block conversion on uncommitted changes.
 
         Two execution modes:
 
@@ -813,12 +810,23 @@ class DocConvert:
             )
 
         # pdf goes directly to PyMuPDF — hybrid text + SVG
-        # output. Text extracted into markdown paragraphs;
-        # pages with significant graphics also get companion
-        # SVGs with glyphs stripped (text already in markdown).
+        # output. Text extracted into markdown paragraphs.
+        # Pages with significant graphics get companion SVGs;
+        # whether those SVGs keep or strip their <text>
+        # elements is controlled by the
+        # ``doc_convert.strip_svg_text_when_present`` config
+        # flag (default False — preserve text so figure
+        # labels survive). Users who care more about size
+        # than fidelity can flip it on.
         if suffix in _PDF_EXTENSIONS:
+            strip_text = bool(
+                self._config.doc_convert_config.get(
+                    "strip_svg_text_when_present", False
+                )
+            )
             return self._pdf.convert_pymupdf(
-                root, source_abs, rel_path
+                root, source_abs, rel_path,
+                strip_text_when_present=strip_text,
             )
 
         # Other supported extensions — explicit "not yet

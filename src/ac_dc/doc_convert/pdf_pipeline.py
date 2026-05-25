@@ -241,7 +241,7 @@ class PdfPipeline:
         pdf_source: Path | None = None,
         display_name: str | None = None,
         hash_source: Path | None = None,
-        strip_text_when_present: bool = True,
+        strip_text_when_present: bool = False,
         always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
@@ -317,17 +317,21 @@ class PdfPipeline:
             LibreOffice produces byte-identical intermediate
             PDFs across runs (it doesn't — timestamps vary).
         strip_text_when_present:
-            When True (the default, used by the direct-PDF
-            path), pages that have extractable text get their
-            ``<text>`` / ``<tspan>`` elements stripped from the
-            generated SVG. The same text already appears in the
-            companion markdown, so duplicating it in the SVG
-            bloats output without benefit for real PDFs (papers,
-            reports). When False (used by the LibreOffice route
-            for pptx/odp), SVG text is preserved unconditionally
-            — presentation text labels the diagram shapes, and
-            stripping it would leave meaningless coloured
-            rectangles.
+            When True, pages that have extractable text get
+            their ``<text>`` / ``<tspan>`` elements stripped
+            from the generated SVG on the assumption that the
+            same prose appears in the companion markdown and
+            duplication is wasteful. Defaults to False because
+            many PDF figures (architecture diagrams, flow
+            charts) carry internal labels that the page-level
+            text extractor cannot distinguish from body
+            paragraphs — stripping leaves nameless coloured
+            rectangles. Direct-PDF callers can opt in via the
+            ``doc_convert.strip_svg_text_when_present`` config
+            flag when they prefer the leaner output. The
+            LibreOffice route for pptx/odp always passes False
+            for the same reason: presentation text is the
+            diagram.
         """
         # Lazy import — PyMuPDF is optional in stripped-down
         # releases. Clean error with install hint on ImportError.
@@ -809,19 +813,21 @@ class PdfPipeline:
         output is compact and selectable. What happens next
         depends on ``strip_text``:
 
-        - ``strip_text=False`` (figure-only pages, and every
-          page on the LibreOffice → PDF → PyMuPDF route):
-          ``<text>`` and ``<tspan>`` elements are preserved.
-          For presentations this matters — diagram labels like
-          "Runtime Environment" or "Calibration Unit" anchor
-          the coloured shapes, and dropping them leaves the
-          user staring at nameless rectangles.
-        - ``strip_text=True`` (direct-PDF pages with
-          extractable text): ``<text>`` and ``<tspan>``
+        - ``strip_text=False`` (default; figure-only pages,
+          every page on the LibreOffice → PDF → PyMuPDF route,
+          and direct-PDF pages unless the user opts in via the
+          ``doc_convert.strip_svg_text_when_present`` config
+          flag): ``<text>`` and ``<tspan>`` elements are
+          preserved. Diagram labels — "BufferController",
+          "Runtime Environment", legend text — anchor the
+          shapes, and dropping them silently loses information.
+        - ``strip_text=True`` (direct-PDF pages with extractable
+          text, opt-in only): ``<text>`` and ``<tspan>``
           elements are removed. The same prose already appears
           in the companion markdown file as extracted
-          paragraphs, and duplicating it inside the SVG just
-          bloats output for real PDFs (papers, reports).
+          paragraphs, and duplicating it inside the SVG bloats
+          output for users who care more about size than
+          fidelity.
 
         See specs-reference/4-features/doc-convert.md
         § "SVG text preservation in PDF pipeline" for the

@@ -13,7 +13,8 @@
   "doc_convert": {
     "enabled": true,
     "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
-    "max_source_size_mb": 50
+    "max_source_size_mb": 50,
+    "strip_svg_text_when_present": false
   },
   "doc_index": {
     "keyword_model": "BAAI/bge-small-en-v1.5",
