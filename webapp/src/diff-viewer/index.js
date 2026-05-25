@@ -717,7 +717,7 @@ export class DiffViewer extends LitElement {
             @click=${this._togglePreview}
             title="Toggle markdown preview"
             aria-label="Toggle markdown preview"
-          >👁</button>`
+          >👁 Preview</button>`
         : ''}
       ${this._file !== null && isSvgFile(this._file)
         ? html`<button

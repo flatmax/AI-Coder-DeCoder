@@ -181,10 +181,17 @@ export class InputHistory extends LitElement {
   constructor() {
     super();
     // The full history list. Oldest at index 0, newest at
-    // the end. An array (not a circular buffer) because
-    // 100-entry caps make the shift-on-overflow cost
-    // negligible and the indexed access is simpler.
+    // the end. Plain strings — image attachments are
+    // tracked separately in `_imagesByText` so the entries
+    // array stays a simple, dedup-friendly key set.
     this._entries = [];
+    // Map of text → array of data URIs. Populated on
+    // addEntry when images are present; consulted on
+    // selection so history-select carries them through.
+    // Lifetime tied to the entries array — when an entry
+    // is dedup-removed or shifted off, its images entry
+    // is dropped too.
+    this._imagesByText = new Map();
     // The input text that was in the textarea when the
     // overlay opened. Restored on Escape.
     this._savedInput = '';
@@ -228,18 +235,28 @@ export class InputHistory extends LitElement {
     // end. The "same text, different time" case is more
     // usefully represented as "most recent", not as two
     // identical list items.
-    const existingIdx = this._entries.findIndex(
-      (e) => e.text === safeText,
-    );
+    const existingIdx = this._entries.indexOf(safeText);
     if (existingIdx !== -1) {
       this._entries.splice(existingIdx, 1);
     }
-    this._entries.push({ text: safeText, images: safeImages });
+    this._entries.push(safeText);
+    // Track images alongside the text. Empty arrays are
+    // fine — readers check length before rendering the
+    // attachment marker. Overwrites any prior images for
+    // the same text so dedup'd recall returns the freshest
+    // attachment set.
+    if (safeImages.length > 0) {
+      this._imagesByText.set(safeText, safeImages);
+    } else {
+      this._imagesByText.delete(safeText);
+    }
     // Cap — discard oldest. splice rather than shift for
     // consistency with the dedup path, though shift would
-    // work too.
+    // work too. Drop the matching images entry to keep
+    // the map from growing unboundedly.
     while (this._entries.length > MAX_ENTRIES) {
-      this._entries.shift();
+      const dropped = this._entries.shift();
+      this._imagesByText.delete(dropped);
     }
   }
 
@@ -362,8 +379,8 @@ export class InputHistory extends LitElement {
   _filteredEntries() {
     if (!this._filter) return this._entries;
     const needle = this._filter.toLowerCase();
-    return this._entries.filter((e) =>
-      e.text.toLowerCase().includes(needle),
+    return this._entries.filter((text) =>
+      text.toLowerCase().includes(needle),
     );
   }
 
@@ -394,7 +411,8 @@ export class InputHistory extends LitElement {
       this._focusedIndex >= 0 && this._focusedIndex < filtered.length
         ? this._focusedIndex
         : filtered.length - 1;
-    const entry = filtered[idx];
+    const text = filtered[idx];
+    const images = this._imagesByText.get(text);
     this._open = false;
     this._filter = '';
     this._focusedIndex = -1;
@@ -402,10 +420,8 @@ export class InputHistory extends LitElement {
     this.dispatchEvent(
       new CustomEvent('history-select', {
         detail: {
-          text: entry.text,
-          images: Array.isArray(entry.images)
-            ? entry.images.slice()
-            : [],
+          text,
+          images: Array.isArray(images) ? images.slice() : [],
         },
         bubbles: true,
         composed: true,
@@ -473,17 +489,18 @@ export class InputHistory extends LitElement {
                 : 'History is empty'}
             </div>`
           : html`<div class="entries">
-              ${visibleEntries.map((entry, i) => {
+              ${visibleEntries.map((text, i) => {
                 const realIdx = visibleOffset + i;
                 const isFocused = realIdx === this._focusedIndex;
-                const imageCount = Array.isArray(entry.images)
-                  ? entry.images.length
+                const images = this._imagesByText.get(text);
+                const imageCount = Array.isArray(images)
+                  ? images.length
                   : 0;
-                const displayText = entry.text || '(image only)';
+                const displayText = text || '(image only)';
                 const titleText =
                   imageCount > 0
-                    ? `${entry.text}\n\n📎 ${imageCount} image${imageCount === 1 ? '' : 's'} attached`
-                    : entry.text;
+                    ? `${text}\n\n📎 ${imageCount} image${imageCount === 1 ? '' : 's'} attached`
+                    : text;
                 return html`
                   <div
                     class="entry ${isFocused ? 'focused' : ''}"

@@ -123,11 +123,11 @@ export async function send(panel) {
   // Record this message in input history before
   // we clear the textarea — up-arrow recall
   // wants the full text, not the empty string
-  // we're about to replace it with. Both text
-  // and pending images are recorded so a recall
-  // restores the full composition (image-only
-  // messages are also recallable).
-  if (text || images.length > 0) {
+  // we're about to replace it with. Image-only
+  // messages aren't recorded: there's no text
+  // to recall and an empty entry would clutter
+  // the up-arrow list.
+  if (text) {
     const history = panel.shadowRoot?.querySelector(
       'ac-input-history',
     );

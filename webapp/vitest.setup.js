@@ -41,6 +41,37 @@ if (
   document.queryCommandSupported = () => false;
 }
 
+// jsdom does not implement URL.createObjectURL /
+// revokeObjectURL. Tests that exercise Blob-to-anchor
+// download flows (the markdown preview's "Export as
+// HTML" path is the current consumer) need both, and
+// they need to be spy-able via vi.spyOn — which means
+// they must be defined as configurable properties on
+// the URL constructor before the test installs its spy.
+// jsdom leaves them undefined, so a vi.spyOn call
+// throws "Cannot spy on a primitive value; undefined
+// given" before the test body runs.
+//
+// Stub both as no-op-returning configurable properties
+// so spying works. Real browsers ignore this — the
+// guards check for missing-ness only.
+if (typeof URL !== 'undefined') {
+  if (typeof URL.createObjectURL !== 'function') {
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: () => 'blob:mock',
+    });
+  }
+  if (typeof URL.revokeObjectURL !== 'function') {
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: () => {},
+    });
+  }
+}
+
 /**
  * Minimal JRPCClient stub. Extends LitElement so consumer
  * code still gets Lit's reactive machinery. Lifecycle hooks
