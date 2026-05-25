@@ -37,12 +37,10 @@ For each PDF page:
 - SVG export emits text as text elements rather than decomposing each character into individual glyph paths
 - Keeps sentences intact, produces smaller SVGs, makes text selectable and searchable in the SVG viewer
 - Extracted text is always written to the companion markdown file for searchability and LLM context
-- Origin-aware dedup: whether SVG text survives depends on how the page reached the PyMuPDF stage
-- For real PDFs (report pages where text flows in paragraphs), `<text>` and `<tspan>` elements are stripped from the SVG when the page also has extractable text — the markdown carries the paragraphs, the SVG carries only the graphics, and duplicating text in both places would bloat output without benefit
-- For presentations (pptx/odp routed through LibreOffice → intermediate PDF → PyMuPDF), text stripping is disabled on every page — slide text like "Runtime Environment" or "Calibration Unit" labels the shapes in a diagram and dropping it leaves meaningless coloured rectangles
-- Figure-only pages (no extractable text) always keep their SVG text regardless of source — any `<text>` element there probably labels the figure itself (axis labels, legend entries)
-- Result for PDFs — text in markdown, graphics in SVG, no duplication on text pages
-- Result for presentations — text in both SVG (so the diagram renders correctly) and markdown (for grep)
+- SVGs preserve every `<text>` element verbatim. Body prose appears in both the markdown (for grep / LLM context) and the SVG (for visual fidelity). The cost is mild output bloat; the alternative — stripping body prose from the SVG when the markdown has it — silently lost diagram labels because PyMuPDF's text-anchor coordinates and figure bboxes live in different coordinate spaces with no reliable conversion between them
+- Result for PDFs — text in both markdown and SVG; diagrams remain self-describing because their internal labels are never at risk
+- Result for presentations — same as PDFs: text in both artifacts, layout preserved
+- The legacy `doc_convert.strip_svg_text_when_present` config flag is deprecated and ignored. Setting the flag logs a one-time warning at startup
 ### SVG Image Externalization
 - SVGs produced by the PDF pipeline may contain embedded base64 image data URIs
 - Externalization scans the SVG, extracts the embedded images, saves them as separate files

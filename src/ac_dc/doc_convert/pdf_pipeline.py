@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ac_dc.doc_index.extractors.svg_geometry import BBox
+
 from .constants import (
     _LIBREOFFICE_TIMEOUT_SECONDS,
     _MIME_TO_EXT,
@@ -175,12 +177,9 @@ class PdfPipeline:
             # next to the original, not in the temp dir. The
             # display_name and hash_source overrides ensure the
             # provenance header records the original file.
-            # strip_text_when_present=False disables the
-            # direct-PDF text-dedup pass: presentation text
-            # labels the diagram shapes, so stripping it would
-            # leave meaningless coloured rectangles. See
-            # specs-reference/4-features/doc-convert.md
-            # § "SVG text preservation in PDF pipeline".
+            # always_emit_svg=True because every slide is a
+            # visual artefact — even text-only slides should
+            # render as SVG to preserve layout fidelity.
             return self.convert_pymupdf(
                 root=root,
                 source_abs=source_abs,
@@ -188,7 +187,6 @@ class PdfPipeline:
                 pdf_source=expected_pdf,
                 display_name=source_abs.name,
                 hash_source=source_abs,
-                strip_text_when_present=False,
                 always_emit_svg=True,
             )
 
@@ -241,7 +239,6 @@ class PdfPipeline:
         pdf_source: Path | None = None,
         display_name: str | None = None,
         hash_source: Path | None = None,
-        strip_text_when_present: bool = False,
         always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Convert a PDF via PyMuPDF's hybrid text + SVG pipeline.
@@ -256,16 +253,13 @@ class PdfPipeline:
           has any raster images OR at least
           :data:`_PAGE_GRAPHICS_THRESHOLD` significant drawings,
           a companion SVG is exported for that page.
-        - SVGs preserve ``<text>`` elements when the page has no
-          extractable text (figure-only pages, where the text
-          likely labels the figure itself) OR when the caller
-          sets ``strip_text_when_present=False`` (the LibreOffice
-          → PDF → PyMuPDF route for pptx/odp, where the text IS
-          the diagram). On direct-PDF pages that DO have
-          extractable text, the `<text>` and `<tspan>` elements
-          are stripped after export so the same prose doesn't
-          appear twice — once in the markdown paragraphs, once
-          embedded in the SVG.
+        - SVGs preserve every ``<text>`` element verbatim. The
+          markdown carries the prose for grep / LLM context;
+          the SVG carries the same text for visual fidelity.
+          Body-prose duplication is accepted: the alternative
+          (bbox-scoped stripping) silently dropped diagram
+          labels because text-anchor coordinates and figure
+          bboxes live in different coordinate spaces.
         - Embedded raster images in the SVG are externalised —
           base64 data URIs replaced with relative file refs.
         - Text-only pages produce no SVG. Pages with no text AND
@@ -316,22 +310,6 @@ class PdfPipeline:
             source classifies as `current` regardless of whether
             LibreOffice produces byte-identical intermediate
             PDFs across runs (it doesn't — timestamps vary).
-        strip_text_when_present:
-            When True, pages that have extractable text get
-            their ``<text>`` / ``<tspan>`` elements stripped
-            from the generated SVG on the assumption that the
-            same prose appears in the companion markdown and
-            duplication is wasteful. Defaults to False because
-            many PDF figures (architecture diagrams, flow
-            charts) carry internal labels that the page-level
-            text extractor cannot distinguish from body
-            paragraphs — stripping leaves nameless coloured
-            rectangles. Direct-PDF callers can opt in via the
-            ``doc_convert.strip_svg_text_when_present`` config
-            flag when they prefer the leaner output. The
-            LibreOffice route for pptx/odp always passes False
-            for the same reason: presentation text is the
-            diagram.
         """
         # Lazy import — PyMuPDF is optional in stripped-down
         # releases. Clean error with install hint on ImportError.
@@ -399,7 +377,6 @@ class PdfPipeline:
                 source_hash=source_hash,
                 rel_path=rel_path,
                 display_name=resolved_display_name,
-                strip_text_when_present=strip_text_when_present,
                 always_emit_svg=always_emit_svg,
             )
         finally:
@@ -419,7 +396,6 @@ class PdfPipeline:
         source_hash: str,
         rel_path: str,
         display_name: str | None = None,
-        strip_text_when_present: bool = True,
         always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Walk the pages of an open PDF document and emit output.
@@ -432,10 +408,6 @@ class PdfPipeline:
         basename when None — used by Pass A5b to override for
         converted pptx/odp (the provenance header shows the
         original filename, not the intermediate PDF's).
-
-        ``strip_text_when_present`` is forwarded to
-        :meth:`_process_pdf_page`; see :meth:`convert_pymupdf`
-        for the full rationale.
         """
         page_count = doc.page_count
         if page_count == 0:
@@ -489,7 +461,6 @@ class PdfPipeline:
                     pad_width=pad_width,
                     assets_dir=assets_dir,
                     assets_created=assets_created,
-                    strip_text_when_present=strip_text_when_present,
                     always_emit_svg=always_emit_svg,
                 )
             except Exception as exc:
@@ -556,7 +527,6 @@ class PdfPipeline:
         pad_width: int,
         assets_dir: Path,
         assets_created: bool,
-        strip_text_when_present: bool = True,
         always_emit_svg: bool = False,
     ) -> dict[str, Any]:
         """Emit markdown + optional SVG for one PDF page.
@@ -582,15 +552,15 @@ class PdfPipeline:
            threshold)
         6. Text-only pages emit no SVG
 
-        ``<text>`` preservation in the emitted SVG depends on
-        ``strip_text_when_present`` AND whether the page has
-        extractable text. Direct-PDF pages with text strip the
-        SVG's ``<text>`` / ``<tspan>`` elements (the markdown
-        already carries the paragraphs); LibreOffice-routed
-        pptx/odp pages always keep text (it labels the diagram
-        shapes); figure-only pages keep text regardless of the
-        flag (the text likely labels the figure). See
-        :meth:`_export_pdf_page_svg` for the strip implementation.
+        Every ``<text>`` element in the emitted SVG is
+        preserved verbatim. The markdown carries the prose
+        for grep / LLM context; the SVG carries the same text
+        so diagrams remain self-describing. Body-prose
+        duplication across the two artifacts is accepted —
+        the only viable dedup strategy (bbox-scoped stripping)
+        silently lost diagram labels because PyMuPDF's text
+        anchors and figure bboxes live in different
+        coordinate spaces.
         """
         page_number = page_index + 1
         slide_name = f"{str(page_number).zfill(pad_width)}_page.svg"
@@ -599,12 +569,21 @@ class PdfPipeline:
         text_paragraphs = self._extract_pdf_text(page)
         has_text = bool(text_paragraphs)
 
-        # Detect images and drawings.
-        raster_images = self._count_pdf_raster_images(page)
-        significant_drawings = self._count_significant_drawings(page)
-        has_raster = raster_images > 0
+        # Detect raster images and significant vector
+        # drawings — used solely to decide whether this page
+        # warrants an SVG companion. The earlier bbox-scoped
+        # text-stripping plan was removed because PyMuPDF's
+        # text-anchor coordinate space differs from page-
+        # space, so bbox tests silently dropped every
+        # diagram label. We still need the counts to drive
+        # the emit-SVG decision.
+        raster_bboxes = self._collect_pdf_raster_bboxes(page)
+        drawing_bboxes = self._collect_significant_drawing_bboxes(
+            page
+        )
+        has_raster = bool(raster_bboxes)
         has_significant_graphics = (
-            significant_drawings >= _PAGE_GRAPHICS_THRESHOLD
+            len(drawing_bboxes) >= _PAGE_GRAPHICS_THRESHOLD
         )
 
         # Decide whether to emit an SVG for this page.
@@ -647,22 +626,10 @@ class PdfPipeline:
                         "assets_created": assets_created,
                     }
 
-            # Decide whether to strip SVG text for this page.
-            # Two conditions must both hold:
-            #   1. The caller asked for stripping (direct-PDF
-            #      path; LibreOffice route passes False to
-            #      preserve diagram labels).
-            #   2. The page has extractable text — otherwise
-            #      the SVG's <text> elements probably ARE the
-            #      figure labels and stripping would lose them.
-            # See specs-reference/4-features/doc-convert.md
-            # § "SVG text preservation in PDF pipeline".
-            strip_svg_text = strip_text_when_present and has_text
             svg_text, image_files = self._export_pdf_page_svg(
                 page=page,
                 svg_name_stem=slide_name.removesuffix(".svg"),
                 assets_dir=assets_dir,
-                strip_text=strip_svg_text,
             )
             svg_path = assets_dir / slide_name
             try:
@@ -737,17 +704,52 @@ class PdfPipeline:
         return paragraphs
 
     @staticmethod
-    def _count_pdf_raster_images(page: Any) -> int:
-        """Return the number of raster images on the page."""
+    def _collect_pdf_raster_bboxes(page: Any) -> list[BBox]:
+        """Return on-page bboxes for every raster image.
+
+        PyMuPDF's ``page.get_images(full=True)`` returns image
+        references; ``page.get_image_rects(xref)`` then resolves
+        each to its position(s) on the page (the same image can
+        appear multiple times via XObjects). Bboxes are in
+        page coordinates — same space as ``page.get_drawings()``
+        rects, so the two collections compose directly.
+
+        Returns an empty list on any failure. The caller treats
+        an empty list as "no raster images present", which is
+        the correct fallback for both real text-only pages and
+        for PyMuPDF API errors we'd rather not propagate.
+        """
+        bboxes: list[BBox] = []
         try:
-            return len(page.get_images())
+            images = page.get_images(full=True)
         except Exception as exc:
             logger.debug("get_images failed: %s", exc)
-            return 0
+            return bboxes
+        for img in images:
+            xref = img[0]
+            try:
+                rects = page.get_image_rects(xref)
+            except Exception as exc:
+                logger.debug(
+                    "get_image_rects(%s) failed: %s", xref, exc
+                )
+                continue
+            for rect in rects:
+                # PyMuPDF Rect has .x0/.y0/.x1/.y1 attributes
+                # in page coordinates. Skip degenerate rects —
+                # zero-area "images" can't contain text labels.
+                w = rect.x1 - rect.x0
+                h = rect.y1 - rect.y0
+                if w <= 0 or h <= 0:
+                    continue
+                bboxes.append(BBox(rect.x0, rect.y0, w, h))
+        return bboxes
 
     @staticmethod
-    def _count_significant_drawings(page: Any) -> int:
-        """Return the count of "significant" vector drawings.
+    def _collect_significant_drawing_bboxes(
+        page: Any,
+    ) -> list[BBox]:
+        """Return page-space bboxes for every significant drawing.
 
         Significance rules (from specs4/4-features/doc-convert.md):
 
@@ -762,14 +764,21 @@ class PdfPipeline:
         - Simple rectangles and single lines → NOT significant
           (these are just borders and table rules that every
           PDF emits for layout)
+
+        Each PyMuPDF drawing carries a ``rect`` attribute giving
+        its on-page bounding box. We collect those bboxes for
+        every significant drawing so the SVG strip pass can
+        decide which ``<text>`` elements fall inside a figure.
+
+        Returns an empty list on any failure.
         """
+        bboxes: list[BBox] = []
         try:
             drawings = page.get_drawings()
         except Exception as exc:
             logger.debug("get_drawings failed: %s", exc)
-            return 0
+            return bboxes
 
-        count = 0
         for drawing in drawings:
             items = drawing.get("items", [])
             if not items:
@@ -780,82 +789,77 @@ class PdfPipeline:
                 item and len(item) > 0 and item[0] in ("c", "qu")
                 for item in items
             )
-            if has_curves:
-                count += 1
+            is_significant = has_curves
+            if not is_significant:
+                # Filled path with multiple segments.
+                is_filled = drawing.get("fill") is not None
+                if (
+                    is_filled
+                    and len(items) > _POLYGON_SIGNIFICANT_SEGMENTS
+                ):
+                    is_significant = True
+            if not is_significant:
+                # Complex path (many segments).
+                if len(items) > _PATH_SIGNIFICANT_SEGMENTS:
+                    is_significant = True
+            if not is_significant:
                 continue
 
-            # Check for filled path with multiple segments.
-            is_filled = drawing.get("fill") is not None
-            if (
-                is_filled
-                and len(items) > _POLYGON_SIGNIFICANT_SEGMENTS
-            ):
-                count += 1
+            rect = drawing.get("rect")
+            if rect is None:
                 continue
-
-            # Check for complex path (many segments).
-            if len(items) > _PATH_SIGNIFICANT_SEGMENTS:
-                count += 1
+            try:
+                x0, y0, x1, y1 = (
+                    rect.x0, rect.y0, rect.x1, rect.y1,
+                )
+            except AttributeError:
+                # Defensive: very old PyMuPDF returns tuples.
+                try:
+                    x0, y0, x1, y1 = rect
+                except Exception:
+                    continue
+            w = x1 - x0
+            h = y1 - y0
+            if w <= 0 or h <= 0:
                 continue
+            bboxes.append(BBox(x0, y0, w, h))
 
-        return count
+        return bboxes
 
     def _export_pdf_page_svg(
         self,
         page: Any,
         svg_name_stem: str,
         assets_dir: Path,
-        strip_text: bool = False,
     ) -> tuple[str, list[str]]:
         """Export a page to SVG, externalizing any raster images.
 
-        PyMuPDF emits ``<text>`` elements (text_as_path=0) so the
-        output is compact and selectable. What happens next
-        depends on ``strip_text``:
-
-        - ``strip_text=False`` (default; figure-only pages,
-          every page on the LibreOffice → PDF → PyMuPDF route,
-          and direct-PDF pages unless the user opts in via the
-          ``doc_convert.strip_svg_text_when_present`` config
-          flag): ``<text>`` and ``<tspan>`` elements are
-          preserved. Diagram labels — "BufferController",
-          "Runtime Environment", legend text — anchor the
-          shapes, and dropping them silently loses information.
-        - ``strip_text=True`` (direct-PDF pages with extractable
-          text, opt-in only): ``<text>`` and ``<tspan>``
-          elements are removed. The same prose already appears
-          in the companion markdown file as extracted
-          paragraphs, and duplicating it inside the SVG bloats
-          output for users who care more about size than
-          fidelity.
-
-        See specs-reference/4-features/doc-convert.md
-        § "SVG text preservation in PDF pipeline" for the
-        rationale behind the origin-aware behaviour.
+        PyMuPDF emits ``<text>`` elements (text_as_path=0) so
+        the output is compact and selectable. Every ``<text>``
+        element is preserved verbatim — body prose appears in
+        both the SVG and the companion markdown. The earlier
+        strip pass was removed because PyMuPDF's text-anchor
+        coordinates and PDF page-space figure bboxes live in
+        different spaces, and the strip silently dropped
+        diagram labels.
 
         Parameters
         ----------
         page:
             A PyMuPDF ``Page`` object.
         svg_name_stem:
-            Stem used for naming externalized raster image files
-            (e.g. ``"02_page"`` → ``02_page_img01.png``).
+            Stem used for naming externalized raster image
+            files (e.g. ``"02_page"`` → ``02_page_img01.png``).
         assets_dir:
             Directory to save externalized images into.
-        strip_text:
-            When True, remove ``<text>`` / ``<tspan>`` elements
-            from the generated SVG. Default False so callers
-            that don't care (tests, figure-only pages) get the
-            safe preserve-everything behaviour.
 
         Returns
         -------
         tuple
-            ``(svg_text, externalized_filenames)``.
-            ``svg_text`` has any base64 raster images rewritten
-            to refer to externalized files and, when
-            ``strip_text`` is True, has ``<text>`` / ``<tspan>``
-            elements removed.
+            ``(svg_text, externalized_filenames)``. The text
+            has any base64 raster images rewritten to refer
+            to externalized files; ``<text>`` elements are
+            untouched.
         """
         try:
             # text_as_path=0 keeps text as <text> elements rather
@@ -876,16 +880,6 @@ class PdfPipeline:
             stem=svg_name_stem,
             assets_dir=assets_dir,
         )
-
-        # Strip text elements on the direct-PDF path. Runs
-        # after image externalization so we can't accidentally
-        # strip text from inside an <image> tag's href (not
-        # that PyMuPDF would ever produce that, but the
-        # ordering keeps each pass independent and easy to
-        # reason about).
-        if strip_text:
-            svg_text = self._strip_svg_text_elements(svg_text)
-
         return svg_text, image_files
 
     def _externalize_svg_images(
@@ -954,64 +948,6 @@ class PdfPipeline:
         )
         modified = pattern.sub(_replace, svg_text)
         return modified, saved
-
-    @staticmethod
-    def _strip_svg_text_elements(svg_text: str) -> str:
-        """Remove ``<text>...</text>`` and any leftover ``<tspan>``
-        elements from an SVG string.
-
-        Used by :meth:`_export_pdf_page_svg` on the direct-PDF
-        path when the page has extractable text — the markdown
-        already carries the prose, so keeping it in the SVG too
-        is just duplication.
-
-        Regex rather than XML parse: PyMuPDF's output is
-        consistently structured and regex keeps us dependency-
-        free and fast. ``re.DOTALL`` matters for multi-line
-        ``<text>`` blocks where tspans span several lines.
-        ``re.IGNORECASE`` is defensive — SVG tag names are
-        normatively lowercase but case-insensitive matching
-        costs nothing and protects against edge cases.
-
-        Two passes:
-        1. Strip whole ``<text>...</text>`` blocks (which
-           includes any nested tspans).
-        2. Strip any stray ``<tspan>...</tspan>`` blocks that
-           somehow survived (e.g. tspan outside a text parent —
-           invalid but possible in malformed SVG).
-
-        Self-closing variants (``<text ... />``) are rare in
-        PyMuPDF output but handled by the first pass too.
-        """
-        # <text ... />  — self-closing.
-        svg_text = re.sub(
-            r"<text\b[^>]*/\s*>",
-            "",
-            svg_text,
-            flags=re.IGNORECASE,
-        )
-        # <text ...>...</text>  — block form.
-        svg_text = re.sub(
-            r"<text\b[^>]*>.*?</text\s*>",
-            "",
-            svg_text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        # Stray <tspan>...</tspan> outside a parent text.
-        svg_text = re.sub(
-            r"<tspan\b[^>]*>.*?</tspan\s*>",
-            "",
-            svg_text,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        # Self-closing tspan.
-        svg_text = re.sub(
-            r"<tspan\b[^>]*/\s*>",
-            "",
-            svg_text,
-            flags=re.IGNORECASE,
-        )
-        return svg_text
 
     def _write_pdf_output(
         self,

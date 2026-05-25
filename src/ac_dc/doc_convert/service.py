@@ -811,22 +811,33 @@ class DocConvert:
 
         # pdf goes directly to PyMuPDF — hybrid text + SVG
         # output. Text extracted into markdown paragraphs.
-        # Pages with significant graphics get companion SVGs;
-        # whether those SVGs keep or strip their <text>
-        # elements is controlled by the
-        # ``doc_convert.strip_svg_text_when_present`` config
-        # flag (default False — preserve text so figure
-        # labels survive). Users who care more about size
-        # than fidelity can flip it on.
+        # Pages with significant graphics get companion
+        # SVGs; the strip pass is bbox-scoped: ``<text>``
+        # whose anchor falls outside every figure bbox is
+        # removed (body prose, already in markdown), and
+        # figure-internal labels survive. The legacy
+        # ``doc_convert.strip_svg_text_when_present`` flag
+        # is no longer honoured — bbox-scoping replaces the
+        # all-or-nothing strip with a precise rule. A
+        # one-time warning logs when the flag is present
+        # so users editing legacy configs know it can be
+        # removed.
         if suffix in _PDF_EXTENSIONS:
-            strip_text = bool(
+            legacy_flag = (
                 self._config.doc_convert_config.get(
-                    "strip_svg_text_when_present", False
+                    "strip_svg_text_when_present"
                 )
             )
+            if legacy_flag is not None:
+                logger.warning(
+                    "doc_convert.strip_svg_text_when_present "
+                    "is deprecated and ignored — bbox-scoped "
+                    "SVG text stripping is now the default. "
+                    "Remove the setting from app.json to "
+                    "silence this warning."
+                )
             return self._pdf.convert_pymupdf(
                 root, source_abs, rel_path,
-                strip_text_when_present=strip_text,
             )
 
         # Other supported extensions — explicit "not yet
