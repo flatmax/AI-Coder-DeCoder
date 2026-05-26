@@ -73,14 +73,30 @@ class SubprocessMixin:
             ``check=True`` and git exits non-zero.
         """
         cmd = ["git", *args]
+        # When ``text=True``, capture as bytes and decode
+        # ourselves with ``errors="replace"`` rather than
+        # letting subprocess.run do strict UTF-8 decoding.
+        # Git output can contain non-UTF-8 bytes in
+        # legitimate cases — ``git diff --cached`` on a
+        # repo that stages a binary file (PDF, image,
+        # compiled artefact) emits the binary delta as
+        # raw bytes inline with the textual diff headers.
+        # Strict decoding crashes the whole call; lossy
+        # decoding preserves the textual portions and
+        # leaves replacement chars where the binary
+        # bytes were, which is exactly what the commit-
+        # message generator and diff viewer want.
+        run_input: str | bytes | None = input_data
+        if text and isinstance(input_data, str):
+            run_input = input_data.encode("utf-8", errors="replace")
         try:
             result = subprocess.run(
                 cmd,
                 cwd=self._root,
                 capture_output=True,
-                text=text,
+                text=False,
                 timeout=timeout,
-                input=input_data,
+                input=run_input,
                 check=False,
             )
         except FileNotFoundError as exc:
@@ -94,6 +110,25 @@ class SubprocessMixin:
             raise RepoError(
                 f"git {' '.join(args)!r} timed out after {timeout}s"
             ) from exc
+
+        # Decode to strings when the caller asked for text
+        # mode. Lossy decode so binary bytes embedded in
+        # otherwise-textual git output (notably ``git diff
+        # --cached`` on staged binary files) survive as
+        # replacement chars instead of raising.
+        if text:
+            stdout_decoded = result.stdout.decode(
+                "utf-8", errors="replace",
+            )
+            stderr_decoded = result.stderr.decode(
+                "utf-8", errors="replace",
+            )
+            result = subprocess.CompletedProcess(
+                args=result.args,
+                returncode=result.returncode,
+                stdout=stdout_decoded,
+                stderr=stderr_decoded,
+            )
 
         if check and result.returncode != 0:
             stderr = result.stderr
