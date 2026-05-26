@@ -100,6 +100,7 @@ Hold Shift and click or drag to multi-select. Shift overrides element hit-testin
 - Textarea matches the text's font size and color
 - Enter confirms the edit (updating the text element's content), Escape cancels
 - Only one text edit active at a time — starting a new edit commits the previous one
+- While the textarea is active, pointer and mouse events inside it do not propagate to the editor's SVG-level handlers — clicks position the caret natively, double-clicks select words, drag-selects text. The editor's selection / pan / marquee gestures are suppressed inside the textarea's bounds. Clicks outside the textarea blur it and trigger the cancel path
 ### Handles
 Selection handles rendered as a dedicated SVG group overlaid on the selected element:
 - Bounding box (dashed rectangle)
@@ -260,13 +261,31 @@ All toolbar-level actions are accessible only via keyboard. Element-level shortc
 - LLM edit blocks for SVG files are applied normally (text-based edits)
 - After application, refresh updates the SVG viewer's content if the file is open
 ## Context Menu
-Right-clicking on the right (editable) panel opens a context menu with:
-| Action | Shortcut | Description |
+Right-clicking on the right (editable) panel opens a context menu. Some actions are always visible; alignment and snap-to-axis are gated on the current selection so the menu shows only what's actionable.
+| Action | Visibility | Description |
 |---|---|---|
-| Copy as PNG | Ctrl+Shift+C | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+| Copy as PNG | Always | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+| Copy as SVG | Always | Copies the current modified SVG source to the clipboard as text — same serialized form a save would produce (handle overlay stripped, pan-zoom wrapper unwrapped, externalized image hrefs intact) |
+| Make horizontal / Make vertical | Exactly one selection of a snappable shape | Snap a line, two-point polyline, or single-segment straight path to be horizontal or vertical |
+| Align horizontal (left / center / right) | Two or more selected elements | Translate every selected element so its left edge / horizontal center / right edge aligns with the union bbox's |
+| Align vertical (top / middle / bottom) | Two or more selected elements | Translate every selected element so its top edge / vertical middle / bottom edge aligns with the union bbox's |
 - Context menu positioned at click point relative to diff container
 - Dismisses on clicking outside or on a subsequent right-click
 - Dismiss listener uses click (not pointerdown) so menu buttons fire handlers before dismiss logic runs
+- Alignment and snap-to-axis go through the same undo/onChange path as drag-to-move — single undo entry per operation, single dirty-state flip
+### Snap to Axis
+- Operates on a single selected `<line>`, two-point `<polyline>`, or `<path>` whose `d` is a single straight segment (M followed by L, optionally followed by Z)
+- The second endpoint anchors (for line: x2/y2; for polyline: second point; for path: the L command's endpoint) — the first endpoint moves to make the line orthogonal
+- "Make horizontal" sets the first endpoint's y to match the second's, leaving x alone; "Make vertical" sets the first endpoint's x to match the second's, leaving y alone
+- Anchor choice preserves direction of travel for plain lines and keeps the arrow head in place for arrows whose head is on the second endpoint (the common authoring convention for Inkscape, draw.io, PowerPoint)
+- No-op when the line is already on the requested axis (sub-pixel tolerance)
+- Multi-selection or non-snappable shapes hide the entries entirely rather than disabling them
+### Alignment
+- Operates on two or more selected elements
+- Reference is the union bbox of the selection in SVG root coordinates — element bboxes are computed via native `getBBox()` then transformed through the parent CTM so alignment is correct across siblings whose ancestor transforms differ (groups with translate/scale/rotate)
+- Each element gets a per-element `(dx, dy)` and is translated using the same per-element dispatch as drag-to-move (rect/image/use → x/y; circle/ellipse → cx/cy; line → both endpoints; polyline/polygon → all points; path/g/transformed text → prepend translate to transform attribute)
+- Sub-pixel-threshold moves are skipped — alignment is idempotent on already-aligned elements and doesn't dirty the file unnecessarily
+- Single-selection alignment is a no-op (no group reference) — the menu hides the entries rather than aligning to the canvas
 ## Copy as PNG
 Copy as PNG renders the current SVG to a high-quality PNG image:
 1. Parse dimensions — reads viewBox or width/height attributes to determine intrinsic size; defaults when unparseable

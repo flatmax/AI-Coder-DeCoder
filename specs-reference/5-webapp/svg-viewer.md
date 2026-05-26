@@ -82,6 +82,81 @@ The drag snapshot captures different attributes per element type. `_captureDragA
 
 Unknown tags return null — drag silently does not start.
 
+Alignment reuses this same dispatch: `alignSelection(axis, mode)` computes a per-element `(dx, dy)` from the union bbox, calls `_captureDragAttributes` to snapshot the origin attrs, then routes through `_applyDragDeltaToEntry`. Sub-pixel-threshold moves (|dx|, |dy| < 0.0001) are skipped before snapshotting, so alignment is idempotent on already-aligned elements.
+
+## Alignment dispatch
+
+`alignSelection(axis, mode)` translates two-or-more selected elements to share an edge or center against the union bbox of the selection.
+
+| `axis` | `mode` | Per-element delta |
+|---|---|---|
+| `horizontal` | `left` | `dx = groupMinX - bbox.x` |
+| `horizontal` | `center` | `dx = groupCenterX - (bbox.x + bbox.width / 2)` |
+| `horizontal` | `right` | `dx = groupMaxX - (bbox.x + bbox.width)` |
+| `vertical` | `top` | `dy = groupMinY - bbox.y` |
+| `vertical` | `middle` | `dy = groupCenterY - (bbox.y + bbox.height / 2)` |
+| `vertical` | `bottom` | `dy = groupMaxY - (bbox.y + bbox.height)` |
+
+Bboxes are computed in SVG root coordinates via `_elementRootBBox(el, svg)` — the element's `getBBox()` (local) is multiplied through `inverse(rootCTM) × elementCTM` to get a four-corner envelope, then min/max gives the axis-aligned root-space box. Required because siblings under different ancestor transforms have incompatible local-space bboxes.
+
+Gating:
+
+- `_selectedSet.size < 2` → no-op (no group reference)
+- Element with `_captureDragAttributes` returning null is silently skipped (same as drag)
+- All deltas under sub-pixel threshold → no-op (no undo entry, no dirty flip)
+
+Single `_pushUndo()` + `_onChange()` per call, regardless of how many elements move. Same orchestration shape as `deleteSelection` / `pasteClipboard`.
+
+## Snap-to-axis dispatch
+
+`snapSelectionToAxis(axis)` rewrites a single selected line-like element to be exactly horizontal or vertical.
+
+Eligibility (`canSnapSelectionToAxis()`):
+
+| Element | Condition |
+|---|---|
+| `<line>` | Always eligible |
+| `<polyline>` | Exactly two points after `_parsePoints` |
+| `<path>` | `_parsePathData(d)` is a single straight segment per `_isSingleStraightSegment` |
+| Any other tag | Not eligible |
+
+`_isSingleStraightSegment(commands)` returns true iff the command list has length 2 (M + L) or length 3 (M + L + Z). Both M/L are accepted in either case (uppercase absolute, lowercase relative); the trailing Z must be Z or z.
+
+Per-element rewrite:
+
+| Element | `axis = horizontal` | `axis = vertical` |
+|---|---|---|
+| `<line>` | `y1 ← y2`, x1 unchanged | `x1 ← x2`, y1 unchanged |
+| `<polyline>` (2 points) | First point's y ← second's y | First point's x ← second's x |
+| `<path>` (M + L [+ Z]) | Move command's y ← line command's absolute end y | Move command's x ← line command's absolute end x |
+
+Path rewrite always emits absolute M/L regardless of source case — round-tripping through absolute is simpler than preserving relative semantics. Trailing Z is preserved if present.
+
+The second endpoint anchors (x2/y2 for line, point[1] for polyline, L's endpoint for path) — the first endpoint moves. This convention preserves direction of travel for plain lines and keeps the arrow head in place when authoring tools place markers on the second endpoint (the common case for Inkscape, draw.io, PowerPoint).
+
+No-op rules:
+
+- `_selectedSet.size !== 1` → silent no-op
+- Already on the requested axis (`y1 === y2` for horizontal, `x1 === x2` for vertical) → silent no-op (no undo entry)
+- Selected element doesn't satisfy `canSnapSelectionToAxis` → silent no-op (the host viewer hides the menu entries in this case, but the editor method is defensive anyway)
+
+Single `_pushUndo()` + `_onChange()` per successful call.
+
+## Copy-as-SVG pipeline
+
+Copy-as-SVG reuses the same on-disk serialization path as the save flow:
+
+| Step | Detail |
+|---|---|
+| Refresh `file.modified` | Call `_onEditorChange()` first to ensure the file's modified text reflects any uncommitted editor mutations. Idempotent on a quiescent editor |
+| Source | `file.modified` — same bytes a save would write to disk |
+| Serialization | Handle overlay stripped, pan-zoom viewport wrapper unwrapped, inlined data-URI image hrefs swapped back to externalized on-disk paths |
+| Clipboard write | `navigator.clipboard.writeText(svgText)` — text-only, no `ClipboardItem` wrapper needed (no async blob production) |
+| Empty file fallback | Toast "Nothing to copy" (info) when `file.modified` is empty |
+| Clipboard unavailable fallback | Toast "Clipboard not available" (error) — no synthesized download because the operation is text-paste, not file-export |
+
+Available only via right-click menu — no keyboard shortcut. The copy-as-PNG shortcut (Ctrl+Shift+C) is reserved for the bitmap path.
+
 ### Points attribute format
 
 Polyline/polygon `points` attributes canonicalize to `x,y` (comma between coordinates, space between points) on output. Input tolerates any combination of commas and whitespace (`10,20 30,40`, `10 20, 30 40`, `10,20,30,40` all parse equivalently).
@@ -196,6 +271,46 @@ _getHandleRadius() {
 ```
 
 Called on every handle render so handles stay ~6px on screen regardless of zoom.
+
+## Inline text edit commit
+
+Double-clicking a `<text>` element opens a `<foreignObject>` textarea overlay; Enter commits, Escape cancels. Both paths flatten the element's children (replacing any `<tspan>` structure with a single text node carrying the new string). Two byte-level fixups run on the parent `<text>` element before the flatten, both required to preserve visible positioning when the originating SVG used non-trivial text layout (common in SVGs derived from PDF, Inkscape, or PowerPoint).
+
+### Tspan attribute promotion
+
+If the parent `<text>` does not declare a positioning or styling attribute that its first child `<tspan>` does, the attribute is copied from the tspan up to the parent before the children are removed. Without this step, text positioned via `<text><tspan x="100" y="50">…</tspan></text>` (parent has no `x`/`y` of its own) would drop to the SVG origin (0,0) after the tspans are deleted.
+
+Promoted attributes (only when absent on the parent):
+
+| Attribute | Reason |
+|---|---|
+| `x`, `y` | Position |
+| `dx`, `dy` | Position offsets |
+| `text-anchor` | Horizontal alignment |
+| `fill` | Color (sometimes only declared on the tspan) |
+
+Same logic applied on cancel, so an Escape after double-click never relocates the text even though it also flattens children.
+
+### List-valued positioning collapse
+
+SVG permits `x`, `y`, `dx`, `dy` to be whitespace-separated lists, where each value positions one glyph. PDF-to-SVG converters frequently emit pre-computed kerning this way — e.g. `x="37.786 66.32031 101.76848 137.80255 152.91928 181.04344 196.27736 230.61228 263.77537 297.28999"` for the 10 glyphs of `"Topic XYZ "`.
+
+When the user edits the content (e.g. to `"Software"`, 8 glyphs), the original list misaligns:
+
+- Glyph count > list length → trailing glyphs collapse to the last position (or to the parent's default)
+- Glyph count < list length → trailing list values ignored
+- Glyph count == list length → positions are reused against the wrong glyphs (an `x` calibrated for `T` is now applied to `S`)
+
+The result is visibly broken kerning. To fix this, after the tspan-attribute promotion and before the children are removed, each of `x`, `y`, `dx`, `dy` on the parent is inspected. When:
+
+1. The attribute value contains more than one whitespace-separated number, AND
+2. The number of values does not equal the new content's character count
+
+the attribute is collapsed to just its first value. The text then starts at the original anchor point and the font's natural metrics control subsequent glyph spacing.
+
+Exact-length matches are left intact — the assumption is that a list whose length still matches the new content was authored deliberately and should be preserved.
+
+This collapse runs only on commit (the cancel path restores the original content, whose length always matches the original list, so collapse would be a no-op).
 
 ## Auto-generated ID filter
 
