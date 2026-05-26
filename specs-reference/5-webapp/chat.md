@@ -267,6 +267,7 @@ See `specs-reference/3-llm/history.md` and `specs-reference/3-llm/streaming.md` 
 | `ac-dc-search-ignore-case` | `"true"` / `"false"` | Search toggle: ignore case (default `"true"`) |
 | `ac-dc-search-regex` | `"true"` / `"false"` | Search toggle: regex mode (default `"false"`) |
 | `ac-dc-search-whole-word` | `"true"` / `"false"` | Search toggle: whole word (default `"false"`) |
+| `ac-dc.chat.draft` | string | In-progress textarea content for the main tab. Written on every input event; removed on send. Global rather than per-repo — drafts are short-lived and the chat panel does not currently receive `repoName`. Restored at `connectedCallback` time when `_input` is empty so an existing in-memory draft is not clobbered. Agent tabs have independent `_input` state but their drafts are not persisted (agent tabs are turn-scoped) |
 
 Input history is NOT persisted — session-scoped only.
 

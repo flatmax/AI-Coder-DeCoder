@@ -114,6 +114,7 @@ import {
   parseAgentTabId,
 } from './helpers.js';
 import {
+  _loadDraft,
   cancel,
   onHistoryCancel,
   onHistorySelect,
@@ -352,6 +353,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     attachEventListeners(this);
+    // Restore any persisted draft. Done here
+    // rather than in the constructor because
+    // `_input` is a forwarding accessor backed
+    // by the main tab's state — the per-tab
+    // state is set up in the constructor, so
+    // this is safe either place, but
+    // connectedCallback also covers the case
+    // where the panel is detached and re-
+    // attached without re-construction. The
+    // textarea is hydrated from `_input` via
+    // the `.value=${panel._input}` binding in
+    // the render template, so no manual sync
+    // is needed.
+    const draft = _loadDraft();
+    if (draft && !this._input) {
+      this._input = draft;
+    }
     // Listen for view-agents-requested events
     // dispatched by the renderViewAgentsAffordance
     // button. The event is composed + bubbles so
@@ -363,6 +381,25 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this.addEventListener(
       'view-agents-requested', this._onViewAgentsRequested,
     );
+  }
+
+  firstUpdated() {
+    // After the textarea exists in the shadow
+    // DOM, force its inline height to match the
+    // restored draft. The render binding sets
+    // `.value` reactively, but auto-resize only
+    // runs on `input` events — without this,
+    // a multi-line restored draft renders in a
+    // single-row textarea until the user types.
+    if (this._input) {
+      const ta = this.shadowRoot?.querySelector(
+        '.input-textarea',
+      );
+      if (ta) {
+        ta.style.height = 'auto';
+        ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+      }
+    }
   }
 
   disconnectedCallback() {

@@ -153,6 +153,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Enter to send, Shift+Enter for newline
 - Image paste — base64 encoded, size and count limits enforced
 - Undo/redo workaround — native undo is broken in shadow DOM textareas when the framework re-renders set value programmatically; intercept Ctrl+Z and delegate via deprecated exec-command fallback
+- Draft persistence — the in-progress draft for the main tab is written to `localStorage` on every input event and restored on reconnect / refresh. Cleared on send. Pending images are not persisted; agent tabs have their own input state but their drafts are not saved (agent tabs are turn-scoped). See `specs-reference/5-webapp/chat.md` for the storage key
 ### Paste Suppression
 - When middle-click inserts a path into the textarea, a flag on the chat panel tells the paste handler to suppress the browser's selection-buffer paste
 - Flag is a one-shot — set on insert, consumed by the next paste event

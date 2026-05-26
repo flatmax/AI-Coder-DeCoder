@@ -53,6 +53,38 @@ import { scheduleUrlDetection } from './urls.js';
 import { handleStreamStartError } from './streaming.js';
 import { setSearchMode } from './search.js';
 
+// localStorage key for the in-progress textarea
+// draft. Persisted on every input event so a
+// browser refresh, tab reload, or accidental
+// close doesn't lose unsent text. Cleared on
+// send. Global rather than per-repo because the
+// draft is short-lived and threading repoName
+// into the chat panel isn't currently wired —
+// worst case on repo switch the draft surfaces
+// in another repo, which the user can clear with
+// one keystroke.
+const _DRAFT_STORAGE_KEY = 'ac-dc.chat.draft';
+
+export function _loadDraft() {
+  try {
+    return localStorage.getItem(_DRAFT_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function _saveDraft(value) {
+  try {
+    if (value) {
+      localStorage.setItem(_DRAFT_STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(_DRAFT_STORAGE_KEY);
+    }
+  } catch {
+    /* localStorage unavailable — silent. */
+  }
+}
+
 // ---------------------------------------------------------------
 // Send + cancel
 // ---------------------------------------------------------------
@@ -145,6 +177,10 @@ export async function send(panel) {
   };
   panel.messages = [...panel.messages, optimistic];
   panel._input = '';
+  // Draft has been committed — clear the
+  // persisted copy so the next refresh starts
+  // clean.
+  _saveDraft('');
   panel._pendingImages = [];
   panel._streaming = true;
   panel._streamingContent = '';
@@ -382,6 +418,9 @@ export function insertSnippet(panel, snippet) {
  */
 export function onInputChange(panel, event) {
   panel._input = event.target.value;
+  // Persist the draft so a refresh / reload
+  // doesn't lose unsent text. Cleared on send.
+  _saveDraft(panel._input);
   // Auto-resize. Reset height first so shrinking
   // works when the user deletes content; then
   // measure and clamp to CSS max.
