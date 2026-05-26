@@ -101,6 +101,16 @@ class FilesMixin:
                 raise RepoError(
                     f"Binary file cannot be read as text: {path}"
                 )
+            # Debug-log working-tree reads so a segfault during
+            # preview rendering can be correlated against the
+            # specific file the viewer was loading. Stays at
+            # debug to keep the steady-state log quiet.
+            import logging as _lg
+            _lg.getLogger("ac_dc.repo").debug(
+                "get_file_content: working-tree read path=%s "
+                "size=%d",
+                path, absolute.stat().st_size,
+            )
             return absolute.read_text(encoding="utf-8", errors="replace")
 
         # Versioned read via ``git show``. The ``ref:path`` syntax is
@@ -121,6 +131,19 @@ class FilesMixin:
             stderr = (result.stderr or b"").decode(
                 "utf-8", errors="replace"
             ).strip()
+            # Log at warning so the failed call is visible even
+            # if the caller swallows the RepoError. The bare
+            # "Failed: git show ..." line that previously appeared
+            # on stderr came from jrpc-oo printing the exception
+            # text directly; this log gives us a properly-
+            # timestamped record in the ac_dc.repo logger that
+            # can be correlated with subsequent segfaults.
+            import logging as _lg
+            _lg.getLogger("ac_dc.repo").warning(
+                "git show %s failed (rc=%d): %s",
+                spec, result.returncode,
+                stderr or "unknown error",
+            )
             raise RepoError(
                 f"git show {spec!r} failed: {stderr or 'unknown error'}"
             )

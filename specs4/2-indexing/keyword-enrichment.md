@@ -77,6 +77,15 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 - Large sections get extra keywords to capture vocabulary from multiple branches
 - Modest token cost for multi-pathway logic sections
 
+### Hard Upper Bound on Section Size
+
+- Sections and prose blocks above a configurable character limit are skipped before extraction
+- Sentence-transformer models truncate input at 512 tokens (~2KB) regardless of input size — feeding megabyte-scale blobs wastes memory in numpy/torch intermediate buffers without improving the result
+- The MMR cosine-similarity step in particular allocates buffers proportional to input length and can trigger OOM kills on pathologically large inputs (e.g., PyMuPDF SVG exports that inline an entire PDF page as one text element)
+- Skipped units retain their structural outline entries; only the `keywords` list stays empty
+- A warning is logged identifying the file, the unit's size, and the limit
+- Default cap is 50KB — generous for any realistic markdown section, two orders of magnitude below the OOM threshold observed in the field
+
 ## Lazy Model Loading
 
 - Model is loaded on first enrich call or first availability check

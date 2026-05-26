@@ -125,24 +125,128 @@ def schedule_doc_index_build(service: "LLMService") -> bool:
 
 
 def shutdown(service: "LLMService") -> None:
-    """Release executor resources. Called on server shutdown."""
-    # Cancel the cache warmer first — its task may be
-    # sleeping on the event loop and we don't want it to
-    # fire after the executors are gone.
+    """Release executor resources. Called on server shutdown.
+
+    Order matters. KeyBERT enrichment runs on the aux
+    executor and delegates to joblib, which spawns child
+    processes via the ``loky`` backend and tracks their
+    semaphores in the parent's
+    ``multiprocessing.resource_tracker``. If we tear down
+    our thread pools with ``wait=False`` while a joblib
+    batch is still mid-flight, the worker thread that owns
+    the loky reference is abandoned — the loky pool's own
+    ``atexit`` handler never runs, the parent's semaphore
+    isn't released, and we get the
+    ``UserWarning: resource_tracker: There appear to be 1
+    leaked semaphore objects to clean up at shutdown``
+    observed in the field.
+
+    Sequence:
+
+    1. Cancel the cache warmer — it may be sleeping on the
+       event loop, and we don't want it to schedule new
+       work after the executors are gone.
+    2. Stream executor — fast LLM completions; safe to
+       abandon in flight, the worker just loses its result.
+    3. Warmer executor — same; single worker, lightweight.
+    4. **Explicitly terminate loky's reusable pool**, with
+       ``kill_workers=True`` so child processes die
+       regardless of what they're currently doing. This is
+       the critical step for the semaphore leak: it
+       releases the parent's resource_tracker handle even
+       when the joblib worker thread is wedged.
+    5. Aux executor — wait briefly so any non-loky cleanup
+       (HTTP timeouts, file handles) gets a chance, but
+       bound the wait so a stuck thread doesn't hang
+       shutdown.
+    """
+    import logging as _lg
+    _log = _lg.getLogger("ac_dc.llm_service")
+
+    # Step 1 — cancel the cache warmer.
     warmer = getattr(service, "_cache_warmer", None)
     if warmer is not None:
         warmer.cancel()
-    # wait=False so shutdown doesn't block on in-flight work;
-    # the event loop is typically already stopping at this point.
+
+    # Step 2 — stream executor. Abandoning in-flight work
+    # is acceptable; users see a stream interruption, no
+    # resource leak.
+    _log.info("shutdown: stream executor...")
     service._stream_executor.shutdown(wait=False)
-    service._aux_executor.shutdown(wait=False)
-    # ``_warmer_executor`` was added in D34; getattr-guard
-    # so a future LLMService construction path that skips
-    # it (or older test fixtures that don't carry it) doesn't
-    # raise during shutdown.
+
+    # Step 3 — warmer executor.
     warmer_pool = getattr(service, "_warmer_executor", None)
     if warmer_pool is not None:
+        _log.info("shutdown: warmer executor...")
         warmer_pool.shutdown(wait=False)
+
+    # Step 4 — kill loky's reusable pool BEFORE the aux
+    # thread pool. ``get_reusable_executor`` returns the
+    # singleton joblib uses internally; calling shutdown
+    # with ``kill_workers=True`` sends SIGTERM to the child
+    # processes and joins on their cleanup, releasing the
+    # loky semaphore in the parent's resource_tracker.
+    #
+    # Best-effort: loky may not be importable in stripped-
+    # down installs (no joblib, no KeyBERT), or the pool
+    # may never have been created (no enrichment ran this
+    # session). Both cases swallow silently.
+    try:
+        from joblib.externals.loky import (  # type: ignore[import-not-found]
+            get_reusable_executor,
+        )
+        _log.info("shutdown: terminating loky pool...")
+        try:
+            executor = get_reusable_executor()
+        except Exception as exc:
+            _log.debug(
+                "shutdown: loky get_reusable_executor "
+                "raised: %s",
+                exc,
+            )
+            executor = None
+        if executor is not None:
+            try:
+                executor.shutdown(
+                    wait=True,
+                    kill_workers=True,
+                )
+                _log.info("shutdown: loky pool terminated.")
+            except Exception as exc:
+                _log.warning(
+                    "shutdown: loky pool shutdown raised: %s",
+                    exc,
+                )
+    except ImportError:
+        _log.debug(
+            "shutdown: joblib/loky not installed; skipping "
+            "loky cleanup."
+        )
+
+    # Step 5 — aux executor. Bounded wait so non-loky
+    # cleanup (HTTP sessions, file handles, JSON writes)
+    # can finish. ``cancel_futures=True`` drops queued
+    # items; ``wait=True`` blocks on in-flight work. Worst
+    # case: a wedged thread holds us briefly before the
+    # signal-handling layer's ``sys.exit`` forces process
+    # exit.
+    _log.info("shutdown: aux executor (waiting for drain)...")
+    try:
+        service._aux_executor.shutdown(
+            wait=True,
+            cancel_futures=True,
+        )
+        _log.info("shutdown: aux executor drained.")
+    except Exception as exc:
+        _log.warning(
+            "shutdown: aux executor drain raised: %s; "
+            "falling back to non-blocking shutdown.",
+            exc,
+        )
+        try:
+            service._aux_executor.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
