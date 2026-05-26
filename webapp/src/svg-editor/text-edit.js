@@ -395,6 +395,24 @@ export default {
     textarea.setAttribute('style', styleParts.join('; '));
     textarea.addEventListener('keydown', this._onTextEditKeyDown);
     textarea.addEventListener('blur', this._onTextEditBlur);
+    // Stop pointer/mouse events from bubbling to the
+    // editor's SVG-level handlers. Without this, the
+    // editor's pointerdown handler sees clicks inside
+    // the textarea, treats them as canvas-area gestures
+    // (selection / pan / marquee), and prevents the
+    // browser's native caret-positioning from running.
+    // Result: the user can type and arrow-key around,
+    // but mouse clicks don't reposition the caret.
+    //
+    // We stop propagation rather than calling
+    // preventDefault — preventDefault on mousedown would
+    // also kill the textarea's own caret placement, since
+    // that's a default action of the same event.
+    const stopPointer = (e) => e.stopPropagation();
+    textarea.addEventListener('pointerdown', stopPointer);
+    textarea.addEventListener('mousedown', stopPointer);
+    textarea.addEventListener('click', stopPointer);
+    textarea.addEventListener('dblclick', stopPointer);
     fo.appendChild(textarea);
     this._svg.appendChild(fo);
     return { foreignObject: fo, textarea };
