@@ -58,6 +58,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 import asyncio
 import atexit
 import faulthandler
+import io
 import logging
 import signal
 import sys
@@ -76,7 +77,22 @@ logger = logging.getLogger(__name__)
 # sentence-transformers, torch, PyMuPDF, tree-sitter).
 # Without this, a native crash leaves only "Segmentation
 # fault (core dumped)" with no Python context.
-faulthandler.enable()
+#
+# Guarded because pytest's capture fixture replaces sys.stderr
+# with an in-memory buffer that lacks ``fileno()``, and
+# faulthandler.enable() raises ``io.UnsupportedOperation`` in
+# that case. The guard preserves crash diagnostics in real
+# runs (where stderr is a tty or a real file) and silently
+# skips installation under capture. Falls back to the raw
+# stderr file descriptor (2) when the high-level stream is
+# not usable but the underlying fd still is.
+try:
+    faulthandler.enable()
+except (io.UnsupportedOperation, ValueError, OSError):
+    try:
+        faulthandler.enable(file=2)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -126,18 +142,21 @@ def _on_atexit() -> None:
     Python-driven; if not, the process died abruptly
     (segfault, OOM kill, kill -9) and faulthandler /
     kernel dmesg are the next things to check.
+
+    Uses ``os.write`` directly rather than the logger
+    because by the time atexit handlers run the logging
+    module's stream handlers may already be torn down by
+    pytest's capture machinery (or any harness that closes
+    stderr early). The logging module catches the
+    resulting ``ValueError`` internally and prints a
+    "--- Logging error ---" diagnostic to stderr, which is
+    noisy and unhelpful at this stage. The raw fd write is
+    both more reliable and quieter.
     """
     try:
-        logger.info("atexit: process unwinding...")
+        os.write(2, b"[ac-dc] atexit: process unwinding...\n")
     except Exception:
-        # Logging may itself fail late in shutdown — fall
-        # back to direct stderr write so at least the
-        # marker is visible.
-        try:
-            import os as _os
-            _os.write(2, b"[ac-dc] atexit: process unwinding...\n")
-        except Exception:
-            pass
+        pass
 
 
 atexit.register(_on_atexit)

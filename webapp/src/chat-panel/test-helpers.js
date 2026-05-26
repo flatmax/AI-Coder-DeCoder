@@ -28,6 +28,7 @@ import { afterEach } from 'vitest';
 import { SharedRpc } from '../rpc.js';
 import '../chat-panel/index.js';
 import {
+  _DRAFT_STORAGE_KEY,
   _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
@@ -117,6 +118,7 @@ afterEach(() => {
   }
   SharedRpc.reset();
   try {
+    localStorage.removeItem(_DRAFT_STORAGE_KEY);
     localStorage.removeItem(_DRAWER_STORAGE_KEY);
     localStorage.removeItem(_SEARCH_IGNORE_CASE_KEY);
     localStorage.removeItem(_SEARCH_REGEX_KEY);

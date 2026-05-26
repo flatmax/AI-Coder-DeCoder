@@ -14,6 +14,7 @@ import { afterEach } from 'vitest';
 
 import { SharedRpc } from '../rpc.js';
 import './index.js';
+import { _DRAFT_STORAGE_KEY } from '../chat-panel/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -114,5 +115,14 @@ export function installCleanup() {
       if (t.isConnected) t.remove();
     }
     SharedRpc.reset();
+    try {
+      // The chat-panel nested inside the files-tab persists
+      // its draft on every input event. Without this clear,
+      // drafts leak from one files-tab test into the next
+      // via `connectedCallback`'s `_loadDraft` call.
+      localStorage.removeItem(_DRAFT_STORAGE_KEY);
+    } catch (_) {
+      // localStorage unavailable — silent.
+    }
   });
 }

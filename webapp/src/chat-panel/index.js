@@ -114,6 +114,7 @@ import {
   parseAgentTabId,
 } from './helpers.js';
 import {
+  _DRAFT_STORAGE_KEY,
   _loadDraft,
   cancel,
   onHistoryCancel,
@@ -535,6 +536,7 @@ export {
   _loadDrawerOpen,
   _saveDrawerOpen,
   _DRAWER_STORAGE_KEY,
+  _DRAFT_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
   _SEARCH_WHOLE_WORD_KEY,

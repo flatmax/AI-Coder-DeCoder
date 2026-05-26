@@ -63,7 +63,13 @@ import { setSearchMode } from './search.js';
 // worst case on repo switch the draft surfaces
 // in another repo, which the user can clear with
 // one keystroke.
-const _DRAFT_STORAGE_KEY = 'ac-dc.chat.draft';
+//
+// Exported so the test suite can clear it in
+// afterEach — without that cleanup, persisted
+// drafts from earlier tests leak into later
+// mounts via `connectedCallback` and corrupt
+// assertions on `_input`.
+export const _DRAFT_STORAGE_KEY = 'ac-dc.chat.draft';
 
 export function _loadDraft() {
   try {
