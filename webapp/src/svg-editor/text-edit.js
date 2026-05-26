@@ -74,8 +74,59 @@ export default {
     // source (user edits the file directly) or lose it
     // here. Users with tspan-heavy text should edit
     // the source.
+    //
+    // Position-preservation: if the visible text
+    // position was driven by attributes on a child
+    // <tspan> rather than the parent <text>, naive
+    // flattening drops the text to the parent's
+    // default (often 0,0). Before removing children,
+    // copy any positioning attributes from the first
+    // <tspan> onto the parent <text> when the parent
+    // doesn't already have them set. Same for fill,
+    // which is sometimes only declared on the tspan.
+    const firstTspan = edit.element.querySelector?.('tspan');
+    if (firstTspan) {
+      const inherit = ['x', 'y', 'dx', 'dy', 'text-anchor', 'fill'];
+      for (const attr of inherit) {
+        if (
+          !edit.element.hasAttribute(attr) &&
+          firstTspan.hasAttribute(attr)
+        ) {
+          edit.element.setAttribute(
+            attr,
+            firstTspan.getAttribute(attr),
+          );
+        }
+      }
+    }
     while (edit.element.firstChild) {
       edit.element.removeChild(edit.element.firstChild);
+    }
+    // Per-glyph positioning fix: SVG <text> supports
+    // list-valued x/y/dx/dy attributes that position
+    // each glyph individually (common output from
+    // PDF-derived SVGs, where the converter pre-computes
+    // kerning). When the user edits the content, the
+    // glyph count changes and the original list no
+    // longer aligns — leftover positions either run out
+    // (extra glyphs collapse together) or get reused
+    // against the wrong glyphs (visible kerning chaos).
+    //
+    // Collapse any whitespace-separated list-valued
+    // positioning attribute on the parent down to its
+    // first value, so subsequent glyphs flow with the
+    // font's natural metrics from the original starting
+    // point. Only collapse when the list length doesn't
+    // match the new content length — exact matches
+    // (rare in practice) preserve the explicit kerning.
+    const positioningAttrs = ['x', 'y', 'dx', 'dy'];
+    for (const attr of positioningAttrs) {
+      const value = edit.element.getAttribute(attr);
+      if (!value) continue;
+      const parts = value.trim().split(/\s+/);
+      if (parts.length > 1 && parts.length !== newContent.length) {
+        edit.element.setAttribute(attr, parts[0]);
+      }
     }
     if (newContent) {
       edit.element.appendChild(
@@ -110,6 +161,27 @@ export default {
     // external caller modified the element mid-edit
     // (unlikely but defensive), this restores what we
     // snapshotted at edit start.
+    //
+    // Same position-preservation as commit: if the
+    // original structure used a positioned <tspan>,
+    // copy its attributes onto the parent before we
+    // flatten, so the restored flat text renders at
+    // the same place.
+    const firstTspanCancel = edit.element.querySelector?.('tspan');
+    if (firstTspanCancel) {
+      const inherit = ['x', 'y', 'dx', 'dy', 'text-anchor', 'fill'];
+      for (const attr of inherit) {
+        if (
+          !edit.element.hasAttribute(attr) &&
+          firstTspanCancel.hasAttribute(attr)
+        ) {
+          edit.element.setAttribute(
+            attr,
+            firstTspanCancel.getAttribute(attr),
+          );
+        }
+      }
+    }
     while (edit.element.firstChild) {
       edit.element.removeChild(edit.element.firstChild);
     }
