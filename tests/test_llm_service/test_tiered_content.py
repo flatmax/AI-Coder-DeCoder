@@ -53,13 +53,19 @@ class TestBuildTieredContent:
         assert result is not None
         assert set(result.keys()) == {"L0", "L1", "L2", "L3"}
 
-    def test_symbol_key_dispatches_to_symbol_index(
+    def test_symbols_dir_key_dispatches_to_symbol_index(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """symbol:{path} items fetch blocks from the symbol index."""
+        """``symbols:{dir}`` items fetch dir-blocks from the symbol index.
+
+        Under D36 the tracker holds per-directory symbol-block
+        keys, not per-file ``symbol:<path>`` entries.
+        ``_build_tiered_content`` dispatches them by calling
+        ``get_dir_symbols_block(directory)`` on the live index.
+        """
         fake_index = _FakeSymbolIndex({
             "src/foo.py": "symbol-block-for-foo",
         })
@@ -68,7 +74,7 @@ class TestBuildTieredContent:
             repo=repo,
             symbol_index=fake_index,
         )
-        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:src", "L1")
         result = svc._build_tiered_content()
         assert result is not None
         assert "symbol-block-for-foo" in result["L1"]["symbols"]
@@ -76,41 +82,41 @@ class TestBuildTieredContent:
         assert result["L0"]["symbols"] == ""
         assert result["L2"]["symbols"] == ""
 
-    def test_symbol_key_without_symbol_index_skipped(
+    def test_symbols_dir_key_without_symbol_index_skipped(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """symbol:* items with no attached index are silently skipped."""
+        """``symbols:<dir>`` items with no attached index are skipped silently."""
         svc = LLMService(config=config, repo=repo, symbol_index=None)
-        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:src", "L1")
         result = svc._build_tiered_content()
         assert result is not None
         assert result["L1"]["symbols"] == ""
 
-    def test_symbol_key_block_not_found_skipped(
+    def test_symbols_dir_key_empty_block_skipped(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """symbol:* items whose path returns None are omitted."""
+        """``symbols:<dir>`` for an empty directory yields no content."""
         fake_index = _FakeSymbolIndex({})  # no blocks
         svc = LLMService(
             config=config,
             repo=repo,
             symbol_index=fake_index,
         )
-        _place_item(svc._stability_tracker, "symbol:src/bar.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:src", "L1")
         result = svc._build_tiered_content()
         assert result is not None
         assert result["L1"]["symbols"] == ""
 
-    def test_doc_key_dispatches_to_doc_index(
+    def test_docs_dir_key_dispatches_to_doc_index(
         self, service: LLMService
     ) -> None:
-        """doc:{path} items fetch blocks from the doc index.
+        """``docs:{dir}`` items fetch dir-blocks from the doc index.
 
         Doc blocks land in the tier's `symbols` field alongside
         symbol blocks — both render under the continued-structure
@@ -129,7 +135,8 @@ class TestBuildTieredContent:
         )
         service._doc_index._all_outlines["README.md"] = outline
 
-        _place_item(service._stability_tracker, "doc:README.md", "L1")
+        # Top-level directory is the empty string.
+        _place_item(service._stability_tracker, "docs:", "L1")
         result = service._build_tiered_content()
         assert result is not None
         # Block landed in the symbols field (not files) — doc
@@ -140,33 +147,32 @@ class TestBuildTieredContent:
         assert result["L0"]["symbols"] == ""
         assert result["L2"]["symbols"] == ""
 
-    def test_doc_key_missing_outline_skipped(
+    def test_docs_dir_key_empty_dir_skipped(
         self, service: LLMService
     ) -> None:
-        """doc:{path} with no outline in the index is omitted.
+        """``docs:<dir>`` with no indexed docs in the dir produces empty.
 
-        Matches the symbol: pattern — missing blocks don't
-        crash assembly, they just produce no content for that
-        tier item. Defensive against partial tracker state
-        (a doc: key seeded from a cached session before the
-        doc index finished rebuilding).
+        Matches the ``symbols:<dir>`` pattern — missing blocks
+        don't crash assembly. Defensive against partial tracker
+        state (a ``docs:`` key seeded before the doc index
+        finished rebuilding).
         """
-        _place_item(service._stability_tracker, "doc:missing.md", "L1")
+        _place_item(service._stability_tracker, "docs:nonexistent", "L1")
         result = service._build_tiered_content()
         assert result is not None
         assert result["L1"]["symbols"] == ""
         assert result["L1"]["files"] == ""
 
-    def test_doc_and_symbol_blocks_mix_in_same_tier(
+    def test_docs_and_symbols_dir_blocks_mix_in_same_tier(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Cross-reference tier holds both symbol: and doc: items.
+        """Cross-reference tier holds both ``symbols:<dir>`` and ``docs:<dir>``.
 
         When cross-reference mode is active, a single tier can
-        contain items from both indexes. Both blocks land in
+        contain dir-blocks from both indexes. Both render into
         the tier's `symbols` field and the sorted-key walk
         orders them deterministically across runs.
         """
@@ -189,9 +195,9 @@ class TestBuildTieredContent:
         )
         svc._doc_index._all_outlines["guide.md"] = outline
 
-        # Both items in L1.
-        _place_item(svc._stability_tracker, "symbol:src/foo.py", "L1")
-        _place_item(svc._stability_tracker, "doc:guide.md", "L1")
+        # Both dir-block items in L1.
+        _place_item(svc._stability_tracker, "symbols:src", "L1")
+        _place_item(svc._stability_tracker, "docs:", "L1")
 
         result = svc._build_tiered_content()
         assert result is not None
@@ -199,8 +205,8 @@ class TestBuildTieredContent:
         # Both blocks present in the same tier field.
         assert "symbol-block-foo" in text
         assert "Guide" in text
-        # Sorted by full key: "doc:guide.md" < "symbol:src/foo.py"
-        # (alphabetical comparison), so doc block appears first.
+        # Sorted by full key: "docs:" < "symbols:src", so the
+        # doc block appears first.
         assert text.index("Guide") < text.index("symbol-block-foo")
 
     def test_file_key_dispatches_to_file_context(
@@ -314,7 +320,7 @@ class TestBuildTieredContent:
         )
         _place_item(
             svc._stability_tracker,
-            "symbol:src/foo.py",
+            "symbols:src",
             "active",
         )
         result = svc._build_tiered_content()
@@ -332,16 +338,16 @@ class TestBuildTieredContent:
     ) -> None:
         """Content in one tier doesn't bleed into adjacent tiers."""
         fake_index = _FakeSymbolIndex({
-            "a.py": "block-A",
-            "b.py": "block-B",
+            "src1/a.py": "block-A",
+            "src2/b.py": "block-B",
         })
         svc = LLMService(
             config=config,
             repo=repo,
             symbol_index=fake_index,
         )
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
-        _place_item(svc._stability_tracker, "symbol:b.py", "L2")
+        _place_item(svc._stability_tracker, "symbols:src1", "L1")
+        _place_item(svc._stability_tracker, "symbols:src2", "L2")
         result = svc._build_tiered_content()
         assert result is not None
         assert "block-A" in result["L1"]["symbols"]
@@ -349,24 +355,24 @@ class TestBuildTieredContent:
         assert "block-B" in result["L2"]["symbols"]
         assert "block-A" not in result["L2"]["symbols"]
 
-    def test_symbol_blocks_joined_with_blank_lines(
+    def test_dir_blocks_joined_with_blank_lines(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Multiple symbol blocks in the same tier are separated."""
+        """Multiple dir-blocks in the same tier are separated by blank lines."""
         fake_index = _FakeSymbolIndex({
-            "a.py": "block-A",
-            "b.py": "block-B",
+            "dirA/a.py": "block-A",
+            "dirB/b.py": "block-B",
         })
         svc = LLMService(
             config=config,
             repo=repo,
             symbol_index=fake_index,
         )
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
-        _place_item(svc._stability_tracker, "symbol:b.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:dirA", "L1")
+        _place_item(svc._stability_tracker, "symbols:dirB", "L1")
         result = svc._build_tiered_content()
         assert result is not None
         # Blocks joined with a blank line separator.
@@ -374,7 +380,7 @@ class TestBuildTieredContent:
         assert "block-A" in result["L1"]["symbols"]
         assert "block-B" in result["L1"]["symbols"]
 
-    def test_symbol_blocks_sorted_by_key_for_determinism(
+    def test_dir_blocks_sorted_by_key_for_determinism(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -382,22 +388,22 @@ class TestBuildTieredContent:
     ) -> None:
         """Fragment ordering is deterministic (sorted by key)."""
         fake_index = _FakeSymbolIndex({
-            "z.py": "block-Z",
-            "a.py": "block-A",
-            "m.py": "block-M",
+            "z/z.py": "block-Z",
+            "a/a.py": "block-A",
+            "m/m.py": "block-M",
         })
         svc = LLMService(
             config=config,
             repo=repo,
             symbol_index=fake_index,
         )
-        _place_item(svc._stability_tracker, "symbol:z.py", "L1")
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
-        _place_item(svc._stability_tracker, "symbol:m.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:z", "L1")
+        _place_item(svc._stability_tracker, "symbols:a", "L1")
+        _place_item(svc._stability_tracker, "symbols:m", "L1")
         result = svc._build_tiered_content()
         assert result is not None
         text = result["L1"]["symbols"]
-        # Sorted by key: a.py → m.py → z.py.
+        # Sorted by key: symbols:a → symbols:m → symbols:z.
         assert text.index("block-A") < text.index("block-M")
         assert text.index("block-M") < text.index("block-Z")
 
@@ -642,17 +648,18 @@ class TestBuildTieredContentUniquenessInvariant:
         repo_dir: Path,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Normal-case sanity check — filters don't over-reach.
+        """Normal-case sanity check — selection filtering is per-file
+        within a dir-block.
 
-        An unselected, non-excluded path must still render its
-        symbol: / doc: / file: content through the builder.
-        Guards against a filter that accidentally suppressed
-        everything.
+        An unselected, non-excluded file in a directory must
+        still render its per-file block via the parent
+        directory's ``symbols:<dir>`` entry. Guards against a
+        filter that accidentally suppressed everything.
 
         a.py must exist on disk because ``set_selected_files``
         runs a ``file_exists`` filter — without the real file,
-        the selection would be silently empty and both symbol
-        blocks would render, defeating the point of the test.
+        the selection would be silently empty and the
+        precondition assertion below would fail.
         """
         (repo_dir / "a.py").write_text("content-a\n")
         (repo_dir / "b.py").write_text("content-b\n")
@@ -665,17 +672,18 @@ class TestBuildTieredContentUniquenessInvariant:
             repo=repo,
             symbol_index=fake_index,
         )
-        # a.py selected (filtered out), b.py neither selected
-        # nor excluded (must render).
+        # a.py selected (filtered out of dir-block), b.py
+        # neither selected nor excluded (must render).
         svc._file_context.add_file("a.py", "content-a")
         svc.set_selected_files(["a.py"])
         assert svc.get_selected_files() == ["a.py"]  # precondition
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
-        _place_item(svc._stability_tracker, "symbol:b.py", "L1")
+        # Both files share dir "" (top-level) under D36.
+        _place_item(svc._stability_tracker, "symbols:", "L1")
 
         result = svc._build_tiered_content()
         assert result is not None
-        # a.py's symbol filtered; b.py's rendered.
+        # a.py's per-file block excluded from dir-block render
+        # (active-excluded set); b.py's still appears.
         assert "symbol-block-a" not in result["L1"]["symbols"]
         assert "symbol-block-b" in result["L1"]["symbols"]
 
@@ -716,9 +724,13 @@ class TestAssembleTieredLegendDispatch:
 
         Returns (service, capture_dict). The capture_dict holds
         the last-seen kwargs from assemble_tiered_messages.
+
+        Under D36 there is no L0 snapshot — legends are read
+        live from the indexes at assembly time. We replace
+        ``get_legend`` on each index with a stub returning the
+        test sentinel and ``_assemble_tiered`` picks them up
+        directly.
         """
-        # Attach a ``get_legend`` method on the fake via a
-        # thin subclass since the base fake doesn't have one.
 
         class _SymbolIndexWithLegend(_FakeSymbolIndex):
             def get_legend(self_) -> str:
@@ -734,17 +746,9 @@ class TestAssembleTieredLegendDispatch:
             repo=repo,
             symbol_index=_SymbolIndexWithLegend({"a.py": "block-a"}),
         )
-        # Attach a get_legend method to the doc index (the real
-        # DocIndex has one; it returns "" on an empty index).
-        # Override it to return the test sentinel.
+        # Stub the doc index's get_legend to return the
+        # sentinel.
         svc._doc_index.get_legend = lambda: doc_legend  # type: ignore[method-assign]
-        # Refreeze the L0 snapshot so the stubbed legends
-        # land in `_l0_primary_legend` / `_l0_secondary_legend`.
-        # The initial freeze in __init__ captured the
-        # pre-monkey-patch state (empty doc legend); without
-        # this refresh, _assemble_tiered reads the stale
-        # snapshot and the stubs are never observed.
-        svc._freeze_l0_snapshot()
 
         # Capture the kwargs passed to assemble_tiered_messages.
         capture: dict[str, Any] = {}
@@ -759,7 +763,7 @@ class TestAssembleTieredLegendDispatch:
         # Place a minimal tiered_content with at least one item so
         # the assembler runs the full path (the caller's
         # _build_tiered_content produces this in real use).
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:", "L1")
 
         return svc, capture
 
@@ -796,12 +800,10 @@ class TestAssembleTieredLegendDispatch:
             config, repo, fake_litellm
         )
         # Bypass the set_cross_reference RPC — it has a readiness
-        # gate we don't care about here. Set the flag directly,
-        # then refreeze so the snapshot picks up the secondary
-        # slot. Production path goes through set_cross_reference
-        # which calls _freeze_l0_snapshot itself.
+        # gate we don't care about here. D36 reads legends live
+        # at assembly time, so simply flipping the flag is
+        # enough.
         svc._cross_ref_enabled = True
-        svc._freeze_l0_snapshot()
 
         tiered = svc._build_tiered_content()
         assert tiered is not None
@@ -831,16 +833,14 @@ class TestAssembleTieredLegendDispatch:
         )
         # Switch to doc mode. Use the Mode enum directly since
         # switch_mode has broadcast side effects not relevant
-        # here. Refreeze the snapshot so primary_legend reflects
-        # the doc index — production switch_mode does this.
+        # here.
         svc._context.set_mode(Mode.DOC)
         svc._stability_tracker = svc._trackers.setdefault(
             Mode.DOC, svc._stability_tracker
         )
-        svc._freeze_l0_snapshot()
         # Re-place an item in the new tracker so tiered content
         # is non-empty.
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:", "L1")
 
         tiered = svc._build_tiered_content()
         assert tiered is not None
@@ -865,12 +865,8 @@ class TestAssembleTieredLegendDispatch:
         svc._stability_tracker = svc._trackers.setdefault(
             Mode.DOC, svc._stability_tracker
         )
-        _place_item(svc._stability_tracker, "symbol:a.py", "L1")
+        _place_item(svc._stability_tracker, "symbols:", "L1")
         svc._cross_ref_enabled = True
-        # Refreeze after both mutations — production paths
-        # (switch_mode, set_cross_reference) each refreeze;
-        # bypassing them means the test must do it.
-        svc._freeze_l0_snapshot()
 
         tiered = svc._build_tiered_content()
         assert tiered is not None

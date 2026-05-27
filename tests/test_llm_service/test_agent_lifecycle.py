@@ -1024,14 +1024,20 @@ class TestSetAgentExcludedIndexFiles:
         self,
         service: LLMService,
     ) -> None:
-        """Excluded paths are purged from the agent's tracker.
+        """Excluded paths drop the agent's ``file:`` entries.
 
         The Context tab's Cache sub-view reads per-agent
         tracker state via the agent-tagged
         ``get_context_breakdown``. Without this purge, a
-        previously-tracked ``symbol:foo.py`` entry would
-        linger after the user excludes foo.py — showing
-        a stale row the user just said they didn't want.
+        previously-tracked ``file:foo.py`` entry would linger
+        after the user excludes foo.py — showing a stale row
+        the user just said they didn't want.
+
+        Under D36 only ``file:`` keys exist as per-file tracker
+        entries; the parent directory's dir-blocks
+        (``symbols:<dir>`` / ``docs:<dir>`` / ``plain_files:<dir>``)
+        get marked broken so they re-render without the
+        excluded file on the next turn.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -1042,22 +1048,20 @@ class TestSetAgentExcludedIndexFiles:
             parent_scope=parent_scope,
             turn_id="turn_purge",
         )
-        # Seed symbol:, doc:, and file: entries for the
-        # path we're about to exclude. All three prefixes
-        # must be purged — that's the invariant.
         tracker = scope.tracker
-        for prefix in ("symbol:", "doc:", "file:"):
-            tracker._items[prefix + "drop.py"] = TrackedItem(
-                key=prefix + "drop.py",
-                tier=Tier.L1,
-                n_value=3,
-                content_hash="h",
-                tokens=100,
-            )
+        # Seed a file: entry for the path we're about to
+        # exclude — it must be purged.
+        tracker._items["file:drop.py"] = TrackedItem(
+            key="file:drop.py",
+            tier=Tier.L1,
+            n_value=3,
+            content_hash="h",
+            tokens=100,
+        )
         # Also seed an entry for a different path — must
         # survive the exclusion.
-        tracker._items["symbol:keep.py"] = TrackedItem(
-            key="symbol:keep.py",
+        tracker._items["file:keep.py"] = TrackedItem(
+            key="file:keep.py",
             tier=Tier.L1,
             n_value=3,
             content_hash="h",
@@ -1068,11 +1072,10 @@ class TestSetAgentExcludedIndexFiles:
             "purger", ["drop.py"],
         )
 
-        # Every prefix for drop.py gone.
-        for prefix in ("symbol:", "doc:", "file:"):
-            assert not tracker.has_item(prefix + "drop.py")
+        # drop.py's file: entry gone.
+        assert not tracker.has_item("file:drop.py")
         # Unrelated entry untouched.
-        assert tracker.has_item("symbol:keep.py")
+        assert tracker.has_item("file:keep.py")
 
     def test_multiple_agents_isolated(
         self,

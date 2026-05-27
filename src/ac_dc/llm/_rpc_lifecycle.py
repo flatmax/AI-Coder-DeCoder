@@ -67,16 +67,7 @@ def complete_deferred_init(
     # Eager stability init; failure falls through to lazy path.
     service._try_initialize_stability()
 
-    # Initial L0 freeze now that the symbol index is
-    # attached. Construction skipped this under deferred
-    # init; running it here means the next chat request
-    # reads from a populated snapshot. Doc index may still
-    # be building — its content joins the snapshot at the
-    # next L0-invalidation event (mode switch, cross-ref
-    # toggle, etc.).
-    service._freeze_l0_snapshot()
-
-    # Start the cache warmer now that L0 is frozen. The
+    # Start the cache warmer now that init is complete. The
     # warmer's first scheduling needs a running event loop;
     # we're on one here (called from the server's startup
     # flow), so start() can succeed even though the

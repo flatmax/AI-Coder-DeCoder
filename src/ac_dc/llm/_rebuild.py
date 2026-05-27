@@ -69,44 +69,38 @@ def rebuild_cache(service: "LLMService") -> dict[str, Any]:
 def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     """The actual rebuild pipeline.
 
-    Under the L0-content-typed model (D27) rebuild is much
-    simpler than the legacy 12-step sequence. The steps are:
+    Under D36 dir-blocks the rebuild sequence is:
 
     1. Preserve history entries.
     2. Wipe everything else from the tracker — including pin
-       flags and deletion markers. Rebuild is the explicit
-       reset point that supersedes per-file edit history.
-    3. Configure cache target (model-aware).
-    4. Register ``system:prompt`` into L0 with real token
-       counts. The aggregate symbol/doc maps that L0 also
-       presents to the LLM are NOT held as tracker entries —
-       they're regenerated from the index at assembly time.
+       flags. Rebuild is the explicit reset point that
+       supersedes per-file edit history.
+    3. Mark all tiers broken; configure cache target
+       (model-aware).
+    4. Load content for selected files (so step 5's bin-pack
+       can compute real token counts).
     5. Distribute selected files across L1/L2/L3 via bin-pack.
-       L0 is excluded (content-typed for structural maps);
-       Active is excluded (rebuild's purpose is to skip the
-       graduation wait).
-    6. Seed cross-reference items into L0 if cross-ref is
-       active. Cross-ref items are structural (symbol/doc
-       blocks) — they legitimately belong in L0 alongside the
-       primary aggregate map.
-    7. Graduate eligible history via piggyback.
-    8. Mark initialized for current mode.
+       Active is excluded — rebuild's purpose is to skip the
+       graduation wait.
+    6. Seed dir-blocks (``symbols:<dir>`` / ``docs:<dir>`` /
+       ``plain_files:<dir>``) across L0–L3 sorted by directory
+       mtime; hottest directories land warmer.
+    7. Cross-reference seeding if enabled.
+    8. Graduate eligible history via piggyback.
+    9. Mark initialized for current mode.
 
-    What's removed from the legacy implementation:
+    Removed under D36:
 
-    - **No file-prefix placement** (``symbol:{path}`` /
-      ``doc:{path}`` entries from indexed files). Those map
-      blocks are part of L0's structural content and don't
-      need cascade tracking.
-    - **No selected-file primary→file swap dance.** Selected
-      files go directly into L1/L2/L3 via ``distribute_orphan_files``.
-    - **No post-measurement cross-tier backfill** of
-      indexed files. The cross-reference seeding path still
-      uses backfill for its own purpose (promoting
-      most-connected opposite-index items into L0).
+    - **No system-prompt tracker entry.** The system prompt
+      sits before L0 as a non-flux head anchor and is
+      rendered live from the context manager at assembly
+      time.
+    - **No L0 snapshot freeze.** Content under D36 is
+      participating in flux uniformly — the cache viewer
+      reads tracker state directly.
 
-    Spec: ``specs4/3-llm/cache-tiering.md`` § Manual Cache
-    Rebuild and § L0 Stability Contract.
+    Spec: :doc:`specs-reference/3-llm/cache-tiering`
+    § Manual Cache Rebuild.
     """
     from ac_dc.llm._stability import seed_cross_reference_items
     from ac_dc.stability_tracker import Tier
@@ -125,14 +119,9 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     # change (user deletes files in a terminal, switches
     # to AC-DC, clicks Rebuild). Without this pass the
     # symbol/doc indexes still hold deleted files'
-    # blocks, ``register_system_prompt`` hashes a stale
-    # legend, and ``_freeze_l0_snapshot`` (step 10
-    # below) captures stale aggregate maps into L0 —
-    # defeating rebuild's purpose as the explicit "L0
-    # refresh" gesture per
-    # specs4/3-llm/cache-tiering.md § What invalidates
-    # L0 (item 2). Same file-list shape and same
-    # try/except discipline as
+    # blocks and dir-block seeding (step 6 below) places
+    # stale entries into the new tracker. Same file-list
+    # shape and same try/except discipline as
     # :func:`ac_dc.llm._streaming.stream_chat`.
     try:
         file_list_raw = service._repo.get_flat_file_list()
@@ -156,22 +145,17 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     items_before = len(tracker.get_all_items())
 
     # Step 1-2: preserve history, wipe everything else.
-    # Wiping includes any pin flags and deletion markers —
-    # rebuild is the explicit "fresh start" gesture that
-    # supersedes per-file edit/delete state.
+    # Wiping includes any pin flags — rebuild is the
+    # explicit "fresh start" gesture that supersedes
+    # per-file edit history.
     history_items = {
         key: item
         for key, item in tracker.get_all_items().items()
         if key.startswith("history:")
     }
-    # Clear transient flags on preserved history entries too —
-    # history items don't carry pin/marker semantics, but a
-    # defensive reset keeps the post-rebuild state clean.
     for item in history_items.values():
         if hasattr(item, "_pinned"):
             item._pinned = False
-        if hasattr(item, "_deleted"):
-            item._deleted = False
     tracker._items.clear()
     for key, item in history_items.items():
         tracker._items[key] = item
@@ -197,26 +181,10 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
                     path, exc,
                 )
 
-    # Step 5: re-seed system prompt into L0. Mode-aware —
-    # the prompt and legend differ between code and doc mode.
-    if mode == Mode.DOC:
-        system_prompt = service._config.get_doc_system_prompt()
-        legend = service._doc_index.get_legend()
-    else:
-        system_prompt = service._config.get_system_prompt()
-        legend = service._symbol_index.get_legend()
-    if system_prompt:
-        prompt_hash = hashlib.sha256(
-            system_prompt.encode("utf-8")
-        ).hexdigest()
-        prompt_tokens = service._counter.count(system_prompt + legend)
-        tracker.register_system_prompt(prompt_hash, prompt_tokens)
-
-    # Step 6: distribute selected files across L1/L2/L3.
-    # Under D27 every selected file is treated as an
-    # "orphan" — there's no primary-index tracker entry to
-    # swap from — so distribute_orphan_files handles all of
-    # them uniformly.
+    # Step 5: distribute selected files across L1/L2/L3.
+    # Under D36 every selected file gets a ``file:`` tracker
+    # entry; the directories that hold them participate via
+    # dir-blocks seeded in step 6.
     selected_loaded = [
         path for path in service._selected_files
         if service._file_context.has_file(path)
@@ -224,10 +192,17 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     if selected_loaded:
         distribute_orphan_files(service, selected_loaded)
 
-    # Step 7: seed cross-reference items if enabled. Promotes
-    # most-connected opposite-index items into L0 alongside
-    # the primary aggregate map (the latter regenerated at
-    # assembly time, not held as tracker entries).
+    # Step 6: seed dir-blocks across L0–L3 by directory
+    # mtime. Hottest directories land warmer — see
+    # :meth:`StabilityTracker.initialize_dir_blocks`. The
+    # ``symbols:<dir>``, ``docs:<dir>``, and
+    # ``plain_files:<dir>`` keys cover the repo's structural
+    # presence; their content is rendered live at assembly
+    # time from the indexes (excluding any files currently
+    # in Active).
+    seed_dir_blocks_for_rebuild(service)
+
+    # Step 7: seed cross-reference items if enabled.
     if service._cross_ref_enabled:
         seed_cross_reference_items(service)
 
@@ -236,14 +211,6 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
 
     # Step 9: mark initialized for the current mode.
     service._stability_initialized[mode] = True
-
-    # Step 10: refreeze L0 from the now-current live
-    # indexes. Rebuild is the canonical "fresh start" gesture
-    # — the user explicitly asked for everything to refresh,
-    # including the L0 cache. See
-    # specs4/3-llm/cache-tiering.md § What invalidates L0
-    # (item 2) and § Manual Cache Rebuild.
-    service._freeze_l0_snapshot()
 
     # Assemble the result dict.
     items_after = len(tracker.get_all_items())
@@ -287,6 +254,96 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
         "file_tier_counts": file_tier_counts,
         "message": message,
     }
+
+
+# ---------------------------------------------------------------------------
+# Dir-block seeding (D36)
+# ---------------------------------------------------------------------------
+
+
+def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
+    """Enumerate per-directory dir-block keys with their mtimes.
+
+    Builds the ``(key, mtime)`` list :meth:`StabilityTracker
+    .initialize_dir_blocks` consumes, then hands it over for
+    the quartile-split mtime-based tier seeding.
+
+    Three key families:
+
+    - ``symbols:<dir>`` — directories that contain at least
+      one file with a symbol-index block.
+    - ``docs:<dir>`` — directories with at least one
+      doc-outline block.
+    - ``plain_files:<dir>`` — directories whose listed files
+      are not covered by either index (or are partially
+      covered, with the uncovered files becoming the block's
+      content).
+
+    The mtime for each key is the most recent file mtime
+    inside that directory — :meth:`Repo.get_directory_mtime`
+    handles the lookup.
+    """
+    repo = service._repo
+    if repo is None:
+        return
+
+    keys_with_mtimes: list[tuple[str, float]] = []
+    seen_dirs: set[str] = set()
+
+    # Collect directories from the symbol index.
+    if service._symbol_index is not None:
+        try:
+            symbol_paths = list(
+                service._symbol_index._all_symbols.keys()
+            )
+        except Exception:
+            symbol_paths = []
+        symbol_dirs: set[str] = set()
+        for path in symbol_paths:
+            symbol_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in symbol_dirs:
+            mtime = repo.get_directory_mtime(directory)
+            keys_with_mtimes.append(
+                (f"symbols:{directory}", mtime)
+            )
+            seen_dirs.add(directory)
+
+    # Collect directories from the doc index.
+    try:
+        doc_paths = list(service._doc_index._all_outlines.keys())
+    except Exception:
+        doc_paths = []
+    doc_dirs: set[str] = set()
+    for path in doc_paths:
+        doc_dirs.add(
+            path[: path.rfind("/")] if "/" in path else ""
+        )
+    for directory in doc_dirs:
+        mtime = repo.get_directory_mtime(directory)
+        keys_with_mtimes.append((f"docs:{directory}", mtime))
+        seen_dirs.add(directory)
+
+    # Plain-files dir-blocks: every directory that owns at
+    # least one tracked-or-untracked file. The block's
+    # content is filled in at assembly time from the leftover
+    # files (those not covered by symbols/docs).
+    try:
+        by_dir = repo.get_files_by_directory()
+    except Exception:
+        by_dir = {}
+    for directory in by_dir.keys():
+        mtime = repo.get_directory_mtime(directory)
+        keys_with_mtimes.append(
+            (f"plain_files:{directory}", mtime)
+        )
+        seen_dirs.add(directory)
+
+    if keys_with_mtimes:
+        service._stability_tracker.initialize_dir_blocks(
+            keys_with_mtimes
+        )
 
 
 # ---------------------------------------------------------------------------

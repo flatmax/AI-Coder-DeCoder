@@ -239,17 +239,46 @@ def _run_git(cwd: Path, *args: str) -> None:
 class _FakeSymbolIndex:
     """Minimal symbol index stub for tier-builder tests.
 
-    Exposes ``get_file_symbol_block(path)`` matching the real
-    interface. Returns pre-seeded blocks from an in-memory dict;
-    missing paths return None (matches the real index's behaviour
-    for unknown files).
+    Exposes ``get_file_symbol_block(path)`` and the D36
+    ``get_dir_symbols_block(directory)`` dispatch entry point.
+    Returns pre-seeded blocks from an in-memory dict; missing
+    paths return None (matches the real index's behaviour for
+    unknown files).
     """
 
     def __init__(self, blocks: dict[str, str] | None = None) -> None:
         self._blocks = dict(blocks or {})
+        self._all_symbols = {p: None for p in self._blocks}
+
+    @staticmethod
+    def _dir_of(path: str) -> str:
+        idx = path.rfind("/")
+        return path[:idx] if idx > 0 else ""
 
     def get_file_symbol_block(self, path: str) -> str | None:
         return self._blocks.get(path)
+
+    def get_dir_symbols_block(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Concat per-file blocks for files in ``directory``."""
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._blocks
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        blocks: list[str] = []
+        for path in files:
+            blk = self._blocks.get(path)
+            if blk:
+                blocks.append(blk)
+        return "\n\n".join(blocks)
+
+    def get_legend(self) -> str:
+        return ""
 
 
 class _FakeRefIndex:

@@ -3,9 +3,10 @@
 Drives the prompt-cache breakpoint placement that makes AC-DC's
 large-context usage affordable. Content that stays structurally
 unchanged across requests promotes upward across tier membranes
-(Active → L3 → L2 → L1), driven by the rectified-flux controller
-in :mod:`ac_dc.cache_membrane`. Content whose content hash changes
-teleports to ``active`` with ``n=0`` and re-climbs from there.
+(Active → L3 → L2 → L1 → L0), driven by the rectified-flux
+controller in :mod:`ac_dc.cache_membrane`. Content whose content
+hash changes teleports to ``active`` with ``n=0`` and re-climbs
+from there.
 
 This module owns tier assignments only. The streaming handler
 (Layer 3.6) builds the active-items list each request and calls
@@ -17,6 +18,9 @@ Governing specs:
 - ``specs4/3-llm/cache-tiering.md`` — the contract-level spec
 - ``specs-reference/3-llm/cache-tiering.md`` — the numeric detail
   reference
+- ``specs4/impl-history/decisions.md`` D36 — L0 is no longer
+  content-typed; every tier participates in flux uniformly,
+  and aggregate L0 maps are replaced by per-directory dir-blocks
 - ``specs4/impl-history/decisions.md`` D35 — the membrane / flux
   controller landed; rectified-GHK is the only supported variant
 
@@ -29,11 +33,13 @@ Design points pinned by the test suite and spec:
   points at — each mode preserves its own tier state when
   inactive.
 
-- **Key prefixes dispatch by content type.** ``system:``,
-  ``file:``, ``symbol:``, ``doc:``, ``url:``, ``history:``. The
-  tracker itself doesn't interpret content — it just tracks the
-  keys. Downstream consumers (prompt assembler, cache viewer)
-  dispatch rendering on the prefix.
+- **Key prefixes dispatch by content type.** ``file:``,
+  ``symbols:<dir>``, ``docs:<dir>``, ``plain_files:<dir>``,
+  ``url:``, ``history:``. The system prompt sits before L0 as
+  the only non-flux head anchor and is NOT a tracker entry.
+  The tracker itself doesn't interpret content — it just
+  tracks the keys. Downstream consumers (prompt assembler,
+  cache viewer) dispatch rendering on the prefix.
 
 - **`n` is a pure age counter** — turns since last edit. Aged
   ``+1`` on every item every cycle. Reset to ``0`` only by
@@ -43,9 +49,9 @@ Design points pinned by the test suite and spec:
 
 - **Promotion is rectified flux across membranes.** Each turn,
   the relaxation loop iterates to local equilibrium across the
-  three live membranes (Active→L3, L3→L2, L2→L1). The L1→L0
-  membrane is disabled — L0 is content-typed (D27) and is
-  populated only by init / rebuild / cross-reference paths.
+  four live membranes (Active→L3, L3→L2, L2→L1, L1→L0). Under
+  D36 the L1→L0 membrane participates uniformly — L0 is no
+  longer content-typed.
 
 - **Direction and quiescence are intrinsic to the flux
   equation.** The rectification clamp pins direction (Φ ≥ 0
@@ -132,20 +138,17 @@ class Tier(str, Enum):
 # The shape ``{"entry_n": int, "promote_n": int}`` is preserved
 # for backwards-compatibility with callers in
 # ``ac_dc.llm._rebuild`` and ``ac_dc.llm._breakdown`` that read
-# ``entry_n`` when materialising fresh items. The ``promote_n``
-# values are no longer load-bearing — the relaxation loop in
-# :mod:`ac_dc.cache_membrane` does not consult them — and are
-# kept in place only so callers that read the dict shape don't
-# break. New code should reach for the membrane parameters
-# directly via :class:`FluxConfig`.
-_L0_PROMOTE_SENTINEL = 9_999_999
-
+# ``entry_n`` when materialising fresh items. ``promote_n`` is
+# no longer load-bearing — the relaxation loop in
+# :mod:`ac_dc.cache_membrane` does not consult it. New code
+# should reach for the membrane parameters directly via
+# :class:`FluxConfig`.
 _TIER_CONFIG: dict[Tier, dict[str, int]] = {
     Tier.ACTIVE: {"entry_n": 0, "promote_n": 3},
     Tier.L3: {"entry_n": 3, "promote_n": 6},
     Tier.L2: {"entry_n": 6, "promote_n": 9},
     Tier.L1: {"entry_n": 9, "promote_n": 12},
-    Tier.L0: {"entry_n": 12, "promote_n": _L0_PROMOTE_SENTINEL},
+    Tier.L0: {"entry_n": 12, "promote_n": 12},
 }
 
 
@@ -167,62 +170,11 @@ _IDX_TO_TIER: dict[int, Tier] = {idx: tier for tier, idx in _TIER_TO_IDX.items()
 _PLACEHOLDER_HASH = ""
 
 
-# Deletion-marker text rendered into the prompt when a file is
-# deleted during the session. The marker preserves the file's
-# tracker entry (path-keyed) but replaces its content with this
-# fixed string. Constant text means a constant hash, so deletion
-# markers don't churn the cascade — they're stable from the
-# tracker's perspective and survive until the next
-# ``rebuild_cache`` (which re-extracts L0's aggregate maps from
-# the now-current index, dropping references to the deleted file).
-#
-# Byte-identity matters: keep this string verbatim. The cache
-# breakpoint hashes content directly and any wording variation
-# would produce a different hash, defeating the
-# stable-across-deletions invariant. Multiple deleted files
-# legitimately share the same marker representation — that's
-# the design.
-#
-# Spec: ``specs4/3-llm/cache-tiering.md`` § Deletion Markers.
-# Reference: ``specs-reference/3-llm/cache-tiering.md`` §
-# Deletion marker content.
-DELETION_MARKER_TEXT = (
-    "[deleted in this session — see L0 symbol/doc map for "
-    "last-known structure]"
-)
-
-
-# Pre-computed hash of :data:`DELETION_MARKER_TEXT`. Cached at
-# import time so the cascade doesn't re-hash the same constant
-# on every Phase 0 deletion check.
-def _compute_deletion_marker_hash() -> str:
-    import hashlib
-
-    return hashlib.sha256(
-        DELETION_MARKER_TEXT.encode("utf-8")
-    ).hexdigest()
-
-
-_DELETION_MARKER_HASH = _compute_deletion_marker_hash()
-
 # Placeholder token count — during initialisation we don't have
 # real token counts (the formatted blocks haven't been rendered
-# yet). A small per-entry estimate is used so L0 seeding doesn't
-# over-fill. Real counts replace these on the first update cycle
-# or via :meth:`_measure_tokens`.
-#
-# Chosen as a deliberate underestimate of real symbol/doc block
-# sizes. Typical per-file symbol blocks measure at 80-300 tokens
-# after rendering; typical doc blocks at 50-200. Using a
-# conservative 100 here means L0 seeding packs ~4x as many files
-# into L0 as a 400-token estimate would, so after measurement
-# L0's real token total lands closer to the cache target rather
-# than dramatically undershooting. The post-measurement backfill
-# catches any remaining shortfall, but starting closer to target
-# reduces the number of items backfill has to promote (each
-# promotion marks a source tier broken and triggers a cascade
-# pass on the next request — cheaper to over-seed initially than
-# to churn tiers on the first cold-start).
+# yet). A small per-entry estimate is used so dir-block seeding
+# doesn't over-fill any single tier. Real counts replace these
+# on the first update cycle or via :meth:`measure_tokens`.
 _PLACEHOLDER_TOKENS = 100
 
 
@@ -488,7 +440,7 @@ class StabilityTracker:
         return key in self._items
 
     # ------------------------------------------------------------------
-    # Pin flag and deletion marker helpers (L0-content-typed model)
+    # Pin flag (edit invariant)
     # ------------------------------------------------------------------
 
     def pin_file(self, key: str) -> bool:
@@ -496,12 +448,11 @@ class StabilityTracker:
 
         Pinned entries are protected from automatic eviction
         — stale-cleanup and underfill demotion skip them. The
-        edit invariant in the L0-content-typed model says: when
-        a file's content hash changes during the session, its
-        full text must remain present in some cached tier
-        until application restart or explicit ``rebuild_cache``,
-        even if the user deselects it. Pinning is the
-        mechanism.
+        edit invariant says: when a file's content hash
+        changes during the session, its full text must remain
+        present in some cached tier until application restart
+        or explicit ``rebuild_cache``, even if the user
+        deselects it. Pinning is the mechanism.
 
         Only ``file:`` keys can be pinned; calling on other
         prefixes is a no-op (returns False). Calling on an
@@ -544,59 +495,6 @@ class StabilityTracker:
         if item is None:
             return False
         return bool(getattr(item, "_pinned", False))
-
-    def mark_deleted(self, key: str) -> bool:
-        """Convert a ``file:`` entry to a deletion marker.
-
-        Replaces the item's content hash with the constant
-        :data:`_DELETION_MARKER_HASH` and updates its token
-        count to the marker text's measured length. Tier and
-        N value are preserved — the entry rides the cascade
-        from wherever it was (typically demoted to ACTIVE on
-        the next update because the hash changed, then
-        graduating upward as it stabilises).
-
-        Pin flag is cleared because deletion markers are
-        intrinsically stable (constant hash) and don't need
-        pin-protection — only ``rebuild_cache`` and
-        application restart clear them, and both already
-        clear pin flags as part of their reset semantics.
-
-        Returns True on success, False when the key is
-        unknown or doesn't have a ``file:`` prefix.
-
-        Spec: ``specs4/3-llm/cache-tiering.md`` §
-        Deletion Markers and § Item Removal.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        item.content_hash = _DELETION_MARKER_HASH
-        # Token count for the marker text. We measure it once
-        # at module load if a counter is available; otherwise
-        # fall back to a coarse character count. The exact
-        # number doesn't matter much for cascade dynamics —
-        # the marker text is short — but rendering accuracy
-        # for the cache viewer expects a real-ish count.
-        item.tokens = len(DELETION_MARKER_TEXT)
-        item._pinned = False  # type: ignore[attr-defined]
-        item._deleted = True  # type: ignore[attr-defined]
-        return True
-
-    def is_deleted(self, key: str) -> bool:
-        """Return True when ``key`` is a deletion-marker entry.
-
-        Distinct from :meth:`is_pinned` — a deletion marker
-        is NOT pinned (the constant hash provides the
-        protection that pinning would). The two flags never
-        overlap; :meth:`mark_deleted` clears any prior pin.
-        """
-        item = self._items.get(key)
-        if item is None:
-            return False
-        return bool(getattr(item, "_deleted", False))
 
     def get_changes(self) -> list[str]:
         """Return change-log entries for the most recent update.
@@ -786,53 +684,39 @@ class StabilityTracker:
     # ------------------------------------------------------------------
 
     def _remove_stale(self, existing_files: set[str]) -> None:
-        """Handle tracked items whose underlying file no longer exists.
+        """Drop tracked items whose underlying file no longer exists.
 
-        Two paths under the L0-content-typed model:
+        Under D36 there is no deletion marker. When a file is
+        deleted during the session:
 
-        - ``file:`` entries (pinned or not) transition to
-          deletion-marker entries via :meth:`mark_deleted`.
-          The entry stays in the tracker but its content and
-          hash become the constant marker representation.
-          The marker rides the cascade like a normal ``file:``
-          entry; its constant hash means subsequent cycles
-          see no change and N grows normally. Survives until
-          the next ``rebuild_cache`` re-extracts L0's
-          aggregate maps and removes the file from the
-          structural index entirely.
-        - ``symbol:`` and ``doc:`` entries are removed
-          normally. These are tracker entries that haven't
-          existed in the L0-content-typed model since
-          startup-distribution was dropped (commit 3
-          onward); the path is kept here for defensive
-          cleanup of any leftover entries from earlier
-          cycles or migrations.
+        - Its ``file:<path>`` tracker entry (if any) is removed
+          outright. The file is no longer renderable.
+        - Its presence in any ``symbols:<dir>`` / ``docs:<dir>``
+          / ``plain_files:<dir>`` block is owned by the dir-block
+          indexer; removing the file from that block produces a
+          new block hash, which Phase 1 detects and teleports
+          the block to Active to re-ride the flux.
 
-        ``system:``, ``url:``, ``history:`` keys have no
-        filesystem dependency and are left alone.
+        ``url:`` and ``history:`` keys have no filesystem
+        dependency and are left alone. Dir-block keys
+        (``symbols:``, ``docs:``, ``plain_files:``) reference
+        directories rather than individual files; their stale
+        cleanup is handled by the indexer's own per-turn
+        rebuild, not here.
 
-        Any tier that loses an item (or transitions a marker)
-        is marked broken so the cascade pass reconsiders it.
+        Any tier that loses an item is marked broken so the
+        cascade pass reconsiders it.
 
-        Spec: ``specs4/3-llm/cache-tiering.md`` § Item
-        Removal and § Deletion Markers.
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Item Removal.
         """
         to_remove: list[str] = []
-        to_mark_deleted: list[str] = []
         for key, item in self._items.items():
             path = self._path_from_key(key)
             if path is None:
                 continue
             if path in existing_files:
                 continue
-            if key.startswith("file:"):
-                # Transition to deletion marker — preserves
-                # the entry's tier and N, replaces content
-                # with the constant marker hash.
-                to_mark_deleted.append(key)
-            else:
-                # symbol: / doc: — remove as before.
-                to_remove.append(key)
+            to_remove.append(key)
 
         for key in to_remove:
             item = self._items.pop(key)
@@ -841,28 +725,20 @@ class StabilityTracker:
                 f"{item.tier.value} → removed (stale): {key}"
             )
 
-        for key in to_mark_deleted:
-            item = self._items.get(key)
-            if item is None:
-                continue
-            tier_label = item.tier.value
-            self.mark_deleted(key)
-            self._mark_broken(item.tier, "file deleted (marker)")
-            self._log_change(
-                f"{tier_label} → marker: {key} (file deleted)"
-            )
-
     @staticmethod
     def _path_from_key(key: str) -> str | None:
-        """Extract the file path suffix from a file-ish key.
+        """Extract the file path suffix from a per-file key.
 
-        Returns None for keys that don't reference a file path
-        (``system:``, ``url:``, ``history:``). Used by Phase 0
-        stale removal and by tests.
+        Returns None for keys that don't reference a single
+        file path. Under D36 only ``file:`` keys reference
+        individual files; dir-block keys (``symbols:``,
+        ``docs:``, ``plain_files:``) reference directories
+        and are not subject to per-file stale removal.
+        ``url:``, ``history:`` keys have no filesystem
+        dependency. Used by Phase 0 stale removal and by tests.
         """
-        for prefix in ("file:", "symbol:", "doc:"):
-            if key.startswith(prefix):
-                return key[len(prefix):]
+        if key.startswith("file:"):
+            return key[len("file:"):]
         return None
 
     @classmethod
@@ -980,24 +856,12 @@ class StabilityTracker:
                 # ``rebuild_cache`` or application restart.
                 # The pin flag protects against automatic
                 # eviction (stale-cleanup, mover selection in
-                # the relaxation loop). The transition out
-                # of a deletion marker (file recreated at the
-                # same path) does NOT pin — only edits to
-                # existing files do.
+                # the relaxation loop).
                 #
                 # Spec: ``specs4/3-llm/cache-tiering.md`` §
                 # Edit Invariant.
-                was_marker = bool(
-                    getattr(existing, "_deleted", False)
-                )
-                if key.startswith("file:") and not was_marker:
+                if key.startswith("file:"):
                     existing._pinned = True  # type: ignore[attr-defined]
-                if was_marker:
-                    # Re-creation: clear the deletion-marker
-                    # flag. The file exists again; the entry
-                    # behaves as a normal active item from
-                    # here on.
-                    existing._deleted = False  # type: ignore[attr-defined]
                 if old_tier != Tier.ACTIVE:
                     existing.tier = Tier.ACTIVE
                     self._mark_broken(old_tier, "hash changed")
@@ -1010,35 +874,28 @@ class StabilityTracker:
 
         # Step 2 — clean up file:* and history:* items that are
         # no longer in the active list. These departed from
-        # context (file deselected, history compacted). symbol:*
-        # and doc:* items are NOT cleaned up this way — they
-        # represent repo structure and persist in their earned
-        # tier even when not actively referenced this request.
+        # context (file deselected, history compacted). Dir-block
+        # entries (symbols:*, docs:*, plain_files:*) are NOT
+        # cleaned up this way — they represent repo structure
+        # and persist in their earned tier even when not
+        # actively referenced this request.
         #
         # Pinned ``file:`` entries (the edit invariant — see
-        # above) and deletion-marker entries are also exempt:
-        # they must survive deselection until the next
-        # ``rebuild_cache`` or application restart. The
-        # truthful current text of an edited file, or the
-        # marker for a deleted-this-session file, stays in
-        # the prompt regardless of selection state.
+        # above) are also exempt: they must survive deselection
+        # until the next ``rebuild_cache`` or application
+        # restart. The truthful current text of an edited file
+        # stays in the prompt regardless of selection state.
         for key in list(self._items.keys()):
             if key in active_items:
                 continue
             if not (key.startswith("file:") or key.startswith("history:")):
                 continue
             item = self._items[key]
-            if key.startswith("file:") and (
-                getattr(item, "_pinned", False)
-                or getattr(item, "_deleted", False)
-            ):
-                # Pinned or marker — protected from departure
-                # cleanup. Stays in its current tier. Active
-                # items list will see it again on subsequent
-                # cycles via the orchestrator's
-                # ``file_context.get_files()`` (selected files)
-                # OR via the deletion marker's path-keyed
-                # presence in the tracker.
+            if key.startswith("file:") and getattr(item, "_pinned", False):
+                # Pinned — protected from departure cleanup.
+                # Stays in its current tier. Active items list
+                # will see it again on subsequent cycles via
+                # the orchestrator's ``file_context.get_files()``.
                 continue
             self._items.pop(key)
             self._mark_broken(item.tier, "item departed")
@@ -1163,9 +1020,9 @@ class StabilityTracker:
 
         Replaces the legacy N-counter cascade. The relaxation
         loop iterates to within-turn flux equilibrium across
-        the three live membranes (Active→L3, L3→L2, L2→L1).
-        L1→L0 is structurally disabled — L0 is content-typed
-        (D27) and is never written by the relaxation loop.
+        the four live membranes (Active→L3, L3→L2, L2→L1,
+        L1→L0). Under D36 every tier participates in flux
+        uniformly; L0 is no longer content-typed.
 
         Pipeline (matches ``specs4/3-llm/cache-tiering.md`` §
         Order of Operations Phases 3–5):
@@ -1200,7 +1057,6 @@ class StabilityTracker:
             # block on every stable turn.
             is_protected=lambda f: bool(
                 getattr(f, "_pinned", False)
-                or getattr(f, "_deleted", False)
                 or f.key.startswith("history:")
             ),
         )
@@ -1245,383 +1101,145 @@ class StabilityTracker:
         )
 
     # ------------------------------------------------------------------
-    # Initialisation from reference graph (startup seeding)
+    # Initialisation — mtime-based dir-block seeding
     # ------------------------------------------------------------------
 
-    def initialize_from_reference_graph(
+    def initialize_dir_blocks(
         self,
-        ref_index: Any,
-        files: list[str],
-        l0_target_tokens: int | None = None,
+        keys_with_mtimes: list[tuple[str, float]],
     ) -> None:
-        """Seed tier assignments from connectivity.
+        """Seed dir-block entries across L0–L3 by directory mtime.
 
-        Called at startup by the orchestrator. Runs the
-        reference-graph clustering algorithm and distributes
-        files across L1/L2/L3 based on connected components.
-        Most-referenced files are seeded into L0 to meet the
-        cache target on the first request.
+        Under D36 the cache initialisation strategy is mtime-
+        based rather than reference-graph clustering. Hot
+        directories (recently-modified) seed warmer tiers so
+        the first request's cache layout reflects "what the
+        user has been working on" — typically the highest-
+        churn content also has the highest churn cost when
+        miscached. Cool directories (untouched in a long time)
+        seed cooler tiers and have less to lose if they get
+        promoted slowly.
+
+        The membrane controller takes over from there: across
+        the next few request cycles, the rectified-flux loop
+        rebalances based on real token mass and aging signals,
+        and the initial mtime-based seed becomes incidental.
 
         Parameters
         ----------
-        ref_index:
-            Object implementing :meth:`connected_components` and
-            :meth:`file_ref_count`. Layer 2.4's
-            :class:`ReferenceIndex` matches this shape, as does
-            the doc-reference index.
-        files:
-            List of repo-relative file paths. Keys are built as
-            ``symbol:{path}`` by default — callers that want doc
-            mode should adjust keys before calling (or pass a
-            pre-built items list; covered by
-            :meth:`initialize_with_keys`).
-        l0_target_tokens:
-            Optional override for L0 seed capacity. Defaults to
-            ``cache_target_tokens`` — which is the right choice
-            for production but tests override it to exercise
-            specific seed quantities.
+        keys_with_mtimes:
+            List of ``(key, mtime)`` pairs for every dir-block
+            to seed. ``key`` is a fully-prefixed tracker key
+            (``symbols:<dir>``, ``docs:<dir>``,
+            ``plain_files:<dir>``). ``mtime`` is the directory's
+            most recent file mtime (seconds since epoch); 0.0
+            for empty / non-existent directories.
 
-        Per specs3 — items initialised this way get placeholder
-        tokens and empty hash; Phase 1 accepts their first real
-        hash without demoting.
+        Tier assignment splits the sorted-by-mtime-descending
+        list into four roughly-equal quartiles: hottest →
+        L0, then L1, L2, and coolest → L3. Ties on mtime fall
+        back to alphabetical key ordering for determinism.
+
+        Items receive placeholder tokens and empty hash;
+        Phase 1 of the next :meth:`update` cycle accepts the
+        first real hash without demoting.
         """
-        self.initialize_with_keys(
-            ref_index,
-            keys=[f"symbol:{path}" for path in files],
-            files=files,
-            l0_target_tokens=l0_target_tokens,
-        )
-
-    def initialize_with_keys(
-        self,
-        ref_index: Any,
-        keys: list[str],
-        files: list[str],
-        l0_target_tokens: int | None = None,
-    ) -> None:
-        """Seed with explicit keys — used by doc mode and tests.
-
-        Distributes every key across all four cached tiers
-        (L0/L1/L2/L3) by clustering connected components in the
-        reference graph, then ranking clusters by aggregate
-        incoming reference count, then bin-packing into tiers
-        with the smallest current token total.
-
-        **Why four-tier even split.** Earlier revisions seeded
-        a target number of files into L0 up to
-        ``cache_target_tokens`` and distributed the remainder
-        across L1/L2/L3. On a sufficiently large repo that
-        works, but on medium repos it under-fills L0 (because
-        placeholder tokens overestimate real token counts —
-        real measured tokens come in well under the 400-token
-        placeholder, so L0's real post-measurement size lands
-        way below the cache target). The four-tier split side-
-        steps the problem: each tier gets ~25% of the repo's
-        placeholder token budget, and the cascade sorts out
-        which items genuinely deserve L0 residency via
-        promotion/demotion over the next few request cycles.
-
-        **Why stability-ranked cluster ordering.** Within the
-        clustering pass, clusters are ranked by aggregate
-        incoming ref count (sum of ``file_ref_count`` across
-        the cluster's members) so the most-referenced
-        structural clusters land in L0 on day one. Orphan
-        files (no edges in the reference graph) sort last and
-        fill whichever tier still has room. This gives the
-        cascade a reasonable starting point — the anchor/cap/
-        promote logic doesn't have to unwind bad initial
-        placements across many turns before the provider cache
-        becomes useful.
-
-        **Ties — clusters of equal size and equal ref count**
-        break deterministically by sorted member tuple so test
-        fixtures see stable output across runs.
-
-        The ``l0_target_tokens`` parameter is accepted for
-        backwards compatibility with callers that pass the
-        cache target; it is now ignored because the four-tier
-        split makes it unnecessary. L0 ends up sized by fair-
-        share budget, not by an explicit target.
-        """
-        if not keys:
+        if not keys_with_mtimes:
             return
-        if len(keys) != len(files):
-            raise ValueError(
-                f"keys length ({len(keys)}) must match "
-                f"files length ({len(files)})"
+
+        # Sort hottest-first; ties broken by key for
+        # determinism so test fixtures see stable output.
+        ranked = sorted(
+            keys_with_mtimes,
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        n = len(ranked)
+        # Quartile boundaries — ceil-divide gives the same
+        # tier order for any n, even small ones (e.g. 1–3
+        # blocks all land in L0).
+        tier_order = (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
+        for idx, (key, _mtime) in enumerate(ranked):
+            quartile = min(
+                len(tier_order) - 1,
+                idx * len(tier_order) // n,
+            )
+            tier = tier_order[quartile]
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=tier,
+                n_value=_TIER_CONFIG[tier]["entry_n"],
+                content_hash=_PLACEHOLDER_HASH,
+                tokens=_PLACEHOLDER_TOKENS,
             )
 
-        # Unused — retained in signature for compatibility.
-        del l0_target_tokens
-
-        path_to_key = dict(zip(files, keys))
-        all_paths = set(files)
-
-        # Step 1 — gather connected components from the
-        # reference graph and filter to the paths we're
-        # actually placing. Components already seen (e.g. from
-        # a prior init pass) are intentionally re-built here —
-        # initialisation is a clean-slate operation.
-        components = ref_index.connected_components()
-        filtered_components: list[set[str]] = []
-        seen_in_components: set[str] = set()
-        for comp in components:
-            filtered = {p for p in comp if p in all_paths}
-            if filtered:
-                filtered_components.append(filtered)
-                seen_in_components.update(filtered)
-
-        # Step 2 — orphan files (no edges in the reference
-        # graph) become singleton "clusters" for the bin
-        # packer. Without this, files with no references never
-        # register.
-        orphan_paths = all_paths - seen_in_components
-        for p in sorted(
-            orphan_paths,
-            key=lambda pp: (-ref_index.file_ref_count(pp), pp),
-        ):
-            filtered_components.append({p})
-
-        # Step 3 — rank clusters by aggregate stability. Sum
-        # the incoming reference count across each cluster's
-        # members so a five-file cluster where each member has
-        # 3 incoming refs (aggregate 15) outranks a ten-file
-        # cluster of orphans (aggregate 0). The ``-`` negates
-        # for descending sort. Ties break by cluster size
-        # descending (prefer placing larger clusters first so
-        # the bin packer balances by token budget) and finally
-        # by sorted member tuple for determinism.
-        def _cluster_rank(
-            comp: set[str],
-        ) -> tuple[int, int, tuple[str, ...]]:
-            aggregate = sum(
-                ref_index.file_ref_count(p) for p in comp
-            )
-            return (-aggregate, -len(comp), tuple(sorted(comp)))
-
-        filtered_components.sort(key=_cluster_rank)
-
-        # Step 4 — bin-pack across all four cached tiers.
-        # Greedy: each cluster goes to the tier with the
-        # smallest current token total. Since we walk clusters
-        # in descending-aggregate order, the first few (highest
-        # ref count) clusters spread across L0/L1/L2/L3 before
-        # any tier fills — but the L0 slot fills first on ties
-        # because ``min`` picks in insertion order and L0 is
-        # listed first below. Later, lower-ranked clusters
-        # cluster toward whichever tier hasn't filled yet.
-        tier_sizes = {
-            Tier.L0: 0,
-            Tier.L1: 0,
-            Tier.L2: 0,
-            Tier.L3: 0,
-        }
-        tier_contents: dict[Tier, list[str]] = {
-            Tier.L0: [],
-            Tier.L1: [],
-            Tier.L2: [],
-            Tier.L3: [],
-        }
-        tier_order_for_ties = {
-            Tier.L0: 0,
-            Tier.L1: 1,
-            Tier.L2: 2,
-            Tier.L3: 3,
-        }
-
-        for comp in filtered_components:
-            target_tier = min(
-                tier_sizes,
-                key=lambda t: (
-                    tier_sizes[t],
-                    tier_order_for_ties[t],
-                ),
-            )
-            for path in sorted(comp):
-                key = path_to_key.get(path)
-                if key is None:
-                    continue
-                tier_contents[target_tier].append(key)
-            # Token budget uses placeholder tokens — real counts
-            # replace these via :meth:`measure_tokens` after the
-            # formatted blocks are rendered for the first time.
-            tier_sizes[target_tier] += (
-                len(comp) * _PLACEHOLDER_TOKENS
-            )
-
-        # Step 5 — instantiate TrackedItems at each tier's
-        # entry N. Placeholder hash marks them as never-yet-
-        # measured so the next :meth:`update` cycle accepts
-        # their first real hash without demoting.
-        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-            for key in tier_contents[tier]:
-                self._items[key] = TrackedItem(
-                    key=key,
-                    tier=tier,
-                    n_value=_TIER_CONFIG[tier]["entry_n"],
-                    content_hash=_PLACEHOLDER_HASH,
-                    tokens=_PLACEHOLDER_TOKENS,
-                )
-
-    def distribute_keys_by_clustering(
+    def cross_ref_seed_dir_blocks(
         self,
-        ref_index: Any,
-        keys: list[str],
-        files: list[str],
+        keys_with_mtimes: list[tuple[str, float]],
     ) -> None:
-        """Append keys to the tracker, distributed across L1/L2/L3.
+        """Append cross-ref dir-block keys, distributed across L1–L3.
 
         Used by cross-reference enable to seed opposite-index
-        items into cached tiers on activation, mirroring how the
-        primary index is distributed at startup — without the
-        L0 seeding (L0 is reserved for primary content + the
-        system prompt) and without touching any tracker entries
-        that already exist.
+        dir-blocks (the docs side in code mode, or the symbols
+        side in doc mode) into cached tiers on activation. The
+        primary index has already claimed its share via
+        :meth:`initialize_dir_blocks`; the cross-ref pass adds
+        the secondary set without touching any existing entries
+        and without competing for L0 (reserved as the warmest
+        tier for primary content).
 
         Keys already present in the tracker are skipped —
         preserves accumulated tier / N state from a prior
-        cross-ref session, and keeps primary-index entries
-        (``symbol:`` in code mode, ``doc:`` in doc mode) safe
-        when the caller naively passes an overlapping key list.
-
-        Uses placeholder hash and placeholder tokens; the
-        caller should immediately measure real tokens via
-        :meth:`measure_tokens` so downstream cascade passes
-        work with accurate counts.
+        cross-ref session.
 
         Parameters
         ----------
-        ref_index:
-            Object implementing :meth:`connected_components` and
-            :meth:`file_ref_count`. Same shape as
-            :meth:`initialize_from_reference_graph` consumes.
-        keys:
-            List of tracker keys (e.g. ``doc:{path}`` or
-            ``symbol:{path}``).
-        files:
-            Parallel list of repo-relative file paths.
-        """
-        if not keys:
-            return
-        if len(keys) != len(files):
-            raise ValueError(
-                f"keys length ({len(keys)}) must match "
-                f"files length ({len(files)})"
-            )
+        keys_with_mtimes:
+            List of ``(key, mtime)`` pairs for every dir-block
+            to seed. Same shape as :meth:`initialize_dir_blocks`.
 
-        # Skip keys already tracked — preserves existing tier
-        # state from prior cross-ref enables and protects the
-        # primary index's entries.
-        pairs = [
-            (key, path)
-            for key, path in zip(keys, files)
+        Distribution strategy: hottest → L1, middle → L2,
+        coolest → L3. The cascade promotes earned content
+        upward across subsequent requests.
+        """
+        if not keys_with_mtimes:
+            return
+
+        new_pairs = [
+            (key, mtime)
+            for key, mtime in keys_with_mtimes
             if key not in self._items
         ]
-        if not pairs:
+        if not new_pairs:
             return
 
-        path_to_key = {path: key for key, path in pairs}
-        remaining_paths = {path for _key, path in pairs}
-
-        components = ref_index.connected_components()
-        filtered_components: list[set[str]] = []
-        seen_in_components: set[str] = set()
-        for comp in components:
-            filtered = {p for p in comp if p in remaining_paths}
-            if filtered:
-                filtered_components.append(filtered)
-                seen_in_components.update(filtered)
-
-        # Orphan files — not in any component. Each becomes its
-        # own singleton "component" for the bin-packer.
-        orphan_paths = remaining_paths - seen_in_components
-        if orphan_paths:
-            orphan_list = sorted(
-                orphan_paths,
-                key=lambda p: (-ref_index.file_ref_count(p), p),
-            )
-            for p in orphan_list:
-                filtered_components.append({p})
-
-        # Bin-pack across L1/L2/L3 — skip L0 (reserved for
-        # primary content). Greedy: assign each component
-        # (descending size) to the tier with the smallest
-        # current size.
-        tier_sizes = {Tier.L1: 0, Tier.L2: 0, Tier.L3: 0}
-        tier_contents: dict[Tier, list[str]] = {
-            Tier.L1: [],
-            Tier.L2: [],
-            Tier.L3: [],
-        }
-        filtered_components.sort(
-            key=lambda c: (-len(c), tuple(sorted(c)))
+        ranked = sorted(
+            new_pairs,
+            key=lambda pair: (-pair[1], pair[0]),
         )
-        for comp in filtered_components:
-            target_tier = min(
-                tier_sizes,
-                key=lambda t: (tier_sizes[t], t.value),
-            )
-            for path in sorted(comp):
-                key = path_to_key.get(path)
-                if key is None:
-                    continue
-                tier_contents[target_tier].append(key)
-            tier_sizes[target_tier] += len(comp)
-
-        # Instantiate. Placeholder hash so Phase 1 of the next
-        # update cycle accepts the first real hash without
-        # demoting (same contract as primary init).
+        n = len(ranked)
+        tier_order = (Tier.L1, Tier.L2, Tier.L3)
         affected_tiers: set[Tier] = set()
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
-            for key in tier_contents[tier]:
-                self._items[key] = TrackedItem(
-                    key=key,
-                    tier=tier,
-                    n_value=_TIER_CONFIG[tier]["entry_n"],
-                    content_hash=_PLACEHOLDER_HASH,
-                    tokens=_PLACEHOLDER_TOKENS,
-                )
-                affected_tiers.add(tier)
+        for idx, (key, _mtime) in enumerate(ranked):
+            third = min(
+                len(tier_order) - 1,
+                idx * len(tier_order) // n,
+            )
+            tier = tier_order[third]
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=tier,
+                n_value=_TIER_CONFIG[tier]["entry_n"],
+                content_hash=_PLACEHOLDER_HASH,
+                tokens=_PLACEHOLDER_TOKENS,
+            )
+            affected_tiers.add(tier)
 
         # Mark destination tiers broken so the next cascade
-        # pass considers them and — critically — so the
-        # provider cache for those tiers is rebuilt with the
-        # new content included. Without this, the next
-        # request would use stale cache breakpoints that
-        # predate the seeding.
+        # rebuilds the provider cache to include the new
+        # content. Without this, the next request would use
+        # stale cache breakpoints that predate the seeding.
         for tier in affected_tiers:
             self._mark_broken(tier, "cross-ref seed")
-
-    def register_system_prompt(
-        self,
-        prompt_hash: str,
-        tokens: int,
-    ) -> None:
-        """Pin ``system:prompt`` into L0.
-
-        Called by the orchestrator after L0 seeding. The system
-        prompt is always the most stable content in the session;
-        placing it at L0 entry_n ensures it never demotes during
-        normal operation.
-
-        Re-registering with the same hash is a no-op; a different
-        hash reinstalls the item (rare — system prompt only
-        changes on mode switch or review entry/exit, both of
-        which create a fresh tracker anyway).
-        """
-        existing = self._items.get("system:prompt")
-        if existing is not None and existing.content_hash == prompt_hash:
-            # Update tokens (legend may have changed) but leave
-            # tier and N alone.
-            existing.tokens = tokens
-            return
-        self._items["system:prompt"] = TrackedItem(
-            key="system:prompt",
-            tier=Tier.L0,
-            n_value=_TIER_CONFIG[Tier.L0]["entry_n"],
-            content_hash=prompt_hash,
-            tokens=tokens,
-        )
 
     # ------------------------------------------------------------------
     # Token measurement hook
@@ -1638,164 +1256,6 @@ class StabilityTracker:
         if item is None:
             return
         item.tokens = tokens
-
-    # ------------------------------------------------------------------
-    # Post-measurement L0 backfill
-    # ------------------------------------------------------------------
-
-    def backfill_l0_after_measurement(
-        self,
-        ref_index: Any,
-        overshoot_multiplier: float = 2.0,
-        candidate_keys: set[str] | None = None,
-    ) -> int:
-        """Top up L0 with real-token-count awareness post-measurement.
-
-        The init-time placeholder (400 tokens/file) is a pessimistic
-        upper bound — once ``_measure_tracker_tokens`` (the caller,
-        on :class:`LLMService`) replaces placeholders with real
-        counts, L0's actual token total is almost always well
-        below ``cache_target_tokens``. Two consequences:
-
-        1. The provider refuses to cache L0 at all (total below
-           the provider's cache-min threshold — 4096 tokens on
-           Sonnet 4.6, 1024 on Sonnet 4.5, etc.).
-        2. L0 has no churn capacity — every item fits comfortably,
-           so the cascade's "tier exceeds cache target → anchor
-           veterans, promote above the line" path never triggers,
-           and L1 items never promote upward even after they've
-           earned it.
-
-        This method pulls additional high-ref-count items from
-        L1/L2/L3 into L0 until the real token total reaches
-        ``cache_target_tokens × overshoot_multiplier``. The
-        overshoot is deliberate — it pushes L0 well clear of
-        the cache-min floor AND gives the cascade's anchoring
-        logic something to work with, so L1 items can be
-        promoted into L0 as lower-ref content cycles out.
-
-        Ranking uses the reference index's ``file_ref_count``
-        (same signal as initial L0 seeding) so the backfill
-        preserves the "most-connected files live longest"
-        intent. Ties break by key for determinism.
-
-        Called post-measurement by both init paths
-        (:meth:`LLMService._try_initialize_stability` and
-        :meth:`LLMService._rebuild_cache_impl`). A no-op when
-        ``cache_target_tokens == 0`` (caching disabled) or
-        when no candidates exist below L0.
-
-        Parameters
-        ----------
-        ref_index:
-            Object implementing ``file_ref_count(path)``. Same
-            object used by :meth:`initialize_with_keys`.
-        overshoot_multiplier:
-            Target token total is ``cache_target_tokens ×
-            overshoot_multiplier``. Default 2.0 produces
-            ~100% headroom above the cache-min floor —
-            guarantees L0 clears the provider's cache-min
-            threshold by a comfortable margin even when
-            real measured tokens come in well under
-            placeholder estimates. Values below 1.0 would
-            leave L0 perpetually underfilled; values above
-            3.0 push too much into L0 at the expense of
-            L1-L3 distribution.
-
-        Returns
-        -------
-        int
-            The number of items promoted into L0. Useful for
-            logging / debug.
-        """
-        if self._cache_target_tokens <= 0:
-            return 0
-
-        target = int(self._cache_target_tokens * overshoot_multiplier)
-
-        # Compute current L0 token total from real (post-
-        # measurement) counts. Iterates _items rather than
-        # calling get_tier_items() to avoid the copy cost.
-        current_l0_tokens = sum(
-            item.tokens
-            for item in self._items.values()
-            if item.tier == Tier.L0
-        )
-        if current_l0_tokens >= target:
-            return 0
-
-        # Candidate pool — every item currently in L1, L2, or
-        # L3 whose key references a file path. ``system:`` and
-        # ``history:`` are L0-only or tier-protected and never
-        # backfill candidates; ``url:`` is skipped because URL
-        # content is session-scoped and shouldn't compete for
-        # the cache-anchor slot.
-        #
-        # When ``candidate_keys`` is supplied, only items in
-        # that set are eligible. Used by cross-reference
-        # enable to restrict the backfill to the keys just
-        # seeded by that pass — without the filter, a user-
-        # accumulated tier state (e.g., a deliberately-placed
-        # L2 entry from a prior session) would get promoted
-        # to L0 as a side effect of toggling cross-ref on.
-        candidates: list[TrackedItem] = []
-        for item in self._items.values():
-            if item.tier not in (Tier.L1, Tier.L2, Tier.L3):
-                continue
-            path = self._path_from_key(item.key)
-            if path is None:
-                continue
-            if candidate_keys is not None and item.key not in candidate_keys:
-                continue
-            candidates.append(item)
-
-        if not candidates:
-            return 0
-
-        # Rank by reference count descending, then by key for
-        # deterministic tie-breaking (critical for test
-        # stability and for reproducible startup behaviour).
-        def _rank_key(it: TrackedItem) -> tuple[int, str]:
-            path = self._path_from_key(it.key)
-            # path is never None here — candidate loop already
-            # filtered. Defensive fallback to empty string.
-            count = ref_index.file_ref_count(path or "")
-            return (-int(count), it.key)
-
-        candidates.sort(key=_rank_key)
-
-        # Promote until the target is met. Each promoted item
-        # keeps its content_hash and its token count (both
-        # already real post-measurement); only the tier and
-        # n_value change. L0's entry_n is used so the item
-        # lands as a fresh L0 resident, not mid-cycle.
-        promoted = 0
-        accumulated = current_l0_tokens
-        l0_entry_n = _TIER_CONFIG[Tier.L0]["entry_n"]
-        affected_source_tiers: set[Tier] = set()
-        for item in candidates:
-            if accumulated >= target:
-                break
-            source_tier = item.tier
-            item.tier = Tier.L0
-            item.n_value = l0_entry_n
-            accumulated += item.tokens
-            promoted += 1
-            affected_source_tiers.add(source_tier)
-            self._log_change(
-                f"{source_tier.value} → L0: {item.key} "
-                f"(post-measurement backfill)"
-            )
-
-        # Mark source tiers broken so the next cascade can
-        # rebalance L1/L2/L3 distribution after the promotions.
-        # L0 itself isn't marked broken — these items earned
-        # their L0 slot via ref-count ranking; we don't want
-        # the cascade immediately reconsidering them.
-        for tier in affected_source_tiers:
-            self._mark_broken(tier, "post-measurement backfill")
-
-        return promoted
 
     # ------------------------------------------------------------------
     # Internal helpers

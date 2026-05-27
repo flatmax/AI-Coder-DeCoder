@@ -468,14 +468,17 @@ class TestUpdateStabilityExcludedFiles:
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Excluded files whose tracker entries survived get removed.
+        """Excluded files whose ``file:`` entries survived get removed.
 
-        Simulates drift: a file was indexed, got a tracker
-        entry at L2, and was later excluded. The one-shot
-        removal in set_excluded_index_files should have caught
-        it — but if it didn't (tracker re-populated after the
-        exclusion set change, e.g., from a cross-ref enable),
-        step 0a cleans it up on the next update cycle.
+        Simulates drift: a file got a ``file:`` tracker entry
+        at L2, and was later excluded. The one-shot removal in
+        set_excluded_index_files should have caught it — but if
+        it didn't (tracker re-populated after the exclusion set
+        change), step 0a cleans it up on the next update cycle.
+
+        Under D36 only ``file:`` keys are subject to the
+        defensive sweep; per-file ``symbol:``/``doc:`` keys
+        don't exist as tracker entries.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -486,9 +489,9 @@ class TestUpdateStabilityExcludedFiles:
         # Set exclusion DIRECTLY on the attribute, bypassing
         # set_excluded_index_files to simulate the drift case.
         svc._excluded_index_files = ["excluded.py"]
-        # Seed a stale tracker entry at L2.
-        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
-            key="symbol:excluded.py",
+        # Seed a stale ``file:`` tracker entry at L2.
+        svc._stability_tracker._items["file:excluded.py"] = TrackedItem(
+            key="file:excluded.py",
             tier=Tier.L2,
             n_value=6,
             content_hash="h",
@@ -499,15 +502,21 @@ class TestUpdateStabilityExcludedFiles:
 
         # Entry gone after the update cycle.
         all_keys = set(svc._stability_tracker.get_all_items().keys())
-        assert "symbol:excluded.py" not in all_keys
+        assert "file:excluded.py" not in all_keys
 
-    def test_step_0a_removes_all_three_prefixes(
+    def test_step_0a_removes_excluded_file_entry(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Removal pass covers symbol:, doc:, and file: prefixes."""
+        """Removal pass covers ``file:`` entries.
+
+        Under D36 the per-file index prefixes (``symbol:``,
+        ``doc:``) are no longer tracker entries — only
+        ``file:`` keys exist for per-file content. The
+        defensive sweep targets that prefix.
+        """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
         svc = self._make_service_with_both_indexes(
@@ -515,14 +524,6 @@ class TestUpdateStabilityExcludedFiles:
         )
         svc._excluded_index_files = ["multi.md"]
         tracker = svc._stability_tracker
-        tracker._items["symbol:multi.md"] = TrackedItem(
-            key="symbol:multi.md", tier=Tier.L1,
-            n_value=3, content_hash="h", tokens=10,
-        )
-        tracker._items["doc:multi.md"] = TrackedItem(
-            key="doc:multi.md", tier=Tier.L2,
-            n_value=6, content_hash="h", tokens=20,
-        )
         tracker._items["file:multi.md"] = TrackedItem(
             key="file:multi.md", tier=Tier.L3,
             n_value=3, content_hash="h", tokens=30,
@@ -531,8 +532,6 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         all_keys = set(tracker.get_all_items().keys())
-        assert "symbol:multi.md" not in all_keys
-        assert "doc:multi.md" not in all_keys
         assert "file:multi.md" not in all_keys
 
     def test_step_0a_marks_tiers_broken(
@@ -551,9 +550,7 @@ class TestUpdateStabilityExcludedFiles:
         top of the cycle, so we can't observe the flag after
         a full update. Instead we verify the REMOVAL happened
         at all — if step 0a's tier-marking didn't run, the
-        entry would still be there after step 3 (which doesn't
-        touch tracker state for excluded-but-indexed paths in
-        a way that removes prior entries).
+        entry would still be there.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -562,8 +559,8 @@ class TestUpdateStabilityExcludedFiles:
             symbol_paths=["excluded.py"],
         )
         svc._excluded_index_files = ["excluded.py"]
-        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
-            key="symbol:excluded.py",
+        svc._stability_tracker._items["file:excluded.py"] = TrackedItem(
+            key="file:excluded.py",
             tier=Tier.L2,
             n_value=6,
             content_hash="h",
@@ -576,7 +573,7 @@ class TestUpdateStabilityExcludedFiles:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        assert "symbol:excluded.py" not in all_keys
+        assert "file:excluded.py" not in all_keys
 
     def test_no_per_file_symbol_entries_regardless_of_exclusion(
         self,
@@ -793,7 +790,7 @@ class TestUpdateStabilityExcludedFiles:
         # Phase 1: exclude.
         svc.set_excluded_index_files(["drifted.py"])
         # Tracker should have no entry at this point.
-        assert "symbol:drifted.py" not in (
+        assert "file:drifted.py" not in (
             svc._stability_tracker.get_all_items()
         )
 
@@ -801,14 +798,14 @@ class TestUpdateStabilityExcludedFiles:
         # entry. In production this could be a rebuild or a
         # cross-ref enable that iterates the index without
         # checking the exclusion set.
-        svc._stability_tracker._items["symbol:drifted.py"] = TrackedItem(
-            key="symbol:drifted.py",
+        svc._stability_tracker._items["file:drifted.py"] = TrackedItem(
+            key="file:drifted.py",
             tier=Tier.L1,
             n_value=3,
             content_hash="h",
             tokens=20,
         )
-        assert "symbol:drifted.py" in (
+        assert "file:drifted.py" in (
             svc._stability_tracker.get_all_items()
         )
 
@@ -816,6 +813,6 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         # Entry gone.
-        assert "symbol:drifted.py" not in (
+        assert "file:drifted.py" not in (
             svc._stability_tracker.get_all_items()
         )

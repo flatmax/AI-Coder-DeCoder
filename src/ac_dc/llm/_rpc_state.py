@@ -96,59 +96,54 @@ def set_excluded_index_files(
     """Store the set of files excluded from the index.
 
     Excluded files have no content, no index block, and no
-    tracker item. Removes matching entries from EVERY mode's
-    tracker — without this, excluding files in one mode
-    leaves stale entries in the other mode's tracker,
-    visible in the cache viewer after a mode switch.
+    tracker item. Drops the matching ``file:<path>`` entry
+    from every tracker so stale full-text rows don't linger
+    in the cache viewer.
 
-    L0 invalidation is asymmetric:
+    Under D36 dir-blocks, the file's structural presence
+    lives inside the parent directory's ``symbols:<dir>`` /
+    ``docs:<dir>`` / ``plain_files:<dir>`` block. We mark
+    the directory's blocks broken so they re-render without
+    the excluded file on the next turn — no aggregate map
+    snapshot to refresh.
 
-    - **Inclusions** (a previously-excluded file removed
-      from the exclusion list): always refreeze. The
-      aggregate map gains the file's structural block; the
-      user expects to see it in context immediately.
-    - **Exclusions** (a file added to the exclusion list):
-      only refreeze when ``invalidate_l0=True``. Mid-session
-      exclusion is uncommon and an L0 refresh costs a full
-      cache write. The webapp prompts the user with
-      "Invalidate L0 cache to apply now, or leave the cache
-      stale until the next L0-invalidating event?" and
-      passes the user's choice via ``invalidate_l0``.
-
-    See specs4/3-llm/cache-tiering.md § What invalidates L0
-    (items 7 and 8) for the full semantics.
+    The legacy ``invalidate_l0`` parameter is now a no-op
+    kept only for wire compatibility with frontend clients
+    not yet updated to the D36 RPC shape.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
         return restricted
 
-    old_excluded = set(service._excluded_index_files)
-    new_excluded = set(files)
-    has_inclusions = bool(old_excluded - new_excluded)
-    has_exclusions = bool(new_excluded - old_excluded)
-
     service._excluded_index_files = list(files)
     for tracker in service._trackers.values():
         for path in files:
-            for prefix in ("symbol:", "doc:", "file:"):
-                key = prefix + path
-                if tracker.has_item(key):
+            file_key = "file:" + path
+            if tracker.has_item(file_key):
+                all_items = tracker.get_all_items()
+                item = all_items.get(file_key)
+                if item is not None:
+                    tracker._items.pop(file_key, None)
+                    tracker.mark_broken(
+                        item.tier, "user excluded file"
+                    )
+            # Dir-block invalidation — the parent
+            # directory's blocks must re-render to drop the
+            # excluded file from their content set.
+            directory = (
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+            for dir_prefix in (
+                "symbols:", "docs:", "plain_files:",
+            ):
+                dir_key = dir_prefix + directory
+                if tracker.has_item(dir_key):
                     all_items = tracker.get_all_items()
-                    item = all_items.get(key)
+                    item = all_items.get(dir_key)
                     if item is not None:
-                        tracker._items.pop(key, None)
                         tracker.mark_broken(
                             item.tier, "user excluded file"
                         )
-
-    # L0 invalidation policy. Inclusions always refreeze
-    # (file's block must appear in the map now); exclusions
-    # only refreeze when the caller opted in.
-    should_refreeze = has_inclusions or (
-        has_exclusions and bool(invalidate_l0)
-    )
-    if should_refreeze:
-        service._freeze_l0_snapshot()
 
     service._broadcast_event(
         "filesChanged", list(service._selected_files)
@@ -222,13 +217,6 @@ def switch_mode(
     # Init target mode's tracker if this is the first entry.
     service._try_initialize_stability()
 
-    # Refreeze L0 — system prompt swapped, primary index
-    # swapped from symbol→doc (or vice versa). L0's bytes
-    # change wholesale; cache write is unavoidable here
-    # but bounded (one per mode switch, not one per turn).
-    # See specs4/3-llm/cache-tiering.md § What invalidates L0.
-    service._freeze_l0_snapshot()
-
     event_text = f"Switched to {target.value} mode."
     service._context.add_message(
         "user", event_text, system_event=True
@@ -280,12 +268,6 @@ def set_cross_reference(
     else:
         service._remove_cross_reference_items()
 
-    # Refreeze L0 — secondary aggregate map and legend
-    # added (enable) or removed (disable). L0's bytes
-    # change in either direction. See
-    # specs4/3-llm/cache-tiering.md § What invalidates L0.
-    service._freeze_l0_snapshot()
-
     service._broadcast_event(
         "modeChanged",
         {
@@ -313,14 +295,12 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
     skips the refresh when review is active so the review
     prompt isn't clobbered.
 
-    Also re-registers the prompt with the stability tracker so
-    the cache viewer's ``system:<hash>`` entry reflects the
-    new content immediately, without waiting for the next
-    ``_post_response`` cycle. Includes the symbol-index legend
-    in the hash exactly like :func:`try_initialize_stability`
-    and :func:`update_stability` do, so the hash matches what
-    those paths would produce on the next turn — otherwise
-    we'd churn the cache one extra time.
+    Under D36 the system prompt is no longer a stability-
+    tracker entry — it sits before L0 as a non-flux head
+    anchor and is rendered live from
+    :meth:`ContextManager.get_system_prompt` at assembly time.
+    Updating ``_context``'s prompt is therefore enough; the
+    next prompt assembly picks up the new bytes automatically.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
@@ -336,54 +316,9 @@ def refresh_system_prompt(service: "LLMService") -> dict[str, Any]:
         prompt = service._config.get_system_prompt()
     has_appendix = "Agent-Spawn Capability" in prompt
 
-    # Capture old prompt BEFORE setting new one, so we can
-    # detect whether the bytes actually changed. Settings
-    # reloads that don't touch the system prompt (e.g., a
-    # save that only edits compaction config) must NOT
-    # invalidate L0 — that would force a 315K cache write
-    # for nothing. Per specs4/3-llm/cache-tiering.md § What
-    # invalidates L0: settings reloads that leave the
-    # prompt bytes unchanged do NOT invalidate L0.
     old_prompt = service._context.get_system_prompt()
     prompt_changed = (old_prompt != prompt)
     service._context.set_system_prompt(prompt)
-
-    # Re-register with the tracker so the cache viewer's
-    # system:<hash> row updates immediately. Must hash the
-    # same combined prompt+legend string that the stability
-    # paths hash, or we'll mint a different key here than
-    # update_stability will mint on the next turn and
-    # trigger an unnecessary L0 churn.
-    import hashlib
-    if service._context.mode == Mode.DOC:
-        legend = service._doc_index.get_legend()
-    else:
-        legend = ""
-        if service._symbol_index is not None:
-            try:
-                legend = service._symbol_index.get_legend()
-            except Exception:
-                legend = ""
-    combined = prompt + ("\n\n" + legend if legend else "")
-    prompt_hash = hashlib.sha256(combined.encode()).hexdigest()
-    tokens = service._counter.count(combined)
-    try:
-        service._stability_tracker.register_system_prompt(
-            prompt_hash, tokens
-        )
-    except Exception as exc:
-        logger.warning(
-            "refresh_system_prompt: tracker update failed: %s",
-            exc,
-        )
-
-    # Refreeze L0 only when the prompt bytes actually
-    # changed. A no-op refresh (Settings reload that didn't
-    # touch the prompt) must skip the freeze; otherwise
-    # every "Save" in the Settings tab would force a full
-    # L0 cache write.
-    if prompt_changed:
-        service._freeze_l0_snapshot()
 
     return {
         "status": "ok",
@@ -590,15 +525,29 @@ def set_agent_excluded_index_files(
     scope.excluded_index_files = list(valid)
     # Drop matching entries from the agent's tracker so stale
     # rows don't linger in the cache viewer's per-agent view.
+    # Under D36 the excluded file's ``file:`` entry is dropped
+    # outright, and the parent directory's dir-blocks are
+    # marked broken so they re-render without the file.
     tracker = scope.tracker
     for path in valid:
-        for prefix in ("symbol:", "doc:", "file:"):
-            key = prefix + path
-            if tracker.has_item(key):
+        file_key = "file:" + path
+        if tracker.has_item(file_key):
+            all_items = tracker.get_all_items()
+            item = all_items.get(file_key)
+            if item is not None:
+                tracker._items.pop(file_key, None)
+                tracker.mark_broken(
+                    item.tier, "agent excluded file"
+                )
+        directory = (
+            path[: path.rfind("/")] if "/" in path else ""
+        )
+        for dir_prefix in ("symbols:", "docs:", "plain_files:"):
+            dir_key = dir_prefix + directory
+            if tracker.has_item(dir_key):
                 all_items = tracker.get_all_items()
-                item = all_items.get(key)
+                item = all_items.get(dir_key)
                 if item is not None:
-                    tracker._items.pop(key, None)
                     tracker.mark_broken(
                         item.tier, "agent excluded file"
                     )

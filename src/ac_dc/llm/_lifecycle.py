@@ -99,21 +99,16 @@ def sync_file_context(
     binary_skipped: list[str] = []
 
     # Track externally-deleted paths so we can broadcast
-    # filesChanged once after the loop completes. Per
-    # specs4/3-llm/cache-tiering.md § Item Removal and
-    # § Order of Operations Phase 0, a file deleted from
-    # disk during the session must transition to a
-    # deletion-marker entry in the stability tracker.
-    # That mechanism already works at the tracker layer
-    # (update_stability passes a fresh existing_files set
-    # to tracker.update, which calls _remove_stale →
-    # mark_deleted). The bug it fixes here is upstream:
-    # without this trim, FileContext keeps the file's
-    # pre-deletion bytes AND scope.selected_files keeps
-    # the path, so update_stability re-registers
-    # file:<path> in active_items every turn and prompt
-    # assembly renders stale content instead of the
-    # deletion-marker text.
+    # filesChanged once after the loop completes. Under
+    # D36, files deleted from disk get pruned from the
+    # tracker by update_stability's existing_files sweep
+    # (tracker.update → _remove_stale drops their file:
+    # entries). The bug this fixes is upstream: without
+    # this trim, FileContext keeps the file's pre-deletion
+    # bytes AND scope.selected_files keeps the path, so
+    # update_stability re-registers file:<path> in
+    # active_items every turn and prompt assembly renders
+    # stale content for a file that no longer exists.
     deleted_from_disk: list[str] = []
 
     # Add newly-selected files.

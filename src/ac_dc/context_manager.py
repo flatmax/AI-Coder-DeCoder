@@ -1052,11 +1052,8 @@ class ContextManager:
         self,
         user_prompt: str,
         images: list[str] | None = None,
-        symbol_map: str = "",
         symbol_legend: str = "",
         doc_legend: str = "",
-        secondary_map: str = "",
-        file_tree: str = "",
         tiered_content: dict[str, dict[str, Any]] | None = None,
         *,
         skip_active: bool = False,
@@ -1068,6 +1065,14 @@ class ContextManager:
         (L0–L3) gets exactly one breakpoint so the provider can
         reuse the preceding prefix across requests.
 
+        Under D36 dir-blocks the aggregate symbol/doc map and
+        the flat file-tree section have been replaced by
+        per-directory dir-block tracker entries that ride flux
+        through the four cached tiers — there is no longer a
+        ``symbol_map`` / ``secondary_map`` / ``file_tree``
+        parameter. Their content arrives as ``symbols`` /
+        ``files`` strings on each tier's content dict.
+
         Parameters
         ----------
         user_prompt:
@@ -1077,32 +1082,15 @@ class ContextManager:
             Optional list of base64 data URIs. When present, the
             final user message becomes a multimodal content block
             list instead of a plain string.
-        symbol_map:
-            The symbol or doc map body (excluding graduated
-            file blocks — those live in their tier's content
-            instead). Empty when no map is available.
         symbol_legend:
             The primary index's legend block — goes under
             :data:`REPO_MAP_HEADER` when in code mode, or
-            :data:`DOC_MAP_HEADER` when in document mode.
+            :data:`DOC_MAP_HEADER` when in document mode. Sits
+            before L0 as a non-flux head anchor.
         doc_legend:
             Optional secondary legend for cross-reference mode.
             When non-empty, appended to L0 under the *opposite*
             mode's header.
-        secondary_map:
-            Optional secondary aggregate map for cross-reference
-            mode. When non-empty, rendered after ``doc_legend``
-            in L0's system message — so the LLM sees both
-            structural maps. Per ``specs4/3-llm/modes.md`` §
-            Cross-Reference Mode: "Both legends included in
-            the L0 cache block". Cross-reference is L0-only
-            under the L0-content-typed model (D27); no
-            per-file tracker entries are created for the
-            secondary index.
-        file_tree:
-            The flat file-tree text produced by the streaming
-            handler. Rendered as its own uncached user/assistant
-            pair.
         tiered_content:
             Dict keyed by tier name (``"L0"``, ``"L1"``, ``"L2"``,
             ``"L3"``) mapping to per-tier content dicts with keys
@@ -1146,16 +1134,12 @@ class ContextManager:
         l0_history = l0.get("history") or []
 
         system_parts: list[str] = [self._system_prompt]
-        if symbol_legend or l0_symbols or symbol_map:
+        if symbol_legend or l0_symbols:
             system_parts.append(primary_header + symbol_legend)
             if l0_symbols:
                 system_parts.append(l0_symbols)
-            if symbol_map:
-                system_parts.append(symbol_map)
-        if doc_legend or secondary_map:
+        if doc_legend:
             system_parts.append(cross_ref_header + doc_legend)
-            if secondary_map:
-                system_parts.append(secondary_map)
         if l0_files:
             system_parts.append(FILES_L0_HEADER + l0_files)
         system_content = "\n\n".join(p for p in system_parts if p)
@@ -1230,16 +1214,6 @@ class ContextManager:
         # "skip everything after the last cache_control marker
         # except the user prompt" flag.
         if not skip_active:
-            if file_tree:
-                messages.append({
-                    "role": "user",
-                    "content": FILE_TREE_HEADER + file_tree,
-                })
-                messages.append({
-                    "role": "assistant",
-                    "content": "Ok.",
-                })
-
             if self._url_context:
                 messages.append({
                     "role": "user",
@@ -1346,33 +1320,12 @@ class ContextManager:
             blocks.append(f"{path}\n```\n{content}\n```")
             rendered_paths.add(path)
 
-        # Append deletion markers for active-tier ``file:``
-        # entries that aren't in FileContext. These are
-        # files that were deleted from disk during the
-        # session and survive in the tracker as markers
-        # until the next ``rebuild_cache``.
-        tracker = self._stability_tracker
-        if tracker is not None:
-            from ac_dc.stability_tracker import (
-                DELETION_MARKER_TEXT,
-                Tier,
-            )
-            try:
-                active_items = tracker.get_tier_items(Tier.ACTIVE)
-            except Exception:
-                active_items = {}
-            for key in active_items:
-                if not key.startswith("file:"):
-                    continue
-                path = key[len("file:"):]
-                if path in graduated or path in rendered_paths:
-                    continue
-                if not tracker.is_deleted(key):
-                    continue
-                blocks.append(
-                    f"{path}\n```\n{DELETION_MARKER_TEXT}\n```"
-                )
-                rendered_paths.add(path)
+        # Under D36 deletion markers no longer exist —
+        # tracker entries for files removed from disk are
+        # dropped outright by the stale-removal pass during
+        # ``StabilityTracker.update``. Files that vanish
+        # mid-session simply disappear from the prompt on
+        # the next turn.
         return "\n\n".join(blocks)
 
     def _build_user_message(

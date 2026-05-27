@@ -687,30 +687,6 @@ class LLMService:
         # session existed.
         self._restored_on_startup = False
 
-        # ---- L0 snapshot fields (D28) ----
-        #
-        # L0's rendered byte sequence — the system message
-        # content the LLM receives — is captured into these
-        # fields at the L0-invalidation events enumerated in
-        # specs4/3-llm/cache-tiering.md § L0 Stability Contract.
-        # Prompt assembly reads from the snapshot, NOT from
-        # live ``SymbolIndex.get_symbol_map()`` /
-        # ``DocIndex.get_doc_map()`` calls. The live indexes
-        # are kept current per-turn (for cascade hash
-        # comparisons on per-file blocks in L1–L3 and for the
-        # next freeze event) but their byte-level drift no
-        # longer affects what the provider caches.
-        #
-        # Empty strings until the first freeze. When deferred
-        # init is active, the freeze is deferred to
-        # ``complete_deferred_init``; flat-assembly fallback
-        # covers the brief pre-freeze window.
-        self._l0_system_prompt: str = ""
-        self._l0_primary_legend: str = ""
-        self._l0_primary_map: str = ""
-        self._l0_secondary_legend: str = ""
-        self._l0_secondary_map: str = ""
-
         # Auto-restore the last session. This happens
         # UNCONDITIONALLY at construction (not deferred) so the
         # first get_current_state call returns previous messages
@@ -719,16 +695,6 @@ class LLMService:
         # independent.
         if self._history_store is not None:
             self._restore_last_session()
-
-        # Initial L0 freeze. Skipped under deferred init —
-        # the symbol index isn't attached yet. The deferred
-        # path runs the freeze in ``complete_deferred_init``
-        # after wiring the index. When not deferred (tests,
-        # synchronous startup paths), freeze immediately so
-        # the first chat request reads from a populated
-        # snapshot.
-        if not deferred_init:
-            self._freeze_l0_snapshot()
 
         # Experimental features gate. The CLI's
         # ``--experimental`` flag flows here via ``main.run``
@@ -760,132 +726,6 @@ class LLMService:
         self._cache_warmer = CacheWarmer(self)
         if not deferred_init:
             self._cache_warmer.start()
-
-    # ------------------------------------------------------------------
-    # L0 snapshot
-    # ------------------------------------------------------------------
-
-    def _freeze_l0_snapshot(self) -> None:
-        """Capture L0's rendered bytes from the live indexes.
-
-        Refreezes the five ``_l0_*`` fields from current
-        index, prompt, and cross-reference state. Called at
-        every L0-invalidation event:
-
-        - Service construction (after indexes are ready, or
-          deferred to :meth:`complete_deferred_init`).
-        - Mode switch (system prompt + primary index swap).
-        - Cross-reference enable/disable (secondary content
-          adds/removes).
-        - Settings reload that changed prompt bytes.
-        - File inclusion / user-confirmed file exclusion.
-        - Manual cache rebuild.
-
-        Reads exactly what the prompt assembler used to read
-        live: the current mode's primary index legend and
-        aggregate map, plus the opposite-mode index's
-        secondary legend and map when cross-reference is
-        active. The user's exclusion list is honoured when
-        rendering the maps (excluded files have no
-        representation in the prompt).
-
-        Side-effect-free apart from setting the snapshot
-        fields. Safe to call from any context (event loop or
-        worker thread) — performs no I/O beyond reading the
-        in-memory live indexes.
-        """
-        # System prompt — read from the context manager
-        # (review mode swap, or current mode's prompt set by
-        # switch_mode).
-        self._l0_system_prompt = self._context.get_system_prompt()
-
-        # User-exclusion set — files removed from the index
-        # via the file picker's three-state checkbox have no
-        # representation in L0.
-        from ac_dc.llm._breakdown import user_excluded_paths
-        excluded = user_excluded_paths(self)
-
-        # Primary index — whichever matches the current mode.
-        if self._context.mode == Mode.DOC:
-            try:
-                self._l0_primary_legend = (
-                    self._doc_index.get_legend()
-                )
-                self._l0_primary_map = self._doc_index.get_doc_map(
-                    exclude_files=excluded
-                )
-            except Exception as exc:
-                logger.warning(
-                    "L0 freeze: doc index read failed: %s", exc
-                )
-                self._l0_primary_legend = ""
-                self._l0_primary_map = ""
-        else:
-            if self._symbol_index is not None:
-                try:
-                    self._l0_primary_legend = (
-                        self._symbol_index.get_legend()
-                    )
-                    self._l0_primary_map = (
-                        self._symbol_index.get_symbol_map(
-                            exclude_files=excluded
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "L0 freeze: symbol index read "
-                        "failed: %s",
-                        exc,
-                    )
-                    self._l0_primary_legend = ""
-                    self._l0_primary_map = ""
-            else:
-                self._l0_primary_legend = ""
-                self._l0_primary_map = ""
-
-        # Secondary index — only populated when cross-
-        # reference is on. Routes to the opposite-mode index.
-        self._l0_secondary_legend = ""
-        self._l0_secondary_map = ""
-        if self._cross_ref_enabled:
-            try:
-                if self._context.mode == Mode.DOC:
-                    if self._symbol_index is not None:
-                        self._l0_secondary_legend = (
-                            self._symbol_index.get_legend()
-                        )
-                        self._l0_secondary_map = (
-                            self._symbol_index.get_symbol_map(
-                                exclude_files=excluded
-                            )
-                        )
-                else:
-                    self._l0_secondary_legend = (
-                        self._doc_index.get_legend()
-                    )
-                    self._l0_secondary_map = (
-                        self._doc_index.get_doc_map(
-                            exclude_files=excluded
-                        )
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "L0 freeze: secondary index read "
-                    "failed: %s",
-                    exc,
-                )
-                self._l0_secondary_legend = ""
-                self._l0_secondary_map = ""
-
-        logger.info(
-            "L0 snapshot frozen — primary_map=%d chars, "
-            "primary_legend=%d chars, secondary_map=%d chars, "
-            "system_prompt=%d chars",
-            len(self._l0_primary_map),
-            len(self._l0_primary_legend),
-            len(self._l0_secondary_map),
-            len(self._l0_system_prompt),
-        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1866,11 +1706,6 @@ class LLMService:
         """Delegate to :func:`ac_dc.llm._stability.try_initialize_stability`."""
         from ac_dc.llm._stability import try_initialize_stability
         try_initialize_stability(self)
-
-    def _measure_tracker_tokens(self) -> None:
-        """Delegate to :func:`ac_dc.llm._stability.measure_tracker_tokens`."""
-        from ac_dc.llm._stability import measure_tracker_tokens
-        measure_tracker_tokens(self)
 
     def _print_init_hud(self) -> None:
         """Delegate to :func:`ac_dc.llm._breakdown.print_init_hud`.

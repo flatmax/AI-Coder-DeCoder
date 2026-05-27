@@ -83,6 +83,10 @@ def _test_config(*, n_admit_active: int = 3) -> FluxConfig:
                 P=1.0, V_T=2000.0,
                 n_admit=0, pick_mode="smallest",
             ),
+            MembraneParams(
+                P=1.0, V_T=2000.0,
+                n_admit=0, pick_mode="smallest",
+            ),
         ),
     )
 
@@ -318,13 +322,12 @@ class TestRelaxLoop:
     """Relaxation loop driver behaviour."""
 
     def test_relax_climbs_to_top_when_unconstrained(self) -> None:
-        """Single item, all upper tiers empty → climbs to L1.
+        """Single item, all upper tiers empty → climbs to L0.
 
-        The relax loop iterates to equilibrium across all live
-        membranes. A lone item at ACTIVE with empty L3/L2/L1 has
-        positive flux at every membrane and ends up at L1 (the
-        topmost flux-reachable tier). L1→L0 is structurally
-        absent so L0 is never touched.
+        Under D36 the L1→L0 membrane is live, so the relax
+        loop's iteration to equilibrium reaches L0 — every
+        membrane on the stack has positive flux for a lone
+        item at ACTIVE with all upper tiers empty.
 
         Tokens chosen so ``Φ`` clears the unit threshold under
         the test config's V_T=2000.
@@ -338,8 +341,8 @@ class TestRelaxLoop:
             n_of=lambda f: f.n, tokens_of=lambda f: f.tokens,
             key_of=lambda f: f.key,
         )
-        # Climbed to L1 — the topmost flux-reachable tier.
-        assert files[0].tier == L1_IDX
+        # Climbed all the way to L0 — every membrane fires.
+        assert files[0].tier == L0_IDX
 
     def test_v_le_zero_does_not_fire_active_to_l3(self) -> None:
         """V ≤ 0 (lower has no/less tokens) → no flux upward.
@@ -365,13 +368,14 @@ class TestRelaxLoop:
     def test_no_flux_when_all_v_at_or_below_zero(self) -> None:
         """All membranes at V≤0 across the stack → no moves.
 
-        Place a single resident at L1 with no occupants below.
-        Every live membrane sees t_lower=0, t_upper>0 (or both
-        zero); the rectified clamp clamps Φ to zero across the
-        board and the loop self-arrests on the first pass.
+        Place a single resident at L0 (top of stack) with no
+        occupants below. Every live membrane sees t_lower=0,
+        t_upper>0 (or both zero); the rectified clamp clamps
+        Φ to zero across the board and the loop self-arrests
+        on the first pass.
         """
         cfg = _test_config()
-        files = [_StubFile("l1.py", L1_IDX, 12, 5000)]
+        files = [_StubFile("l0.py", L0_IDX, 12, 5000)]
         set_tier, moves = _files_to_callbacks(files)
         stats = relax(
             files, config=cfg,
@@ -381,7 +385,7 @@ class TestRelaxLoop:
         )
         assert stats.moves == []
         assert moves == []
-        assert files[0].tier == L1_IDX
+        assert files[0].tier == L0_IDX
 
     def test_protected_files_are_not_movers(self) -> None:
         """Files flagged protected are excluded from the mover pool."""
@@ -506,8 +510,9 @@ class TestTrackerIntegration:
 
         With the broken-tier gate retired, L2→L1 fires whenever
         Φ ≥ threshold regardless of the source of invalidation.
-        A sole heavy L2 resident with empty L1 has positive flux
-        across L2→L1 and climbs.
+        Under D36 the L1→L0 membrane is live too, so a sole heavy
+        L2 resident with all upper tiers empty climbs all the way
+        to L0 across the relax loop's iteration to equilibrium.
         """
         tracker = StabilityTracker(flux_config=_test_config())
         # Seed an L2 resident directly.
@@ -520,8 +525,8 @@ class TestTrackerIntegration:
             {"file:l2.py": _active_item("h1", 5000)}
         )
         item = tracker.get_all_items()["file:l2.py"]
-        # L2 resident climbed to L1 — empty upper, positive flux.
-        assert item.tier == Tier.L1
+        # Empty upper tiers + heavy L2 resident → climbs to L0.
+        assert item.tier == Tier.L0
 
     def test_pinned_item_protected_from_flux(self) -> None:
         """Pinned items are excluded from the mover pool."""
@@ -544,40 +549,24 @@ class TestTrackerIntegration:
         # Stayed in ACTIVE — pin protected it from the flux move.
         assert item.tier == Tier.ACTIVE
 
-    def test_deletion_marker_protected_from_flux(self) -> None:
-        """Deletion-marker items are excluded from the mover pool.
+    def test_deleted_file_removed_not_promoted(self) -> None:
+        """Files removed from disk leave the tracker entirely.
 
-        Once a file is marked deleted, its entry is preserved as
-        a constant marker and must not be promoted by flux —
-        the marker is a placeholder, not a meaningful candidate
-        for upward movement.
+        Under D36 the deletion-marker mechanism is gone — the
+        tracker prunes file: entries when their path leaves
+        existing_files. The parent directory's dir-block then
+        re-renders without the missing file's signature on the
+        next turn (block hash changes, flux re-rides).
         """
         tracker = StabilityTracker(flux_config=_test_config())
-        # Drive the item up so age is past floor.
         for _ in range(5):
             tracker.update(
                 {"file:a.py": _active_item("h1", 5000)},
                 existing_files={"a.py"},
             )
-        # Now the file gets deleted on disk → Phase 0 transitions
-        # the entry to a deletion marker.
-        tracker.update(
-            {"file:a.py": _active_item("h1", 5000)},
-            existing_files=set(),
-        )
-        # Deletion marker is in place — entry survives.
-        assert tracker.is_deleted("file:a.py")
-        marker_tier_before = tracker.get_all_items()["file:a.py"].tier
-        tracker.update(
-            {"file:a.py": _active_item(
-                tracker.get_all_items()["file:a.py"].content_hash,
-                1000,
-            )},
-            existing_files=set(),
-        )
-        item = tracker.get_all_items()["file:a.py"]
-        # Marker stays where the deletion put it — no flux move.
-        assert item.tier == marker_tier_before
+        # File deleted on disk + dropped from active items.
+        tracker.update({}, existing_files=set())
+        assert tracker.has_item("file:a.py") is False
 
     def test_flux_move_change_log_format(self) -> None:
         """Successful flux move logs as 'src → dst: key (flux)'.
@@ -599,16 +588,17 @@ class TestTrackerIntegration:
             for c in flux_entries
         )
 
-    def test_l1_to_l0_membrane_absent(self) -> None:
-        """L1→L0 is structurally absent — nothing climbs into L0 via flux.
+    def test_l1_to_l0_membrane_present(self) -> None:
+        """L1→L0 is live under D36 — flux promotes into L0.
 
-        L0 is content-typed (D27); promotion into L0 is
-        ``backfill_l0_after_measurement``'s sole responsibility.
-        LIVE_MEMBRANES omits the (L1_IDX, L0_IDX) pair.
+        The legacy backfill_l0_after_measurement mechanism was
+        retired alongside the L0-snapshot machinery. Under D36
+        L0 is just another flux tier; LIVE_MEMBRANES includes
+        the (L1_IDX, L0_IDX) pair.
         """
-        assert (L1_IDX, L0_IDX) not in LIVE_MEMBRANES
-        # Verify integration: an L1 resident does not climb to
-        # L0 under any flux — there is no membrane for it.
+        assert (L1_IDX, L0_IDX) in LIVE_MEMBRANES
+        # Verify integration: a heavy L1 resident with empty
+        # L0 climbs via flux.
         tracker = StabilityTracker(flux_config=_test_config())
         tracker._items["file:l1.py"] = TrackedItem(
             "file:l1.py", Tier.L1, n_value=12,
@@ -617,6 +607,5 @@ class TestTrackerIntegration:
         tracker.update(
             {"file:l1.py": _active_item("h1", 5000)}
         )
-        # L1 resident stays at L1 — there is no membrane
-        # capable of moving it into L0.
-        assert tracker.get_all_items()["file:l1.py"].tier == Tier.L1
+        # L1 resident climbs to L0 — empty upper, positive flux.
+        assert tracker.get_all_items()["file:l1.py"].tier == Tier.L0

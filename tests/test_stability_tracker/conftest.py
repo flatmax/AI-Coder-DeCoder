@@ -30,11 +30,9 @@ from __future__ import annotations
 import pytest
 
 from ac_dc.stability_tracker import (
-    DELETION_MARKER_TEXT,
     StabilityTracker,
     Tier,
     TrackedItem,
-    _DELETION_MARKER_HASH,
     _TIER_CONFIG,
 )
 

@@ -4,13 +4,27 @@ Stability-based tiering of prompt content to align with provider cache breakpoin
 
 The cascade dynamics are governed by an **electrodiffusion-flux model**: tier boundaries are treated as semi-permeable membranes, and per-membrane promotion is driven by the token-mass imbalance between the lower and upper tier. The model is the cache-tiering specialisation of the multi-membrane controller derived in Flax (2026), *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*. The original derivation lives in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) (linked here for the full discussion); §4 below distils what the implementation needs.
 
+Per **D36**, the cache items below the system prompt are **per-directory dir-blocks** rather than monolithic aggregate maps. The system prompt is the only non-flux head anchor; every other block — including the symbol/doc/plain-file listings that D27 had pinned to L0 — rides the membrane.
+
 ## Content Categories Tracked
 
-- Files — full content
-- Symbol map entries — compact code structure per file
-- Doc outline entries — compact doc structure per file
-- History messages — conversation pairs
-- URL content — fetched web pages, GitHub repos, documentation (design target; initial implementation may always include URLs in the uncached section)
+The cache holds three classes of content. Every indexed file is represented in the prompt at every turn, in exactly one of these forms.
+
+**Dir-blocks** — the bulk of the cache. One block per `(directory, content_type)` where `content_type ∈ {symbols, docs, plain_files}`:
+
+- `symbols:<dir>` — concatenated symbol-table entries for source files in `<dir>` that aren't currently full-text in Active.
+- `docs:<dir>` — concatenated doc-outline entries for documents in `<dir>` that aren't currently full-text in Active.
+- `plain_files:<dir>` — list of filenames in `<dir>` for files that have neither a symbol table nor a doc index (configs, data, assets, fixtures). The union of `plain_files` blocks across the repo replaces the synthetic `meta:file_tree` entry from earlier revisions.
+
+A file in Active as full text is **removed** from its dir-block — the block shrinks and is teleported (see Edit Invariant). When all files in a directory are pulled into Active full-text, that dir-block has zero entries and is removed entirely from the cache, not retained as an empty block.
+
+**Active full-file content** — `file:<path>` entries in Active when the user has selected a file for editing. Carry the full text. Pinned against silent eviction during edits.
+
+**History messages** — conversation pairs. Graduate to L3 only via piggyback on Active→L3 flux (see History Graduation).
+
+URL content is a design target (currently in Active only).
+
+**What is no longer tracked.** D27's two aggregate maps (`aggregate symbol map`, `aggregate doc map`) and the synthetic `meta:file_tree` entry are replaced by the dir-block set. D27's deletion-marker entries are removed — file deletion shrinks the dir-block directly, no marker needed.
 
 ## Tracker Instance Scope
 
@@ -32,61 +46,43 @@ When the target mode's index isn't ready (doc index still building on first swit
 
 ## Tier Structure
 
-- L0 — content-typed, never invalidated by the cascade — system prompt + aggregate symbol map + aggregate doc map
-- L1 — most stable promoted concrete content
-- L2 — stable promoted concrete content
-- L3 — entry tier for graduated promoted content
-- Active — recently changed or new, not cached
+- L0 — uppermost cached tier; the controller drives the hottest dir-blocks here
+- L1 — second-tier cached content
+- L2 — third-tier cached content
+- L3 — entry tier for newly-graduated content
+- Active — recently changed or new, not cached. Holds full-file text for files the user has selected for editing, plus non-graduated history.
 
-Each tier maps to a single cached message block in the LLM request.
+Each tier maps to a single cached message block in the LLM request. The system prompt sits before L0 as a non-flux head anchor — it is hashed and rendered once per session and never moves.
 
-L0 is content-typed: it always contains the system prompt and the aggregate structural maps over every indexed file. The cascade does not place items into L0; the cascade does not rewrite L0. L0's byte sequence is a function of the index state captured at session start (or after explicit `rebuild_cache`), and is otherwise fixed for the session.
-
-L1, L2, L3 hold *promoted concrete content* — full file text, fetched URL content, and graduated history. Symbol blocks and doc blocks never appear in L1–L3; they live only in L0's aggregate maps.
+All four cached tiers (L0–L3) hold dir-blocks. Per **D36**, L0 is no longer content-typed: flux can promote any dir-block all the way to L0, and the edit-invariant teleport can demote any dir-block back to Active when its contents change.
 
 The four membranes between adjacent tiers are:
 
 | Index | Membrane | Notes |
 |---|---|---|
-| 0 | Active → L3 | Admission gated by `n_admit` (default 3) — files must reach minimum age before any flux evaluation |
-| 1 | L3 → L2 | Pure flux — no admission floor |
-| 2 | L2 → L1 | Pure flux — no admission floor |
-| 3 | L1 → L0 | **Disabled.** L0 is content-typed; cascade-mobile content is ineligible for L0 |
+| 0 | Active → L3 | Admission gated by `n_admit` (default 3) — items must reach minimum age before graduating. Admission-only — no flux equation. |
+| 1 | L3 → L2 | Flux — rectified GHK, no admission floor |
+| 2 | L2 → L1 | Flux — rectified GHK, no admission floor |
+| 3 | L1 → L0 | Flux — rectified GHK, no admission floor. **Enabled** under D36 (was disabled under D27). |
 
-## L0 Stability Contract
+## System Prompt Anchor
 
-L0's rendered byte sequence is captured at session start and refrozen only at explicit invalidation events. Routine session activity (file edits, selection toggles, URL fetches, history compaction, session loads, OS-level file changes) does NOT invalidate L0.
+The system prompt sits before L0 as a fixed prefix head. It is hashed (without legend bytes) and never invalidated by the cascade. It changes only on:
 
-### What invalidates L0
+1. **Application restart**.
+2. **Settings reload that changes the system prompt text**. Reloads that leave the prompt bytes unchanged are no-ops.
+3. **Mode switch** (code → doc or doc → code) — the prompt text swaps.
+4. **Cross-reference enable/disable** — only when the prompt text changes (legends are tracked separately).
 
-The complete enumerated list:
+Routine session activity (file edits, selection toggles, dir-block flux, history compaction, session loads, OS-level file changes) does NOT touch the system prompt's bytes.
 
-1. **Application restart** — the snapshot is in-memory and is rebuilt fresh on each server start.
-2. **Explicit cache rebuild** (`rebuild_cache` RPC, localhost-only). Ideally extended to fire automatically post-commit; see the Manual Cache Rebuild section.
-3. **Mode switch** (code → doc or doc → code). The system prompt swaps and the primary aggregate map swaps from symbol-index to doc-index (or vice versa); L0's bytes change wholesale and must be refrozen.
-4. **Cross-reference enable**. Adds the secondary index's aggregate map and legend to L0 alongside the primary; L0's bytes grow.
-5. **Cross-reference disable**. Removes the secondary content from L0; L0's bytes shrink.
-6. **Settings reload that changes the system prompt text**. Settings reloads that leave the prompt bytes unchanged do NOT invalidate L0.
-7. **File inclusion** (a previously-excluded file is added back to the index via the file picker's three-state checkbox).
-8. **File exclusion** (a file is removed from the index via the file picker's three-state checkbox), **subject to user confirmation**. Excluding files mid-session is not common, and invalidating L0 is expensive. The webapp prompts the user with a three-button dialog: **Apply now** / **Defer** / **Cancel**. A "Don't ask again" checkbox persists either Apply now or Defer as the default; Cancel never persists. The stored preference is keyed `ac-dc-l0-exclude-pref` in browser localStorage with values `ask` (default), `always`, or `never`. The Settings tab can reset the preference back to `ask` via a public `resetL0ExcludePref()` method on the files-tab component.
+L0, by contrast, **is** a flux tier under D36 — dir-blocks move into and out of L0 whenever V/c warrant. The previous L0-stability contract (D27/D28: refrozen only at enumerated events) is **deleted**. Cache-write cost on L0 is bounded by the controller's deadband (Φ < threshold) and rectification clamp (Φ ≥ 0), not by an explicit freeze.
 
-### What does NOT invalidate L0
+### Why this is acceptable under the membrane controller
 
-- File edits, creations, or deletions performed during the session — L0's aggregate map may show a stale signature for an edited file. The truthful full text of edited files is always present in Active or a lower cached tier (see the edit invariant below). The system prompt's "How Files Appear in This Prompt" clause instructs the LLM to treat full text in Working Files as authoritative when it disagrees with the structural map.
-- Selection toggles (selecting or deselecting an unmodified file). The aggregate map in L0 includes every indexed file regardless of selection state.
-- URL fetches.
-- History compaction.
-- Session loads.
-- OS-level file changes (a file removed by `git rm` or terminal). The deletion-marker mechanism (see the Deletion Markers section) bridges the gap until the next L0 refresh.
-- Any item entering or leaving L1, L2, L3, or Active. The cascade does not touch L0.
+D27 froze L0 because the N-counter cascade had no global signal — each tier-pair promoted independently and there was no negotiation when one tier filled up, so allowing L0 to be touched by the cascade meant unbounded cache-write churn. The membrane controller has both a global signal (V) and a self-arresting deadband, so it can manage all four cached tiers uniformly without runaway. Quiet turns produce Φ < threshold on every membrane and fire no moves. Active turns (edit applied, file selected) produce one or two block migrations and quiesce.
 
-### Why this matters
-
-L0 is typically the largest single cached block in the prompt. Cache-write cost is paid every time L0's bytes change. Restricting invalidation to the enumerated events keeps the L0 cache stable across the long tail of routine session activity.
-
-### Implementation note
-
-L0's content is held in a frozen snapshot on the LLM service alongside the live indexes. Per-turn streaming reads from the snapshot for prompt assembly; the live indexes stay current (per-turn re-indexing remains in place) so per-file blocks rendered in L1–L3 reflect current edits, and so the next L0-invalidation event can refresh from accurate live data. See decision D28 for the snapshot-vs-live-index split.
+The system prompt is the only fixed point because it is the cache-prefix root — provider prefix caches require a stable head, and the prompt text is small enough that its rare re-cache cost is negligible. Everything below it is allowed to move.
 
 ## Per-Item State
 
@@ -106,24 +102,41 @@ Every tracked item carries:
 
 ## Edit Invariant
 
-When a file's content hash changes (LLM edit applied, or future user-side edit detected):
+When the user selects a file for editing (full-text inclusion in Active):
 
-- `file:<path>` is **teleported to Active** with `n = 0` and `arrived_at_turn` reset to the current turn (the membrane analogue of "ion enters bulk solution"). This is the only downward force in the system; flux carries content upward only.
-- The entry is **pinned** — stale cleanup and automatic eviction skip it
-- It rides the cascade upward via flux as it stabilises (see §4)
-- Only application restart or explicit cache rebuild can clear pinned files
+- A `file:<path>` entry is created in Active with `n = 0`, carrying the full file text. The entry is **pinned** — stale cleanup and automatic eviction skip it.
+- The file's entry in its directory's dir-block (`symbols:<dir>`, `docs:<dir>`, or `plain_files:<dir>` depending on file type) is **removed**. The dir-block's contents change, so the dir-block is teleported to Active with `n = 0` (the membrane analogue of "ion enters bulk solution"). It rides the cascade upward via flux as it stabilises (see §4).
+- If the dir-block now has zero entries (every file in the directory is in Active full-text), it is **removed entirely** from the cache rather than retained as an empty block.
 
-Unmodified files can still be deselected by the user as today; deselection of an unmodified file removes its `file:<path>` entry from tracking. The pin only protects files that have been edited during the current session.
+When the user later **deselects** an edited file, or applies edits and the file leaves Active:
 
-The edit invariant guarantees that the truthful, current text of every edited file is always present somewhere in the prompt — either in Active (just edited) or in a graduated lower tier. The LLM never has to reason about a file whose only representation is a stale L0 symbol-block.
+- The `file:<path>` entry is removed from Active.
+- The file's entry rejoins its dir-block on the next freeze. The dir-block grows by one entry, content changes, and is again teleported to Active and re-rides flux upward.
+
+When a file's content hash changes while it is in Active (edit applied):
+
+- The `file:<path>` entry is updated in place (still in Active, still pinned). Hash mismatch resets `n = 0`.
+- The dir-block is unaffected (the file is not represented there while in Active full-text).
+
+When a file is **deleted from disk**:
+
+- If the file was in Active as full-text, its `file:<path>` entry is removed.
+- The file's entry is removed from its dir-block. The dir-block shrinks, contents change, and it is teleported to Active to re-ride flux.
+- No deletion-marker entry is created (D27's marker scheme is removed under D36 — there is no monolithic L0 to be stale against).
+
+**The pin flag** applies only to `file:<path>` entries in Active. Dir-blocks carry no pin flag — they are reconstructed from the live index on every freeze and inherit consistency from the index.
+
+**The unifying rule.** Content change ⇒ teleport to Active. "Size change" (dir-block grows or shrinks because a file moved into or out of Active) is a special case of "contents changed." The truthful, current representation of every indexed file is always present in the prompt — either as full text in Active (selected for edit) or as a dir-block entry somewhere in L0–L3 (the union of all dir-blocks covers the whole repo).
 
 ## History Graduation
 
 - History is immutable, so waiting on N is unnecessary — graduation is controlled
-- **Piggyback on L3 invalidation** — if L3 is already being rebuilt this cycle (any membrane fired into or out of L3), all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
-- **Never** — if cache target is zero, or if L3 is not already being rebuilt this cycle, history stays active
+- **Piggyback on Active→L3 flux** — when any Active→L3 promotion fires this cycle (a `file:<path>` graduating, or a dir-block teleported by edit/deletion graduating), all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
+- **Never** — if cache target is zero, or no Active→L3 flux fired this cycle, history stays active
 
-Active history is not forced to graduate on its own. A long conversation that never happens to coincide with an L3 invalidation stays in the uncached active section until compaction deals with it. This is deliberate. `cache_target_tokens` is a per-tier caching floor (typically a few thousand tokens), not a conversation-length cap — comparing total active history against it would force graduation on almost every turn of any real conversation, tearing down the L3 cache block on every request. Compaction, which has its own much larger `trigger_tokens` budget and purges tracker history when it runs, is the correct owner of "active history is too big".
+Active history is not forced to graduate on its own. A long conversation that never happens to coincide with an Active→L3 firing stays in the uncached active section until compaction deals with it. This is deliberate. `cache_target_tokens` is a per-tier caching floor (typically a few thousand tokens), not a conversation-length cap — comparing total active history against it would force graduation on almost every turn of any real conversation, tearing down the L3 cache block on every request. Compaction, which has its own much larger `trigger_tokens` budget and purges tracker history when it runs, is the correct owner of "active history is too big".
+
+The piggyback rule's effect is unchanged from D27 in the steady state: stable conversations don't churn the L3 cache block, because steady-state turns produce no Active→L3 flux at all. Under D36 the trigger generalises slightly — dir-block teleports caused by edits and deletions now also count as Active→L3 firings, so history piggyback hops a ride on those events too rather than only on `file:<path>` graduations.
 
 ## Cache Target Tokens
 
@@ -155,7 +168,7 @@ GHK with a hard rectification clamp on the lower side. The exponential weighting
 - For V/V_T > 50: evaluate the asymptote `Φₘ → P · V · cₗ` (denominator → 1; cᵤ term vanishes).
 - For V/V_T < −50: evaluate the downward asymptote `Φₘ → P · V · cᵤ` (which is then clamped to 0 by rectification).
 
-The rectification clamp makes flux upward-only — downward motion happens exclusively via the edit invariant (teleport-to-active) and explicit invalidations (selection change, deletion marker). Earlier revisions exposed `linear` and `bidirectional-ghk` variants; both are retired. Flax 2026 §6.3 finds the bidirectional path empirically dead at the headline operating point — the rectification clamp is *free* — and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default.
+The rectification clamp makes flux upward-only — downward motion happens exclusively via the edit invariant (teleport-to-active for `file:<path>` entries on hash mismatch, and for dir-blocks on contents-changed) and explicit invalidations (selection change, file deletion). Earlier revisions exposed `linear` and `bidirectional-ghk` variants; both are retired. Flax 2026 §6.3 finds the bidirectional path empirically dead at the headline operating point — the rectification clamp is *free* — and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default.
 
 ### 4.2 Per-membrane parameters
 
@@ -164,7 +177,7 @@ Every membrane carries its own (P, V_T, n_admit, pick_mode). Defaults are tuned 
 - Active → L3: **admission_only**, n_admit=3, pick_mode="oldest" — age-gated admission, no flux equation
 - L3 → L2: P=1.616399379428934e-06, V_T=98952.34312610888 tokens, n_admit=0, pick_mode="smallest"
 - L2 → L1: P=1.616399379428934e-06, V_T=98952.34312610888 tokens, n_admit=0, pick_mode="smallest"
-- L1 → L0: **disabled** — never fires (L0 content-typed contract)
+- L1 → L0: P=1.616399379428934e-06, V_T=98952.34312610888 tokens, n_admit=0, pick_mode="smallest" — **enabled** under D36 (was disabled under D27/D28)
 
 `n_admit` is an admission floor: a file can only be picked as a mover across this membrane if `f.n ≥ n_admit`. On the Active → L3 membrane (admission_only) it is a strict gate; on the flux membranes above it is a soft prefer-aged-movers rule (the loop retries without the floor if no aged candidate exists, since the flux equation has already decided promotion is warranted).
 
@@ -181,10 +194,10 @@ Each turn, after edits have teleported and `n` has aged, the cascade runs **iter
 ```
 repeat:
   moved := False
-  for m in [Active→L3, L3→L2, L2→L1]:        # L1→L0 is disabled
+  for m in [Active→L3, L3→L2, L2→L1, L1→L0]: # all four enabled under D36
     if m.admission_only:                       # Active→L3 path
       pick mover from lower with n ≥ n_admit
-        honouring pick_mode, pin/marker/history rules
+        honouring pick_mode, pin/history rules
       if no eligible mover:
         continue
       move mover to upper
@@ -193,9 +206,9 @@ repeat:
 
     recompute Φₘ from current tier state      # rectified — Φ ≥ 0 always
     if Φₘ < flux_threshold:                    # default 1.0 — "one
-      continue                                #   file-equivalent of pressure"
+      continue                                #   block-equivalent of pressure"
     pick mover from lower
-      honouring pick_mode, n_admit, pin/marker rules
+      honouring pick_mode, n_admit, pin rules
       (retry without n_admit if no aged candidate)
     if no eligible mover:
       continue
@@ -221,19 +234,19 @@ When a membrane has decided to fire (|Φ| ≥ threshold and the direction passes
 - `"fifo"` — smallest `arrived_at_turn`. Pure arrival-order.
 - `"random"` — uniform among admission-eligible files. Ablation only.
 
-Pinned files and deletion markers are eligible to participate in V/c counts (they contribute mass to their tier) but are skipped by the mover-selection step — they cannot be promoted *out of* their current tier as ordinary movers, and `mark_deleted` / `pin_file` flag entries to that effect. This preserves the edit invariant under flux dynamics: an edited file's text stays in whatever cached tier it has reached, and deletion markers remain in place until rebuild.
+Pinned `file:<path>` entries (edited files held in Active) are eligible to participate in V/c counts (they contribute mass to their tier) but are skipped by the mover-selection step — they cannot be promoted *out of* Active as ordinary movers, and `pin_file` flags entries to that effect. This preserves the edit invariant under flux dynamics: an edited file's text stays in Active until edits are done. Dir-blocks have no equivalent pin — they are reconstructed from the live index at every freeze and inherit their consistency from the index.
 
 ### 4.5 Active → L3 graduation
 
-The Active → L3 membrane is the entry point for new content into the cached part of the cascade. It is **admission_only**: no flux equation, no V coupling, no threshold deadband. A file graduates when (and only when) it has aged ≥ `n_admit` turns since registration or last edit (default `n_admit = 3`). The `pick_mode` is `"oldest"` so the longest-aged eligible item promotes first when several are ready in the same turn.
+The Active → L3 membrane is the entry point for new content into the cached part of the cascade. It is **admission_only**: no flux equation, no V coupling, no threshold deadband. An item (a `file:<path>` entry or a teleported dir-block) graduates when (and only when) it has aged ≥ `n_admit` turns since registration or last teleport (default `n_admit = 3`). The `pick_mode` is `"oldest"` so the longest-aged eligible item promotes first when several are ready in the same turn.
 
-Why not the flux equation here? In AC-DC4, active is **structurally lighter** than the cached tiers — files only sit in active until they age past `n_admit`, then leave for L3+, so V (= t_active − t_L3) is permanently negative in steady state. The rectified flux equation responds to V ≥ 0 only, so it would never fire on this membrane. The flux model is a fit to inter-cache *balancing*; admission is fundamentally a *gating* problem (has this file proven stable enough to commit to cache?), and the right primitive for that is an age threshold, not a mass differential.
+Why not the flux equation here? In AC-DC4, Active is **structurally lighter** than the cached tiers — items only sit in Active until they age past `n_admit`, then leave for L3+, so V (= t_active − t_L3) is permanently negative in steady state. The rectified flux equation responds to V ≥ 0 only, so it would never fire on this membrane. The flux model is a fit to inter-cache *balancing*; admission is fundamentally a *gating* problem (has this item proven stable enough to commit to cache?), and the right primitive for that is an age threshold, not a mass differential.
 
 `history:*` items are excluded from this membrane (filtered as protected in the relax loop). History graduates only via the piggyback path — see § History Graduation — so a stable conversation does not rewrite the L3 cache block on every turn.
 
 ### 4.6 Demotion semantics
 
-The only downward force is the edit invariant: hash mismatch teleports a file to Active with `n=0`. There is no controller-driven demotion. A file that should logically "cool" but is never edited stays cached indefinitely, climbing toward L1. Explicit invalidations (selection change, deletion marker, history purge) move content downward through deletion-and-reregistration, not through reverse flux.
+The only downward force is the edit invariant: contents change → teleport the affected entry (`file:<path>` or dir-block) to Active with `n=0`. There is no controller-driven demotion. An item that should logically "cool" but is never touched stays cached indefinitely, climbing toward L0 under flux. Explicit invalidations (selection change, file deletion, history purge) propagate via the same teleport mechanism — the affected dir-block or `file:<path>` entry lands in Active and re-rides flux.
 
 ### 4.7 What was removed
 
@@ -242,7 +255,11 @@ The earlier cascade had several mechanisms that the membrane model subsumes or e
 - **Anchoring** — items below the cache-target line had their N frozen. Replaced by the flux equation: V is computed from total tier tokens, not item-by-item, so individual items don't need a frozen-N flag. Tier-internal ordering is the mover-pick rule, not an anchor list.
 - **N-cap-at-promote-when-stable-above** — items whose N grew unbounded under stable upstream conditions had their N capped. Replaced by `n` being a pure age counter (no semantic role in promotion eligibility above n_admit) — there's nothing to cap.
 - **Post-cascade underfill demotion** — tiers below the cache target had items demoted to avoid wasting a cache breakpoint. Removed: prompt assembly checks tier token totals and elides cache breakpoints for under-target tiers, but tier *contents* are not rearranged on that basis.
-- **`backfill_l0_after_measurement`** — retained but only fires on cross-reference activation (it never participated in per-turn cascade dynamics in the first place; see §10).
+- **L0 content-typing (D27)** — L0 was reserved for the system prompt and aggregate maps. Under D36 L0 is a flux tier; the system prompt sits before L0 as the only non-flux head anchor.
+- **L0 frozen snapshot (D28)** — there is no L0 snapshot under D36; live indexes feed dir-block reconstruction directly at freeze events.
+- **`backfill_l0_after_measurement`** — removed entirely. Its sole remaining caller (cross-reference activation) is replaced by a normal block-registration pass that adds the secondary index's dir-blocks to the membrane.
+- **Deletion markers (D27)** — removed. File deletion shrinks the relevant dir-block directly; no marker entry is needed because there is no monolithic L0 aggregate to be stale against.
+- **`meta:file_tree` synthetic entry** — removed. The union of `plain_files:<dir>` blocks across the repo replaces it.
 
 ## §5 — Configuration
 
@@ -253,7 +270,8 @@ The membrane controller is configured via `app.json`:
   "cache_tiering": {
     "flux_threshold": 1.0,
     "membranes": [
-      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 2, "pick_mode": "smallest"},
+      {"admission_only": true, "n_admit": 3, "pick_mode": "oldest"},
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest"},
       {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest"},
       {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest"}
     ]
@@ -261,8 +279,8 @@ The membrane controller is configured via `app.json`:
 }
 ```
 
-- `flux_threshold`: minimum Φ at which a membrane fires (default 1.0 — "one file-worth of driving force"). Smaller thresholds fire more aggressively.
-- `membranes`: array of three per-membrane parameter blocks, in cascade order (Active→L3, L3→L2, L2→L1). The L1→L0 membrane is disabled by spec and not configurable. Missing or partial blocks fall back to defaults.
+- `flux_threshold`: minimum Φ at which a membrane fires (default 1.0 — "one block-worth of driving force"). Smaller thresholds fire more aggressively.
+- `membranes`: array of four per-membrane parameter blocks, in cascade order (Active→L3, L3→L2, L2→L1, L1→L0). The first is admission-only (no flux equation, age gate only); the rest use rectified GHK. Under D36 the L1→L0 membrane is **enabled** (was disabled under D27/D28). Missing or partial blocks fall back to defaults.
 
 Only the rectified-GHK variant is supported — the linear and bidirectional-GHK forms from earlier revisions were retired when the synth-tuner's headline rectified fit landed as the production default.
 
@@ -274,126 +292,102 @@ Parameter values are pinned at tracker construction. Mid-session reconfiguration
 
 Built on each request — the set of items explicitly in active (uncached) context:
 
-- Selected file paths (full content)
-- Index entries (symbol or doc, depending on mode) for selected files — excluded from the compact map output since full content is present
+- Selected file paths (full content) — `file:<path>` entries
+- Dir-blocks teleported by recent edits or deletions, still climbing back toward stability
 - Non-graduating history messages
 - Fetched URL content (target design)
 
-Index entries for *unselected* files are never in this list — they live in whichever cached tier they have earned through initialization or promotion.
+A file selected for editing has its full text in the Active list AND is removed from its dir-block; the dir-block (now without that file) sits wherever flux has placed it (typically also Active, freshly teleported, on its way back up). There is no "wide exclude" coordination needed because the file's content lives in exactly one place per turn.
 
 ## Initialization
 
-- On startup, L0 is populated with the system prompt + aggregate symbol map + aggregate doc map. The aggregate maps are formed by concatenating every indexed file's symbol/doc block in deterministic order.
-- L1/L2/L3 start empty. Files enter Active when selected and graduate upward through flux as they stay stable. There is no startup distribution of files into cached tiers — rebuild is the explicit mechanism for that.
+- On startup, after the symbol/doc indexes are built, dir-blocks are constructed from the current index state (one block per `(directory, content_type)` for `content_type ∈ {symbols, docs, plain_files}`).
+- Dir-blocks are seeded into L0/L1/L2/L3 using a per-directory **mtime prior**:
+  - Most recently modified directory tree → seeded into L1.
+  - Older directories → seeded into L2 / L3 by mtime quantile.
+  - All-time-cold directories → seeded into L3 (controller may push them up later).
+- L0 starts empty of dir-blocks; flux fills it as V/c warrant over the first few turns. The system prompt sits before L0 and is rendered from turn one regardless.
 - No persistence — rebuilt fresh each session.
 
-### Why no startup file distribution
+### Why mtime-based seeding
 
-Earlier designs distributed every indexed file across L0/L1/L2/L3 at startup using reference-graph clustering. That design optimised for "every cached tier is full from turn one", but interacted badly with the routine churn of selection toggles and edits — every selection change would shift bytes in cached tiers and trigger demotion cascades.
+The mtime prior is heuristic, not load-bearing. Flux re-sorts dir-blocks within a few turns regardless of where they start. Two alternatives were considered and rejected:
 
-Under the L0-content-typed model, the optimisation is no longer needed:
+- **All-cold-into-L3**: cleanest (no heuristic), but wastes a session on warm-up — every dir-block has to climb the full cascade before settling.
+- **Tree-depth-based**: shallower directory paths → higher tier. Tempting but weak — root-level config files are not necessarily hotter than deep core modules. Tree depth correlates with nothing reliable.
 
-- L0 is full from turn one regardless (it's the aggregate maps).
-- L1/L2/L3 fill organically as the user selects files and the cascade graduates them via flux.
-- The user can trigger immediate redistribution via the rebuild button if they prefer warm caches over the natural graduation path.
+mtime gives the first session a usable warm cache for ~5 lines of seed code, and is forgiving (wrong choices are corrected by flux quickly).
 
-This trades a small amount of "cache warmth on turn one" for substantially more cache stability across every subsequent turn.
+### Agent inheritance
+
+When an agent is spawned (parallel-agents, see [parallel-agents.md](../7-future/parallel-agents.md)), the agent's tracker copies the parent's current tier distribution at spawn time — a snapshot of which dir-blocks sit in which tier. Agent flux thereafter is independent; the agent rebalances toward its own working set without affecting the parent. Agents do not inherit pinned `file:<path>` entries (those are scope-bound to the parent's edit invariant).
 
 ## Manual Cache Rebuild
 
-A user-initiated disruptive operation that rebuilds L0 from the current index state, wipes the L1/L2/L3/Active assignments (except history), redistributes promoted content using the reference-graph clustering algorithm, and clears all edit-invariant pin flags. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
+A user-initiated disruptive operation that wipes all tier assignments (except history), reconstructs the dir-block set from the current index state, re-seeds dir-blocks via the mtime prior, and clears all edit-invariant pin flags. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
 
-Rebuild is the only mechanism (besides application restart) that causes L0 to be invalidated. Post-commit triggers for automatic rebuild are a planned extension.
+Rebuild and application restart are the explicit reset points. Post-commit triggers for automatic rebuild are a planned extension.
 
 ### Sequence
 
 Atomic from the RPC caller's perspective:
 
 - Preserve history entries in the current tracker (history graduation is controlled separately below)
-- Wipe everything else — file, URL, deletion-marker, and any residual entries
+- Wipe all `file:<path>` entries and dir-block entries from L0/L1/L2/L3/Active
 - Clear all edit-invariant pin flags — rebuild is the explicit "fresh start" that supersedes pinning
-- Re-extract aggregate symbol map and aggregate doc map from the current index state — these populate L0 alongside the system prompt
-- Mark L1/L2/L3/Active broken so any follow-up cascade can freely rebalance
-- Load content for selected files into file context so real hashes and token counts can be computed
-- Distribute selected files across L1/L2/L3 — bin-pack by current tier token count. Files cannot land in L0 (content-typed for structural maps only) and don't land in Active (rebuild's purpose is to skip the graduation wait)
-- Re-seed cross-reference items into L0 if cross-reference mode is active
-- **Graduate history via piggyback** — rebuild is treated as a disruptive event equivalent to L3 already being rebuilt this cycle. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3
+- Reconstruct dir-blocks (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) from the current index state
+- Seed dir-blocks across L0/L1/L2/L3 by mtime prior (see Initialization)
+- Load content for selected files into file context so real hashes and token counts can be computed; selected files land in Active as `file:<path>` entries and are removed from their dir-blocks
+- If cross-reference mode is active, also seed the secondary index's dir-blocks via the same mtime prior
+- **Graduate history via piggyback** — rebuild is treated as equivalent to a fresh Active→L3 firing this cycle. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3
 - Mark the tracker as initialized so subsequent chat requests skip the lazy-init path
 
 ### What Rebuild Does Not Do
 
-- **Does not run the relaxation loop.** The deterministic placement computed during rebuild is the final state. Running flux would recompute V from the just-placed contents and immediately undo some of the placement. The next real chat request runs the relaxation loop normally and rebuilt tiers behave identically to any other tier state.
+- **Does not run the relaxation loop.** The mtime-seeded placement is the final state for this turn. Running flux would recompute V from the just-placed contents and immediately undo some of the placement. The next real chat request runs the relaxation loop normally and rebuilt tiers behave identically to any other tier state.
 - **Does not change file selection.** The user's selected-files list is untouched.
 - **Does not change session state.** History content, session ID, and review state are preserved.
 - **Does not preserve pins.** Files that were pinned by the edit invariant lose pin status — rebuild is the explicit reset point.
 - **Does not persist.** Like startup initialization, the rebuilt state lives only in memory.
 
-### Orphan File Handling
-
-Selected files that aren't recognised by the primary index (non-source files in code mode, or source files in doc mode) bypass tier placement and would otherwise land in active. Rebuild's distribution pass places them in L1/L2/L3 via bin-packing tracked by current tier token count.
-
 ## Cross-Reference Mode
 
-- User toggle — primary mode keeps its index; the *other* index's file blocks are added alongside
-- Separate initialization pass appends cross-reference items without disturbing primary index items
-- Both legends included in L0 with appropriate headers
-- Tier content dispatch is prefix-based (symbol vs doc), not mode-based — the same tier can contain a mix of items from both indexes
-- Deactivation — cross-reference items removed, affected tiers marked broken, no full rebalancing cascade
+- User toggle — primary mode keeps its dir-blocks; the *other* index's dir-blocks are added alongside
+- Activation registers the secondary index's `symbols:<dir>` (or `docs:<dir>`) blocks with the membrane controller, seeded via the mtime prior. They participate in flux uniformly with the primary blocks.
+- Deactivation removes the secondary dir-blocks from the membrane.
+- Tier content dispatch is prefix-based (`symbols:` vs `docs:` vs `plain_files:`), not mode-based — the same tier can contain a mix of blocks from both indexes
 - Toggle is always available once startup completes
 
-## L0 Backfill (cross-reference activation only)
-
-Under the L0-content-typed model, L0 holds the system prompt + aggregate maps and is not subject to per-turn backfill. The aggregate maps include every indexed file by construction; there is no notion of "L0 underfilled" during normal operation.
-
-The `backfill_l0_after_measurement` mechanism remains in the codebase for one specific path: **cross-reference activation**. When the user enables cross-reference mode, the opposite-mode index's most-connected items are promoted into L0 alongside the primary aggregate map. The backfill ranks candidates by reference count and stops at a configurable token overshoot. This is a structural-content operation (cross-reference items are symbol/doc blocks, which legitimately belong in L0), not a file-content operation.
-
-The relaxation loop does not run L0 backfill per turn. L0 is only modified by:
-
-- Application restart
-- Explicit `rebuild_cache`
-- Cross-reference activation/deactivation (touches L0's secondary content)
-
-## Deletion Markers
-
-When a file is deleted (LLM edit, user-side `git rm`, terminal removal, agent edit), its `file:<path>` entry transitions into a deletion-marker entry rather than being removed from the tracker:
-
-- **Content** — a fixed string indicating the file has been deleted this session, e.g. `[deleted in this session — see L0 symbol/doc map for last-known structure]`
-- **Hash** — a deterministic hash of the marker content (so deletion-markers are stable across requests and don't churn the cascade)
-- **Tier** — preserved at whatever tier the file was occupying when deleted; the marker rides flux upward as the cascade stabilises
-- **Lifetime** — survives until the next application restart or explicit `rebuild_cache`. Rebuild re-extracts L0's aggregate maps from the now-current index (which excludes deleted files), so the marker is no longer needed and is cleared along with all other L1/L2/L3/Active assignments.
-- **Mover-pick exemption** — deletion markers participate in V/c counts but are skipped by mover selection, so they hold their tier slot until rebuild clears them.
-
-The marker exists because L0 may still reference the file in its aggregate symbol/doc map (L0 is captured at session start or last rebuild and is not invalidated by routine deletions). Without the marker, the LLM would see a structural reference to a file in L0 but no full-text representation anywhere.
-
-Re-creating a file at the same path during the same session demotes the marker back to a normal `file:<path>` entry with the new content's hash.
+The previous `backfill_l0_after_measurement` mechanism is removed under D36 — its sole remaining caller (cross-reference activation) is handled by the normal dir-block registration pass.
 
 ## Item Removal
 
-- **Unmodified file unchecked** — file entry removed from its tier (cache miss); the file's symbol/doc representation is unaffected.
-- **Edited file unchecked** — file entry is *not* removed (pinned by the edit invariant); the user has deselected it, but the truthful text remains cached until application restart or explicit rebuild.
-- **File deleted** — file entry replaced by a deletion-marker entry regardless of pin status.
+- **Unmodified file unchecked** — `file:<path>` entry never existed (only edited files create one). The file's representation lives in its dir-block, which is unaffected.
+- **Edited file unchecked** — the `file:<path>` entry in Active is *not* removed (pinned by the edit invariant); the truthful text remains cached until application restart or explicit rebuild. The dir-block already excludes this file (it was excluded when the file entered Active for editing) and stays that way until rebuild.
+- **File deleted from disk** — `file:<path>` entry (if any) removed from Active; file's entry removed from its dir-block; dir-block teleported to Active to re-ride flux. No deletion-marker entry created.
 - **URL removed** — URL entry removed from its tier (cache miss).
-- **Stale entries for deleted files** are not silently dropped — they convert to deletion markers.
+- **Directory deleted entirely** — every dir-block keyed at that path (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) is removed from the cache.
 
 ## Order of Operations (Per Request)
 
 Broken tiers set and change log cleared at start of each update cycle.
 
-- **Phase 0: Detect deletions and remove genuine stale items** — check tracked items against current repo files. `file:` entries (pinned or not) transition to deletion-marker entries; orphaned `url:` / malformed `history:` indices are removed.
-- **Phase 1: Process active items** — hash comparison, age increment (`n += 1` on every item every cycle), edit demotion (hash mismatch → teleport to Active), integrated cleanup of deselected unmodified files and compacted history. Pinned files are not removed by deselection.
-- **Phase 3: History piggyback graduation** — if L3 has been marked broken by Phase 0/1 or external mutation, run the verbatim-window walk and graduate older history into L3. (The broken-tier signal is now consumed only here and by the HUD; flux itself no longer reads it.)
-- **Phase 4: Run relaxation loop** — iterate-to-equilibrium across the three live membranes (Active→L3, L3→L2, L2→L1). The rectification clamp pins direction (Φ ≥ 0); the deadband threshold absorbs steady-state noise. Termination when a full pass fires no moves.
+- **Phase 0: Detect filesystem changes** — check tracked items against current repo state. Files removed from disk are removed from their dir-blocks (and from Active if they were there); affected dir-blocks are teleported to Active. Newly added files are inserted into the appropriate dir-block; affected dir-blocks are teleported to Active.
+- **Phase 1: Process active items** — hash comparison, age increment (`n += 1` on every item every cycle), edit teleport (hash mismatch → mover to Active with `n=0`), cleanup of deselected unmodified files and compacted history. Pinned `file:<path>` entries are not removed by deselection.
+- **Phase 2: Reconcile dir-blocks against selected files** — for any newly-selected file, remove from its dir-block and create a `file:<path>` entry in Active; teleport the dir-block. For any newly-deselected file (not pinned), put it back into its dir-block; teleport the dir-block.
+- **Phase 3: History piggyback graduation** — if any Active→L3 firing is detected this cycle (file or dir-block graduated), run the verbatim-window walk and graduate older history into L3.
+- **Phase 4: Run relaxation loop** — iterate-to-equilibrium across the four live membranes (Active→L3, L3→L2, L2→L1, L1→L0). The Active→L3 membrane is admission_only (age gate); the rest use rectified GHK. The rectification clamp pins direction (Φ ≥ 0); the deadband threshold absorbs steady-state noise. Termination when a full pass fires no moves.
 - **Phase 5: Record changes** — log promotions and demotions, store current active items for next request, clear the broken-tier set.
 
 ## Index Inclusion
 
-Under the L0-content-typed model, **every indexed file's symbol or doc block is always present in L0's aggregate map**, regardless of whether the file is selected, edited, or in any cached tier. There is no per-file index exclusion.
+Under D36, **every indexed file is always represented in the prompt** — either as full text in Active (selected for edit) or as an entry in its directory's dir-block (in any cached tier). There is no monolithic L0 aggregate map; coverage is distributed across the dir-block set.
 
-A file that is also in Active or a graduated tier (full text present in L1/L2/L3) appears in both representations: structural summary in L0, full text in the lower tier. The system prompt's authority rule resolves any apparent conflict between the two.
+A file selected for editing appears in exactly one place per turn: its full text in Active. It is removed from its dir-block at the moment it enters Active. There is no "structural summary in L0 + full text in lower tier" duplication that D27 had to manage with the system-prompt authority rule.
 
 ### User-Excluded Files
 
-Users can still explicitly exclude files from indexing via the file picker's three-state checkbox. Excluded files are removed from the index entirely.
+Users can still explicitly exclude files from indexing via the file picker's three-state checkbox. Excluded files are removed from the index entirely; their dir-block entry shrinks accordingly and the dir-block is teleported to Active.
 
 ## History Compaction Interaction
 
@@ -403,19 +397,21 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 
 ## Invariants
 
-- **L0 is content-typed and invalidated only by enumerated events.** The cascade does not touch L0; the L1→L0 membrane is disabled.
-- **L0 is held as a frozen snapshot** distinct from the live indexes.
-- **L1, L2, L3 hold promoted concrete content only** — full file text, fetched URL content, graduated history.
-- **Files, URLs, and history are ineligible for L0.** The relaxation loop respects this — the L1→L0 membrane is structurally disabled.
-- **Edited files are pinned and teleported to Active.** Hash mismatch resets `n=0` and moves to Active; pin protects from automatic eviction. Cleared only by application restart or explicit `rebuild_cache`.
-- **Unmodified files can be deselected normally** — the pin only protects edited files.
-- **Deleted files leave a marker, not silence.** Markers participate in V/c counts but are mover-pick-exempt.
+- **The system prompt is the only non-flux head anchor.** L0–L3 are all flux tiers under D36; the L1→L0 membrane is enabled.
+- **Every indexed file is always represented in the prompt** — either as full text in Active (selected for editing) or as an entry in its directory's dir-block (in some tier L0–L3). There is no third state.
+- **A file selected for editing appears in exactly one place.** Its full text is in Active; it is removed from its dir-block. No "structural summary in L0 + full text in lower tier" duplication.
+- **Dir-blocks are reconstructed from the live index at every freeze.** No pin flag on dir-blocks; they inherit consistency from the index.
+- **Edited files are pinned and held in Active.** Hash mismatch resets `n=0`; pin protects from automatic eviction. Cleared only by application restart or explicit `rebuild_cache`.
+- **Unmodified files can be deselected normally** — the pin only protects edited files. Deselection puts the file back into its dir-block (which teleports to Active to re-ride flux).
+- **File deletion shrinks the relevant dir-block; no marker entry is created.** D27's deletion-marker scheme is removed under D36.
+- **The synthetic `meta:file_tree` entry is removed.** Its contents live as `plain_files:<dir>` dir-blocks across the repo.
 - **A URL never appears in both a cached tier and the uncached URL section** (design target).
-- **`n` is a pure age counter.** It increments by 1 per cycle for every item; resets to 0 on hash mismatch (edit). Aging is decoupled from promotion eligibility above the `n_admit` floor on Active→L3.
+- **`n` is a pure age counter.** It increments by 1 per cycle for every item; resets to 0 on hash mismatch (edit) or teleport. Aging is decoupled from promotion eligibility above the `n_admit` floor on Active→L3.
 - **Each turn is a self-contained relaxation step.** No charge accumulator, no leak. Every move strictly increases the mover's tier index (under rectified variants), so the loop is bounded.
-- **Rebuild does not run the relaxation loop.** The deterministic placement is the final state; the next real chat request runs flux normally.
+- **Rebuild does not run the relaxation loop.** The mtime-seeded placement is the final state for that turn; the next real chat request runs flux normally.
 - **Manual rebuild is localhost-only.**
-- **History graduates to L3 only on piggyback** (L3 already broken this cycle).
+- **History graduates to L3 only on piggyback** (Active→L3 firing detected this cycle).
+- **Agents inherit the parent's tier distribution at spawn**; agent flux thereafter is independent.
 - **The flux variant is fixed at tracker construction.** Mid-session switching is not supported.
 
 ## Cache Warmer — Currently Unplugged

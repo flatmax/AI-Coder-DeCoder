@@ -63,7 +63,10 @@ def build_tiered_content(
 
     Each tier entry has keys:
 
-    - ``symbols`` — concatenated symbol/doc index blocks
+    - ``symbols`` — concatenated dir-block bodies (symbols
+      and docs blocks for directories assigned to this tier)
+    - ``plain_files`` — concatenated plain-files blocks for
+      directories whose files have no symbol/doc index
     - ``files`` — concatenated fenced file contents for
       ``file:`` items in this tier
     - ``history`` — history message dicts graduated to this
@@ -73,26 +76,26 @@ def build_tiered_content(
     - ``graduated_history_indices`` — history message indices
       in this tier (used for active-history exclusion)
 
-    Key-prefix dispatch:
+    Key-prefix dispatch (D36):
 
-    - ``symbol:{path}`` — symbol index block for the file
-    - ``doc:{path}`` — doc index block (shares the ``symbols``
-      field with symbol blocks so cross-reference mode
-      produces one coherent block per tier)
+    - ``symbols:{dir}`` — per-directory symbols block
+      rendered live from the symbol index, excluding any
+      file in Active full-text
+    - ``docs:{dir}`` — per-directory docs block rendered
+      live from the doc index, excluding any file in Active
+      full-text
+    - ``plain_files:{dir}`` — per-directory listing of
+      filenames that have neither a symbol table nor a doc
+      index
     - ``file:{path}`` — full file content as a fenced block
     - ``history:{N}`` — history message at index N
-    - ``system:*``, ``url:*`` — skipped (system prompt is
-      handled by the assembler directly; URL tier entry is
-      deferred)
+    - ``url:*`` — skipped (URL tier entry is deferred)
 
     Defensive filters skip:
 
-    - Items whose path is user-excluded (tracker cleanup will
-      drop them on the next update cycle; belt-and-suspenders
-      guard prevents leakage mid-cycle)
-    - ``symbol:``/``doc:`` items for selected files (their
-      full content renders via ``file:`` or active Working
-      Files; the index block would be a duplicate)
+    - ``file:`` entries for paths the user has excluded
+      (tracker cleanup drops them on the next update cycle;
+      this is a belt-and-suspenders guard for mid-cycle).
     """
     if scope is None:
         scope = service._default_scope()
@@ -108,6 +111,7 @@ def build_tiered_content(
     result: dict[str, dict[str, Any]] = {
         tier: {
             "symbols": "",
+            "plain_files": "",
             "files": "",
             "history": [],
             "graduated_files": [],
@@ -125,6 +129,9 @@ def build_tiered_content(
     tier_symbol_fragments: dict[str, list[str]] = {
         t: [] for t in ("L0", "L1", "L2", "L3")
     }
+    tier_plain_files_fragments: dict[str, list[str]] = {
+        t: [] for t in ("L0", "L1", "L2", "L3")
+    }
     tier_file_fragments: dict[str, list[str]] = {
         t: [] for t in ("L0", "L1", "L2", "L3")
     }
@@ -132,12 +139,15 @@ def build_tiered_content(
         str, list[tuple[int, dict[str, Any]]]
     ] = {t: [] for t in ("L0", "L1", "L2", "L3")}
 
-    # Defensive filter sets per specs-reference/3-llm/
-    # prompt-assembly.md § Uniqueness invariants.
+    # Selected files are excluded from the dir-block bodies —
+    # their full text appears in the active "Working Files"
+    # section instead. The dir-block hash already excludes
+    # them, so the live render must too.
     selected_set = set(scope.selected_files)
     excluded_set = set(
         getattr(service, "_excluded_index_files", [])
     )
+    active_excluded = selected_set | excluded_set
 
     for key in sorted(all_items.keys()):
         item = all_items[key]
@@ -147,91 +157,58 @@ def build_tiered_content(
         if tier_name not in ("L0", "L1", "L2", "L3"):
             continue
 
-        # Extract the path once for defensive filters below.
-        path_suffix: str | None = None
-        for prefix in ("symbol:", "doc:", "file:"):
-            if key.startswith(prefix):
-                path_suffix = key[len(prefix):]
-                break
-
-        # Defensive: skip user-excluded paths regardless of
-        # prefix.
-        if (
-            path_suffix is not None
-            and path_suffix in excluded_set
-        ):
-            logger.debug(
-                "Tier content: skipping %s (excluded from "
-                "index by user); tracker entry will be "
-                "cleaned up on next update cycle",
-                key,
-            )
-            continue
-
-        # Defensive: skip symbol:/doc: for selected files.
-        if (
-            key.startswith(("symbol:", "doc:"))
-            and path_suffix is not None
-            and path_suffix in selected_set
-        ):
-            logger.debug(
-                "Tier content: skipping %s (full content "
-                "present via selection); tracker entry "
-                "will be cleaned up on next update cycle",
-                key,
-            )
-            continue
-
-        if key.startswith("symbol:"):
-            path = key[len("symbol:"):]
+        if key.startswith("symbols:"):
+            directory = key[len("symbols:"):]
             if service._symbol_index is None:
                 continue
-            block = service._symbol_index.get_file_symbol_block(
-                path
+            block = service._symbol_index.get_dir_symbols_block(
+                directory, exclude_active=active_excluded
             )
             if block:
                 tier_symbol_fragments[tier_name].append(block)
-                result[tier_name]["graduated_files"].append(path)
-        elif key.startswith("doc:"):
-            path = key[len("doc:"):]
-            block = service._doc_index.get_file_doc_block(path)
+        elif key.startswith("docs:"):
+            directory = key[len("docs:"):]
+            if service._doc_index is None:
+                continue
+            block = service._doc_index.get_dir_docs_block(
+                directory, exclude_active=active_excluded
+            )
             if block:
                 tier_symbol_fragments[tier_name].append(block)
-                result[tier_name]["graduated_files"].append(path)
+        elif key.startswith("plain_files:"):
+            directory = key[len("plain_files:"):]
+            if service._repo is None:
+                continue
+            try:
+                by_dir = service._repo.get_files_by_directory()
+            except Exception as exc:
+                logger.debug(
+                    "Tier content for %s skipped: "
+                    "get_files_by_directory failed: %s",
+                    key,
+                    exc,
+                )
+                continue
+            files_in_dir = [
+                f for f in by_dir.get(directory, [])
+                if f not in active_excluded
+            ]
+            if files_in_dir:
+                tier_plain_files_fragments[tier_name].append(
+                    "\n".join(files_in_dir)
+                )
         elif key.startswith("file:"):
             path = key[len("file:"):]
+            if path in excluded_set:
+                logger.debug(
+                    "Tier content: skipping %s (excluded from "
+                    "index by user); tracker entry will be "
+                    "cleaned up on next update cycle",
+                    key,
+                )
+                continue
             content = scope.context.file_context.get_content(path)
             if content is None:
-                # The tracker may hold this entry as a
-                # deletion marker — file was on disk earlier
-                # in the session, then deleted (LLM edit,
-                # `git rm`, terminal `rm`, agent edit). Per
-                # specs4/3-llm/cache-tiering.md § Deletion
-                # Markers, the marker text MUST be rendered
-                # in the prompt wherever the file would have
-                # appeared. Without this branch, deletion
-                # markers are invisible to the LLM and L0's
-                # stale aggregate map shows a phantom file
-                # with no full-text counterpart anywhere —
-                # exactly the contradiction the marker
-                # mechanism is supposed to resolve.
-                #
-                # Probe via tracker.is_deleted(); the
-                # tracker is the source of truth for marker
-                # state, FileContext is not (sync_file_context
-                # removes deleted files from FileContext, so
-                # get_content returning None doesn't tell us
-                # whether the file is "merely missing" or
-                # "marked deleted").
-                from ac_dc.stability_tracker import (
-                    DELETION_MARKER_TEXT,
-                )
-                if scope.tracker.is_deleted(key):
-                    tier_file_fragments[tier_name].append(
-                        f"{path}\n```\n{DELETION_MARKER_TEXT}\n```"
-                    )
-                    result[tier_name]["graduated_files"].append(path)
-                    continue
                 logger.debug(
                     "Tier content for %s skipped: no "
                     "content in file context (stale "
@@ -255,15 +232,19 @@ def build_tiered_content(
                 result[tier_name][
                     "graduated_history_indices"
                 ].append(idx)
-        # system:*, url:* — intentionally skipped.
+        # url:* — intentionally skipped (URL tier entry is
+        # deferred).
 
-    # Finalise each tier. Symbols and files join with blank
-    # lines between fragments. History is sorted by original
-    # index so multi-message tier content reads in conversation
-    # order.
+    # Finalise each tier. Symbols, plain_files and files join
+    # with blank lines between fragments. History is sorted
+    # by original index so multi-message tier content reads
+    # in conversation order.
     for tier_name in ("L0", "L1", "L2", "L3"):
         result[tier_name]["symbols"] = "\n\n".join(
             tier_symbol_fragments[tier_name]
+        )
+        result[tier_name]["plain_files"] = "\n\n".join(
+            tier_plain_files_fragments[tier_name]
         )
         result[tier_name]["files"] = "\n\n".join(
             tier_file_fragments[tier_name]
@@ -292,17 +273,18 @@ def assemble_tiered(
 ) -> list[dict[str, Any]]:
     """Build the tiered message array.
 
-    Computes the symbol map with tier-aware exclusions (two-
-    pass: exclude selected files from the map, then exclude
-    tier-graduated file paths too) and delegates message
-    assembly to the context manager.
+    Renders the index legends live from the live indexes
+    (D36: there is no L0 snapshot — dir-block content is
+    rendered fresh per turn from each tier's tracker keys).
+    The system prompt + legend(s) form the L0 system
+    message and sit before L0 as the only non-flux head
+    anchor.
 
     System reminder is appended to the user prompt so the
     tier assembler doesn't need to know about it.
 
     Legend routing per specs4/3-llm/modes.md and
-    specs4/3-llm/prompt-assembly.md § "Cross-Reference Legend
-    Headers":
+    specs4/3-llm/prompt-assembly.md:
 
     - Doc mode primary: doc legend flows to the primary slot
       (``symbol_legend`` kwarg). The context manager's
@@ -356,47 +338,31 @@ def assemble_tiered(
         descriptor_prefix + user_prompt + (reminder or "")
     )
 
-    # L0 contents — read from the frozen snapshot, NOT live
-    # from the indexes. The snapshot was captured at the
-    # last L0-invalidation event (construction, mode switch,
-    # cross-ref toggle, settings prompt change, file
-    # inclusion/exclusion, manual rebuild). Reading live
-    # would let per-turn drift in the symbol index's
-    # internal state (call-site resolution, import
-    # resolution) leak into L0's bytes and force a fresh
-    # cache write every turn. See decision D28 in
-    # specs4/impl-history/decisions.md and § L0 Stability
-    # Contract in specs4/3-llm/cache-tiering.md.
-    #
-    # Variables are named ``symbol_map`` and ``symbol_legend``
-    # for backwards compatibility with the
-    # :meth:`ContextManager.assemble_tiered_messages` kwargs;
-    # they hold the doc map / doc legend in doc mode and
-    # match whatever was captured into the primary slot.
-    symbol_map = service._l0_primary_map
-    symbol_legend = service._l0_primary_legend
-    doc_legend = service._l0_secondary_legend
-    secondary_map = service._l0_secondary_map
-
-    # File tree — the flat repo listing.
-    file_tree = ""
-    if service._repo is not None:
-        try:
-            file_tree = service._repo.get_flat_file_list()
-        except Exception as exc:
-            logger.warning(
-                "Failed to fetch file tree for prompt: %s", exc
-            )
+    # Index legends — rendered live from the live indexes.
+    # Under D36 there is no L0 snapshot. The system prompt
+    # sits before L0 as the only non-flux head anchor; its
+    # stability is enforced structurally (it changes only at
+    # the documented invalidation events — see
+    # ``specs4/3-llm/cache-tiering.md``).
+    primary_legend = ""
+    secondary_legend = ""
+    if scope.context.mode == Mode.DOC:
+        if service._doc_index is not None:
+            primary_legend = service._doc_index.get_legend()
+        if service._cross_ref_enabled and service._symbol_index is not None:
+            secondary_legend = service._symbol_index.get_legend()
+    else:
+        if service._symbol_index is not None:
+            primary_legend = service._symbol_index.get_legend()
+        if service._cross_ref_enabled and service._doc_index is not None:
+            secondary_legend = service._doc_index.get_legend()
 
     # Delegate to the scope's ContextManager.
     return scope.context.assemble_tiered_messages(
         user_prompt=augmented_prompt,
         images=images if images else None,
-        symbol_map=symbol_map,
-        symbol_legend=symbol_legend,
-        doc_legend=doc_legend,
-        secondary_map=secondary_map,
-        file_tree=file_tree,
+        symbol_legend=primary_legend,
+        doc_legend=secondary_legend,
         tiered_content=tiered_content,
         skip_active=skip_active,
     )
@@ -458,11 +424,13 @@ def assemble_messages_flat(
         descriptor_prefix + user_prompt + (reminder or "")
     )
 
-    # Assemble a repo-context block. L0 contents (primary
-    # and secondary aggregate maps + legends) come from the
-    # frozen snapshot, not live from the indexes — same
-    # contract as :func:`assemble_tiered`. See decision
-    # D28 in specs4/impl-history/decisions.md.
+    # Assemble a repo-context block. Index legends are
+    # rendered live from the live indexes — under D36 there
+    # is no L0 snapshot. The legends sit on the system
+    # message; per-directory dir-blocks are not surfaced in
+    # the flat path (they're tracker-driven and only matter
+    # once the tracker initialises and the tiered path
+    # takes over).
     system_parts: list[str] = [system_prompt]
 
     from ac_dc.context_manager import (
@@ -470,56 +438,45 @@ def assemble_messages_flat(
         REPO_MAP_HEADER,
     )
 
-    # Primary aggregate map + legend — mode-aware header
-    # selection on top of the snapshot's primary slot.
-    primary_legend = service._l0_primary_legend
-    primary_map = service._l0_primary_map
-    primary_header = (
-        DOC_MAP_HEADER if scope.context.mode == Mode.DOC
-        else REPO_MAP_HEADER
-    )
-    if primary_legend or primary_map:
-        system_parts.append(primary_header + primary_legend)
-        if primary_map:
-            system_parts.append(primary_map)
-
-    # Secondary aggregate map + legend — cross-reference
-    # only, opposite-mode header.
-    if service._cross_ref_enabled:
-        secondary_legend = service._l0_secondary_legend
-        secondary_map = service._l0_secondary_map
-        secondary_header = (
-            REPO_MAP_HEADER if scope.context.mode == Mode.DOC
-            else DOC_MAP_HEADER
+    # Primary legend — mode-aware header selection.
+    if scope.context.mode == Mode.DOC:
+        primary_legend = (
+            service._doc_index.get_legend()
+            if service._doc_index is not None else ""
         )
-        if secondary_legend or secondary_map:
-            system_parts.append(
-                secondary_header + secondary_legend
+        primary_header = DOC_MAP_HEADER
+    else:
+        primary_legend = (
+            service._symbol_index.get_legend()
+            if service._symbol_index is not None else ""
+        )
+        primary_header = REPO_MAP_HEADER
+    if primary_legend:
+        system_parts.append(primary_header + primary_legend)
+
+    # Secondary legend — cross-reference only, opposite-mode
+    # header.
+    if service._cross_ref_enabled:
+        if scope.context.mode == Mode.DOC:
+            secondary_legend = (
+                service._symbol_index.get_legend()
+                if service._symbol_index is not None else ""
             )
-            if secondary_map:
-                system_parts.append(secondary_map)
+            secondary_header = REPO_MAP_HEADER
+        else:
+            secondary_legend = (
+                service._doc_index.get_legend()
+                if service._doc_index is not None else ""
+            )
+            secondary_header = DOC_MAP_HEADER
+        if secondary_legend:
+            system_parts.append(secondary_header + secondary_legend)
 
-    # File tree, URL context, review context. Skipped for
-    # warm-ups alongside Active files / history: a warm-up
-    # only needs the system prompt and the ping tail.
-    # Everything else is wasted input on every firing.
+    # URL context, review context. Skipped for warm-ups
+    # alongside Active files / history: a warm-up only needs
+    # the system prompt and the ping tail. Everything else
+    # is wasted input on every firing.
     if not skip_active:
-        if service._repo is not None:
-            try:
-                file_tree = service._repo.get_flat_file_list()
-                if file_tree:
-                    from ac_dc.context_manager import (
-                        FILE_TREE_HEADER,
-                    )
-                    system_parts.append(
-                        FILE_TREE_HEADER + file_tree
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "Flat assembly: file tree fetch failed: %s",
-                    exc,
-                )
-
         url_parts = scope.context.get_url_context()
         if url_parts:
             from ac_dc.context_manager import URL_CONTEXT_HEADER

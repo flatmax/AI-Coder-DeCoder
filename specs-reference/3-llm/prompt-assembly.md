@@ -2,6 +2,8 @@
 
 **Supplements:** `specs4/3-llm/prompt-assembly.md`
 
+> **D36 update:** The aggregate `meta:repo_map`, `meta:doc_map`, and `meta:file_tree` rows are removed. Their content is distributed across **per-directory dir-blocks** (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) which are first-class tracker entries that can sit in any of L0–L3. Sections of this reference that previously described the aggregate-map model have been rewritten; the byte-level header strings, acknowledgements, and cache-control placement rules are unchanged.
+
 This is the canonical owner for header constant byte-strings, cache-control marker placement, and acknowledgement text. Every LLM request the system makes depends on these strings being byte-identical across runs — cache-hit stability requires it.
 
 ## Byte-level formats
@@ -14,7 +16,7 @@ Module-level string constants used to introduce each section of the assembled me
 |---|---|
 | `REPO_MAP_HEADER` | `"# Repository Structure\n\nBelow is a map of the repository showing classes, functions, and their relationships. Use this to navigate the codebase — request full file content when you need to read or edit.\n\n"` |
 | `DOC_MAP_HEADER` | `"# Document Structure\n\nBelow is an outline map of documentation files showing headings, keywords, and cross-references. Use this to navigate the documentation — request full file content when you need to read or edit.\n\n"` |
-| `FILE_TREE_HEADER` | `"# Repository Files\n\nComplete list of files in the repository:\n\n"` |
+| `PLAIN_FILES_HEADER` | `"# Repository Files\n\nFiles in this directory without symbol tables or doc indexes:\n\n"` (used as the per-directory `plain_files:<dir>` block header; replaces the former `FILE_TREE_HEADER`) |
 | `URL_CONTEXT_HEADER` | `"# URL Context\n\nThe following content was fetched from URLs mentioned in the conversation:\n\n"` |
 | `REVIEW_CONTEXT_HEADER` | `"# Code Review Context\n\n"` |
 | `FILES_ACTIVE_HEADER` | `"# Working Files\n\nHere are the files:\n\n"` |
@@ -69,9 +71,11 @@ The L0 message is a single `role: "system"` entry. Its content is the concatenat
 3. Mode-appropriate map header (`REPO_MAP_HEADER` in code mode, `DOC_MAP_HEADER` in doc mode)
 4. Legend text (primary index's legend)
 5. If cross-reference mode is active: blank line + opposite-mode header + opposite index's legend
-6. Symbol map or doc map content (with L0-graduated items excluded)
-7. If tier has L0 file entries: `FILES_L0_HEADER` + fenced file contents
-8. If tier has L0 symbol entries: `TIER_SYMBOLS_HEADER` + symbol/doc blocks
+6. L0 dir-blocks for the active mode's content type, in stable order (`symbols:<dir>` blocks in code mode, `docs:<dir>` blocks in doc mode), with cross-reference adding the opposite content type's L0 dir-blocks
+7. L0 `plain_files:<dir>` blocks (filenames for non-source-non-doc files), in stable order
+8. If tier has L0 file entries: `FILES_L0_HEADER` + fenced file contents
+
+Under D36 the legends remain in L0 (they are static format descriptions and benefit from the head-anchor cache), but the **content** referenced by the legends — the symbol-map and doc-map bodies — is no longer concentrated in L0. Each directory's `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` block is independently routed by the membrane controller and may live in any tier L0–L3. Empty L0 (no dir-blocks routed there) is legitimate: only the system prompt + legends remain.
 
 Concatenation is done with single blank-line separation between sections unless a section's trailing `\n\n` already provides it.
 
@@ -94,7 +98,7 @@ Below is an outline map of documentation files...
 
 {doc_legend}
 
-{symbol_map_content}
+{L0 dir-blocks: any symbols:<dir> / docs:<dir> / plain_files:<dir> the membrane routed to L0}
 ```
 
 The **opposite mode's header** introduces the secondary legend. Rationale: each legend is introduced with a contextually appropriate description. A reimplementer might be tempted to use the current mode's header for both — don't. The mismatch is deliberate.
@@ -166,8 +170,6 @@ The message list returned from `assemble_tiered_messages` follows this exact sha
   # — cache breakpoint 3 —
   ...L3 block (same shape with FILES_L3_HEADER)...
   # — cache breakpoint 4 —
-  {role: "user",      content: "{FILE_TREE_HEADER}{tree}"}  # uncached
-  {role: "assistant", content: "Ok."}
   {role: "user",      content: "{URL_CONTEXT_HEADER}{urls}"}  # uncached, conditional
   {role: "assistant", content: "Ok, I've reviewed the URL content."}
   {role: "user",      content: "{REVIEW_CONTEXT_HEADER}{review}"}  # uncached, conditional
@@ -236,55 +238,63 @@ Format details:
 
 The absence of a language tag is deliberate. Language tags are useful for syntax highlighting in UIs, but for LLM context they add tokens without improving model behavior — the model infers language from path and content equally well without the hint.
 
-## No symbol-map exclusions
+## Dir-block exclusions
 
-Under the L0-content-typed model, the aggregate symbol-map and doc-map bodies in L0's system message contain **every indexed file's block**. The only filter applied is user-exclusion via the file picker's three-state checkbox, which removes the file from the index entirely.
+Under D36, each directory is rendered as up to three independent dir-blocks: `symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`. Every indexed file is represented in **exactly one place** per turn:
 
-The wide-exclude logic that previously coordinated three call sites is removed. The three call sites that previously had to agree on the exclusion set now all simply request "every indexed file":
+- If the file is selected for editing, it appears as `file:<path>` full text in the Active working-files section, and is **excluded from its dir-block** at the tracker level (D36 edit-invariant).
+- Otherwise, it appears as one entry inside its directory's appropriate dir-block (`symbols:` for source files with a symbol table, `docs:` for documents with a doc index, `plain_files:` for everything else indexed but neither).
+
+There are exactly two filters on dir-block contents:
+
+1. **Active full-text exclusion** — files currently in Active are removed from their dir-block. The tracker enforces this invariant; assembly does not re-coordinate it.
+2. **User exclusion** — files removed via the file picker's three-state checkbox are dropped from the index entirely and therefore from every dir-block.
+
+The three call sites that read dir-block bytes all use the same filtered view:
 
 | Call site | Behaviour |
 |---|---|
-| `_assemble_tiered` | Renders the aggregate maps without per-file filtering |
-| `_get_meta_block` | Renders the same aggregate maps when the user clicks the `meta:repo_map` / `meta:doc_map` row |
-| `get_context_breakdown` | Reports the token count of the same aggregate maps |
+| `_assemble_tiered` | Renders each routed dir-block at its tier from the live index |
+| `_get_block_content` (cache-viewer modal) | Renders the same dir-block bytes when the user clicks a `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` row |
+| `get_context_breakdown` | Reports the token count of each dir-block as its own row |
 
-There is no longer any divergence-bug class involving these three sites — they all read from the same source (the index) with the same single filter (user-exclusion).
-
-### Why duplicates are acceptable
-
-A selected file appears twice in the prompt: as a structural summary in L0's aggregate map, and as full text in the file's appropriate lower-tier section. The duplication is small (symbol blocks are dense) and is resolved by the system prompt's authority rule ("if a file appears in Working Files, the full text is the absolute truth, superseding any structural outlines provided earlier"). Modern instruction-tuned models follow this rule reliably via recency bias plus the explicit instruction.
-
-The win from removing exclusions is that L0's byte sequence is invariant under selection toggles, edits, and tier graduation — L0 cache survives every routine event in a session.
+A file appears in **exactly one** location per turn — never duplicated across L0 + a lower tier the way D27/D28 required. The system-prompt authority rule from D27 ("Working Files supersedes structural outlines") is therefore unnecessary under D36 and has been removed from the system prompt.
 
 ## Synthetic meta rows
 
-The cache viewer surfaces every distinct section of the assembled prompt as a row, including sections that aren't individual tracker entries. These synthetic rows use the prefix `meta:` and are generated by `get_context_breakdown` (for row display) and `_get_meta_block` (for click-to-view content).
+Under D36 the dir-blocks (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) are first-class tracker entries with their own rows in the cache viewer; they are **not** surfaced via synthetic `meta:` keys. The remaining `meta:` rows cover sections that genuinely don't have tracker representation.
 
 ### Meta row catalog
 
 | Key | Tier | Content |
 |---|---|---|
-| `meta:repo_map` | L0 (cached) | Aggregate symbol-map body, in code mode; full coverage of every indexed file (minus user-excluded files) |
-| `meta:doc_map` | L0 (cached) | Aggregate doc-map body, in doc mode; full coverage of every indexed file (minus user-excluded files) |
-| `meta:file_tree` | uncached tail | Flat repo file listing (`Repo.get_flat_file_list`) |
 | `meta:url:{url}` | uncached tail | One row per fetched URL; content is the URL service's formatted block |
 | `meta:review_context` | uncached tail | Review mode's injected block (review summary + commits + pre-change map + reverse diffs) |
 | `meta:active_file:{path}` | uncached tail | One row per selected file that hasn't graduated to a cached tier; content is the file's raw bytes |
+
+The `meta:repo_map`, `meta:doc_map`, and `meta:file_tree` rows from D27/earlier are **removed**. Their content is now distributed across the dir-block set:
+
+- The former `meta:repo_map` row was the union of `symbols:<dir>` blocks
+- The former `meta:doc_map` row was the union of `docs:<dir>` blocks
+- The former `meta:file_tree` row was the union of `plain_files:<dir>` blocks
+
+The cache viewer renders one row per non-empty dir-block, with the directory path encoded into the key. This gives the user finer-grained visibility into which directories' indexes are sitting in which cache tier.
 
 ### Uncached tail composition
 
 The cache viewer's synthetic "uncached" tier aggregates every row whose content appears in the prompt *after* the last cache breakpoint. These sections are rebuilt on every request (no caching benefit would accrue even if markers were placed). Per `specs4/3-llm/prompt-assembly.md § Message Array Structure`, the uncached tail contains:
 
-- File tree — `meta:file_tree`
 - URL context — one `meta:url:{url}` per fetched URL
 - Review context — `meta:review_context` (conditional, review mode only)
 - Active files section — one `meta:active_file:{path}` per non-graduated selected file
 - Active history — already rendered as `history:N` entries in the active tier (not duplicated as meta rows)
 - Current user message — transient, not surfaced as a row
 
+The standalone file-tree section that previously sat in the uncached tail under D27/D28 is **gone** — its filenames live in `plain_files:<dir>` dir-blocks distributed across L0–L3.
+
 ### Click-to-view dispatch
 
-When the user clicks a meta row, the modal dispatches to `_get_meta_block` which re-computes or re-fetches the section's content. For `meta:repo_map` / `meta:doc_map` specifically, this recomputes the aggregate map using the wide exclusion set — any divergence between this dispatcher and `get_context_breakdown`'s row-building path produces the "row shows N tokens but modal shows empty" symptom.
+When the user clicks a row, the modal dispatches to a content-fetcher that re-computes or re-fetches the section's bytes. For `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` rows the dispatcher renders the directory's block from the live index (with the two filters above applied). For `meta:url:` / `meta:review_context` / `meta:active_file:` rows the dispatcher fetches from the relevant subsystem (URL service / review mode / file context). The dispatcher and the row-building path read from the same source, so divergence-style bugs ("row shows N tokens but modal shows empty") are not possible.
 
 ## Numeric constants
 

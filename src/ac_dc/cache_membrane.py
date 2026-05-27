@@ -46,21 +46,21 @@ logger = logging.getLogger(__name__)
 # Tier index convention matches the reference model: 0 = ACTIVE
 # (entry tier, uncached), 1 = L3, 2 = L2, 3 = L1, 4 = L0. Higher
 # index = more stable. Files climb upward across membranes; only
-# edits or `mark_deleted` move them down.
+# edits move them down.
 ACTIVE_IDX = 0
 L3_IDX = 1
 L2_IDX = 2
 L1_IDX = 3
 L0_IDX = 4
 
-# Live membranes. The L1→L0 boundary (3, 4) is intentionally
-# absent — L0 is content-typed (D27); promotion into L0 is the
-# sole responsibility of `backfill_l0_after_measurement`, never
-# the cascade.
+# Live membranes. Under D36 every tier participates in flux —
+# the system prompt is the only non-flux head anchor and is not
+# a tracker entry, so the controller spans Active → L0 uniformly.
 LIVE_MEMBRANES: tuple[tuple[int, int], ...] = (
     (ACTIVE_IDX, L3_IDX),
     (L3_IDX, L2_IDX),
     (L2_IDX, L1_IDX),
+    (L1_IDX, L0_IDX),
 )
 
 
@@ -131,11 +131,20 @@ class FluxConfig:
     """
 
     threshold: float = 1.0
-    membranes: tuple[MembraneParams, MembraneParams, MembraneParams] = (
+    membranes: tuple[
+        MembraneParams,
+        MembraneParams,
+        MembraneParams,
+        MembraneParams,
+    ] = (
         MembraneParams(
             P=_DEFAULT_P, V_T=_DEFAULT_V_T,
             n_admit=_DEFAULT_N_ADMIT_ACTIVE, pick_mode="oldest",
             admission_only=True,
+        ),
+        MembraneParams(
+            P=_DEFAULT_P, V_T=_DEFAULT_V_T,
+            n_admit=0, pick_mode="smallest",
         ),
         MembraneParams(
             P=_DEFAULT_P, V_T=_DEFAULT_V_T,
@@ -169,6 +178,10 @@ class FluxConfig:
                 P=_DEFAULT_P, V_T=_DEFAULT_V_T,
                 n_admit=_DEFAULT_N_ADMIT_ACTIVE, pick_mode="oldest",
                 admission_only=True,
+            ),
+            MembraneParams(
+                P=_DEFAULT_P, V_T=_DEFAULT_V_T,
+                n_admit=0, pick_mode="smallest",
             ),
             MembraneParams(
                 P=_DEFAULT_P, V_T=_DEFAULT_V_T,

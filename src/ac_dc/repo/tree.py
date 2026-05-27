@@ -25,6 +25,74 @@ class TreeMixin:
     # File tree and flat listing
     # ------------------------------------------------------------------
 
+    def get_files_by_directory(
+        self,
+        skip_paths: set[str] | None = None,
+    ) -> dict[str, list[str]]:
+        """Return repo files grouped by their directory.
+
+        Same source as :meth:`get_flat_file_list` (tracked +
+        untracked-non-ignored, filtered to files that exist on
+        disk), but bucketed by directory and skipping any path
+        in ``skip_paths`` (used by D36 dir-block construction
+        to drop paths already covered by `symbols:<dir>` /
+        `docs:<dir>` blocks).
+
+        Returns a dict mapping directory path → sorted list of
+        repo-relative filenames. Top-level files use empty
+        string as the directory key. Directories with no
+        eligible files after filtering are omitted entirely.
+        """
+        tracked = self._run_git(
+            ["ls-files"],
+            check=True,
+        ).stdout.splitlines()
+        untracked = self._run_git(
+            ["ls-files", "--others", "--exclude-standard"],
+            check=True,
+        ).stdout.splitlines()
+        all_files = sorted(set(tracked) | set(untracked))
+        skip = skip_paths or set()
+        by_dir: dict[str, list[str]] = {}
+        for rel in all_files:
+            if rel in skip:
+                continue
+            if not (self._root / rel).exists():
+                continue
+            idx = rel.rfind("/")
+            directory = rel[:idx] if idx != -1 else ""
+            by_dir.setdefault(directory, []).append(rel)
+        return by_dir
+
+    def get_directory_mtime(self, directory: str) -> float:
+        """Return the most recent file mtime within ``directory``.
+
+        Used by D36's mtime-based dir-block seeding: directories
+        with recently-modified contents seed into warmer tiers.
+        Returns 0.0 when the directory does not exist or contains
+        no files.
+
+        ``directory`` is repo-relative (forward-slash, no leading
+        slash). The empty string means the repo root.
+        """
+        base = self._root / directory if directory else self._root
+        if not base.exists() or not base.is_dir():
+            return 0.0
+        latest = 0.0
+        try:
+            for entry in base.iterdir():
+                if not entry.is_file():
+                    continue
+                try:
+                    mtime = entry.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > latest:
+                    latest = mtime
+        except OSError:
+            return 0.0
+        return latest
+
     def get_flat_file_list(self) -> str:
         """Return a sorted newline-separated list of all repo files.
 
@@ -38,22 +106,19 @@ class TreeMixin:
         filter, three subsystems silently feed stale paths to
         downstream consumers:
 
-        - The LLM-facing file tree section (assembled in both
-          tiered and flat prompt paths) lists the deleted file
-          — and after :meth:`rebuild_cache` this is the ONLY
-          place the LLM sees its name, with no deletion-marker
-          context to explain its absence.
+        - The LLM-facing file listing (rendered from
+          ``plain_files:<dir>`` blocks in tiered prompts) would
+          list the deleted file as still present, contradicting
+          what the LLM sees in selected-file content.
         - :func:`update_stability` builds its ``existing_files``
           set from this output and passes it to
           :meth:`StabilityTracker.update`. A path that's
           tracked-but-deleted-on-disk shows up as "still
           existing" to the tracker's stale-removal pass, so
-          :meth:`mark_deleted` never fires and the deletion
-          marker mechanism (specs4/3-llm/cache-tiering.md
-          § Deletion Markers) silently skips this entire class
-          of file. Untracked-and-deleted files were already
-          handled correctly because git drops them from
-          ``ls-files`` output the moment they vanish.
+          its ``file:`` entry never gets pruned and the cache
+          carries a phantom file across turns. Untracked-and-deleted
+          files were already handled correctly because git drops
+          them from ``ls-files`` output the moment they vanish.
         - The per-turn ``index_repo`` call in
           :func:`stream_chat` would re-extract symbols from a
           path that no longer exists — defended downstream by

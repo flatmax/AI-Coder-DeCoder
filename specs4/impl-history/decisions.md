@@ -894,6 +894,8 @@ Spec authority: `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction (co
 
 ### D35 — Cache tiering replaced by membrane / flux controller; rectified-GHK is the only variant
 
+> **Note (D36):** D35's geometry assumes the D27/D28 "L0 content-typed, L1→L0 disabled" contract. Under D36, L1→L0 is enabled and the four-membrane stack is uniform; the equation, parameters, and admission_only Active→L3 rule below carry forward unchanged.
+
 The previous cascade contract for `specs4/3-llm/cache-tiering.md` was an N-counter design: each tier held an integer counter that incremented per stable appearance, decremented on edit, and triggered promotion to the next tier when it crossed a per-tier `promote_n` threshold. Anchoring at the L1/L2 boundary, post-cascade underfill demotion, and the "broken or empty upper tier" gating layered on top to keep buildup contained. The N-counter design solved cohesion (no jittery promotions) but exposed two orthogonal problems: the buildup pathology described in the now-retired `specs4/7-future/cache-tiering-piggyback-promotion.md`, and the lack of a tunable knob trading aggregate throughput against worst-class fairness. Both eventually pointed at the same root cause: the cascade had no global signal coupling the tiers, so each tier-pair was promoting independently and there was nothing to negotiate against when one tier filled up.
 
 The replacement is the cache-tiering specialisation of Flax 2026, *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*, derived in `~/flatmax/personal.work/research/cache.tiering/paper/draft/03_policy.md`. The controller treats each tier boundary as a thin membrane and the integer counter `n` (now a pure age field) as the per-file imbalance state on that membrane. A single global signal `V = Σ_k (T_{l,k} − T_{u,k})` — the token-mass difference between lower and upper sides of every membrane — drives K parallel rectified per-membrane flux accumulators. When an accumulator integrates past unit charge, one promotion fires on that membrane. Eviction is delegated entirely to an age-ordered backstop (the existing `n`-ordered tier draining behaviour), which is exactly the C2 rectification clamp from the paper.
@@ -946,3 +948,92 @@ An earlier revision of this decision exposed all three (linear / rectified-GHK /
 **Superseded artefacts.** `specs4/7-future/cache-tiering-piggyback-promotion.md` is retired — its buildup pathology is structurally resolved by V coupling (the global signal pulls promotion pressure where it's needed without needing the upper tier to have been "broken" first). The retired spec is left in place with a banner pointing here and to the new `cache-tiering.md`; no content removed, since the analysis of the buildup pathology is still useful as motivation reading.
 
 **Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten); `specs4/7-future/cache-tiering-piggyback-promotion.md` (banner only — superseded). Implementation authority: `src/ac_dc/cache_membrane.py` (new module) + `src/ac_dc/stability_tracker.py` (cascade replaced). Reference implementation: `~/flatmax/personal.work/research/cache.tiering/synth/model.py` and `~/flatmax/personal.work/research/cache.tiering/cache_membrane/state.py`. Paper sections: §3.1 constraints C1/C2/C3; §3.2 linear; §3.3 GHK; §4 implementation contract; §6.3 rectification ablation; §6.4 GHK-vs-linear ablation.
+
+### D36 — Per-directory dir-blocks supersede L0 aggregate maps; L0 joins the flux path
+
+D27 split the tier model into a content-typed L0 (system prompt + aggregate symbol map + aggregate doc map, never moved by the cascade) and stability-typed L1/L2/L3/Active for full files. D28 added the frozen-snapshot machinery so per-turn live-index updates stop invalidating L0. The pair was correct for the N-counter cascade — items moved by counter, not by global signal, so a monolithic always-resident block at the head of the prompt was the right shape. Under the membrane / flux controller (D35) the same shape is starvation: the aggregate maps are the largest single bytes in the prompt and they never move, so flux has nothing useful to balance until full files start arriving in Active. The controller's coupling signal V is computed against tiers that are mostly empty most of the time.
+
+**Resolution.** Replace the two aggregate maps with **per-directory blocks** (dir-blocks), one block per `(directory, content_type)` where `content_type ∈ {symbols, docs, plain_files}`. Every file in the repo lives in exactly one dir-block somewhere in the cache: source files contribute their symbol-table entry to the directory's `symbols` block, documents contribute their outline entry to the directory's `docs` block, and everything else (configs, data files, assets, fixtures — files with neither a symbol table nor a doc index) contribute their filename to the directory's `plain_files` block. There is no longer a separate `meta:file_tree` synthetic entry; the union of `plain_files` blocks across the repo *is* the file tree.
+
+Dir-blocks are first-class membrane participants. They live in any tier including L0. Flux moves them as the controller sees fit. The system prompt remains the only fixed (non-flux) prefix anchor — everything below it, including the two aggregate maps that D27 placed in L0, now rides the membrane.
+
+**Always-resident invariant.** Every indexed file is represented in the prompt at every turn:
+
+- as a symbol-table entry inside its directory's `symbols` dir-block (somewhere in L0–L3), or
+- as a doc-outline entry inside its directory's `docs` dir-block (somewhere in L0–L3), or
+- as a filename entry inside its directory's `plain_files` dir-block (somewhere in L0–L3), or
+- as full text in Active (only when the user has selected it for editing).
+
+Tier placement affects prefix-cache hit rate, not coverage. xref always resolves; it just resolves against blocks that may sit in different tiers. Cross-directory xref references are unaffected — the rendered prompt contains every directory's block, and resolution walks across blocks regardless of tier.
+
+**Edit ⇒ block rebuild.** Editing a file requires its full text in Active by precondition (you cannot edit what you cannot see). When a file moves into Active for editing:
+
+1. Its entry is removed from its directory's `symbols` (or `docs`, or `plain_files`) dir-block — the block shrinks by one entry.
+2. The shrunk dir-block is teleported to Active and re-emitted, mirroring the file-edit demotion path. The dir-block re-rides flux upward as it stabilises.
+3. The file itself sits in Active as full text until edits are done.
+
+When the file leaves Active (deselected, edits applied and stable), it rejoins its dir-block on the next freeze — the block grows by one entry and is again teleported. The "size change ⇒ demote" rule is a special case of "content change ⇒ demote": rebuild is unconditional whenever a block's contents change.
+
+If every file in a directory is currently in Active as full text, that directory's dir-block has zero entries and is **removed entirely from the cache**, not retained as an empty block.
+
+**Block-size variance.** Directories with hundreds of files produce large blocks; single-file directories produce tiny ones. Under the membrane controller this is fine — V is a token-mass signal, so large blocks naturally exert more promotion pressure than small ones. No max-block chunking is imposed at the spec level; if a workload demands it later, the chunking layer is a per-directory concern (split a directory's `symbols` block into N sub-blocks keyed by a stable partition function), additive to the design here.
+
+**Deletion semantics simplified.** D27's deletion-marker scheme is **deleted entirely**. When a file is removed from disk:
+
+- Source file: its entry is removed from the directory's `symbols` block; the block shrinks and is teleported.
+- Doc file: same, against the `docs` block.
+- Plain file: same, against the `plain_files` block.
+- File currently in Active as full text: its `file:<path>` entry is removed from Active outright.
+
+The "L0 references a deleted file" problem D27's marker bridged is no longer reachable — there is no monolithic L0 aggregate to be stale against. The dir-block carries the live truth of the directory at all times.
+
+**Pin flag retained but narrowed.** Files edited but not yet stable are still pinned in Active so deselection cannot silently evict them. Pinning applies only to `file:<path>` entries in Active. Dir-blocks carry no pin flag — they are reconstructed from disk on every freeze and inherit consistency from the index.
+
+**History piggybacks dir-block flux.** D27's history-graduation rule was "piggyback on L3 invalidation" — when L3 was already broken by a file mutation, eligible history graduated for free. That rule survives, generalised: when any Active→L3 flux fires (file moving up, dir-block moving up after rebuild), eligible history graduates in the same turn. Stable conversations still don't churn the L3 cache block, because steady-state turns produce no Active→L3 flux at all.
+
+**L0 anchoring changes meaningfully.** Under D27/D28, L0 = system prompt + two aggregate maps, refrozen only at enumerated events. Under D36, L0 holds the system prompt and whichever dir-blocks happen to have flowed there via flux. The L0-snapshot freeze mechanism (D28) is **deleted** — there is no longer a static byte sequence to freeze, and the membrane controller now spans L0 just like every other tier. The list of "what invalidates L0" from D27 collapses to: whatever the controller decides to move into or out of L0 this turn. The system prompt is the only non-flux head — it sits in front of L0's flux-managed contents and never moves.
+
+This means L0 *can* be invalidated by routine activity in a way it could not before. The compensation is that L0 also fills automatically with the hottest blocks per the controller's V signal — flux drives the most-stable-and-largest dir-blocks toward L0 organically, where D27 always sat the aggregate maps in L0 by construction. Net cache-write cost depends on workload; the scheme is uniform in tier mechanics rather than special-casing L0 against the rest.
+
+**Initialization seeds by mtime.** On startup, after the symbol/doc indexes are built, dir-blocks are constructed from the current index state and seeded into tiers using a per-directory mtime prior:
+
+- Most recently modified directory tree → seeded into L1 (likely to be touched soon, prime warm).
+- Older directories → seeded into L2 / L3 by mtime quantile.
+- All-time-cold directories → seeded into L3 (controller may push them up later).
+
+The mtime prior is heuristic, not load-bearing. Flux re-sorts within a few turns. The alternative (cold-start everything in L3) was considered and rejected as wasting a session of warm-up; the mtime prior is ~5 lines of seed code and gives the first session a usable warm cache.
+
+**Agent inheritance.** When an agent is spawned, the agent's tracker copies the parent's current tier distribution at spawn time (a snapshot of which dir-blocks sit where). Agent flux thereafter is independent — the agent can rebalance toward its own working set without affecting the parent. Agents do not inherit pinned files (those are scope-bound to the parent's edit invariant).
+
+**Cross-reference scope.** Cross-reference activation no longer adds the *opposite-mode aggregate map* to L0; it adds the opposite-mode dir-blocks (symbol blocks in doc mode, doc blocks in code mode) to the membrane. They participate in flux uniformly with the primary blocks. The `backfill_l0_after_measurement` mechanism is **deleted** — its sole remaining caller (cross-reference activation) is replaced by a normal block-registration pass. The deactivation path likewise just removes the secondary dir-blocks from the membrane.
+
+**`meta:file_tree` removed.** The synthetic `meta:file_tree` entry is no longer produced. Its contents (the flat list of files-without-symbol-or-doc) were already the union of every directory's plain-file listing; under D36 that listing exists as a real cache citizen (the `plain_files` dir-blocks) instead of as a synthesised tail-of-prompt block. Prompt assembly stops emitting `meta:file_tree`; consumers that read it from `_breakdown.py` are updated to read the dir-block set instead.
+
+**Why this design is a good fit for the membrane controller.**
+
+D27/D28 were a correct response to the N-counter cascade: the cascade had no global signal, so freezing L0 against the cascade's per-tier-pair decisions was the only way to keep cache-writes contained. The membrane controller has a global signal (V) and a self-arresting deadband (Φ < threshold), so it can manage the full prefix below the system prompt without runaway churn. Giving it dir-blocks rather than two monolithic blocks gives it enough granularity that V is computed over a meaningful population of mobile items per turn, and rectification pins the direction so we still don't see thrash.
+
+**What this decision does NOT change.**
+
+- The system prompt is still hashed and rendered as the prefix head; nothing about the system prompt's role changes.
+- The cache warmer (D34, D34a) is independent of the membrane geometry and is not touched.
+- The Active tier semantics (full-file selection, edit invariant, pin flag for in-flight edits) are unchanged.
+- D35's flux equation, parameters, admission_only Active→L3 membrane, and history-protection rule all carry forward unchanged. The per-membrane geometry is unchanged: Active→L3 (admission_only), L3→L2, L2→L1, plus L1→L0 now **enabled** as a flux membrane (was disabled under D27).
+- Mode switching (code ↔ doc) still swaps the primary index; under D36 the swap rebuilds the dir-blocks from the new primary index rather than swapping the L0 aggregate map.
+- Manual `rebuild_cache` is preserved as the explicit reset point — wipes tier assignments, re-seeds dir-blocks via the mtime prior, clears pin flags.
+
+**Superseded artefacts.**
+
+- D27 — superseded in part. The "L0 is content-typed; cascade no longer touches it" rule is replaced by "the system prompt is the only non-flux anchor; everything below rides the membrane." The deletion-marker mechanism it introduced is deleted (see above). The pin flag for edited files survives.
+- D28 — superseded in full. There is no L0 snapshot to freeze. Live indexes feed dir-block reconstruction directly at freeze events (turn boundary, edit landing, file deletion, mode switch).
+- The `meta:file_tree` rendering path in `_breakdown.py` (lines around 366–367 and 913 per current grep) is removed.
+
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten under this decision); `specs4/3-llm/prompt-assembly.md` and `specs-reference/3-llm/prompt-assembly.md` (`meta:file_tree` row removed). Implementation: `src/ac_dc/stability_tracker.py` (dir-block registration replaces aggregate-map population; deletion-marker code path removed; L1→L0 membrane enabled), `src/ac_dc/llm/_breakdown.py` (dir-block rendering replaces aggregate-map and `meta:file_tree` rendering), `src/ac_dc/llm/_assembly.py` (L0 freeze removed), `src/ac_dc/cache_membrane.py` (no change — geometry just gains an enabled L1→L0 membrane via config).
+
+**Open implementation questions (deferred to the work commit).**
+
+- Exact within-tier block ordering. Likely: alphabetical by directory path within each `content_type` group, with `content_type` groups in a fixed order (symbols, docs, plain_files). Stable ordering matters for the prefix cache.
+- Block size at the boundary between a directory's three `content_type` blocks — whether a `symbols` block and `docs` block from the same directory render adjacently or grouped by type repo-wide. Default proposal: grouped by type repo-wide, since type-grouped chunks are more cache-stable across selection toggles than directory-grouped ones.
+- Whether the mtime prior reads from the filesystem directly or from the index's last-touch timestamp. The index version is preferred (avoids a second stat pass) but requires the index to track mtime per directory rather than just per file.
+
+These are settled at implementation time, not in this decision entry.

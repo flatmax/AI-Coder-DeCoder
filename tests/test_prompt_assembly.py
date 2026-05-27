@@ -252,23 +252,22 @@ class TestHeaders:
         assert DOC_MAP_HEADER in system_text
         assert "DOC_LEGEND" in system_text
 
-    def test_file_tree_renders_as_uncached_pair(self) -> None:
+    def test_no_file_tree_parameter_under_d36(self) -> None:
+        """Under D36 the flat ``file_tree`` parameter is removed.
+
+        File listings ride per-directory ``plain_files:<dir>``
+        dir-block tracker entries through the four cached tiers
+        instead of being injected as an uncached pair on every
+        request. Passing ``file_tree=`` to
+        ``assemble_tiered_messages`` raises TypeError.
+        """
         cm = _cm()
-        messages = cm.assemble_tiered_messages(
-            user_prompt="hi",
-            file_tree="a.py\nb.py",
-            tiered_content=_tiered(),
-        )
-        # File-tree pair appears after the system message but
-        # before the final user message.
-        tree_msg = next(
-            m for m in messages
-            if m.get("role") == "user"
-            and FILE_TREE_HEADER in _text_of(m)
-        )
-        assert "a.py\nb.py" in _text_of(tree_msg)
-        # Not cached — plain string content.
-        assert isinstance(tree_msg["content"], str)
+        with pytest.raises(TypeError):
+            cm.assemble_tiered_messages(
+                user_prompt="hi",
+                file_tree="a.py\nb.py",  # type: ignore[call-arg]
+                tiered_content=_tiered(),
+            )
 
     def test_l0_files_use_l0_header(self) -> None:
         cm = _cm()
@@ -664,6 +663,14 @@ class TestOrdering:
     """Overall ordering: L0 → tiers → tree → URL → review → active files → active history → prompt."""
 
     def test_full_ordering_with_every_section(self) -> None:
+        """Ordering: SYS → legend → tier symbols → URL → review → active → history → prompt.
+
+        Under D36 the flat ``file_tree`` parameter is gone —
+        file listings now ride per-directory
+        ``plain_files:<dir>`` dir-block tracker entries through
+        the cached tiers (delivered via the L1 ``plain_files``
+        field in this test).
+        """
         cm = _cm(system_prompt="SYS")
         cm.add_message("user", "history-u")
         cm.add_message("assistant", "history-a")
@@ -674,7 +681,6 @@ class TestOrdering:
         messages = cm.assemble_tiered_messages(
             user_prompt="now",
             symbol_legend="LEG",
-            file_tree="tree.py",
             tiered_content=_tiered(L1={"symbols": "L1-SYM"}),
         )
         all_text = "\n\n".join(_text_of(m) for m in messages)
@@ -684,7 +690,6 @@ class TestOrdering:
             "SYS": all_text.index("SYS"),
             "LEG": all_text.index("LEG"),
             "L1-SYM": all_text.index("L1-SYM"),
-            "tree.py": all_text.index("tree.py"),
             "URL-BODY": all_text.index("URL-BODY"),
             "REVIEW-BODY": all_text.index("REVIEW-BODY"),
             "KEEP": all_text.index("KEEP"),
@@ -692,7 +697,7 @@ class TestOrdering:
             "now": all_text.rindex("now"),
         }
         ordered_labels = [
-            "SYS", "LEG", "L1-SYM", "tree.py", "URL-BODY",
+            "SYS", "LEG", "L1-SYM", "URL-BODY",
             "REVIEW-BODY", "KEEP", "history-u", "now",
         ]
         for a, b in zip(ordered_labels, ordered_labels[1:]):
