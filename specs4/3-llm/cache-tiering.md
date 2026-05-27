@@ -2,6 +2,8 @@
 
 Stability-based tiering of prompt content to align with provider cache breakpoints. Content that remains unchanged across requests promotes to higher tiers; changed content demotes. Reduces re-ingestion costs for large contexts.
 
+The cascade dynamics are governed by an **electrodiffusion-flux model**: tier boundaries are treated as semi-permeable membranes, and per-membrane promotion is driven by the token-mass imbalance between the lower and upper tier. The model is the cache-tiering specialisation of the multi-membrane controller derived in Flax (2026), *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*. The original derivation lives in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) (linked here for the full discussion); §4 below distils what the implementation needs.
+
 ## Content Categories Tracked
 
 - Files — full content
@@ -30,7 +32,7 @@ When the target mode's index isn't ready (doc index still building on first swit
 
 ## Tier Structure
 
-- L0 — content-typed, never invalidated — system prompt + aggregate symbol map + aggregate doc map
+- L0 — content-typed, never invalidated by the cascade — system prompt + aggregate symbol map + aggregate doc map
 - L1 — most stable promoted concrete content
 - L2 — stable promoted concrete content
 - L3 — entry tier for graduated promoted content
@@ -42,10 +44,14 @@ L0 is content-typed: it always contains the system prompt and the aggregate stru
 
 L1, L2, L3 hold *promoted concrete content* — full file text, fetched URL content, and graduated history. Symbol blocks and doc blocks never appear in L1–L3; they live only in L0's aggregate maps.
 
-- Each tier (L1, L2, L3) has an entry N (the N value assigned on arrival) and a promotion N (the threshold for leaving)
-- Active's promotion threshold is low — graduation to L3 is quick
-- Promotion from L3 → L2 → L1 follows the existing N-counter cascade
-- Nothing promotes into L0; the cascade respects the policy "files, URLs, and history are ineligible for L0"
+The four membranes between adjacent tiers are:
+
+| Index | Membrane | Notes |
+|---|---|---|
+| 0 | Active → L3 | Admission gated by `n_admit` (default 3) — files must reach minimum age before any flux evaluation |
+| 1 | L3 → L2 | Pure flux — no admission floor |
+| 2 | L2 → L1 | Pure flux — no admission floor |
+| 3 | L1 → L0 | **Disabled.** L0 is content-typed; cascade-mobile content is ineligible for L0 |
 
 ## L0 Stability Contract
 
@@ -60,9 +66,9 @@ The complete enumerated list:
 3. **Mode switch** (code → doc or doc → code). The system prompt swaps and the primary aggregate map swaps from symbol-index to doc-index (or vice versa); L0's bytes change wholesale and must be refrozen.
 4. **Cross-reference enable**. Adds the secondary index's aggregate map and legend to L0 alongside the primary; L0's bytes grow.
 5. **Cross-reference disable**. Removes the secondary content from L0; L0's bytes shrink.
-6. **Settings reload that changes the system prompt text**. Settings reloads that leave the prompt bytes unchanged do NOT invalidate L0. The byte-comparison covers L0 as a whole (system prompt + primary legend + primary aggregate map + secondary legend and map when cross-ref is on); legend and alias-table content are part of the rendered L0 and refresh together with the prompt.
-7. **File inclusion** (a previously-excluded file is added back to the index via the file picker's three-state checkbox). The aggregate map gains the file's structural block; L0 must be refrozen.
-8. **File exclusion** (a file is removed from the index via the file picker's three-state checkbox), **subject to user confirmation**. Excluding files mid-session is not common, and invalidating L0 is expensive. The webapp prompts the user with a three-button dialog: **Apply now** (invalidate L0 immediately, full cache rewrite), **Defer** (leave the cache stale until the next L0-invalidating event), or **Cancel** (discard the pending exclusion entirely). A "Don't ask again" checkbox persists either Apply now or Defer as the default; Cancel never persists. The stored preference is keyed `ac-dc-l0-exclude-pref` in browser localStorage with values `ask` (default), `always`, or `never`. The Settings tab can reset the preference back to `ask` via a public `resetL0ExcludePref()` method on the files-tab component.
+6. **Settings reload that changes the system prompt text**. Settings reloads that leave the prompt bytes unchanged do NOT invalidate L0.
+7. **File inclusion** (a previously-excluded file is added back to the index via the file picker's three-state checkbox).
+8. **File exclusion** (a file is removed from the index via the file picker's three-state checkbox), **subject to user confirmation**. Excluding files mid-session is not common, and invalidating L0 is expensive. The webapp prompts the user with a three-button dialog: **Apply now** / **Defer** / **Cancel**. A "Don't ask again" checkbox persists either Apply now or Defer as the default; Cancel never persists. The stored preference is keyed `ac-dc-l0-exclude-pref` in browser localStorage with values `ask` (default), `always`, or `never`. The Settings tab can reset the preference back to `ask` via a public `resetL0ExcludePref()` method on the files-tab component.
 
 ### What does NOT invalidate L0
 
@@ -76,22 +82,21 @@ The complete enumerated list:
 
 ### Why this matters
 
-L0 is typically the largest single cached block in the prompt — the system prompt plus aggregate maps for every indexed file can run to hundreds of thousands of tokens. Cache-write cost is paid every time L0's bytes change. Restricting invalidation to the enumerated events keeps the L0 cache stable across the long tail of routine session activity.
-
-The cost is a small risk that the LLM produces a comment or question based on a stale symbol-map signature for an edited file. The benefit is that L0 survives every selection toggle, edit, URL fetch, and turn boundary in the session — the cache hit rate stays high through normal use.
+L0 is typically the largest single cached block in the prompt. Cache-write cost is paid every time L0's bytes change. Restricting invalidation to the enumerated events keeps the L0 cache stable across the long tail of routine session activity.
 
 ### Implementation note
 
 L0's content is held in a frozen snapshot on the LLM service alongside the live indexes. Per-turn streaming reads from the snapshot for prompt assembly; the live indexes stay current (per-turn re-indexing remains in place) so per-file blocks rendered in L1–L3 reflect current edits, and so the next L0-invalidation event can refresh from accurate live data. See decision D28 for the snapshot-vs-live-index split.
 
-## The N Value
+## Per-Item State
 
-- Every tracked item has an N measuring consecutive unchanged appearances
-- New item — N = 0
-- Unchanged across a request — N increments (with exceptions for threshold anchoring)
-- Content changes (hash mismatch) — N reset to 0, demote to active
-- N at or above active's promotion threshold — eligible for graduation
-- Entering a cached tier — N reset to that tier's entry N
+Every tracked item carries:
+
+- `tier` — current placement (Active, L3, L2, L1, or L0)
+- `tokens` — current size in tokens
+- `n` — the **age counter** (turns since the item last entered Active or was placed at this tier on graduation/promotion). Replaces the spec3-era "consecutive unchanged appearances" semantic. Aging is uniform: every item's `n` increments by 1 per cycle. Edits reset `n` to 0.
+- `content_hash` — last-seen SHA-256 of content; mismatch on a turn signals an edit
+- `arrived_at_turn` — the turn at which the item entered its current tier (used by some pick-rule modes; see §4.4)
 
 ## Content Hashing
 
@@ -99,20 +104,13 @@ L0's content is held in a frozen snapshot on the LLM service alongside the live 
 - Symbol blocks use a signature hash derived from raw symbol data, not formatted output — avoids spurious hash mismatches when path aliases or exclusion sets change between requests
 - System prompt is hashed from the prompt text alone (not legend) — the legend changes when file selection changes, which would prevent system prompt from stabilizing
 
-## Graduation: Active → L3
-
-- Files with N at threshold graduate to L3 regardless of whether they are still in the active items list
-- Still-selected files have their content move from the uncached working files section to the cached L3 block
-- URL content (target design) skips the threshold wait — URLs enter directly at a high tier since content is static once fetched
-- Symbol blocks and doc blocks do not graduate — they are always present in L0's aggregate maps from session start; they have no Active → L3 path
-
 ## Edit Invariant
 
 When a file's content hash changes (LLM edit applied, or future user-side edit detected):
 
-- `file:<path>` is demoted to Active with fresh content (existing hash-change behaviour)
+- `file:<path>` is **teleported to Active** with `n = 0` and `arrived_at_turn` reset to the current turn (the membrane analogue of "ion enters bulk solution"). This is the only downward force in the system; flux carries content upward only.
 - The entry is **pinned** — stale cleanup and automatic eviction skip it
-- It rides the cascade upward normally (Active → L3 → L2 → L1 over stable turns)
+- It rides the cascade upward via flux as it stabilises (see §4)
 - Only application restart or explicit cache rebuild can clear pinned files
 
 Unmodified files can still be deselected by the user as today; deselection of an unmodified file removes its `file:<path>` entry from tracking. The pin only protects files that have been edited during the current session.
@@ -122,7 +120,7 @@ The edit invariant guarantees that the truthful, current text of every edited fi
 ## History Graduation
 
 - History is immutable, so waiting on N is unnecessary — graduation is controlled
-- **Piggyback on L3 invalidation** — if L3 is already being rebuilt, all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
+- **Piggyback on L3 invalidation** — if L3 is already being rebuilt this cycle (any membrane fired into or out of L3), all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
 - **Never** — if cache target is zero, or if L3 is not already being rebuilt this cycle, history stays active
 
 Active history is not forced to graduate on its own. A long conversation that never happens to coincide with an L3 invalidation stays in the uncached active section until compaction deals with it. This is deliberate. `cache_target_tokens` is a per-tier caching floor (typically a few thousand tokens), not a conversation-length cap — comparing total active history against it would force graduation on almost every turn of any real conversation, tearing down the L3 cache block on every request. Compaction, which has its own much larger `trigger_tokens` budget and purges tracker history when it runs, is the correct owner of "active history is too big".
@@ -133,139 +131,144 @@ Active history is not forced to graduate on its own. A long conversation that ne
 - Model-aware — providers specify different minimums per model family
 - User-configured minimum can override upward but never below the model's hard floor
 - A fallback value (without model reference) is used when the caller has no model context
+- The cache target does NOT enter the flux equation — flux drives promotion based on token-mass *imbalance*, not absolute fill. Cache target is read by prompt assembly to decide whether to emit a `cache_control` breakpoint; it no longer drives anchoring or underfill demotion (both removed under the membrane model).
 
-## Ripple Promotion
+---
 
-- When a tier's cache block is invalidated, veterans from the tier below may promote upward
-- Two kinds of invalidation behave differently in the cascade:
-  - **External** invalidation — user deselects a file, a hash changes, a tier is marked broken by the orchestrator before the cascade runs. Opens exactly one upward path. The tier itself becomes a promotion target for the tier below, but the chain does not propagate past it uninvited — e.g. an L1 deselect must not drain L0
-  - **Structural** invalidation — a tier loses residents because they promoted upward, so its cache block genuinely needs rebuilding. Propagates: the now-drained tier becomes a legitimate promotion target for the tier below it. This is how ripple promotion chains upward through multiple levels (external L1 break → L2→L1, L2 now structurally broken → L3→L2, L3 now structurally broken → active→L3 graduates)
-- Only promote into broken tiers — if a tier is stable at cascade entry AND no upstream structural invalidation has reached it, nothing promotes into it and tiers below remain cached
-- The destination of an external invalidation is never itself a source of structural invalidation — receiving content is the purpose of the invalidation, not a sign that further drain is needed. This is what keeps external L1 invalidation from draining L0
+## §4 — Membrane / Flux Cascade
 
-## L0 Backfill (legacy mechanism, narrow scope)
+The cascade replaces the spec3-era N-counter promotion algorithm with a per-turn **iterate-to-equilibrium relaxation loop** driven by Goldman-Hodgkin-Katz (GHK) flux across each tier boundary. The mathematical derivation is in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) and the multi-membrane validation is in `synth/` of the source paper. This section covers the implementation contract.
 
-Under the L0-content-typed model, L0 holds the system prompt + aggregate maps and is not subject to size-based backfill. The aggregate maps include every indexed file by construction; there is no notion of "L0 underfilled".
+### 4.1 The flux equation
 
-The `backfill_l0_after_measurement` mechanism remains in the codebase for one specific path: cross-reference activation. When the user enables cross-reference mode, the opposite-mode index's most-connected items are promoted into L0 alongside the primary aggregate map. The backfill ranks candidates by reference count and stops at a configurable token overshoot. This is a structural-content operation (cross-reference items are symbol/doc blocks, which legitimately belong in L0), not a file-content operation.
+For each membrane *m* with lower tier *l* and upper tier *u*, the controller computes a per-turn flux Φₘ from four inputs read from the current tier state: the lower-tier file count *cₗ*, the upper-tier file count *cᵤ*, the lower-tier total token mass *Tₗ*, and the upper-tier total token mass *Tᵤ*. The token-mass imbalance is
 
-The cascade does not run L0 backfill per turn. L0 is only modified by:
+> V = Tₗ − Tᵤ
 
-- Application restart
-- Explicit `rebuild_cache`
-- Cross-reference activation/deactivation (touches L0's secondary content)
+A positive V means the lower tier holds more token mass than the upper — the field pushes files upward across the membrane. The flux equation is **rectified GHK**:
 
-## Threshold-Aware Cascade Algorithm
+> Φₘ = max(0, P · V · (cₗ − cᵤ · exp(−V/V_T)) / (1 − exp(−V/V_T)))
 
-- Process tiers bottom-up (L3 → L0), repeating until no promotions occur
-- A tier is processed when it has incoming items, OR it has not been processed yet AND either it or the tier above is broken
+GHK with a hard rectification clamp on the lower side. The exponential weighting sharpens response under zero-concentration conditions in the upper tier. At V → 0 the formula's Taylor limit reduces to the linear form (Flax 2026 §3.3). Numerically guarded by the standard branch:
 
-For each tier:
+- For |V/V_T| < 10⁻⁹: evaluate the limit `Φₘ ≈ max(0, P · V_T · (cₗ − cᵤ))` directly.
+- For V/V_T > 50: evaluate the asymptote `Φₘ → P · V · cₗ` (denominator → 1; cᵤ term vanishes).
+- For V/V_T < −50: evaluate the downward asymptote `Φₘ → P · V · cᵤ` (which is then clamped to 0 by rectification).
 
-1. Place incoming items with the tier's entry N
-2. Process veterans once per cascade — if cache target is positive AND the tier exceeds cache target, sort by N ascending, accumulate tokens; items consumed before reaching cache target are **anchored** (N frozen, cannot promote); items past the threshold increment N, capped at promotion threshold if the tier above is stable
-3. Check promotion — if the tier above is broken/empty and N exceeds threshold, promote out, mark source tier broken
-4. **Post-cascade consolidation** — any tier below cache target has its items demoted one level (keeping their current N) to avoid wasting a cache breakpoint
+The rectification clamp makes flux upward-only — downward motion happens exclusively via the edit invariant (teleport-to-active) and explicit invalidations (selection change, deletion marker). Earlier revisions exposed `linear` and `bidirectional-ghk` variants; both are retired. Flax 2026 §6.3 finds the bidirectional path empirically dead at the headline operating point — the rectification clamp is *free* — and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default.
 
-## Anchoring Details
+### 4.2 Per-membrane parameters
 
-- Anchoring is a per-item transient flag set during each cascade pass
-- Re-evaluated from scratch on each cycle — does not persist between requests
-- Only applies when the tier exceeds cache target; small tiers anchor nothing
+Every membrane carries its own (P, V_T, n_admit, pick_mode). Defaults are tuned from the synth-tuner's headline rectified-GHK fit (`runs/opt-run2/best_params.json`):
 
-## Demotion
+- Active → L3: **admission_only**, n_admit=3, pick_mode="oldest" — age-gated admission, no flux equation
+- L3 → L2: P=1.616399379428934e-06, V_T=98952.34312610888 tokens, n_admit=0, pick_mode="smallest"
+- L2 → L1: P=1.616399379428934e-06, V_T=98952.34312610888 tokens, n_admit=0, pick_mode="smallest"
+- L1 → L0: **disabled** — never fires (L0 content-typed contract)
 
-- Items demote to active (N = 0) when content hash changes or file appears in modified-files list
+`n_admit` is an admission floor: a file can only be picked as a mover across this membrane if `f.n ≥ n_admit`. On the Active → L3 membrane (admission_only) it is a strict gate; on the flux membranes above it is a soft prefer-aged-movers rule (the loop retries without the floor if no aged candidate exists, since the flux equation has already decided promotion is warranted).
 
-## Item Removal
+**Why Active → L3 is admission_only and not flux-coupled.** The membrane / flux model treats V (token-mass differential) as the driving force: items climb when the lower side is overfull relative to the upper. That's right for inter-cache balancing (L3 ↔ L2 ↔ L1) where each tier accumulates content over time and the controller's job is to keep them in proportion. It's wrong for the admission boundary because active is **structurally lighter** than the cached tiers — items only stay in active until they age past the admission gate, after which they leave for L3+, so total active token mass tends to *decrease* relative to the cache. With `t_active < t_L3` as the steady state, V is permanently negative and the rectified flux equation's response is permanently zero. Active items would never graduate. The fix is to recognise that admission is fundamentally an age-based gate, not a mass-balance gate, and treat it as such — `n ≥ n_admit` is the entire promotion criterion on this membrane.
 
-- **Unmodified file unchecked** — file entry removed from its tier (cache miss); the file's symbol/doc representation is unaffected (it lives in L0's aggregate map, not as a separate tracker entry)
-- **Edited file unchecked** — file entry is *not* removed (pinned by the edit invariant); the user has deselected it, but the truthful text remains cached until application restart or explicit rebuild
-- **File deleted** — file entry replaced by a deletion-marker entry (see below) regardless of pin status. The marker rides the cascade like a normal `file:` entry but its content is a fixed "this file has been deleted in this session" notice rather than the file's last-known text. This bridges the gap until the next `rebuild_cache` removes the file from L0's aggregate map.
-- **URL removed** — URL entry removed from its tier (cache miss)
-- **Deselected unmodified-file cleanup** runs during stability update; affected tier marked broken
-- **Stale entries for deleted files** are not silently dropped — they convert to deletion markers (see below). Phase 0 of the cascade does not evict deleted files; it transitions them.
+Higher membranes use the flux equation alone. `history:*` items are excluded from the regular flux loop entirely — they only enter L3 via the piggyback path (§ History Graduation), which fires when L3 is already broken by another mutation; otherwise the conversation would churn the L3 cache block on every stable turn.
 
-## Deletion Markers
+The original tune was run bidirectional (`allow_negative_flux=True`); for the rectified clamp the same P and V_T are a sound starting point, but the optimum may shift slightly. Re-tune later for the last few percent.
 
-When a file is deleted (LLM edit, user-side `git rm`, terminal removal, agent edit), its `file:<path>` entry transitions into a deletion-marker entry rather than being removed from the tracker:
+### 4.3 The relaxation loop
 
-- **Content** — a fixed string indicating the file has been deleted this session, e.g. `[deleted in this session — see L0 symbol/doc map for last-known structure]`
-- **Hash** — a deterministic hash of the marker content (so deletion-markers are stable across requests and don't churn the cascade)
-- **Tier** — lands in Active first, rides the cascade upward as it stabilises
-- **Lifetime** — survives until the next application restart or explicit `rebuild_cache`. Rebuild re-extracts L0's aggregate maps from the now-current index (which excludes deleted files), so the marker is no longer needed and is cleared along with all other L1/L2/L3/Active assignments.
+Each turn, after edits have teleported and `n` has aged, the cascade runs **iterate-to-equilibrium relaxation**:
 
-The marker exists because L0 may still reference the file in its aggregate symbol/doc map (L0 is captured at session start or last rebuild and is not invalidated by routine deletions). Without the marker, the LLM would see a structural reference to a file in L0 but no full-text representation anywhere — a phantom that invites questions about a file that no longer exists. The marker resolves the apparent contradiction: the symbol map shows the file existed, the marker confirms it's gone, the system prompt's authority rule keeps the LLM correctly grounded ("trust the full text" — and here the full text says "deleted").
+```
+repeat:
+  moved := False
+  for m in [Active→L3, L3→L2, L2→L1]:        # L1→L0 is disabled
+    if m.admission_only:                       # Active→L3 path
+      pick mover from lower with n ≥ n_admit
+        honouring pick_mode, pin/marker/history rules
+      if no eligible mover:
+        continue
+      move mover to upper
+      moved := True
+      continue                                # next membrane
 
-Re-creating a file at the same path during the same session demotes the marker back to a normal `file:<path>` entry with the new content's hash. The marker had no protective semantics — a fresh file at the same path simply replaces it.
+    recompute Φₘ from current tier state      # rectified — Φ ≥ 0 always
+    if Φₘ < flux_threshold:                    # default 1.0 — "one
+      continue                                #   file-equivalent of pressure"
+    pick mover from lower
+      honouring pick_mode, n_admit, pin/marker rules
+      (retry without n_admit if no aged candidate)
+    if no eligible mover:
+      continue
+    move mover to upper
+    moved := True
+  until not moved
+```
 
-## Manual Cache Rebuild
+Termination: a full pass that fires no moves. Either every membrane has Φ < `flux_threshold` (at/near equilibrium) or no eligible movers remain.
 
-A user-initiated disruptive operation that rebuilds L0 from the current index state, wipes the L1/L2/L3/Active assignments (except history), redistributes promoted content using the reference-graph clustering algorithm, and clears all edit-invariant pin flags. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
+**No cross-turn state.** Each turn solves to local flux equilibrium independently. There is no charge accumulator, no leak, no anchoring — the rectified GHK form self-arrests as V → 0, so persistent memory is unnecessary (and was empirically shown to be an artefact of integer mover discretisation, not physics; Flax 2026 §3.3).
 
-Rebuild is the only mechanism (besides application restart) that causes L0 to be invalidated. Post-commit triggers for automatic rebuild are a planned extension (a clean working tree after commit is the natural moment to refresh the structural baseline).
+**Direction and quiescence are intrinsic to the flux equation, not a separate gate.** The rectification clamp pins direction (Φ ≥ 0 — controller is upward-only); the deadband threshold absorbs steady-state noise so quiet turns with V ≈ 0 across all membranes self-arrest on the first pass without firing. An earlier revision applied a separate `max_membrane` scope gate — restricting flux to membranes whose upper tier had been externally invalidated — but that mechanism was a vestige of the N-counter cascade and is unnecessary under the rectified controller: the deadband + rectification jointly bound cache-write cost, and the controller no longer manufactures churn on quiet turns because Φ never clears the threshold without real token pressure.
 
-### Motivation
+A correctness contract: every move strictly increases the mover's tier index, so the loop is bounded by `NUM_TIERS · n_files` moves. A `max_iters` cap of 1000 is a defensive guard — convergence in real workloads is 1–3 passes.
 
-Two problems motivate rebuild:
+### 4.4 Mover selection
 
-1. **L1/L2/L3 churn.** Normal operation grows the active tier with file entries as users select files, and those entries only graduate to L3 via the standard N-value progression across multiple request cycles. When many files are selected at once (e.g., loading a large working set at session start), the active tier can be dominated by full-content entries that take many requests to graduate. Rebuild immediately redistributes into L1/L2/L3 using the same clustering algorithm as startup initialization, giving users control over cache layout without waiting for natural graduation.
-2. **L0 staleness.** During a long session with edits, the aggregate symbol/doc map in L0 reflects the structure at session start, not at the present moment. While the system prompt's authority rule keeps the LLM correctly grounded on full-text Working Files, navigation queries against the symbol map can return stale signatures. Rebuild re-extracts the aggregate maps from the now-current index, giving the LLM a fresh navigation baseline.
+When a membrane has decided to fire (|Φ| ≥ threshold and the direction passes the rectification check), it picks one mover from the source tier subject to the membrane's `pick_mode`:
 
-### Sequence
+- `"smallest"` (default) — longest residency in this tier (`turn − arrived_at_turn`), with smaller tokens as tiebreaker. Promotes the most stable, cheapest-to-promote file first.
+- `"lru"` — largest `n` (turns since last edit). The same coldness signal a flat LRU policy would use.
+- `"fifo"` — smallest `arrived_at_turn`. Pure arrival-order.
+- `"random"` — uniform among admission-eligible files. Ablation only.
 
-Atomic from the RPC caller's perspective:
+Pinned files and deletion markers are eligible to participate in V/c counts (they contribute mass to their tier) but are skipped by the mover-selection step — they cannot be promoted *out of* their current tier as ordinary movers, and `mark_deleted` / `pin_file` flag entries to that effect. This preserves the edit invariant under flux dynamics: an edited file's text stays in whatever cached tier it has reached, and deletion markers remain in place until rebuild.
 
-- Preserve history entries in the current tracker (history graduation is controlled separately below)
-- Wipe everything else — file, URL, deletion-marker, and any residual entries (deletion markers no longer needed because L0 will be re-extracted from the now-current index, which already excludes deleted files)
-- Clear all edit-invariant pin flags — rebuild is the explicit "fresh start" that supersedes pinning
-- Re-extract aggregate symbol map and aggregate doc map from the current index state — these populate L0 alongside the system prompt
-- Mark L1/L2/L3/Active broken so any follow-up cascade can freely rebalance
-- Load content for selected files into file context so real hashes and token counts can be computed
-- Distribute selected files across L1/L2/L3 — bin-pack by current tier token count. Files cannot land in L0 (content-typed for structural maps only) and don't land in Active (rebuild's purpose is to skip the graduation wait)
-- Re-seed cross-reference items into L0 if cross-reference mode is active (cross-reference items are structural — they belong in L0 alongside the primary aggregate map)
-- **Graduate history via piggyback** — rebuild is treated as a disruptive event equivalent to L3 already being rebuilt this cycle, which unlocks the piggyback path. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3 with L3's entry N
-- Mark the tracker as initialized so subsequent chat requests skip the lazy-init path
+### 4.5 Active → L3 graduation
 
-### What Rebuild Does Not Do
+The Active → L3 membrane is the entry point for new content into the cached part of the cascade. It is **admission_only**: no flux equation, no V coupling, no threshold deadband. A file graduates when (and only when) it has aged ≥ `n_admit` turns since registration or last edit (default `n_admit = 3`). The `pick_mode` is `"oldest"` so the longest-aged eligible item promotes first when several are ready in the same turn.
 
-- **Does not run the stability update cascade.** The deterministic placement computed during rebuild is the final state. Running the cascade would demote underfilled tiers and undo the careful placement. The next real chat request runs the cascade normally and rebuilt tiers behave identically to any other tier state.
-- **Does not change file selection.** The user's selected-files list is untouched; only how those selections are tracked in tiers changes.
-- **Does not change session state.** History content, session ID, and review state are preserved.
-- **Does not preserve pins.** Files that were pinned by the edit invariant lose pin status — rebuild is the explicit reset point for pin lifecycle.
-- **Does not persist.** Like startup initialization, the rebuilt state lives only in memory and is recomputed on the next server start.
+Why not the flux equation here? In AC-DC4, active is **structurally lighter** than the cached tiers — files only sit in active until they age past `n_admit`, then leave for L3+, so V (= t_active − t_L3) is permanently negative in steady state. The rectified flux equation responds to V ≥ 0 only, so it would never fire on this membrane. The flux model is a fit to inter-cache *balancing*; admission is fundamentally a *gating* problem (has this file proven stable enough to commit to cache?), and the right primitive for that is an age threshold, not a mass differential.
 
-### Orphan File Handling
+`history:*` items are excluded from this membrane (filtered as protected in the relax loop). History graduates only via the piggyback path — see § History Graduation — so a stable conversation does not rewrite the L3 cache block on every turn.
 
-Selected files that aren't recognised by the primary index (non-source files in code mode, or source files in doc mode) bypass tier placement and would otherwise land in active. Rebuild's distribution pass places them in L1/L2/L3 via bin-packing tracked by current tier token count, the same algorithm that handles indexed files. L0 is never a target — L0 is structural maps only, and orphan files have no structural representation to contribute there.
+### 4.6 Demotion semantics
 
-### History Graduation Detail
+The only downward force is the edit invariant: hash mismatch teleports a file to Active with `n=0`. There is no controller-driven demotion. A file that should logically "cool" but is never edited stays cached indefinitely, climbing toward L1. Explicit invalidations (selection change, deletion marker, history purge) move content downward through deletion-and-reregistration, not through reverse flux.
 
-Rebuild is treated as equivalent to "L3 is already being rebuilt this cycle", matching the piggyback condition in [history graduation](#history-graduation). This lets rebuild preempt the normal cache-target-threshold wait and graduate history immediately. The verbatim window walks newest → oldest, accumulating tokens until the next message would exceed the cache target. Everything newer stays in active; everything older graduates to L3.
+### 4.7 What was removed
 
-When the cache target is zero (history stays in active permanently), no history graduates regardless of rebuild.
+The earlier cascade had several mechanisms that the membrane model subsumes or eliminates:
 
-### Response Shape
+- **Anchoring** — items below the cache-target line had their N frozen. Replaced by the flux equation: V is computed from total tier tokens, not item-by-item, so individual items don't need a frozen-N flag. Tier-internal ordering is the mover-pick rule, not an anchor list.
+- **N-cap-at-promote-when-stable-above** — items whose N grew unbounded under stable upstream conditions had their N capped. Replaced by `n` being a pure age counter (no semantic role in promotion eligibility above n_admit) — there's nothing to cap.
+- **Post-cascade underfill demotion** — tiers below the cache target had items demoted to avoid wasting a cache breakpoint. Removed: prompt assembly checks tier token totals and elides cache breakpoints for under-target tiers, but tier *contents* are not rearranged on that basis.
+- **`backfill_l0_after_measurement`** — retained but only fires on cross-reference activation (it never participated in per-turn cascade dynamics in the first place; see §10).
 
-Rebuild returns a status dict with per-tier counts, a file-specific tier count (how many file entries landed in each tier), item counts before and after, and a human-readable summary string suitable for a toast. On failure returns an error dict — rebuild is all-or-nothing from the caller's perspective, though the next chat request's stability update repairs any partial state the failure might have left.
+## §5 — Configuration
 
-### When to Use Rebuild
+The membrane controller is configured via `app.json`:
 
-- After selecting a large working set at the start of a session, to avoid many graduation cycles
-- After a mode switch that populated the tracker from an empty state
-- When the cache viewer shows most content in active and the user wants to force redistribution
-- For debugging tier placement — rebuild reproduces a fresh initialization state
+```json
+{
+  "cache_tiering": {
+    "flux_threshold": 1.0,
+    "membranes": [
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 2, "pick_mode": "smallest"},
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest"},
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest"}
+    ]
+  }
+}
+```
 
-Rebuild is not needed during normal use. Tiers evolve correctly through the standard stability cycle. It is a user-facing convenience, not a required maintenance step.
+- `flux_threshold`: minimum Φ at which a membrane fires (default 1.0 — "one file-worth of driving force"). Smaller thresholds fire more aggressively.
+- `membranes`: array of three per-membrane parameter blocks, in cascade order (Active→L3, L3→L2, L2→L1). The L1→L0 membrane is disabled by spec and not configurable. Missing or partial blocks fall back to defaults.
 
-## Cross-Reference Mode
+Only the rectified-GHK variant is supported — the linear and bidirectional-GHK forms from earlier revisions were retired when the synth-tuner's headline rectified fit landed as the production default.
 
-- User toggle — primary mode keeps its index; the *other* index's file blocks are added alongside
-- Separate initialization pass appends cross-reference items without disturbing primary index items
-- Both legends included in L0 with appropriate headers
-- Tier content dispatch is prefix-based (symbol vs doc), not mode-based — the same tier can contain a mix of items from both indexes
-- Deactivation — cross-reference items removed, affected tiers marked broken, no full rebalancing cascade
-- Toggle is always available once startup completes
+The defaults are sourced from `runs/opt-run2/best_params.json` (the synth-tuner's headline fit on the 4-membrane stack). Workloads with very large or very small working sets may benefit from raising or lowering V_T; `flux_threshold` is a coarser knob and rarely needs adjustment.
+
+Parameter values are pinned at tracker construction. Mid-session reconfiguration is not supported — edit `app.json` and restart.
 
 ## Active Items List
 
@@ -281,82 +284,148 @@ Index entries for *unselected* files are never in this list — they live in whi
 ## Initialization
 
 - On startup, L0 is populated with the system prompt + aggregate symbol map + aggregate doc map. The aggregate maps are formed by concatenating every indexed file's symbol/doc block in deterministic order.
-- L1/L2/L3 start empty. Files enter Active when selected and graduate upward through the cascade as they stay stable. There is no startup distribution of files into cached tiers — rebuild is the explicit mechanism for that.
+- L1/L2/L3 start empty. Files enter Active when selected and graduate upward through flux as they stay stable. There is no startup distribution of files into cached tiers — rebuild is the explicit mechanism for that.
 - No persistence — rebuilt fresh each session.
 
 ### Why no startup file distribution
 
-Earlier designs distributed every indexed file across L0/L1/L2/L3 at startup using reference-graph clustering, with placeholder token counts and a post-init measurement pass. That design optimised for "every cached tier is full from turn one", but interacted badly with the routine churn of selection toggles and edits — every selection change would shift bytes in cached tiers and trigger demotion cascades.
+Earlier designs distributed every indexed file across L0/L1/L2/L3 at startup using reference-graph clustering. That design optimised for "every cached tier is full from turn one", but interacted badly with the routine churn of selection toggles and edits — every selection change would shift bytes in cached tiers and trigger demotion cascades.
 
 Under the L0-content-typed model, the optimisation is no longer needed:
 
 - L0 is full from turn one regardless (it's the aggregate maps).
-- L1/L2/L3 fill organically as the user selects files and the cascade graduates them.
+- L1/L2/L3 fill organically as the user selects files and the cascade graduates them via flux.
 - The user can trigger immediate redistribution via the rebuild button if they prefer warm caches over the natural graduation path.
 
 This trades a small amount of "cache warmth on turn one" for substantially more cache stability across every subsequent turn.
 
-## First-Measurement Acceptance
+## Manual Cache Rebuild
 
-- Items initialized with a placeholder (empty-string) hash accept their first real hash without triggering demotion
-- Subsequent hash changes trigger normal demotion
-- Without this, every initialized item would demote on the first request after startup
+A user-initiated disruptive operation that rebuilds L0 from the current index state, wipes the L1/L2/L3/Active assignments (except history), redistributes promoted content using the reference-graph clustering algorithm, and clears all edit-invariant pin flags. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
+
+Rebuild is the only mechanism (besides application restart) that causes L0 to be invalidated. Post-commit triggers for automatic rebuild are a planned extension.
+
+### Sequence
+
+Atomic from the RPC caller's perspective:
+
+- Preserve history entries in the current tracker (history graduation is controlled separately below)
+- Wipe everything else — file, URL, deletion-marker, and any residual entries
+- Clear all edit-invariant pin flags — rebuild is the explicit "fresh start" that supersedes pinning
+- Re-extract aggregate symbol map and aggregate doc map from the current index state — these populate L0 alongside the system prompt
+- Mark L1/L2/L3/Active broken so any follow-up cascade can freely rebalance
+- Load content for selected files into file context so real hashes and token counts can be computed
+- Distribute selected files across L1/L2/L3 — bin-pack by current tier token count. Files cannot land in L0 (content-typed for structural maps only) and don't land in Active (rebuild's purpose is to skip the graduation wait)
+- Re-seed cross-reference items into L0 if cross-reference mode is active
+- **Graduate history via piggyback** — rebuild is treated as a disruptive event equivalent to L3 already being rebuilt this cycle. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3
+- Mark the tracker as initialized so subsequent chat requests skip the lazy-init path
+
+### What Rebuild Does Not Do
+
+- **Does not run the relaxation loop.** The deterministic placement computed during rebuild is the final state. Running flux would recompute V from the just-placed contents and immediately undo some of the placement. The next real chat request runs the relaxation loop normally and rebuilt tiers behave identically to any other tier state.
+- **Does not change file selection.** The user's selected-files list is untouched.
+- **Does not change session state.** History content, session ID, and review state are preserved.
+- **Does not preserve pins.** Files that were pinned by the edit invariant lose pin status — rebuild is the explicit reset point.
+- **Does not persist.** Like startup initialization, the rebuilt state lives only in memory.
+
+### Orphan File Handling
+
+Selected files that aren't recognised by the primary index (non-source files in code mode, or source files in doc mode) bypass tier placement and would otherwise land in active. Rebuild's distribution pass places them in L1/L2/L3 via bin-packing tracked by current tier token count.
+
+## Cross-Reference Mode
+
+- User toggle — primary mode keeps its index; the *other* index's file blocks are added alongside
+- Separate initialization pass appends cross-reference items without disturbing primary index items
+- Both legends included in L0 with appropriate headers
+- Tier content dispatch is prefix-based (symbol vs doc), not mode-based — the same tier can contain a mix of items from both indexes
+- Deactivation — cross-reference items removed, affected tiers marked broken, no full rebalancing cascade
+- Toggle is always available once startup completes
+
+## L0 Backfill (cross-reference activation only)
+
+Under the L0-content-typed model, L0 holds the system prompt + aggregate maps and is not subject to per-turn backfill. The aggregate maps include every indexed file by construction; there is no notion of "L0 underfilled" during normal operation.
+
+The `backfill_l0_after_measurement` mechanism remains in the codebase for one specific path: **cross-reference activation**. When the user enables cross-reference mode, the opposite-mode index's most-connected items are promoted into L0 alongside the primary aggregate map. The backfill ranks candidates by reference count and stops at a configurable token overshoot. This is a structural-content operation (cross-reference items are symbol/doc blocks, which legitimately belong in L0), not a file-content operation.
+
+The relaxation loop does not run L0 backfill per turn. L0 is only modified by:
+
+- Application restart
+- Explicit `rebuild_cache`
+- Cross-reference activation/deactivation (touches L0's secondary content)
+
+## Deletion Markers
+
+When a file is deleted (LLM edit, user-side `git rm`, terminal removal, agent edit), its `file:<path>` entry transitions into a deletion-marker entry rather than being removed from the tracker:
+
+- **Content** — a fixed string indicating the file has been deleted this session, e.g. `[deleted in this session — see L0 symbol/doc map for last-known structure]`
+- **Hash** — a deterministic hash of the marker content (so deletion-markers are stable across requests and don't churn the cascade)
+- **Tier** — preserved at whatever tier the file was occupying when deleted; the marker rides flux upward as the cascade stabilises
+- **Lifetime** — survives until the next application restart or explicit `rebuild_cache`. Rebuild re-extracts L0's aggregate maps from the now-current index (which excludes deleted files), so the marker is no longer needed and is cleared along with all other L1/L2/L3/Active assignments.
+- **Mover-pick exemption** — deletion markers participate in V/c counts but are skipped by mover selection, so they hold their tier slot until rebuild clears them.
+
+The marker exists because L0 may still reference the file in its aggregate symbol/doc map (L0 is captured at session start or last rebuild and is not invalidated by routine deletions). Without the marker, the LLM would see a structural reference to a file in L0 but no full-text representation anywhere.
+
+Re-creating a file at the same path during the same session demotes the marker back to a normal `file:<path>` entry with the new content's hash.
+
+## Item Removal
+
+- **Unmodified file unchecked** — file entry removed from its tier (cache miss); the file's symbol/doc representation is unaffected.
+- **Edited file unchecked** — file entry is *not* removed (pinned by the edit invariant); the user has deselected it, but the truthful text remains cached until application restart or explicit rebuild.
+- **File deleted** — file entry replaced by a deletion-marker entry regardless of pin status.
+- **URL removed** — URL entry removed from its tier (cache miss).
+- **Stale entries for deleted files** are not silently dropped — they convert to deletion markers.
 
 ## Order of Operations (Per Request)
 
 Broken tiers set and change log cleared at start of each update cycle.
 
-- **Phase 0: Detect deletions and remove genuine stale items** — check tracked items against current repo files. Two paths:
-  - **File no longer on disk** — `file:<path>` entries (pinned or not) transition to deletion-marker entries. The entry stays in the tracker, but its content and hash are replaced by the marker representation. The entry is treated as fresh-content for cascade purposes (lands in Active or stays in its current tier marked broken, depending on where it was when deleted).
-  - **Other genuinely stale entries** (orphaned `url:`, malformed `history:` indices, etc.) — removed normally.
-
-  Prerequisite: upstream indexes must be pruned of deleted files *before* the active items list is built (so the deletion is observable here). Pinned `file:` entries are NEVER silently dropped — they either persist (file still exists) or transition to a marker (file deleted).
-- **Phase 1: Process active items** — hash comparison, N increment or reset, integrated cleanup of deselected unmodified files and compacted history. Pinned files are not removed by deselection. L0's aggregate maps are not touched here — they live in L0 by content-type policy and are not tracked as cascade-mobile items.
-- **Phase 2: Determine L3 entrants** — files (including pinned) and URLs leaving active with N at threshold, active items with N at threshold, controlled history graduation
-- **Phase 3: Run cascade** — bottom-up pass over L1/L2/L3 only (L0 is content-typed and excluded from cascade dynamics); place incoming, process veterans, check promotion, repeat until stable, post-cascade underfill demotion
-- **Phase 4: Record changes** — log promotions and demotions, store current active items for next request
+- **Phase 0: Detect deletions and remove genuine stale items** — check tracked items against current repo files. `file:` entries (pinned or not) transition to deletion-marker entries; orphaned `url:` / malformed `history:` indices are removed.
+- **Phase 1: Process active items** — hash comparison, age increment (`n += 1` on every item every cycle), edit demotion (hash mismatch → teleport to Active), integrated cleanup of deselected unmodified files and compacted history. Pinned files are not removed by deselection.
+- **Phase 3: History piggyback graduation** — if L3 has been marked broken by Phase 0/1 or external mutation, run the verbatim-window walk and graduate older history into L3. (The broken-tier signal is now consumed only here and by the HUD; flux itself no longer reads it.)
+- **Phase 4: Run relaxation loop** — iterate-to-equilibrium across the three live membranes (Active→L3, L3→L2, L2→L1). The rectification clamp pins direction (Φ ≥ 0); the deadband threshold absorbs steady-state noise. Termination when a full pass fires no moves.
+- **Phase 5: Record changes** — log promotions and demotions, store current active items for next request, clear the broken-tier set.
 
 ## Index Inclusion
 
 Under the L0-content-typed model, **every indexed file's symbol or doc block is always present in L0's aggregate map**, regardless of whether the file is selected, edited, or in any cached tier. There is no per-file index exclusion.
 
-A file that is also in Active or a graduated tier (full text present in L1/L2/L3) appears in both representations: structural summary in L0, full text in the lower tier. This is the deliberate design — the LLM uses the L0 map for navigation and the lower-tier full text for truth. The system prompt's authority rule resolves any apparent conflict between the two.
-
-The wide-exclude logic that previously coordinated the three call sites (`_assemble_tiered`, `_get_meta_block`, `get_context_breakdown`) is removed: there is no exclusion to coordinate.
+A file that is also in Active or a graduated tier (full text present in L1/L2/L3) appears in both representations: structural summary in L0, full text in the lower tier. The system prompt's authority rule resolves any apparent conflict between the two.
 
 ### User-Excluded Files
 
-Users can still explicitly exclude files from indexing via the file picker's three-state checkbox. Excluded files are removed from the index entirely, so they do not appear in L0's aggregate map and cannot be tracked or rendered anywhere. This is distinct from deselection (which only removes a file's full text from cached tiers — the symbol/doc block remains in L0's aggregate map).
+Users can still explicitly exclude files from indexing via the file picker's three-state checkbox. Excluded files are removed from the index entirely.
 
 ## History Compaction Interaction
 
 - Compaction purges all history entries from the tracker
-- Compacted messages re-enter as new active items with N = 0
+- Compacted messages re-enter as new active items with `n = 0`
 - One-time cache miss; shorter history re-stabilizes within a few requests
 
 ## Invariants
 
-- **L0 is content-typed and invalidated only by enumerated events.** L0 holds the system prompt plus the aggregate symbol map plus the aggregate doc map (plus secondary aggregate map and legend when cross-reference is enabled). The full list of L0-invalidation events is: application restart, explicit `rebuild_cache`, mode switch, cross-reference enable, cross-reference disable, settings reload that changes prompt bytes, file inclusion, and file exclusion (user-confirmed). Routine session activity (selection toggles, edits, URL fetches, history compaction, session loads, OS-level file changes) does NOT invalidate L0.
-- **L0 is held as a frozen snapshot** distinct from the live indexes. The live symbol and doc indexes stay current across the session (per-turn re-indexing); the snapshot captures L0's rendered bytes at the last invalidation event and is read by prompt assembly until the next invalidation event. See decision D28.
-- **L1, L2, L3 hold promoted concrete content only** — full file text, fetched URL content, graduated history. Symbol blocks and doc blocks never appear in L1–L3; the aggregate maps in L0 are their permanent home.
-- **Files, URLs, and history are ineligible for L0.** The cascade respects this — nothing promotes into L0 from below.
-- **Edited files are pinned.** A file whose content hash changed during the session cannot be removed by stale cleanup or automatic eviction. Only application restart or explicit cache rebuild clears pin flags.
+- **L0 is content-typed and invalidated only by enumerated events.** The cascade does not touch L0; the L1→L0 membrane is disabled.
+- **L0 is held as a frozen snapshot** distinct from the live indexes.
+- **L1, L2, L3 hold promoted concrete content only** — full file text, fetched URL content, graduated history.
+- **Files, URLs, and history are ineligible for L0.** The relaxation loop respects this — the L1→L0 membrane is structurally disabled.
+- **Edited files are pinned and teleported to Active.** Hash mismatch resets `n=0` and moves to Active; pin protects from automatic eviction. Cleared only by application restart or explicit `rebuild_cache`.
 - **Unmodified files can be deselected normally** — the pin only protects edited files.
-- **Deleted files leave a marker, not silence.** When a file is deleted during a session, its `file:<path>` entry transitions into a deletion-marker entry that rides the cascade and survives until the next `rebuild_cache`. The marker prevents the LLM from seeing a phantom file (referenced in L0's aggregate map but with no full-text representation anywhere). Markers are cleared by application restart or explicit cache rebuild, both of which also refresh L0.
+- **Deleted files leave a marker, not silence.** Markers participate in V/c counts but are mover-pick-exempt.
 - **A URL never appears in both a cached tier and the uncached URL section** (design target).
-- N increments only on unchanged content; resets to 0 on hash mismatch or modification.
-- Promoted items enter destination tier with that tier's entry N, not their preserved N.
-- Ripple cascade propagates only into broken tiers.
-- Anchored items have frozen N.
-- Post-init measurement replaces placeholder tokens with real counts before any tier display.
-- Manual rebuild re-extracts aggregate maps for L0, preserves history entries, wipes L1/L2/L3/Active, clears pin flags, and re-distributes selected files across L1/L2/L3 deterministically. The cascade is not run post-rebuild.
-- Manual rebuild is localhost-only; remote collaborators receive the restricted-error shape.
-- History graduates to L3 only on piggyback (L3 already broken this cycle). Token-threshold-driven history graduation is not used — `cache_target_tokens` is a caching floor, not a conversation-length cap, and using it as a graduation trigger would destabilise L3 on almost every request. Active-history size is compaction's concern, not tiering's.
+- **`n` is a pure age counter.** It increments by 1 per cycle for every item; resets to 0 on hash mismatch (edit). Aging is decoupled from promotion eligibility above the `n_admit` floor on Active→L3.
+- **Each turn is a self-contained relaxation step.** No charge accumulator, no leak. Every move strictly increases the mover's tier index (under rectified variants), so the loop is bounded.
+- **Rebuild does not run the relaxation loop.** The deterministic placement is the final state; the next real chat request runs flux normally.
+- **Manual rebuild is localhost-only.**
+- **History graduates to L3 only on piggyback** (L3 already broken this cycle).
+- **The flux variant is fixed at tracker construction.** Mid-session switching is not supported.
 
 ## Cache Warmer — Currently Unplugged
-**Status (2025).** The cache warmer is currently disabled at the entry point regardless of any config flag. Field testing of the D34 / D34a stack revealed that every firing stalls the event loop for ~120 seconds inside the ``await self._broadcast_event_async(...)`` calls. Broadcasts that complete in sub-milliseconds for normal user-turn events take roughly 2 minutes when the warmer is mid-cycle. The cause is not in the warmer's own code paths (prompt assembly is instant, executor handoff is instant, the LiteLLM call itself completes in 3-15 seconds); the broadcasts are being queued or held somewhere in the WebSocket / jrpc-oo serialization path during warm-up firings. Combined with the timing drift that produces 0% cache hit rate on the firings that do complete (traces showed cache ROI of -100%), the warmer is currently negative-value: every cycle costs a full cache write at 1.25× input pricing AND stalls every other broadcast event for ~2 minutes.
+
+**Status (2025).** The cache warmer is currently disabled at the entry point regardless of any config flag. Field testing of the D34 / D34a stack revealed that every firing stalls the event loop for ~120 seconds inside the ``await self._broadcast_event_async(...)`` calls. Broadcasts that complete in sub-milliseconds for normal user-turn events take roughly 2 minutes when the warmer is mid-cycle. The cause is not in the warmer's own code paths (prompt assembly is instant, executor handoff is instant, the LiteLLM call itself completes in 3-15 seconds); the broadcasts are being queued or held somewhere in the WebSocket / jrpc-oo serialization path during warm-up firings. Combined with the timing drift that produces 0% cache hit rate on the firings that do complete, the warmer is currently negative-value.
+
 The D34 (executor isolation, circuit breaker, dedicated thread pool) and D34a (wall-clock deadline anchoring) infrastructure remains in place. Re-enabling requires diagnosing the WebSocket-side stall — that work is parked, not abandoned.
+
 To re-enable for diagnosis: remove the early return in :meth:`CacheWarmer.start`, set ``cache_warmup.enabled: true`` in ``app.json``, and pass ``--experimental`` on the CLI.
+
 ## Cache Warmer (parked design — does not currently fire)
 
 Anthropic's prompt cache uses a 5-minute sliding TTL — any read or write extends the window. During interactive coding sessions the user often pauses for longer than 5 minutes to think, read, or context-switch. When the user returns, the cached prefix has expired and the next turn pays the full cache-write price (1.25× input on Claude) to re-prime.
@@ -366,72 +435,62 @@ The cache warmer is a background timer that issues a tiny `litellm.completion` c
 ### Warm-up call shape
 
 - Reuses the EXACT cached prefix that a real turn would. Messages up to and including the last `cache_control` marker (system + L0 history + L1/L2/L3 pairs) are byte-identical to a real turn, assembled via the same code path as `stream_chat`.
-- **Post-cache content omitted.** Everything after the last `cache_control` marker — Active tier (selected files + active history), file tree, URL context, review context — is skipped. The cached prefix bytes are unchanged so L0–L3 cache hits still land. Saves input tokens on every firing — meaningful when the user has selected a large working set or has many files in the repo (the file tree alone can be several thousand tokens). Wired through the assembly path via a `skip_active` flag honoured by both tiered and flat assembly. The flag's semantics: "skip everything after the last `cache_control` marker except the user prompt".
-- Appends a minimal user message asking for a 1-token acknowledgement. This is the entire post-cache tail.
-- Sets `max_tokens=2`. Providers reject 0; 2 covers a single token plus framing.
-- Disables reasoning regardless of session config — a warm-up never benefits from hidden thinking, and a reasoning budget would defeat the cost-minimisation goal.
+- **Post-cache content omitted.** Everything after the last `cache_control` marker — Active tier (selected files + active history), file tree, URL context, review context — is skipped. The cached prefix bytes are unchanged so L0–L3 cache hits still land. Saves input tokens on every firing.
+- Appends a minimal user message asking for a 1-token acknowledgement.
+- Sets `max_tokens=2`.
+- Disables reasoning regardless of session config.
 - No streaming. Synchronous completion via the aux executor.
 
-The result is discarded. Warm-ups never enter conversation history, never broadcast `userMessage` or `streamComplete`, never touch the stability tracker. They are side-channel completions whose only purpose is to refresh the provider's cache TTL.
+The result is discarded. Warm-ups never enter conversation history, never broadcast `userMessage` or `streamComplete`, never touch the stability tracker.
 
 ### Lifecycle
 
-- `start()` schedules the first firing. Called from `complete_deferred_init` (or from the synchronous init path when `deferred_init=False`) once the L0 snapshot is ready and an event loop is available.
-- `cancel()` stops the pending timer without rescheduling. Called at the start of every `stream_chat` invocation — a real LLM request is about to fly, the warmer should not race it.
-- `reset(reason)` cancels and reschedules. Called at the end of every `stream_chat` invocation — user activity just ended, restart the idle timer.
-- `disable(reason)` cancels and stays inert until `enable()` is called explicitly. Triggered by warm-up failure or retry-budget exhaustion (see below).
+- `start()` schedules the first firing.
+- `cancel()` stops the pending timer without rescheduling. Called at the start of every `stream_chat` invocation.
+- `reset(reason)` cancels and reschedules. Called at the end of every `stream_chat` invocation.
+- `disable(reason)` cancels and stays inert until `enable()` is called explicitly.
 
 ### Two-phase wait with visible countdown
 
 Each interval is split into two phases:
 
-1. **Silent phase** — `interval_seconds - countdown_seconds` of `asyncio.sleep`. Most of the wait. The warmer broadcasts nothing.
-2. **Visible countdown phase** — the final `countdown_seconds` (default 30s). One `cacheWarmupCountdown` event broadcast per second carrying `{seconds_remaining, total}`. The frontend renders a progress bar matching the retry-banner UX so the user sees the warm-up coming and can interrupt by sending a real message.
+1. **Silent phase** — `interval_seconds - countdown_seconds` of `asyncio.sleep`.
+2. **Visible countdown phase** — the final `countdown_seconds` (default 30s). One `cacheWarmupCountdown` event broadcast per second carrying `{seconds_remaining, total}`.
 
-When the countdown reaches zero, the warmer broadcasts `cacheWarmupFiring` (frontend flips bar to spinner), issues the call, and broadcasts `cacheWarmupComplete` with `{success: bool, reason?: str}`. A user-initiated stream during the countdown produces `cacheWarmupCancelled` with `{reason: "user-activity"}`; a stream already in flight when the visible phase begins produces `{reason: "stream-active"}` and reschedules.
+When the countdown reaches zero, the warmer broadcasts `cacheWarmupFiring` (frontend flips bar to spinner), issues the call, and broadcasts `cacheWarmupComplete` with `{success: bool, reason?: str}`.
 
 ### Single-stream guard interaction
 
-Warm-ups skip when any LLM stream is in flight — both the main user-facing stream and any agent streams. Provider rate limits and serialization concerns make concurrent warm-up calls counterproductive. The warmer reschedules rather than disables in this case; the next idle window is the next chance.
-
-The warmer does NOT register itself in the single-stream guard. Its existence is invisible to `chat_streaming` — a real user request fires regardless of whether a warm-up is mid-flight (they share the same `litellm` HTTP path, but provider-level concurrency is the warmer's concern, not the guard's).
+Warm-ups skip when any LLM stream is in flight — both the main user-facing stream and any agent streams. The warmer reschedules rather than disables in this case.
 
 ### Retry budget bounded by cache TTL
 
-The wrapped `retry_litellm_completion` call honours `config.num_retries` for retryable error types (rate_limit, api_connection, service_unavailable, timeout). The warmer's `on_retry` callback adds a retry-budget guard:
-
-If the cumulative elapsed time plus the next computed wait would exceed the cache TTL (5 minutes), the callback raises early. By that point the cached prefix has already expired, so the warm-up was pointless — completing the retry sequence would just burn the rest of the retry budget on a cold cache. The early raise propagates up to the warmer's exception handler, which calls `disable("warm-up failed: ...")`.
+The wrapped `retry_litellm_completion` call honours `config.num_retries` for retryable error types. The warmer's `on_retry` callback adds a retry-budget guard: if the cumulative elapsed time plus the next computed wait would exceed the cache TTL (5 minutes), the callback raises early.
 
 ### Auto-disable on failure
 
-Any exception from the warm-up call disables the warmer. The reason is recorded on the warmer instance and logged at WARNING. Re-enabling requires explicit `enable()` (currently no UI surface; future Settings-tab toggle).
-
-The disable strategy assumes that one warm-up failure predicts more — typical causes are persistent provider outages, auth misconfigurations, or rate-limit windows that exceed the TTL. Letting the warmer keep retrying every interval would burn cycles for no benefit. A user who wants to re-enable mid-session can adjust config or wait for the future RPC.
+Any exception from the warm-up call disables the warmer.
 
 ### Scope
 
-Single-instance per `LLMService`. Only the main conversation is warmed. Agent contexts have transient cache state by design — each agent spawn writes a fresh cache and consumes it within the agent's lifetime. Warming agent contexts would multiply provider load with no proportional benefit.
-
-Auxiliary smaller-model calls (commit-message generation, topic-boundary detection) do not interact with the warmer. They use a different model with an independent provider cache, so resetting the main-model warmer's timer on an aux call would shift the next firing later for no caching benefit. The warmer's reset hooks live only on the `stream_chat` lifecycle (cancel at start, reset at end); aux calls bypass that path entirely.
+Single-instance per `LLMService`. Only the main conversation is warmed.
 
 ### Configuration
 
 Two fields in the `cache_warmup` section of `app.json`:
 
-- `enabled` (default `true`) — whether the warmer runs at all. The auto-disable runtime flag is independent of this config value (the warmer flips its own `_enabled` field on failure); re-enabling after auto-disable currently requires application restart.
-- `interval_seconds` (default `270`) — seconds of idle time before each warm-up firing. 270s (4:30) sits comfortably inside the 5-minute cache TTL with margin for retry waits. Values that would push past the TTL are clamped to the default — a zero or near-TTL interval would defeat the purpose.
+- `enabled` (default `true`)
+- `interval_seconds` (default `270`)
 
 ### UI surfacing
 
-A successful warm-up triggers the floating Token HUD with the warm-up's token counts (prompt, cache read, cache write, elapsed). The HUD's header shows `🌡️ Cache warmup` instead of the model name to distinguish from per-turn HUDs. Warm-up tokens accumulate into session totals via the standard `_accumulate_usage` path — a warm-up is a paid LLM call (cache writes cost 1.25× input on Claude), and surfacing that cost cumulatively keeps session totals honest. Failure warm-ups suppress the HUD; the failure flash on the floating progress overlay is sufficient signal.
+A successful warm-up triggers the floating Token HUD with the warm-up's token counts.
 
 ### Invariants
 
 - Warm-ups never appear in conversation history.
 - Warm-ups never trigger stability tracker updates.
-- Warm-ups never trigger the cache cascade — they only refresh the provider's cache TTL on already-placed content.
-- Warm-up tokens DO accumulate into `_session_totals` via `_accumulate_usage`. The "side-channel" framing applies to tracker state and conversation history, not to cumulative cost accounting — a warm-up is a real provider charge and surfacing it in session totals keeps the cost row honest.
-- The cached prefix bytes used by a warm-up are identical to those a real turn would produce — everything up to and including the last `cache_control` marker. Any change to prompt assembly that affects the cached portion must affect warm-ups identically, or the warmer's cache hits will silently degrade.
-- The post-cache tail differs by design: a real turn's tail carries Active files, active history, file tree, URL context, review context, and the user prompt; a warm-up's tail carries only the ping prompt. This shrinks per-warmup input billing without disturbing cache hits.
-- Warm-ups print the same five-section terminal HUD as real turns (cache tiers, last-request usage, history budget, tier changes, session totals) so operators see the same diagnostic shape regardless of trigger.
-- A failed warm-up disables the warmer; manual re-enable required. Failure broadcasts suppress the Token HUD — the floating progress overlay's failure flash is the only UI signal for failed warm-ups.
+- Warm-ups never trigger the relaxation loop — they only refresh the provider's cache TTL on already-placed content.
+- Warm-up tokens DO accumulate into `_session_totals` via `_accumulate_usage`.
+- The cached prefix bytes used by a warm-up are identical to those a real turn would produce.
+- A failed warm-up disables the warmer; manual re-enable required.

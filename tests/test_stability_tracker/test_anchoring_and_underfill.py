@@ -11,7 +11,7 @@ from ac_dc.stability_tracker import (
     TrackedItem,
 )
 
-from .conftest import _active_item
+from .conftest import _active_item, xfail_legacy_cascade
 
 
 class TestStaticUnderfillDoesNotDrainL1:
@@ -176,6 +176,7 @@ class TestAnchoring:
     hold the tier above the cache floor.
     """
 
+    @xfail_legacy_cascade
     def test_anchoring_disabled_when_target_zero(self) -> None:
         """With cache_target_tokens=0, no items are anchored.
 
@@ -190,6 +191,7 @@ class TestAnchoring:
         # Should still promote — no anchoring to hold it back.
         assert tracker.get_all_items()["file:a.py"].tier == Tier.L2
 
+    @xfail_legacy_cascade
     def test_anchored_items_cannot_promote(self) -> None:
         """Items below cache target in a tier don't promote.
 
@@ -320,6 +322,7 @@ class TestAnchoring:
 class TestUnderfillDemotion:
     """Tiers below cache target demote one level."""
 
+    @xfail_legacy_cascade
     def test_tier_below_target_demotes(self) -> None:
         """L1 with one small item demotes to L2.
 
@@ -366,6 +369,7 @@ class TestUnderfillDemotion:
         tracker.update({"system:prompt": _active_item("h1", 100)})
         assert tracker.get_all_items()["system:prompt"].tier == Tier.L0
 
+    @xfail_legacy_cascade
     def test_broken_tiers_skipped(self) -> None:
         """Tiers broken this cycle are not demoted.
 
@@ -458,6 +462,7 @@ class TestL0ContentTypedCascade:
             == Tier.L0
         )
 
+    @xfail_legacy_cascade
     def test_active_item_with_high_n_graduates_to_l3_only(self) -> None:
         """Active item with high N reaches L1 over many cycles.
 

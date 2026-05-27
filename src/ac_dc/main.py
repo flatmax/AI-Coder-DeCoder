@@ -57,8 +57,6 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 
 import asyncio
 import atexit
-import faulthandler
-import io
 import logging
 import signal
 import sys
@@ -68,31 +66,6 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-
-# Enable faulthandler at module import — earliest point
-# in the AC-DC process lifecycle. Dumps a Python traceback
-# on SIGSEGV / SIGABRT / SIGFPE / SIGBUS / SIGILL to stderr,
-# even when the fault is inside a C extension (KeyBERT,
-# sentence-transformers, torch, PyMuPDF, tree-sitter).
-# Without this, a native crash leaves only "Segmentation
-# fault (core dumped)" with no Python context.
-#
-# Guarded because pytest's capture fixture replaces sys.stderr
-# with an in-memory buffer that lacks ``fileno()``, and
-# faulthandler.enable() raises ``io.UnsupportedOperation`` in
-# that case. The guard preserves crash diagnostics in real
-# runs (where stderr is a tty or a real file) and silently
-# skips installation under capture. Falls back to the raw
-# stderr file descriptor (2) when the high-level stream is
-# not usable but the underlying fd still is.
-try:
-    faulthandler.enable()
-except (io.UnsupportedOperation, ValueError, OSError):
-    try:
-        faulthandler.enable(file=2)
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +113,8 @@ def _on_atexit() -> None:
     ``resource_tracker`` warning that fires later in the
     same unwind: if we see this log line, the unwind was
     Python-driven; if not, the process died abruptly
-    (segfault, OOM kill, kill -9) and faulthandler /
-    kernel dmesg are the next things to check.
+    (segfault, OOM kill, kill -9) and kernel dmesg is the
+    next thing to check.
 
     Uses ``os.write`` directly rather than the logger
     because by the time atexit handlers run the logging
@@ -860,76 +833,25 @@ async def run(
         _heavy_init(llm_service, repo, config, event_callback)
     )
 
-    # Keep the server running
+    # Keep the server running. On Ctrl-C / SIGTERM we exit
+    # via ``os._exit`` to bypass asyncio's runner cleanup —
+    # otherwise the runner re-enters the loop to cancel
+    # tasks and hangs on ``_heavy_init``'s sentence-transformer
+    # load running in the default executor. Vite gets a
+    # SIGTERM via ``terminate()``; we don't wait for it,
+    # vite shuts itself down once the parent dies.
     def _signal_handler(sig: int, frame: Any) -> None:
-        logger.info("Shutting down (signal=%d)...", sig)
         if vite_process is not None:
             try:
-                logger.info("Terminating Vite process...")
                 vite_process.terminate()
-                vite_process.wait(timeout=5)
-                logger.info("Vite process terminated cleanly.")
-            except Exception as exc:
-                logger.warning(
-                    "Vite terminate failed: %s — sending SIGKILL",
-                    exc,
-                )
+            except Exception:
                 try:
                     vite_process.kill()
                 except Exception:
                     pass
-        # llm_service.shutdown() tears down the three thread
-        # pools (stream, aux, warmer). The aux pool runs
-        # KeyBERT enrichment which spawns joblib/loky worker
-        # processes; if those don't drain we leak the
-        # semaphore observed in the field. Logging entry/exit
-        # gives a timestamp pair to correlate against the
-        # resource_tracker warning that fires post-exit.
-        logger.info("Shutting down LLMService...")
-        try:
-            llm_service.shutdown()
-            logger.info("LLMService shutdown complete.")
-        except Exception as exc:
-            logger.warning(
-                "LLMService shutdown raised: %s", exc
-            )
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    # SIGCONT logger — fires when the process resumes from
-    # Ctrl+Z / SIGSTOP. The first segfault incident
-    # followed a suspend/resume cycle; logging the resume
-    # gives us a timestamp to correlate against the next
-    # crash. Native extensions (joblib's loky pool, torch
-    # workers, PyMuPDF) don't always survive suspension —
-    # the parent's first call into them post-resume is
-    # the likely fault site.
-    #
-    # Signal handlers can't safely call into Python's
-    # logger on every platform, so we use os.write directly.
-    # Best-effort: if even that fails we swallow it.
-    def _on_sigcont(_sig: int, _frame: Any) -> None:
-        try:
-            os.write(
-                2,
-                b"[ac-dc] SIGCONT received - process resumed "
-                b"from suspension. Native extensions (KeyBERT, "
-                b"PyMuPDF, tree-sitter) may be in inconsistent "
-                b"state; segfault-on-next-call is possible.\n",
-            )
-        except Exception:
-            pass
-    try:
-        signal.signal(signal.SIGCONT, _on_sigcont)
-    except (OSError, ValueError):
-        # Some environments (Windows, certain restricted
-        # sandboxes) don't allow SIGCONT handlers. Not
-        # critical — just lose the marker on those.
-        pass
-
-    try:
-        await asyncio.Event().wait()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        _signal_handler(0, None)
+    await asyncio.Event().wait()

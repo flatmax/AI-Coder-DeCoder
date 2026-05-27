@@ -11,12 +11,13 @@ from ac_dc.stability_tracker import (
     TrackedItem,
 )
 
-from .conftest import _active_item
+from .conftest import _active_item, xfail_legacy_cascade
 
 
 class TestGraduation:
     """Items with N ≥ 3 in active graduate to L3."""
 
+    @xfail_legacy_cascade
     def test_graduates_at_threshold(self) -> None:
         """Three unchanged cycles → graduation to L3."""
         tracker = StabilityTracker()
@@ -32,13 +33,21 @@ class TestGraduation:
         assert item.tier == Tier.L3
 
     def test_graduate_enters_l3_at_entry_n(self) -> None:
-        """On graduation, N resets to L3's entry_n (3)."""
+        """On graduation, n_value resets to 0.
+
+        Under the membrane controller, every flux move resets
+        ``n_value`` to 0 — the age counter measures
+        residency-since-last-edit-or-move uniformly across all
+        membranes. The legacy ``entry_n`` per-tier seeding from
+        the N-counter cascade is gone.
+        """
         tracker = StabilityTracker()
         for _ in range(4):
             tracker.update({"file:a.py": _active_item("h1")})
         item = tracker.get_all_items()["file:a.py"]
-        assert item.n_value == 3
+        assert item.n_value == 0
 
+    @xfail_legacy_cascade
     def test_graduation_change_logged(self) -> None:
         """The graduation event appears in the change log."""
         tracker = StabilityTracker()
@@ -72,6 +81,7 @@ class TestCascadePromotion:
     underfill demotion don't interfere — pure promote-at-threshold.
     """
 
+    @xfail_legacy_cascade
     def test_promotion_l3_to_l2(self) -> None:
         """Item at L3 with N ≥ 6 promotes to L2 when L2 is empty."""
         tracker = StabilityTracker()
@@ -85,6 +95,7 @@ class TestCascadePromotion:
         item = tracker.get_all_items()["file:a.py"]
         assert item.tier == Tier.L2
 
+    @xfail_legacy_cascade
     def test_promotion_resets_n_to_destination_entry(self) -> None:
         """Promoted item gets destination's entry_n, not preserved N."""
         tracker = StabilityTracker()
@@ -96,6 +107,7 @@ class TestCascadePromotion:
         # L2's entry_n = 6.
         assert item.n_value == 6
 
+    @xfail_legacy_cascade
     def test_promotion_terminates_at_l1(self) -> None:
         """Item reaches L1 and stops — L0 is content-typed.
 
@@ -119,6 +131,7 @@ class TestCascadePromotion:
         item = tracker.get_all_items()["file:a.py"]
         assert item.tier == Tier.L1
 
+    @xfail_legacy_cascade
     def test_blocked_by_stable_upper_tier(self) -> None:
         """Items do NOT promote past a stable upper tier.
 
@@ -197,6 +210,7 @@ class TestCascadePromotion:
             tracker.get_all_items()["file:l0_pin.py"].tier == Tier.L0
         )
 
+    @xfail_legacy_cascade
     def test_primed_cache_l1_deselect_ripples_full_chain(self) -> None:
         """End-to-end: L1 deselect drains L1, ripples up, graduates active.
 
@@ -299,6 +313,7 @@ class TestCascadePromotion:
             "end-to-end behaviour completes the chain)."
         )
 
+    @xfail_legacy_cascade
     def test_promotion_marks_tiers_broken(self) -> None:
         """Successful promotion records both source and dest as broken.
 
@@ -314,6 +329,7 @@ class TestCascadePromotion:
             for c in changes
         )
 
+    @xfail_legacy_cascade
     def test_l1_invalidation_ripples_up_through_structural_breaks(self) -> None:
         """Ripple Promotion: invalidation propagates via structural drain.
 

@@ -1,4 +1,4 @@
-# Decisions (D1–D30)
+# Decisions (D1–D35)
 
 Historical decision log. Numbered for cross-reference. Order in this file is delivery order, not numerical order — entries are appended as decisions land. Use the table of contents (or a search) to find a specific decision number.
 
@@ -889,3 +889,60 @@ What this decision does NOT deliver:
 The decisive argument for shipping this immediately rather than waiting for the consuming UI: every agent-mode turn that runs without persisting `agent_blocks` becomes a permanent gap in the historical record — the per-turn view via `get_turn_archive` still works, but cross-turn filtering by id is impossible for those turns. The cost of landing now (small, pure addition, fully tested) is much lower than the cost of going back later to manually reconstruct the mapping for turns that ran during the gap.
 
 Spec authority: `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction (committed `bd79d93`). Ledger reference: `specs4/3-llm/history.md` § Backwards Compatibility — records without `agent_blocks` (predating this decision) load correctly; cross-turn views skip them rather than guess.
+
+---
+
+### D35 — Cache tiering replaced by membrane / flux controller; rectified-GHK is the only variant
+
+The previous cascade contract for `specs4/3-llm/cache-tiering.md` was an N-counter design: each tier held an integer counter that incremented per stable appearance, decremented on edit, and triggered promotion to the next tier when it crossed a per-tier `promote_n` threshold. Anchoring at the L1/L2 boundary, post-cascade underfill demotion, and the "broken or empty upper tier" gating layered on top to keep buildup contained. The N-counter design solved cohesion (no jittery promotions) but exposed two orthogonal problems: the buildup pathology described in the now-retired `specs4/7-future/cache-tiering-piggyback-promotion.md`, and the lack of a tunable knob trading aggregate throughput against worst-class fairness. Both eventually pointed at the same root cause: the cascade had no global signal coupling the tiers, so each tier-pair was promoting independently and there was nothing to negotiate against when one tier filled up.
+
+The replacement is the cache-tiering specialisation of Flax 2026, *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*, derived in `~/flatmax/personal.work/research/cache.tiering/paper/draft/03_policy.md`. The controller treats each tier boundary as a thin membrane and the integer counter `n` (now a pure age field) as the per-file imbalance state on that membrane. A single global signal `V = Σ_k (T_{l,k} − T_{u,k})` — the token-mass difference between lower and upper sides of every membrane — drives K parallel rectified per-membrane flux accumulators. When an accumulator integrates past unit charge, one promotion fires on that membrane. Eviction is delegated entirely to an age-ordered backstop (the existing `n`-ordered tier draining behaviour), which is exactly the C2 rectification clamp from the paper.
+
+**Only the rectified-GHK variant is supported.**
+
+The flux equation is
+
+> `Φ = max(0, P · V · (c_l − c_u · exp(−V/V_T)) / (1 − exp(−V/V_T)))`
+
+with a Taylor-branch numerical guard at `|V/V_T| < 1e-9` and overflow-safe asymptotic branches at `|V/V_T| > 50`. The hard rectification clamp on the lower side makes flux upward-only — downward motion is reserved for the edit invariant (hash mismatch teleports to Active) and explicit invalidations.
+
+Earlier revisions of this decision exposed three variants — `linear` (Taylor branch as a separate code path), `rectified-ghk`, and `bidirectional-ghk` (no clamp, controller-driven demotion). All three were retired: rectification is **free** on AC-DC4's single-tenant headline (paper §6.3 — the demotion path is empirically dead code), and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default. Carrying the alternates as live code paths added dispatch surface, test surface, and config surface for no production-headline benefit.
+
+AC-DC4 is single-tenant single-class — the K=4 multi-class structure of the paper does not apply; we keep the three-membrane geometry (Active→L3, L3→L2, L2→L1; L1→L0 absent per D27) and treat each membrane as its own one-class controller, with V summed across all membranes per constraint C1.
+
+**Default parameters** are sourced from the synth-tuner's headline rectified-GHK fit (`runs/opt-run2/best_params.json` in `~/flatmax/personal.work/research/cache.tiering`):
+
+- `P = 1.616399379428934e-06`
+- `V_T = 98952.34312610888`
+- Active→L3: `admission_only=True`, `n_admit=3`, `pick_mode="oldest"` (no flux equation; P/V_T unused)
+- L3→L2, L2→L1: flux-driven, `n_admit=0`
+
+The original tune ran bidirectional (`allow_negative_flux=True`); for the rectified clamp the same P/V_T are a sound starting point, with re-tuning available later for the last few percent.
+
+**What changes structurally vs the N-counter spec.**
+
+- `n` is now a pure age counter (turns since last seen at `n=0`), not "consecutive unchanged appearances." The Active→L3 membrane is **admission_only** (`n_admit=3`, `pick_mode="oldest"`) — no flux equation, just an age gate. Higher membranes use the flux controller alone. The `cache-warmup` semantics survive unchanged.
+
+  **Why Active→L3 falls back to admission semantics.** The flux model treats V (token-mass differential) as the driving force, which is right for inter-cache balancing but degenerate at the admission boundary: in AC-DC4, active is structurally lighter than the cached tiers — items live there only until they age past the gate, after which they leave for L3+ — so `t_active < t_L3` is the steady state and rectified Φ is permanently zero. An earlier revision of this decision used flux uniformly (`n_admit=2` as a soft prefer-aged rule with retry-without-floor). It produced a hard regression: active items never graduated, the cache stalled with a permanently-occupied active tier, and the L3 cache hit rate fell off the cliff once the synthetic startup churn ended. The fix is to recognise that admission is fundamentally a gating problem (has this file proven stable enough to commit to cache?) not a balancing problem (which tier is overfull?), and treat it as such — `n ≥ n_admit` is the entire criterion on this membrane.
+
+  `history:*` items are also marked protected against the regular relax flux — they only enter L3 via the piggyback path (which fires when L3 is already broken). Without this guard the admission_only membrane would graduate stable history every few turns and rewrite the L3 cache block on every conversation, defeating the no-churn property the piggyback design was supposed to provide.
+- The `_run_cascade` driver is replaced by an iterate-to-equilibrium relaxation loop: per turn, recompute V, recompute every membrane's `Φ`, drain any membrane whose accumulator has crossed unit charge, repeat until no membrane fires (capped at 1000 iterations as a safety bound, never expected to bind in practice).
+- Anchoring (the L1/L2 stickiness rule) and post-cascade underfill demotion are both **deleted**. The flux controller subsumes anchoring (a stable tier accumulates flux only on imbalance, not on routine refresh) and underfill (the rectification clamp + age backstop together produce the same shape without an explicit demotion pass).
+- `max_membrane` gating from the N-counter cascade is **deleted**. An earlier revision of this decision preserved it verbatim ("flux fires only on membranes whose upper side is already invalidated this turn") on the theory that scope-limiting cache-write cost was load-bearing. In practice the gate prevented quiet turns from firing flux at all — even when V was large and Φ well above threshold, an empty `_broken_tiers` set short-circuited `relax()` and active-tier residents stayed pinned forever. The rectified controller already has two gating mechanisms intrinsic to the equation: the rectification clamp (Φ ≥ 0 — direction is fixed) and the deadband threshold (Φ < 1.0 — quiet turns self-arrest). With both in place the `max_membrane` gate is not just redundant, it inverts the controller's intended behaviour by withholding promotion pressure until an external invalidation arrives. The broken-tier set survives as a HUD diagnostic and as the gate for history-piggyback graduation — it just no longer feeds the flux loop.
+- L0 stays content-typed (D27 unchanged); the L1→L0 membrane is structurally absent from `LIVE_MEMBRANES`. L0 admissions still go through `backfill_l0_after_measurement`, untouched.
+- Edit invariant strengthens: hash mismatch teleports the file to Active with `n=0` (full reset), not just demotes it. The pin-protection invariant from the previous spec carries forward unchanged.
+
+**Why a single variant rather than config-selectable.**
+
+An earlier revision of this decision exposed all three (linear / rectified-GHK / bidirectional-GHK) behind a config switch on the theory that AC-DC4's metric of interest might shift later. In practice the three variants share most of their machinery, the bidirectional path is empirically dead at our operating point (paper §6.3), and the linear form is the V → 0 Taylor branch of GHK — redundant once the GHK form is the production default. Carrying the alternates added dispatch surface in `compute_flux`, two more dataclass branches in `FluxConfig`, and pages of tests pinning behaviours that are decorative on the headline. The simpler module is easier to reason about and easier to retune; if a future workload shift demands the alternates back, they live in git history and in the synth reference implementation alongside the optimisation runs.
+
+**What this decision does NOT change.**
+
+- The cache-warmer (D34, D34a) is independent of the cascade and is not touched.
+- L0 content-typed contract (D27, D28) is preserved.
+- Cross-reference activation, deletion markers, manual rebuild, history piggyback graduation, and the integration with `StabilityTracker.update()`'s call sites all preserve their contract; only the internals of `_run_cascade` change shape.
+- Test contracts at the public-API layer (`pin_file`, `unpin_file`, `mark_deleted`, `is_deleted`, the lifecycle through `update()`) hold; lower-level tests that read `_TIER_CONFIG.promote_n` directly need to be rewritten to assert flux-controller invariants instead.
+
+**Superseded artefacts.** `specs4/7-future/cache-tiering-piggyback-promotion.md` is retired — its buildup pathology is structurally resolved by V coupling (the global signal pulls promotion pressure where it's needed without needing the upper tier to have been "broken" first). The retired spec is left in place with a banner pointing here and to the new `cache-tiering.md`; no content removed, since the analysis of the buildup pathology is still useful as motivation reading.
+
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten); `specs4/7-future/cache-tiering-piggyback-promotion.md` (banner only — superseded). Implementation authority: `src/ac_dc/cache_membrane.py` (new module) + `src/ac_dc/stability_tracker.py` (cascade replaced). Reference implementation: `~/flatmax/personal.work/research/cache.tiering/synth/model.py` and `~/flatmax/personal.work/research/cache.tiering/cache_membrane/state.py`. Paper sections: §3.1 constraints C1/C2/C3; §3.2 linear; §3.3 GHK; §4 implementation contract; §6.3 rectification ablation; §6.4 GHK-vs-linear ablation.

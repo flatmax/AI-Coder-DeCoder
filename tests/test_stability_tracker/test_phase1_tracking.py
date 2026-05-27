@@ -11,7 +11,7 @@ from ac_dc.stability_tracker import (
     TrackedItem,
 )
 
-from .conftest import _active_item, _drive_n_unchanged
+from .conftest import _active_item, _drive_n_unchanged, xfail_legacy_cascade
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ class TestActiveItemTracking:
         tracker.update({"file:a.py": _active_item("h1", 150)})
         assert tracker.get_all_items()["file:a.py"].tokens == 150
 
+    @xfail_legacy_cascade
     def test_change_log_records_demotion(self) -> None:
         """Hash change after graduation is recorded in change log."""
         tracker = StabilityTracker()

@@ -135,6 +135,7 @@ from ac_dc.llm._types import (
     _TIER_CONFIG_LOOKUP,
     _URL_PER_MESSAGE_LIMIT,
 )
+from ac_dc.cache_membrane import FluxConfig
 from ac_dc.stability_tracker import StabilityTracker, Tier, _TIER_CONFIG
 from ac_dc.token_counter import TokenCounter
 from ac_dc.url_service import URLCache, URLService
@@ -326,8 +327,12 @@ class LLMService:
         # created lazily on first switch — it costs nothing
         # while the session stays in code mode.
         cache_target = config.cache_target_tokens_for_model()
+        flux_config = FluxConfig.from_dict(config.cache_tiering_config)
         self._trackers: dict[Mode, StabilityTracker] = {
-            Mode.CODE: StabilityTracker(cache_target_tokens=cache_target),
+            Mode.CODE: StabilityTracker(
+                cache_target_tokens=cache_target,
+                flux_config=flux_config,
+            ),
         }
         # Point the context manager at the current mode's tracker.
         # _stability_tracker is kept as a backwards-compatible

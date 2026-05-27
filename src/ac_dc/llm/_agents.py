@@ -49,6 +49,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.agent_factory import build_agent_context_manager
+from ac_dc.cache_membrane import FluxConfig
 from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import AgentBlock
 from ac_dc.llm._types import ConversationScope
@@ -551,6 +552,9 @@ def build_agent_scope(
     agent_tracker = StabilityTracker(
         cache_target_tokens=(
             service._config.cache_target_tokens_for_model()
+        ),
+        flux_config=FluxConfig.from_dict(
+            service._config.cache_tiering_config
         ),
     )
     agent_context.set_stability_tracker(agent_tracker)
@@ -1110,6 +1114,9 @@ def reconstruct_agent_scope(
     agent_tracker = StabilityTracker(
         cache_target_tokens=(
             service._config.cache_target_tokens_for_model()
+        ),
+        flux_config=FluxConfig.from_dict(
+            service._config.cache_tiering_config
         ),
     )
     agent_context.set_stability_tracker(agent_tracker)

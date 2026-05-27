@@ -37,6 +37,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from ac_dc.cache_membrane import FluxConfig
 from ac_dc.context_manager import Mode
 from ac_dc.stability_tracker import StabilityTracker
 
@@ -202,6 +203,9 @@ def switch_mode(
         service._trackers[target] = StabilityTracker(
             cache_target_tokens=(
                 service._config.cache_target_tokens_for_model()
+            ),
+            flux_config=FluxConfig.from_dict(
+                service._config.cache_tiering_config
             ),
         )
 
@@ -672,6 +676,9 @@ def _rebuild_agent_tracker(
     new_tracker = StabilityTracker(
         cache_target_tokens=(
             service._config.cache_target_tokens_for_model()
+        ),
+        flux_config=FluxConfig.from_dict(
+            service._config.cache_tiering_config
         ),
     )
     scope.tracker = new_tracker

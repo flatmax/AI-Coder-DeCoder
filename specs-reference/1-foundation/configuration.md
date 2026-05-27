@@ -206,6 +206,25 @@ Drives the background cache warmer (see `specs-reference/3-llm/cache-tiering.md`
 
 The auto-disable runtime flag (flipped by the warmer on failure or retry-budget exhaustion) is independent of this config value — re-enabling after auto-disable currently requires application restart.
 
+**`cache_tiering` section:**
+
+```pseudo
+CacheTieringConfig:
+    flux_variant: string           // "linear" (default) | "rectified-ghk" | "bidirectional-ghk"
+    flux_threshold: float          // Default 1.0 — accumulator unit-charge threshold
+    membranes: [MembraneParams, MembraneParams, MembraneParams]
+
+MembraneParams:
+    P: float                       // Default 1.0 — permeability (per-membrane gain)
+    V_T: float                     // Default 2000.0 — soft-knee voltage scale (tokens)
+    n_admit: int                   // Active→L3 default 3; higher membranes default 0
+    pick_mode: string              // "smallest" (default) | "oldest"
+```
+
+Drives the membrane / flux controller documented in `specs-reference/3-llm/cache-tiering.md` and decision D35. The three `membranes` entries correspond to (Active→L3, L3→L2, L2→L1) in order; the L1→L0 membrane is intentionally absent because L0 is content-typed (D27). Unknown `flux_variant` values fall back to `"linear"`. Non-positive `flux_threshold` and negative `n_admit` fall back to defaults; unknown `pick_mode` values fall back to `"smallest"`.
+
+`linear` is the load-bearing form on the headline metric (paper §6.4); the GHK variants are research / ablation surfaces and incur a small numerical cost (Taylor-branch guard near `V/V_T → 0`). `bidirectional-ghk` allows controller-driven demotion (drops the rectification clamp) — empirically dominated on the headline objective per paper §6.3, retained for ablation only.
+
 **`doc_index` section:**
 
 ```pseudo

@@ -44,6 +44,25 @@ from ac_dc.stability_tracker import (
 _TIER_CONFIG_PROMOTE_L3 = _TIER_CONFIG[Tier.L3]["promote_n"]
 
 
+# Shared xfail marker for tests that encode the legacy N-counter
+# cascade semantics removed by D35 (membrane / flux controller).
+# The legacy mechanisms — anchoring, underfill demotion,
+# ripple-promotion-without-flux, N-threshold graduation — no
+# longer exist. Tests asserting their behaviour are kept in the
+# tree as historical record but excluded from CI; replacements
+# covering flux-driven promotion live in ``test_membrane_flux.py``.
+xfail_legacy_cascade = pytest.mark.xfail(
+    reason=(
+        "Legacy N-counter cascade behaviour removed by D35 "
+        "(membrane / flux controller). See "
+        "specs4/3-llm/cache-tiering.md and "
+        "specs4/impl-history/decisions.md D35. "
+        "Replacements in test_membrane_flux.py."
+    ),
+    strict=False,
+)
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------

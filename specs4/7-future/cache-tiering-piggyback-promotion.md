@@ -1,8 +1,8 @@
 # Cache-Tiering Piggyback Magnitude Promotion
 
-**Status:** Design discussion captured. Not yet implemented. Future work.
+**Status:** SUPERSEDED 2026-05-26 by `specs4/impl-history/decisions.md` D35 and the rewritten `specs4/3-llm/cache-tiering.md` (membrane / flux controller). The buildup pathology described below is structurally resolved by global V coupling — the new controller pulls promotion pressure across membranes through one shared imbalance signal, without needing the upper tier to be "broken" first as a precondition. The analysis below is preserved as motivation reading; **do not implement** the piggyback magnitude rule on top of the new controller.
 
-**Background:** see `specs4/3-llm/cache-tiering.md` § Ripple Promotion and `specs4/impl-history/decisions.md` D27 (L0 content-typed) for the current cascade contract.
+**Background:** see `specs4/3-llm/cache-tiering.md` (rewritten) and `specs4/impl-history/decisions.md` D27 (L0 content-typed) + D35 (membrane controller) for the current cascade contract.
 
 ## Problem
 

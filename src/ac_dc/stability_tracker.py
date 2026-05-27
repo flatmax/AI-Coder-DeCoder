@@ -2,9 +2,10 @@
 
 Drives the prompt-cache breakpoint placement that makes AC-DC's
 large-context usage affordable. Content that stays structurally
-unchanged across requests graduates into higher tiers (L3 → L2 →
-L1 → L0), which map to provider cache breakpoints. Content that
-changes demotes to ``active`` and pays the re-ingestion cost.
+unchanged across requests promotes upward across tier membranes
+(Active → L3 → L2 → L1), driven by the rectified-flux controller
+in :mod:`ac_dc.cache_membrane`. Content whose content hash changes
+teleports to ``active`` with ``n=0`` and re-climbs from there.
 
 This module owns tier assignments only. The streaming handler
 (Layer 3.6) builds the active-items list each request and calls
@@ -15,8 +16,9 @@ Governing specs:
 
 - ``specs4/3-llm/cache-tiering.md`` — the contract-level spec
 - ``specs-reference/3-llm/cache-tiering.md`` — the numeric detail
-  reference (entry N and promotion thresholds, cascade order,
-  anchoring algorithm)
+  reference
+- ``specs4/impl-history/decisions.md`` D35 — the membrane / flux
+  controller landed; rectified-GHK is the only supported variant
 
 Design points pinned by the test suite and spec:
 
@@ -33,34 +35,37 @@ Design points pinned by the test suite and spec:
   keys. Downstream consumers (prompt assembler, cache viewer)
   dispatch rendering on the prefix.
 
-- **The N value measures consecutive unchanged appearances.**
-  Incremented when an item's content hash is unchanged across a
-  request; reset to 0 when the hash changes (demotion to active).
-  N ≥ 3 triggers graduation from active into L3.
+- **`n` is a pure age counter** — turns since last edit. Aged
+  ``+1`` on every item every cycle. Reset to ``0`` only by
+  hash mismatch (the edit invariant). The Active → L3 membrane
+  has an admission floor ``n_admit`` (default 3) so newly-
+  registered items cannot graduate until they have aged.
 
-- **Cascade is bottom-up L3 → L2 → L1 → L0.** Processed once per
-  update cycle, up to a few iterations until stable. Only broken
-  tiers promote items into them — a stable tier blocks promotions
-  to keep its cache breakpoint valid.
+- **Promotion is rectified flux across membranes.** Each turn,
+  the relaxation loop iterates to local equilibrium across the
+  three live membranes (Active→L3, L3→L2, L2→L1). The L1→L0
+  membrane is disabled — L0 is content-typed (D27) and is
+  populated only by init / rebuild / cross-reference paths.
 
-- **Anchoring prevents cache-target drain.** When a tier holds
-  more tokens than ``cache_target_tokens``, items below the
-  threshold are anchored — their N is frozen and they cannot
-  promote until the tier shrinks. Prevents a cascade of
-  promotions from emptying a tier below its caching threshold.
+- **Direction and quiescence are intrinsic to the flux
+  equation.** The rectification clamp pins direction (Φ ≥ 0
+  — controller is upward-only); the deadband threshold
+  absorbs steady-state noise so quiet turns with V ≈ 0 across
+  all membranes self-arrest on the first pass without firing.
+  The broken-tier set survives as a HUD diagnostic and as the
+  gate for history-piggyback graduation, but no longer feeds
+  the flux loop.
 
-- **N cap at promotion threshold when tier above is stable.**
-  An item past the anchoring threshold increments N normally
-  but caps at the promotion-N value when the tier above is
-  stable — otherwise N would grow unbounded on long-lived stable
-  content, eventually causing a spurious promotion when the tier
-  above gets invalidated.
+- **Edit invariant.** A hash mismatch teleports the file to
+  Active with ``n = 0``. The entry is pinned; subsequent
+  deselection / stale-cleanup skips it. Only application
+  restart or explicit ``rebuild_cache`` clears pins.
 
-- **Post-cascade underfill demotion.** Any tier below
-  ``cache_target_tokens`` (except L0 and tiers broken this
-  cycle) has items demoted one level. Prevents wasting a cache
-  breakpoint on an under-full tier that won't actually be
-  cached by the provider.
+Anchoring, N-cap-at-stable-above, and post-cascade underfill
+demotion are all removed — the membrane controller subsumes the
+first two, and prompt assembly handles the third (cache target
+is consulted at breakpoint emission time, not by rearranging
+tier contents).
 """
 
 from __future__ import annotations
@@ -69,6 +74,17 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from ac_dc.cache_membrane import (
+    ACTIVE_IDX,
+    L0_IDX,
+    L1_IDX,
+    L2_IDX,
+    L3_IDX,
+    LIVE_MEMBRANES,
+    FluxConfig,
+    relax,
+)
 
 if TYPE_CHECKING:
     # Reference index is consumed for initialisation only; the
@@ -103,81 +119,46 @@ class Tier(str, Enum):
     L0 = "L0"
 
 
-# Per-tier entry N and promotion N thresholds, from specs3. These
-# are the canonical numbers — the spec table and the cascade
-# algorithm both depend on exactly these values.
+# Per-tier ``entry_n`` — the age stamp assigned to an item when
+# it is *placed* at this tier by init / rebuild / cross-reference
+# seeding paths. Under the membrane model these values are
+# effectively decorative: ``n`` is a pure age counter, and the
+# only place ``n`` is read in the relaxation loop is the
+# Active → L3 admission floor (``n_admit``, configured per-
+# membrane). Items seeded at L3 / L2 / L1 / L0 by init paths
+# bypass the admission gate entirely (they're already past the
+# membrane it gates).
 #
-# - ``entry_n``: the N value an item is assigned when it enters
-#   the tier (on graduation from below, or on promotion from a
-#   lower tier).
-# - ``promote_n``: the N value at which the item becomes eligible
-#   for promotion to the tier above. L0 has no promotion (it's
-#   terminal); we use a sentinel large value rather than None so
-#   the N-cap arithmetic stays simple.
+# The shape ``{"entry_n": int, "promote_n": int}`` is preserved
+# for backwards-compatibility with callers in
+# ``ac_dc.llm._rebuild`` and ``ac_dc.llm._breakdown`` that read
+# ``entry_n`` when materialising fresh items. The ``promote_n``
+# values are no longer load-bearing — the relaxation loop in
+# :mod:`ac_dc.cache_membrane` does not consult them — and are
+# kept in place only so callers that read the dict shape don't
+# break. New code should reach for the membrane parameters
+# directly via :class:`FluxConfig`.
 _L0_PROMOTE_SENTINEL = 9_999_999
 
 _TIER_CONFIG: dict[Tier, dict[str, int]] = {
-    # Active is the entry tier for new items. Graduation to L3
-    # happens at N ≥ 3.
     Tier.ACTIVE: {"entry_n": 0, "promote_n": 3},
     Tier.L3: {"entry_n": 3, "promote_n": 6},
     Tier.L2: {"entry_n": 6, "promote_n": 9},
     Tier.L1: {"entry_n": 9, "promote_n": 12},
-    # L0 is terminal — no promotion path. Entry N stays 12 so an
-    # item that promotes from L1 lands with the documented value.
     Tier.L0: {"entry_n": 12, "promote_n": _L0_PROMOTE_SENTINEL},
 }
 
 
-# Cascade processing order — bottom-up. L3 processes incoming
-# graduates from active, L2 handles L3's promotions, L1 handles
-# L2's. Active is processed separately in Phase 1; L0 is
-# DELIBERATELY EXCLUDED from the cascade.
-#
-# L0 is content-typed under the new model (D27): it holds the
-# system prompt and the aggregate symbol/doc map, both of which
-# are regenerated from the index at assembly time, not driven
-# by the N-counter cascade. The cascade does not place items
-# into L0, does not rewrite L0 entries, and does not consider
-# L0 for promotion targets. L0 invalidation happens only via
-# application restart or explicit ``rebuild_cache``.
-#
-# Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
-# Contract and § Tier Structure.
-_CASCADE_ORDER: tuple[Tier, ...] = (Tier.L3, Tier.L2, Tier.L1)
-
-# Adjacency map — the tier above each cached tier. Used for
-# promotion targeting.
-#
-# L1's "tier above" is None under the L0-content-typed model
-# (D27): cascade-mobile content (file:, url:, history:) is
-# ineligible for L0. The cascade processes L3 → L2 → L1 and
-# stops there. L1 is the terminal tier for promoted concrete
-# content; L0 is reserved for the system prompt and aggregate
-# maps and is reached only via explicit init / rebuild paths,
-# not via the cascade.
-#
-# L0 itself stays in the map for consistency (it never tries
-# to promote upward — there's nothing above it — and the
-# cascade code paths that read this map for L0 entries simply
-# see None and short-circuit).
-_TIER_ABOVE: dict[Tier, Tier | None] = {
-    Tier.ACTIVE: Tier.L3,
-    Tier.L3: Tier.L2,
-    Tier.L2: Tier.L1,
-    Tier.L1: None,
-    Tier.L0: None,
+# Mapping between the :class:`Tier` enum and the integer indices
+# the membrane controller uses. Higher index = more stable.
+_TIER_TO_IDX: dict[Tier, int] = {
+    Tier.ACTIVE: ACTIVE_IDX,
+    Tier.L3: L3_IDX,
+    Tier.L2: L2_IDX,
+    Tier.L1: L1_IDX,
+    Tier.L0: L0_IDX,
 }
-
-# Adjacency map — the tier below each cached tier. Used for
-# underfill demotion. Active has no tier below.
-_TIER_BELOW: dict[Tier, Tier | None] = {
-    Tier.L0: Tier.L1,
-    Tier.L1: Tier.L2,
-    Tier.L2: Tier.L3,
-    Tier.L3: Tier.ACTIVE,
-    Tier.ACTIVE: None,
-}
+_IDX_TO_TIER: dict[int, Tier] = {idx: tier for tier, idx in _TIER_TO_IDX.items()}
 
 
 # Placeholder content hash assigned during initialisation from the
@@ -314,6 +295,7 @@ class StabilityTracker:
     def __init__(
         self,
         cache_target_tokens: int = 0,
+        flux_config: FluxConfig | None = None,
     ) -> None:
         """Initialise an empty tracker.
 
@@ -324,12 +306,19 @@ class StabilityTracker:
             Per specs, this is ``max(cache_min_tokens,
             min_cacheable_tokens) × buffer_multiplier`` — computed
             by :meth:`ConfigManager.cache_target_tokens_for_model`
-            and passed in. Zero disables anchoring and underfill
-            demotion (tests use 0 when they want to exercise the
-            simple promote/demote path without anchoring
-            interference).
+            and passed in. Read by prompt assembly to decide
+            whether to emit a cache breakpoint; **does not**
+            enter the flux equation under the membrane model
+            (D35).
+        flux_config:
+            The membrane / flux controller configuration. When
+            None, defaults to :class:`FluxConfig` (rectified-GHK
+            with the synth-tuner's headline parameters). Tests
+            construct explicit configs to exercise specific
+            parameter values.
         """
         self._cache_target_tokens = cache_target_tokens
+        self._flux_config = flux_config if flux_config is not None else FluxConfig()
         self._items: dict[str, TrackedItem] = {}
         self._changes: list[str] = []
         # Per-cycle registration log. Distinct from
@@ -763,38 +752,25 @@ class StabilityTracker:
                 active_items, existing_files
             )
 
-        # Phase 1 — process active items. Hash compare, N
-        # increment or reset, cleanup of file:*/history:* items
-        # no longer present.
-        graduates = self._process_active_items(active_items)
-
-        # Phase 2 — place graduates into L3 as entry N.
-        self._place_graduates(graduates)
+        # Phase 1 — process active items. Hash compare, uniform
+        # age increment, edit teleport, cleanup of file:*/history:*
+        # items no longer present. No graduation happens here —
+        # Active→L3 is decided by the relaxation loop in Phase 4.
+        self._process_active_items(active_items)
 
         # Phase 2b — controlled history graduation. History is
-        # immutable so the N-based progression that drives file
-        # and symbol graduation is the wrong signal. Per
-        # specs4/3-llm/cache-tiering.md § "History Graduation",
-        # history graduates only when:
-        #
-        #   - cache_target_tokens > 0 (otherwise history stays
-        #     active permanently), AND
-        #   - either L3 is already broken this cycle (piggyback
-        #     on an invalidation that's going to rebuild the L3
-        #     cache block anyway — free ride), OR
-        #   - eligible history tokens exceed the cache target
-        #     (token-threshold rule; keeps the verbatim window
-        #     bounded regardless of cache state).
-        #
-        # Runs AFTER _place_graduates so the file/symbol graduates
-        # that just marked L3 broken unlock the piggyback path.
-        # Runs BEFORE _run_cascade so any history additions to L3
-        # participate in the cascade's anchor/cap/promote logic
-        # uniformly with other L3 content.
+        # immutable so the flux equation's V/c imbalance is the
+        # wrong signal. Per specs4/3-llm/cache-tiering.md §
+        # "History Graduation", history graduates only when L3
+        # is already broken this cycle — a piggyback on an
+        # invalidation that's going to rebuild the L3 cache block
+        # anyway. Runs BEFORE the relaxation loop so any history
+        # additions to L3 participate uniformly in the flux
+        # equation.
         self._graduate_history_if_eligible()
 
-        # Phase 3 — cascade. Bottom-up pass, anchoring,
-        # promotion, post-cascade underfill demotion.
+        # Phase 4/5 — run relax loop, clear broken-tiers
+        # diagnostic state. Replaces the legacy cascade.
         self._run_cascade()
 
         # Prepend the pre-cycle changes (external mutations
@@ -918,16 +894,31 @@ class StabilityTracker:
     def _process_active_items(
         self,
         active_items: dict[str, dict[str, Any]],
-    ) -> list[str]:
-        """Compare hashes, update N values, clean up departed items.
+    ) -> None:
+        """Compare hashes, age every tracked item, clean up departed.
 
-        Returns the list of keys that should graduate into L3
-        this cycle (items with N ≥ 3 in active, plus items
-        leaving active with N ≥ 3). History graduation is
-        controlled — see the "controlled history graduation"
-        paragraph later.
+        Per ``specs4/3-llm/cache-tiering.md`` § Per-Item State, ``n``
+        increments by 1 per cycle for every tracked item — the
+        membrane model treats it as a pure age counter, decoupled
+        from promotion eligibility above the Active→L3 admission
+        floor. Items present in ``active_items`` then have their
+        hash and tokens reconciled; mismatch teleports them to
+        Active with ``n=0`` (the only downward force in the
+        rectified variants). Active→L3 graduation is no longer
+        threshold-driven here — the relaxation loop in
+        :func:`ac_dc.cache_membrane.relax` decides flux moves
+        based on token-mass imbalance and the per-membrane
+        ``n_admit`` floor.
         """
-        graduates: list[str] = []
+        # Uniform age increment — every tracked item, including
+        # cached-tier residents that don't appear in active_items
+        # this cycle, ages by one. The flux equation reads tokens
+        # and counts, but the Active→L3 admission floor reads
+        # ``n``, and pinned/marker entries that sit in upper
+        # tiers without an active_items appearance must still
+        # age so their pick-rule tiebreakers stay stable.
+        for item in self._items.values():
+            item.n_value += 1
 
         # Step 1 — process every currently-active item.
         for key, payload in active_items.items():
@@ -961,7 +952,11 @@ class StabilityTracker:
 
             # Existing item — update tokens (always — tokens may
             # change due to re-rendering without a structural
-            # change), then decide on hash comparison.
+            # change), then decide on hash comparison. Aging
+            # (``n_value += 1``) was already applied uniformly
+            # at the top of this method; the only paths that
+            # touch n_value here are first-measurement (no
+            # change) and hash-mismatch (reset to 0).
             existing.tokens = new_tokens
 
             if existing.content_hash == _PLACEHOLDER_HASH:
@@ -971,12 +966,10 @@ class StabilityTracker:
                 # Without this, every initialised item would
                 # demote on the first request after startup.
                 existing.content_hash = new_hash
-                # Still increment N — the item is unchanged from
-                # the tracker's perspective (it had no prior
-                # real hash to compare to).
-                existing.n_value += 1
             elif existing.content_hash != new_hash:
-                # Hash changed — demote to active, reset N.
+                # Hash changed — teleport to active, reset N.
+                # Per spec § Edit Invariant: this is the only
+                # downward force in the rectified variants.
                 old_tier = existing.tier
                 existing.content_hash = new_hash
                 existing.n_value = 0
@@ -985,11 +978,12 @@ class StabilityTracker:
                 # has been edited and its full text must
                 # remain cached until the next
                 # ``rebuild_cache`` or application restart.
-                # The pin flag prevents stale cleanup and
-                # underfill demotion from removing it. The
-                # transition out of a deletion marker
-                # (file recreated at the same path) does NOT
-                # pin — only edits to existing files do.
+                # The pin flag protects against automatic
+                # eviction (stale-cleanup, mover selection in
+                # the relaxation loop). The transition out
+                # of a deletion marker (file recreated at the
+                # same path) does NOT pin — only edits to
+                # existing files do.
                 #
                 # Spec: ``specs4/3-llm/cache-tiering.md`` §
                 # Edit Invariant.
@@ -1010,27 +1004,9 @@ class StabilityTracker:
                     self._log_change(
                         f"{old_tier.value} → active: {key} (hash changed)"
                     )
-            else:
-                # Unchanged — increment N. Cap is applied later
-                # in the cascade phase (it depends on whether the
-                # tier above is stable).
-                existing.n_value += 1
-
-            # Graduation check — items at or above the active
-            # promote threshold are candidates for L3. History
-            # is excluded: per specs4/3-llm/cache-tiering.md
-            # § "History Graduation", history is immutable so
-            # N-based progression is the wrong signal. History
-            # graduation is controlled separately — piggyback
-            # on L3 invalidation, or token-threshold-driven —
-            # and runs in a dedicated phase after _place_graduates
-            # via _graduate_history_if_eligible.
-            if (
-                existing.tier == Tier.ACTIVE
-                and existing.n_value >= _TIER_CONFIG[Tier.ACTIVE]["promote_n"]
-                and not key.startswith("history:")
-            ):
-                graduates.append(key)
+            # Else: unchanged hash. Aging already applied at
+            # the top of this method. The relaxation loop
+            # decides flux promotion below.
 
         # Step 2 — clean up file:* and history:* items that are
         # no longer in the active list. These departed from
@@ -1069,34 +1045,6 @@ class StabilityTracker:
             self._log_change(
                 f"{item.tier.value} → removed: {key} (not in active)"
             )
-
-        return graduates
-
-    # ------------------------------------------------------------------
-    # Phase 2 — place graduates into L3
-    # ------------------------------------------------------------------
-
-    def _place_graduates(self, graduates: list[str]) -> None:
-        """Move graduated items from active to L3.
-
-        Each graduate gets L3's entry N (=3). The source tier
-        (active) doesn't need to be marked broken — active isn't
-        cached. L3 is marked broken because new content arriving
-        invalidates any prior cache state on that tier.
-        """
-        if not graduates:
-            return
-        for key in graduates:
-            item = self._items.get(key)
-            if item is None:
-                continue
-            old_tier = item.tier
-            item.tier = Tier.L3
-            item.n_value = _TIER_CONFIG[Tier.L3]["entry_n"]
-            self._log_change(
-                f"{old_tier.value} → L3: {key} (graduated)"
-            )
-        self._mark_broken(Tier.L3, "graduation incoming")
 
     # ------------------------------------------------------------------
     # Phase 2b — controlled history graduation
@@ -1207,453 +1155,94 @@ class StabilityTracker:
             self._mark_broken(Tier.L3, "history piggyback")
 
     # ------------------------------------------------------------------
-    # Phase 3 — cascade (the complex bit)
+    # Phases 2/3/4/5 — relaxation cascade
     # ------------------------------------------------------------------
 
     def _run_cascade(self) -> None:
-        """Run the bottom-up cascade until no more promotions occur.
+        """Drive the membrane / flux relaxation loop.
 
-        Each pass processes each tier once in L3 → L0 order:
+        Replaces the legacy N-counter cascade. The relaxation
+        loop iterates to within-turn flux equilibrium across
+        the three live membranes (Active→L3, L3→L2, L2→L1).
+        L1→L0 is structurally disabled — L0 is content-typed
+        (D27) and is never written by the relaxation loop.
 
-        1. Anchoring — items below the cache-target anchor line
-           freeze their N this cycle (cannot promote). Items
-           above the line are unanchored and increment N
-           normally. N is NOT capped — letting it grow means
-           items above the anchor stay promotion-eligible every
-           turn rather than bouncing between promote_n and
-           promote_n+1 under stable upstream conditions.
-        2. Promotion — items with N ≥ promote_n move up into
-           tiers that are broken or empty at cascade entry.
-           Cascade happens every turn for every eligible item —
-           the cache block's re-ingestion cost is the price of
-           letting content flow upward to where it belongs.
+        Pipeline (matches ``specs4/3-llm/cache-tiering.md`` §
+        Order of Operations Phases 3–5):
 
-        Post-cascade — any tier below cache_target (except L0
-        and broken tiers) demotes one item level as underfill
-        cleanup.
-
-        Tracked via ``processed`` set so anchoring and cap math
-        run at most once per tier per cascade cycle, even when
-        multiple passes happen.
-
-        Promotion gating uses a snapshot of ``_broken_tiers``
-        taken at cascade entry. Per the spec's Ripple Promotion
-        rule — "if a tier is stable, nothing promotes into it
-        and tiers below remain cached" — one external
-        invalidation opens exactly one upward promotion path,
-        not a chain. Mutations to ``_broken_tiers`` made during
-        the cascade (for external consumers and the L0 backfill
-        probe) are preserved but do not feed back into
-        promotion gating within the same cycle. Without the
-        snapshot, an external L1 invalidation would mark L2
-        broken when L2→L1 promotes, then mark L3 broken when
-        L3→L2 follows, cascading a single user action into
-        full-stack drain.
+        - **Phase 3** — already done in :meth:`update` before
+          this call (history piggyback graduation).
+        - **Phase 4** — call :func:`ac_dc.cache_membrane.relax`
+          with the live ``_items`` and the configured
+          :class:`FluxConfig`. Direction is fixed by the
+          rectification clamp (Φ ≥ 0); the deadband threshold
+          absorbs steady-state noise so quiet turns
+          self-arrest. Each move logs to ``_changes`` and
+          marks both source and destination tiers broken
+          (HUD diagnostic).
+        - **Phase 5** — clear ``_broken_tiers`` and
+          ``_broken_reasons``. External callers will repopulate
+          between turns.
         """
-        # Snapshot the broken-tiers set at cascade entry. All
-        # promotion gating below reads from this snapshot; the
-        # live self._broken_tiers set continues to receive
-        # updates during the cascade (for the L0 backfill probe,
-        # _demote_underfilled, and the post-cascade clear) but
-        # those updates do not feed back into _try_promote_from.
-        cascade_broken = set(self._broken_tiers)
-        # Also snapshot which tiers were EMPTY at entry. The
-        # promotion gate accepts "broken OR empty" destinations
-        # — and emptiness must be frozen at entry too, not
-        # recomputed per-iteration. Without this snapshot, a
-        # tier that was stable (populated, not broken) at entry
-        # but becomes empty mid-cascade (because its own
-        # residents promoted upward) would start accepting
-        # content from the tier below, recreating the
-        # chain-cascade bug through a different path. The spec's
-        # "tiers below remain cached" rule is that one external
-        # invalidation opens exactly one upward path — and that
-        # path is pinned by BOTH the broken set and the empty
-        # set, captured at the same instant.
-        cascade_empty: set[Tier] = set()
-        for tier in _CASCADE_ORDER + (Tier.ACTIVE,):
-            has_items = any(
-                it.tier == tier for it in self._items.values()
+        stats = relax(
+            list(self._items.values()),
+            config=self._flux_config,
+            tier_of=lambda f: _TIER_TO_IDX[f.tier],
+            set_tier=self._apply_relax_move,
+            n_of=lambda f: f.n_value,
+            tokens_of=lambda f: f.tokens,
+            key_of=lambda f: f.key,
+            # ``history:*`` items are excluded from regular flux —
+            # they only enter L3 via the piggyback path
+            # (:meth:`_graduate_history_if_eligible`), which fires
+            # only when L3 is already broken by another mutation.
+            # Otherwise the conversation would churn the L3 cache
+            # block on every stable turn.
+            is_protected=lambda f: bool(
+                getattr(f, "_pinned", False)
+                or getattr(f, "_deleted", False)
+                or f.key.startswith("history:")
+            ),
+        )
+        if stats.iters >= 1000:
+            logger.warning(
+                "stability_tracker: relax loop did not converge "
+                "(iters=%d, moves=%d)",
+                stats.iters,
+                len(stats.moves),
             )
-            if not has_items:
-                cascade_empty.add(tier)
-        # Did external mutations invalidate any tier at cascade
-        # entry? When yes, the cascade is permitted to piggyback
-        # an L0 backfill probe on the existing invalidation —
-        # the cache block is going to be rebuilt regardless, so
-        # topping L0 up costs nothing extra. When no, the
-        # cascade must NOT invent a fresh L0 invalidation: doing
-        # so would chain L1 → L0, then L2 → L1, then L3 → L2
-        # every turn that L0 happened to sit a few hundred
-        # tokens below cache_target, draining cached tiers
-        # without any structural reason. Permanent L0 underfill
-        # is the dedicated job of
-        # :meth:`backfill_l0_after_measurement`, called once at
-        # init / cache rebuild — not the per-turn cascade.
-        had_external_invalidation = bool(cascade_broken)
 
-        # Up to 8 iterations — real cascades converge in 1–2,
-        # cap is defensive against logic bugs creating a cycle.
-        #
-        # Note the L0-content-typed model: the cascade does NOT
-        # touch L0. There is no per-cycle L0-backfill probe
-        # because L0 is invariant under routine events
-        # (selection toggles, edits, URL fetches, history
-        # compaction). The legacy "L0 underfilled →
-        # piggyback-promote from L1" path is removed; L0
-        # population is the responsibility of init / rebuild
-        # paths and the optional cross-reference seed, never
-        # the cascade.
-        #
-        # Spec: ``specs4/3-llm/cache-tiering.md`` § L0
-        # Stability Contract.
-        del had_external_invalidation  # no longer drives gating
-        processed: set[Tier] = set()
-        for _ in range(8):
-            made_progress = False
-            for tier in _CASCADE_ORDER:
-                if tier in processed:
-                    # Re-visit only to check promotion eligibility
-                    # based on a newly-broken upper tier; skip
-                    # the anchor/cap pass which we already did.
-                    if self._try_promote_from(
-                        tier, cascade_broken, cascade_empty
-                    ):
-                        made_progress = True
-                    continue
-                # First visit — full processing.
-                self._process_tier_veterans(tier)
-                processed.add(tier)
-                if self._try_promote_from(
-                    tier, cascade_broken, cascade_empty
-                ):
-                    made_progress = True
-            if not made_progress:
-                break
-
-        # Post-cascade underfill demotion. Runs in reverse cascade
-        # order (L0 → L1 → L2 → L3) so a demotion from L1 into L2
-        # can flow through to L2's own underfill check in the
-        # same call.
-        self._demote_underfilled()
-
-        # Cascade has consumed the broken-tier signals. Clear the
-        # set so the next cycle starts fresh — external mutations
-        # between now and the next :meth:`update` will repopulate
-        # it. Note: _demote_underfilled may have added entries
-        # (its own source/destination marks), so we clear AFTER
-        # it runs. The next update's cascade will see an empty
-        # set plus whatever external paths added since.
+        # Phase 5 — broken-tier signals consumed. Next cycle
+        # starts fresh; external mutations between now and the
+        # next :meth:`update` repopulate the set.
         self._broken_tiers.clear()
         self._broken_reasons.clear()
 
-    def _process_tier_veterans(self, tier: Tier) -> None:
-        """Anchor items below cache target; cap N above it.
+    def _apply_relax_move(self, item: TrackedItem, new_idx: int) -> None:
+        """Set-tier callback used by :func:`relax`.
 
-        Only runs when cache_target_tokens > 0 AND the tier's
-        total tokens exceed cache_target. Otherwise no items
-        are anchored and no caps are applied — the simple
-        promote-when-N-reaches-threshold path handles it.
-
-        The anchoring flag is attached dynamically via
-        ``_anchored`` attribute — transient per-cycle state that
-        doesn't persist between updates.
+        Records the change-log entry, marks both source and
+        destination tiers broken, and resets ``n_value`` to 0
+        on the destination so the per-membrane ``n_admit``
+        floor on a *subsequent* turn applies cleanly. (For
+        upward moves the floor is only meaningful on the
+        Active→L3 membrane; resetting on every move keeps the
+        semantics uniform.)
         """
-        if self._cache_target_tokens <= 0:
-            # Anchoring disabled — clear any stale flags and
-            # return.
-            for item in self._items.values():
-                if item.tier == tier:
-                    item._anchored = False  # type: ignore[attr-defined]
-            return
-
-        tier_items = [
-            item for item in self._items.values() if item.tier == tier
-        ]
-        total_tokens = sum(item.tokens for item in tier_items)
-
-        if total_tokens <= self._cache_target_tokens:
-            # Tier under cache target — no anchoring this cycle.
-            for item in tier_items:
-                item._anchored = False  # type: ignore[attr-defined]
-            return
-
-        # Sort by N ascending — items with the lowest N get
-        # anchored first. Ties broken by key for determinism
-        # (crucial for test stability — otherwise the anchoring
-        # boundary drifts per-run).
-        tier_items.sort(key=lambda it: (it.n_value, it.key))
-
-        # Accumulate tokens; items consumed before reaching
-        # cache_target are anchored (N frozen this cycle).
-        accumulated = 0
-        for item in tier_items:
-            if accumulated < self._cache_target_tokens:
-                # Below the line — anchored. N is frozen this
-                # cycle; the item cannot promote and stays
-                # pinned to the bottom of the tier keeping the
-                # cache block valid.
-                item._anchored = True  # type: ignore[attr-defined]
-            else:
-                # Above the line — not anchored. N is NOT
-                # capped here; letting it grow means items
-                # above the anchor stay promotion-eligible
-                # every turn rather than bouncing between
-                # promote_n and promote_n+1 under stable
-                # upstream conditions.
-                item._anchored = False  # type: ignore[attr-defined]
-            accumulated += item.tokens
-
-    def _try_promote_from(
-        self,
-        tier: Tier,
-        cascade_broken: set[Tier] | None = None,
-        cascade_empty: set[Tier] | None = None,
-    ) -> bool:
-        """Promote eligible items from ``tier`` to the tier above.
-
-        Promotion is gated on the destination tier being
-        broken or empty — ripple-promotion per
-        specs4/3-llm/cache-tiering.md § Ripple Promotion.
-        When the upper tier's cache block is already
-        invalidated (or doesn't exist), moving veterans in
-        costs nothing extra. When it's stable, we leave it
-        alone — disturbing a cached tier for a steady-state
-        promotion would trash the cache on every turn.
-
-        The ``cascade_broken`` and ``cascade_empty`` parameters
-        are snapshots of the broken-tiers set and the set of
-        empty tiers, taken at cascade entry (see
-        :meth:`_run_cascade`) and then augmented during the
-        cascade to track **structural** invalidations — tiers
-        that became broken because their own residents
-        promoted upward and drained them. When provided,
-        gating reads from these augmented snapshots rather
-        than the live tracker state.
-
-        The subtle point: two kinds of invalidation exist, and
-        they chain differently.
-
-        - **External** invalidation (user deselects a file,
-          a file's hash changes, the orchestrator marks a
-          tier broken before calling :meth:`update`) must
-          NOT chain. Per spec § Ripple Promotion, one
-          external invalidation opens exactly one upward
-          path. Without this constraint, a single deselect
-          of an L1 item would cascade L2→L1, L3→L2, active
-          graduation, potentially drain L0 — tearing down
-          the whole cache.
-
-        - **Structural** invalidation (a tier's cache block
-          needs rebuilding because its own residents just
-          promoted out, leaving the tier's token content
-          changed) MUST chain. This is the legitimate Ripple
-          Promotion the spec describes: L2 veterans promote
-          into broken L1, L2 is now structurally broken,
-          L3 veterans flow into L2, and so on up the chain.
-          Stopping at the external invalidation point
-          instead of propagating structural invalidations
-          leaves tiers stranded — L3 veterans ready to flow
-          upward but the cascade blocks them because "L2
-          wasn't broken at cascade entry".
-
-        The snapshots handle both cases: they start with
-        only the external invalidations (what ``_broken_tiers``
-        held at cascade entry) and what was empty at entry.
-        When a promotion succeeds, the source tier is added
-        to the snapshot — subsequent iterations see it as
-        broken and allow the chain to continue. The
-        destination tier is NOT added to the snapshot (it
-        was the target of the invalidation, not a new source
-        of one) — this preserves the "external L1
-        invalidation doesn't drain L0" guarantee, because
-        the L1 destination mark never feeds back into
-        gating.
-
-        When either snapshot is None (callers outside the
-        cascade, plus tests), gating falls back to the live
-        ``self._broken_tiers`` set and a live emptiness
-        probe — preserves the prior contract for direct
-        callers who don't need cycle-stable gating.
-
-        An item is eligible when:
-
-        - The tier above was broken OR empty at cascade entry,
-          OR the tier above became structurally broken
-          earlier in this cascade (per augmented snapshot),
-          AND
-        - It is not anchored (above the cache-target anchor
-          line within its current tier), AND
-        - Its N ≥ the tier's promote_n threshold
-
-        Returns True if any items promoted. The cascade uses
-        this to decide whether another pass is needed.
-        """
-        above = _TIER_ABOVE[tier]
-        if above is None:
-            # L0 — no tier above, can't promote.
-            return False
-
-        # Gate: only promote into tiers that were broken OR
-        # empty at cascade entry. Both signals are snapshotted
-        # so mid-cascade mutations (source-tier marking after
-        # promotion, a tier emptying because its residents just
-        # promoted upward) do not feed back into gating. See
-        # docstring for why both snapshots matter.
-        broken_gate = cascade_broken if cascade_broken is not None else self._broken_tiers
-        if cascade_empty is not None:
-            empty_gate = above in cascade_empty
-        else:
-            # Live fallback for non-cascade callers — probe
-            # the current state.
-            empty_gate = not any(
-                it.tier == above for it in self._items.values()
-            )
-        upper_broken = above in broken_gate
-        if not upper_broken and not empty_gate:
-            return False
-
-        promote_n = _TIER_CONFIG[tier]["promote_n"]
-        candidates = [
-            item
-            for item in self._items.values()
-            if item.tier == tier
-            and not getattr(item, "_anchored", False)
-            and item.n_value >= promote_n
-        ]
-        if not candidates:
-            return False
-
-        promoted_any = False
-        for item in candidates:
-            item.tier = above
-            item.n_value = _TIER_CONFIG[above]["entry_n"]
-            self._log_change(
-                f"{tier.value} → {above.value}: {item.key} (promoted)"
-            )
-            promoted_any = True
-
-        if promoted_any:
-            # Source tier shed items → its cache block needs
-            # rebuilding. Destination tier gained items → its
-            # cache block also needs rebuilding. Mark both in
-            # the live set so external consumers (prompt
-            # assembler, underfill demotion which skips broken
-            # tiers) see the structural change.
-            self._mark_broken(tier, "promoted out")
-            self._mark_broken(above, "promoted in")
-
-            # Structural invalidation propagation — the
-            # source tier just lost residents, so its cache
-            # block is genuinely broken for the remainder of
-            # this cascade. Add it to the snapshot so the
-            # next iteration's gate sees the invalidation
-            # and allows the tier below to chain into it.
-            # This is the spec's Ripple Promotion: L1
-            # invalidation opens L2→L1, which opens L3→L2,
-            # which opens active→L3.
-            #
-            # The DESTINATION tier is deliberately NOT added
-            # to ``cascade_broken``. The destination received
-            # content — it's being rebuilt because it was
-            # already broken (the precondition of this
-            # promotion firing). Adding it to the snapshot
-            # would re-open a path that was just closed by
-            # this very promotion, producing the chain-
-            # cascade bug that the snapshot was introduced
-            # to prevent: external L1 invalidation would
-            # mark L0 "broken" when L1→L0 promotes, letting
-            # L2 promote up through the chain without any
-            # L0-side invalidation having occurred.
-            if cascade_broken is not None:
-                cascade_broken.add(tier)
-
-        return promoted_any
-
-    def _demote_underfilled(self) -> None:
-        """Demote items from tiers that are below the cache target.
-
-        Wastes a cache breakpoint to hold a tier below
-        cache_target — the provider won't cache it. Each
-        under-full tier (excluding L0 which is terminal and
-        tiers broken this cycle, which we already reprocessed)
-        demotes one item level.
-
-        Iterates L0 → L1 → L2 → L3 so a demoted item can
-        participate in its new tier's underfill check on the
-        next outer iteration. L3 is processed with demotion
-        target ``active``, which absorbs without limit.
-
-        Each item demotes AT MOST ONCE per call to avoid
-        cascading double-demotions within a single pass.
-        """
-        if self._cache_target_tokens <= 0:
-            return
-
-        # Items we've already demoted this pass — prevent
-        # re-demotion if a tier becomes under-full after its
-        # demoted items have already left.
-        demoted_this_call: set[str] = set()
-
-        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-            if tier == Tier.L0:
-                # L0 is terminal — never demoted via underfill.
-                # An under-full L0 is the "backfill" scenario;
-                # the cascade's normal L1→L0 promotion path tops
-                # it up when L1 is invalidated, not this demotion
-                # path.
-                continue
-            if tier in self._broken_tiers:
-                # Broken tiers received promotions this cycle —
-                # don't immediately undo them.
-                continue
-
-            below = _TIER_BELOW[tier]
-            if below is None:
-                continue
-
-            tier_items = [
-                item
-                for item in self._items.values()
-                if item.tier == tier and item.key not in demoted_this_call
-            ]
-            total = sum(item.tokens for item in tier_items)
-            if total >= self._cache_target_tokens:
-                continue
-            if not tier_items:
-                continue
-
-            # Demote every item except pinned files and
-            # deletion markers — those are protected from
-            # automatic eviction by the L0-content-typed
-            # model's edit invariant. Their N is preserved
-            # for the items that do demote; they may
-            # re-promote on the next cycle if the tier above
-            # stabilises.
-            #
-            # Spec: ``specs4/3-llm/cache-tiering.md`` § Edit
-            # Invariant and § Item Removal.
-            demoted_any = False
-            for item in tier_items:
-                if getattr(item, "_pinned", False) or getattr(
-                    item, "_deleted", False
-                ):
-                    # Pinned or marker — skip. The entry
-                    # stays at its current tier even though
-                    # the tier is below cache target.
-                    continue
-                item.tier = below
-                demoted_this_call.add(item.key)
-                demoted_any = True
-                self._log_change(
-                    f"{tier.value} → {below.value}: {item.key} "
-                    f"(underfill demotion)"
-                )
-            if demoted_any:
-                # Both tiers experience structural change
-                # only when something actually demoted.
-                self._mark_broken(tier, "underfill demotion (source)")
-                self._mark_broken(below, "underfill demotion (dest)")
+        old_tier = item.tier
+        new_tier = _IDX_TO_TIER[new_idx]
+        item.tier = new_tier
+        # ``n`` resets on every flux move — the age counter
+        # measures residency-since-last-edit-or-move, which
+        # is what the Active→L3 admission floor wants. For
+        # higher membranes (n_admit=0) the reset is harmless.
+        item.n_value = 0
+        self._mark_broken(old_tier, "flux move (source)")
+        self._mark_broken(new_tier, "flux move (destination)")
+        self._log_change(
+            f"{old_tier.value} → {new_tier.value}: "
+            f"{item.key} (flux)"
+        )
 
     # ------------------------------------------------------------------
     # Initialisation from reference graph (startup seeding)

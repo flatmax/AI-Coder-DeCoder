@@ -955,6 +955,114 @@ class ConfigManager:
         }
 
     @property
+    def cache_tiering_config(self) -> dict[str, Any]:
+        """Cache-tiering (membrane / flux controller) section.
+
+        Drives the rectified-GHK flux controller that manages
+        promotion across the Active → L3 → L2 → L1 membranes.
+        See ``specs4/3-llm/cache-tiering.md`` and
+        ``specs4/impl-history/decisions.md`` D35. Only the
+        rectified-GHK variant is supported — the linear and
+        bidirectional-GHK forms from earlier revisions are
+        retired.
+
+        Fields:
+
+        - ``flux_threshold`` — accumulator unit charge before
+          a promotion fires. Default 1.0. Values <= 0 fall
+          back to 1.0 (a non-positive threshold would fire
+          unboundedly).
+        - ``membranes`` — list of three per-membrane
+          parameter dicts, one each for Active→L3, L3→L2,
+          L2→L1 (in that order). The L1→L0 membrane is
+          intentionally absent (L0 is content-typed, D27).
+          Each entry is a dict with ``P`` (permeability,
+          float), ``V_T`` (soft-knee voltage scale, float),
+          ``n_admit`` (integer minimum-age admission floor),
+          ``pick_mode`` (``"smallest"`` or ``"oldest"``), and
+          ``admission_only`` (bool — when True the membrane
+          fires whenever an aged-enough mover exists, with no
+          flux equation; used on Active→L3, where V coupling
+          degenerates because active is structurally lighter
+          than the cache).
+          Missing entries are filled with defaults; entries
+          past index 2 are ignored.
+
+        Defaults sourced from the synth-tuner's headline fit
+        (``runs/opt-run2/best_params.json`` in
+        ``~/flatmax/personal.work/research/cache.tiering``):
+        ``P = 1.616399379428934e-06``,
+        ``V_T = 98952.34312610888``, ``n_admit = 3`` and
+        ``admission_only = True`` on Active→L3, plain flux
+        with ``n_admit = 0`` elsewhere.
+
+        Spec: ``cache_tiering`` section of ``app.json``.
+        """
+        section = self.app_config.get("cache_tiering", {})
+        if not isinstance(section, dict):
+            section = {}
+
+        try:
+            threshold = float(section.get("flux_threshold", 1.0))
+        except (TypeError, ValueError):
+            threshold = 1.0
+        if threshold <= 0.0:
+            threshold = 1.0
+
+        default_p = 1.616399379428934e-06
+        default_vt = 98952.34312610888
+        membrane_defaults = [
+            {"P": default_p, "V_T": default_vt, "n_admit": 3,
+             "pick_mode": "oldest", "admission_only": True},
+            {"P": default_p, "V_T": default_vt, "n_admit": 0,
+             "pick_mode": "smallest", "admission_only": False},
+            {"P": default_p, "V_T": default_vt, "n_admit": 0,
+             "pick_mode": "smallest", "admission_only": False},
+        ]
+        raw_list = section.get("membranes", [])
+        if not isinstance(raw_list, list):
+            raw_list = []
+        membranes: list[dict[str, Any]] = []
+        for idx, default in enumerate(membrane_defaults):
+            entry = raw_list[idx] if idx < len(raw_list) else {}
+            if not isinstance(entry, dict):
+                entry = {}
+            try:
+                p_val = float(entry.get("P", default["P"]))
+            except (TypeError, ValueError):
+                p_val = default["P"]
+            try:
+                vt_val = float(entry.get("V_T", default["V_T"]))
+            except (TypeError, ValueError):
+                vt_val = default["V_T"]
+            try:
+                n_admit = int(entry.get("n_admit", default["n_admit"]))
+            except (TypeError, ValueError):
+                n_admit = default["n_admit"]
+            if n_admit < 0:
+                n_admit = 0
+            pick = entry.get("pick_mode", default["pick_mode"])
+            if pick not in {"smallest", "oldest"}:
+                pick = default["pick_mode"]
+            admission_only = bool(
+                entry.get("admission_only", default["admission_only"])
+            )
+            membranes.append(
+                {
+                    "P": p_val,
+                    "V_T": vt_val,
+                    "n_admit": n_admit,
+                    "pick_mode": pick,
+                    "admission_only": admission_only,
+                }
+            )
+
+        return {
+            "flux_threshold": threshold,
+            "membranes": membranes,
+        }
+
+    @property
     def agents_config(self) -> dict[str, Any]:
         """Agent-mode section with defaults filled in.
 
