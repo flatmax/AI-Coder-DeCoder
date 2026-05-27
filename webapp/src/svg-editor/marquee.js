@@ -241,36 +241,42 @@ export default {
 
   /**
    * Walk the SVG DOM collecting candidate elements for
-   * marquee hit-test. Direct children of the root SVG
-   * plus one level inside `<g>` groups. Deeper nesting
-   * is deliberately out of scope per specs4.
+   * marquee hit-test. Recursively descends through every
+   * `<g>` group so deeply-nested elements (typical of
+   * exported SVGs that wrap content in styling layers)
+   * are reachable. The ancestor-dedupe step in
+   * `_endMarquee` drops descendants whose ancestor is
+   * also selected, so adding everything here doesn't
+   * cause double-moves on group drag — it just means
+   * the marquee can find shapes regardless of how the
+   * source SVG nests them.
    */
   _marqueeCandidates() {
     const out = [];
-    const rootChildren = Array.from(this._svg.children);
-    for (const child of rootChildren) {
-      if (!child.tagName) continue;
-      const tag = child.tagName.toLowerCase();
-      if (_NON_SELECTABLE_TAGS.has(tag)) continue;
-      if (child.classList && child.classList.contains(HANDLE_CLASS)) {
-        continue;
+    const visit = (node) => {
+      if (!node || !node.tagName) return;
+      const tag = node.tagName.toLowerCase();
+      if (_NON_SELECTABLE_TAGS.has(tag)) return;
+      if (node.classList && node.classList.contains(HANDLE_CLASS)) {
+        return;
       }
-      if (child.id === HANDLE_GROUP_ID) continue;
+      if (node.id === HANDLE_GROUP_ID) return;
       if (tag === 'g') {
-        // One level deeper.
-        for (const inner of Array.from(child.children)) {
-          if (!inner.tagName) continue;
-          const innerTag = inner.tagName.toLowerCase();
-          if (_NON_SELECTABLE_TAGS.has(innerTag)) continue;
-          if (_SELECTABLE_TAGS.has(innerTag) || innerTag === 'g') {
-            out.push(inner);
-          }
+        // Group itself is selectable, and we descend
+        // into its children so nested shapes are
+        // reachable too.
+        out.push(node);
+        for (const child of Array.from(node.children)) {
+          visit(child);
         }
-        // The group itself is also selectable.
-        out.push(child);
-      } else if (_SELECTABLE_TAGS.has(tag)) {
-        out.push(child);
+        return;
       }
+      if (_SELECTABLE_TAGS.has(tag)) {
+        out.push(node);
+      }
+    };
+    for (const child of Array.from(this._svg.children)) {
+      visit(child);
     }
     return out;
   },
