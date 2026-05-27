@@ -1764,20 +1764,33 @@ export class SvgViewer extends LitElement {
   // ---------------------------------------------------------------
 
   /**
-   * Copy the current modified SVG source to the
-   * clipboard as text. Uses the same serialised form
-   * `_onEditorChange` produces — handle overlay stripped,
-   * pan-zoom viewport wrapper unwrapped, inlined
-   * data-URI hrefs swapped back to their externalised
-   * on-disk paths. The user gets exactly what would
-   * land in the file on save.
+   * Copy the current modified SVG to the clipboard as a
+   * multi-format payload — `image/png` (rendered raster)
+   * plus `image/svg+xml` (source). Chat applications and
+   * image-aware paste targets pick the PNG and render the
+   * image inline; SVG-aware editors (Inkscape, browsers)
+   * pick the SVG source. This matches the spec's intent
+   * for "Copy as SVG" — the user wants an *image* on the
+   * clipboard, not the XML text.
+   *
+   * The PNG side reuses the same render pipeline as
+   * `_copyAsPng` (parse viewBox, scale for quality, draw
+   * to canvas, blob). The SVG side uses the serialised
+   * form `_onEditorChange` produces — handle overlay
+   * stripped, pan-zoom viewport unwrapped, inlined data-
+   * URI hrefs swapped back to their externalised on-disk
+   * paths. So a paste into a code editor (which falls
+   * through to text/plain when the target doesn't grok
+   * either MIME type) still gives clean SVG source.
    *
    * Calling `_onEditorChange` first guarantees
    * `file.modified` is current — there may be
-   * uncommitted edits in the SvgEditor that haven't
-   * been serialised yet (the editor calls onChange on
-   * mutation commits, but a paranoid refresh is cheap
-   * and matches the `_switchToTextDiff` precedent).
+   * uncommitted edits in the SvgEditor that haven't been
+   * serialised yet.
+   *
+   * Falls back to text-only `writeText` when
+   * `ClipboardItem` is unavailable (older browsers, non-
+   * secure contexts).
    */
   async _copyAsSvg() {
     this._contextMenu = null;
@@ -1793,22 +1806,245 @@ export class SvgViewer extends LitElement {
       this._emitToast('Nothing to copy', 'info');
       return;
     }
+    if (!navigator.clipboard) {
+      this._emitToast('Clipboard not available', 'error');
+      return;
+    }
+    // Preferred path: ClipboardItem with both PNG and
+    // SVG MIME types. Receiving app picks whichever it
+    // understands.
     if (
-      !navigator.clipboard ||
-      typeof navigator.clipboard.writeText !== 'function'
+      typeof navigator.clipboard.write === 'function' &&
+      typeof ClipboardItem !== 'undefined'
     ) {
+      try {
+        const pngBlob = await this._renderSvgToPngBlob(svgText);
+        const svgBlob = new Blob([svgText], {
+          type: 'image/svg+xml',
+        });
+        const item = new ClipboardItem({
+          'image/png': pngBlob,
+          'image/svg+xml': svgBlob,
+        });
+        await navigator.clipboard.write([item]);
+        this._emitToast('Image copied to clipboard', 'success');
+        return;
+      } catch (err) {
+        // Fall through to text-only writeText. Common
+        // failure modes: ClipboardItem MIME-type rejection
+        // (some browsers gate non-image types behind a
+        // flag), document not focused, render failure
+        // (malformed SVG). Logging for diagnosis; user
+        // gets a working text fallback.
+        console.warn('[svg-viewer] image copy failed', err);
+      }
+    }
+    // Fallback: text-only.
+    if (typeof navigator.clipboard.writeText !== 'function') {
       this._emitToast('Clipboard not available', 'error');
       return;
     }
     try {
       await navigator.clipboard.writeText(svgText);
-      this._emitToast('SVG copied to clipboard', 'success');
+      this._emitToast('SVG source copied as text', 'info');
     } catch (err) {
       this._emitToast(
-        `Failed to copy SVG: ${err?.message || 'unknown error'}`,
+        `Failed to copy: ${err?.message || 'unknown error'}`,
         'error',
       );
     }
+  }
+
+  /**
+   * Render an SVG string to an `image/png` Blob. Shared
+   * pipeline between `_copyAsSvg` (which combines this
+   * with the SVG source for a multi-format clipboard
+   * item) and any future raster export. Returns a Blob
+   * ready to drop into a `ClipboardItem`.
+   *
+   * Frames the output to match the right editor's
+   * current viewBox — what the user actually sees on
+   * screen — rather than the SVG's authored
+   * viewBox/width/height. After fit-to-content, pan/zoom,
+   * or presentation toggle, the live viewBox can differ
+   * substantially from the authored one; rendering against
+   * the authored frame produces a PNG with mismatched
+   * margins (extra whitespace, or content cropped). We
+   * clone the parsed SVG, overwrite its viewBox with the
+   * live one, force `preserveAspectRatio="xMidYMid meet"`
+   * so the renderer doesn't stretch (the live editor uses
+   * `none` for its own coordinate math, but a standalone
+   * raster wants the natural aspect), and re-serialise
+   * before handing to the Image loader.
+   *
+   * Throws on render failure — caller decides whether to
+   * fall back to text-only or surface an error. The PNG
+   * pipeline can fail when the SVG references resources
+   * the renderer can't resolve (cross-origin images,
+   * tainted canvas). The error message is opaque on
+   * purpose; callers handle by falling through.
+   */
+  async _renderSvgToPngBlob(svgText) {
+    // Parse the SVG into a fresh document so we can
+    // mutate its root attributes without affecting the
+    // live editor.
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    const svgEl = doc.querySelector('svg');
+    // Default frame from the authored SVG. Used when no
+    // live editor is attached (defensive — `_copyAsSvg`
+    // already gates on activeIndex, but the helper is
+    // self-contained).
+    let width = 1920;
+    let height = 1080;
+    if (svgEl) {
+      const vb = svgEl.getAttribute('viewBox');
+      if (vb) {
+        const parts = vb.split(/[\s,]+/).map(Number);
+        if (parts.length >= 4 && parts[2] > 0 && parts[3] > 0) {
+          width = parts[2];
+          height = parts[3];
+        }
+      }
+      const w = parseFloat(svgEl.getAttribute('width'));
+      const h = parseFloat(svgEl.getAttribute('height'));
+      if (w > 0 && h > 0) {
+        width = w;
+        height = h;
+      }
+    }
+    // Determine the rendering frame. Priority order:
+    //
+    //   1. Content bbox of the live right-pane SVG. The
+    //      editor's viewBox is sized to the container's
+    //      aspect ratio (after fitContent), which means
+    //      it carries letterbox padding around the
+    //      actual content. Rendering against that
+    //      viewBox produces a PNG with visible margins
+    //      above/below or left/right of the content.
+    //      Reading `getBBox()` on the live SVG root
+    //      gives the tight content extent — which is
+    //      what the user wants on the clipboard.
+    //
+    //   2. The editor's reported viewBox. Used when the
+    //      bbox read fails (detached element, malformed
+    //      SVG) but the editor is still alive. May
+    //      include letterbox padding but at least
+    //      reflects pan/zoom state.
+    //
+    //   3. The authored viewBox/width/height already
+    //      parsed above. Fallback for the no-editor
+    //      case.
+    let liveVb = null;
+    const rightContainer = this.shadowRoot?.querySelector(
+      '.pane-right .svg-container',
+    );
+    const liveSvg = rightContainer
+      ? rightContainer.querySelector('svg')
+      : null;
+    if (liveSvg && typeof liveSvg.getBBox === 'function') {
+      try {
+        const bbox = liveSvg.getBBox();
+        if (
+          bbox && Number.isFinite(bbox.width)
+          && Number.isFinite(bbox.height)
+          && bbox.width > 0 && bbox.height > 0
+        ) {
+          // Add a small margin so glyphs at the bbox
+          // edge don't get clipped by sub-pixel
+          // rendering rounding. 2% of the longer edge
+          // is invisible on small content and adds at
+          // most a few pixels on large.
+          const pad = Math.max(bbox.width, bbox.height) * 0.02;
+          liveVb = {
+            x: bbox.x - pad,
+            y: bbox.y - pad,
+            width: bbox.width + pad * 2,
+            height: bbox.height + pad * 2,
+          };
+        }
+      } catch (_) {
+        liveVb = null;
+      }
+    }
+    if (!liveVb && this._editorRight) {
+      try {
+        liveVb = this._editorRight.getViewBox();
+      } catch (_) {
+        liveVb = null;
+      }
+    }
+    if (
+      liveVb
+      && Number.isFinite(liveVb.x)
+      && Number.isFinite(liveVb.y)
+      && Number.isFinite(liveVb.width)
+      && Number.isFinite(liveVb.height)
+      && liveVb.width > 0
+      && liveVb.height > 0
+      && svgEl
+    ) {
+      svgEl.setAttribute(
+        'viewBox',
+        `${liveVb.x} ${liveVb.y} ${liveVb.width} ${liveVb.height}`,
+      );
+      // The live editor sets preserveAspectRatio="none" so
+      // its viewBox writes drive coordinate math directly.
+      // Standalone raster output should fit naturally —
+      // override to "xMidYMid meet" so the renderer
+      // letterboxes rather than stretching.
+      svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      // Strip declared width/height so the browser uses
+      // the viewBox as the intrinsic size. Without this,
+      // the authored width/height would override and we'd
+      // be back to the original mismatch.
+      svgEl.removeAttribute('width');
+      svgEl.removeAttribute('height');
+      width = liveVb.width;
+      height = liveVb.height;
+    }
+    // Re-serialise with the (possibly mutated) root.
+    const serializer = new XMLSerializer();
+    const renderText = serializer.serializeToString(doc);
+    // Scale for quality. Same heuristic as `_copyAsPng`:
+    // tiny SVGs get 4x oversampling for crisp text;
+    // larger SVGs get 2x; clamp the long edge to 4096
+    // so we don't allocate gigabyte canvases.
+    const maxDim = Math.max(width, height);
+    let scale = maxDim < 1024 ? 4 : 2;
+    const maxPx = 4096;
+    if (maxDim * scale > maxPx) {
+      scale = maxPx / maxDim;
+    }
+    const canvasWidth = Math.round(width * scale);
+    const canvasHeight = Math.round(height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    const blob = new Blob([renderText], {
+      type: 'image/svg+xml;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => {
+        if (b) resolve(b);
+        else reject(new Error('canvas.toBlob returned null'));
+      }, 'image/png');
+    });
   }
 
   // ---------------------------------------------------------------
