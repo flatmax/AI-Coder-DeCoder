@@ -382,6 +382,7 @@ def relax(
     tokens_of: Callable[[Any], float],
     key_of: Callable[[Any], str],
     is_protected: Callable[[Any], bool] = lambda f: False,
+    is_balance_excluded: Callable[[Any], bool] = lambda f: False,
     max_moves: int | None = None,
 ) -> RelaxationStats:
     """Iterate to within-turn flux equilibrium.
@@ -408,6 +409,14 @@ def relax(
     Protected files (pinned files, deletion markers) are not
     selectable as movers — the caller's ``is_protected`` predicate
     returns True for them.
+
+    Balance-excluded files (D37 — ``history:*`` entries) are
+    skipped from V/c accumulation entirely so they neither
+    inflate ``c_lower``/``c_upper`` nor ``t_lower``/``t_upper``.
+    The caller's ``is_balance_excluded`` predicate returns True
+    for them. Distinct from ``is_protected``: pinned files still
+    contribute mass to V/c (their bytes really are in their
+    tier) but cannot be picked as movers.
 
     Returns a :class:`RelaxationStats` record. ``moves`` is a list
     of ``(membrane_idx, key)`` tuples in firing order.
@@ -456,6 +465,8 @@ def relax(
             t_lower = 0.0
             t_upper = 0.0
             for f in files:
+                if is_balance_excluded(f):
+                    continue
                 t = tier_of(f)
                 if t == lower:
                     c_lower += 1

@@ -18,9 +18,14 @@ from ac_dc.stability_tracker import Tier, _TIER_CONFIG
 # Tier config lookup
 # ---------------------------------------------------------------------------
 #
-# Maps Tier enum to the entry_n / promote_n config dict. Imported
-# from the tracker module so the numbers stay in sync with the
-# cascade algorithm.
+# Maps Tier enum to the per-tier config dict. Under D37 every tier
+# carries ``entry_n`` (used by :mod:`ac_dc.llm._rebuild` and
+# :mod:`ac_dc.llm._breakdown` when materialising fresh items at a
+# target tier); only Active also carries ``promote_n`` (the
+# admission gate ``n_admit`` for the Active → L3 membrane). The
+# legacy L0/L1/L2/L3 ``promote_n`` thresholds were retired with
+# the membrane / flux controller (D35) and the field is now
+# absent on those tiers.
 
 _TIER_CONFIG_LOOKUP: dict[Tier, dict[str, int]] = _TIER_CONFIG
 

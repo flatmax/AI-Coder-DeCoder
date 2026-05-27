@@ -135,20 +135,25 @@ class Tier(str, Enum):
 # bypass the admission gate entirely (they're already past the
 # membrane it gates).
 #
-# The shape ``{"entry_n": int, "promote_n": int}`` is preserved
-# for backwards-compatibility with callers in
-# ``ac_dc.llm._rebuild`` and ``ac_dc.llm._breakdown`` that read
-# ``entry_n`` when materialising fresh items. ``promote_n`` is
-# no longer load-bearing — the relaxation loop in
-# :mod:`ac_dc.cache_membrane` does not consult it. New code
-# should reach for the membrane parameters directly via
-# :class:`FluxConfig`.
+# Per D37 (and D35 retiring the N-counter cascade), only Active
+# carries a ``promote_n`` field — its value is the admission gate
+# (``n_admit``, default 3) for the Active → L3 membrane. L0 / L1 /
+# L2 / L3 no longer carry ``promote_n``: the legacy "L3→L2 at N=6,
+# L2→L1 at N=9, L1→L0 at N=12" thresholds are gone. ``entry_n``
+# survives on every tier because :mod:`ac_dc.llm._rebuild` and
+# :mod:`ac_dc.llm._breakdown` still consult it to assign a fresh
+# item's N value at its target tier (so a new L0-seeded item
+# starts above zero rather than triggering an immediate demotion
+# on first measurement). Above the Active → L3 admission gate the
+# membrane controller in :mod:`ac_dc.cache_membrane` drives every
+# promotion via the rectified GHK flux equation; new code should
+# reach for the membrane parameters via :class:`FluxConfig`.
 _TIER_CONFIG: dict[Tier, dict[str, int]] = {
     Tier.ACTIVE: {"entry_n": 0, "promote_n": 3},
-    Tier.L3: {"entry_n": 3, "promote_n": 6},
-    Tier.L2: {"entry_n": 6, "promote_n": 9},
-    Tier.L1: {"entry_n": 9, "promote_n": 12},
-    Tier.L0: {"entry_n": 12, "promote_n": 12},
+    Tier.L3: {"entry_n": 3},
+    Tier.L2: {"entry_n": 6},
+    Tier.L1: {"entry_n": 9},
+    Tier.L0: {"entry_n": 12},
 }
 
 
@@ -1059,6 +1064,14 @@ class StabilityTracker:
                 getattr(f, "_pinned", False)
                 or f.key.startswith("history:")
             ),
+            # D37 — history is also excluded from V/c
+            # accumulation, not just mover selection. Bytes still
+            # sit in L3 (and the prompt is truthful), but the
+            # flux equation does not interpret a long L3 history
+            # block as pressure. Pinned files do NOT match here:
+            # their mass is real and contributes to V even though
+            # they cannot move.
+            is_balance_excluded=lambda f: f.key.startswith("history:"),
         )
         if stats.iters >= 1000:
             logger.warning(
@@ -1106,7 +1119,7 @@ class StabilityTracker:
 
     def initialize_dir_blocks(
         self,
-        keys_with_mtimes: list[tuple[str, float]],
+        keys_with_mtimes: list[tuple[str, float] | tuple[str, float, int]],
     ) -> None:
         """Seed dir-block entries across L0–L3 by directory mtime.
 
@@ -1128,27 +1141,37 @@ class StabilityTracker:
         Parameters
         ----------
         keys_with_mtimes:
-            List of ``(key, mtime)`` pairs for every dir-block
-            to seed. ``key`` is a fully-prefixed tracker key
-            (``symbols:<dir>``, ``docs:<dir>``,
-            ``plain_files:<dir>``). ``mtime`` is the directory's
-            most recent file mtime (seconds since epoch); 0.0
-            for empty / non-existent directories.
+            List of ``(key, mtime)`` or ``(key, mtime, tokens)``
+            tuples for every dir-block to seed. ``key`` is a
+            fully-prefixed tracker key (``symbols:<dir>``,
+            ``docs:<dir>``, ``plain_files:<dir>``). ``mtime``
+            is the directory's most recent file mtime (seconds
+            since epoch); 0.0 for empty / non-existent
+            directories. ``tokens`` is the rendered block's
+            real token count when the caller has measured it
+            — passing it here avoids the Context-tab-before-
+            first-turn window where every seeded item shows
+            a placeholder count. When omitted the placeholder
+            (:data:`_PLACEHOLDER_TOKENS`) is used as a stop-
+            gap until the first :meth:`update` cycle replaces
+            it with a measured value.
 
         Tier assignment splits the sorted-by-mtime-descending
         list into four roughly-equal quartiles: hottest →
         L0, then L1, L2, and coolest → L3. Ties on mtime fall
         back to alphabetical key ordering for determinism.
 
-        Items receive placeholder tokens and empty hash;
-        Phase 1 of the next :meth:`update` cycle accepts the
-        first real hash without demoting.
+        Items receive an empty hash regardless; Phase 1 of
+        the next :meth:`update` cycle accepts the first real
+        hash without demoting.
         """
         if not keys_with_mtimes:
             return
 
         # Sort hottest-first; ties broken by key for
         # determinism so test fixtures see stable output.
+        # Sort key uses mtime + key, ignoring the optional
+        # tokens slot.
         ranked = sorted(
             keys_with_mtimes,
             key=lambda pair: (-pair[1], pair[0]),
@@ -1158,7 +1181,11 @@ class StabilityTracker:
         # tier order for any n, even small ones (e.g. 1–3
         # blocks all land in L0).
         tier_order = (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
-        for idx, (key, _mtime) in enumerate(ranked):
+        for idx, entry in enumerate(ranked):
+            key = entry[0]
+            tokens = (
+                entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
+            )
             quartile = min(
                 len(tier_order) - 1,
                 idx * len(tier_order) // n,
@@ -1169,12 +1196,12 @@ class StabilityTracker:
                 tier=tier,
                 n_value=_TIER_CONFIG[tier]["entry_n"],
                 content_hash=_PLACEHOLDER_HASH,
-                tokens=_PLACEHOLDER_TOKENS,
+                tokens=tokens,
             )
 
     def cross_ref_seed_dir_blocks(
         self,
-        keys_with_mtimes: list[tuple[str, float]],
+        keys_with_mtimes: list[tuple[str, float] | tuple[str, float, int]],
     ) -> None:
         """Append cross-ref dir-block keys, distributed across L1–L3.
 
@@ -1194,8 +1221,12 @@ class StabilityTracker:
         Parameters
         ----------
         keys_with_mtimes:
-            List of ``(key, mtime)`` pairs for every dir-block
-            to seed. Same shape as :meth:`initialize_dir_blocks`.
+            List of ``(key, mtime)`` or ``(key, mtime, tokens)``
+            tuples for every dir-block to seed. Same shape as
+            :meth:`initialize_dir_blocks` — when the caller has
+            already rendered the block, passing real tokens
+            here avoids the placeholder-count window in the
+            Context tab.
 
         Distribution strategy: hottest → L1, middle → L2,
         coolest → L3. The cascade promotes earned content
@@ -1205,9 +1236,9 @@ class StabilityTracker:
             return
 
         new_pairs = [
-            (key, mtime)
-            for key, mtime in keys_with_mtimes
-            if key not in self._items
+            entry
+            for entry in keys_with_mtimes
+            if entry[0] not in self._items
         ]
         if not new_pairs:
             return
@@ -1219,7 +1250,11 @@ class StabilityTracker:
         n = len(ranked)
         tier_order = (Tier.L1, Tier.L2, Tier.L3)
         affected_tiers: set[Tier] = set()
-        for idx, (key, _mtime) in enumerate(ranked):
+        for idx, entry in enumerate(ranked):
+            key = entry[0]
+            tokens = (
+                entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
+            )
             third = min(
                 len(tier_order) - 1,
                 idx * len(tier_order) // n,
@@ -1230,7 +1265,7 @@ class StabilityTracker:
                 tier=tier,
                 n_value=_TIER_CONFIG[tier]["entry_n"],
                 content_hash=_PLACEHOLDER_HASH,
-                tokens=_PLACEHOLDER_TOKENS,
+                tokens=tokens,
             )
             affected_tiers.add(tier)
 

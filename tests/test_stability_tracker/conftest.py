@@ -33,13 +33,14 @@ from ac_dc.stability_tracker import (
     StabilityTracker,
     Tier,
     TrackedItem,
-    _TIER_CONFIG,
 )
 
-# Convenience alias for the L3 promote threshold — used by
-# tests that seed items directly into L3 and want to exercise
-# promotion without reproducing the numeric literal.
-_TIER_CONFIG_PROMOTE_L3 = _TIER_CONFIG[Tier.L3]["promote_n"]
+# Frozen historical value for legacy (xfail) tests that seeded
+# items at L3's old "promote_n" threshold. Under D37 the field
+# itself is gone from ``_TIER_CONFIG[Tier.L3]``; the literal
+# survives only so the legacy-cascade tests below can still
+# import and the xfail marker can carry their historical intent.
+_TIER_CONFIG_PROMOTE_L3 = 6
 
 
 # Shared xfail marker for tests that encode the legacy N-counter

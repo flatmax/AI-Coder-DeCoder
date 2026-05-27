@@ -45,10 +45,48 @@ logger = logging.getLogger("ac_dc.llm_service")
 # ---------------------------------------------------------------------------
 
 
+def _indexed_paths_in_dir(
+    service: "LLMService",
+    directory: str,
+) -> set[str]:
+    """Return the set of paths in ``directory`` covered by either index.
+
+    A file is "covered" when it appears as a key in the
+    symbol index or the doc index — its content already
+    rides the cascade via the corresponding ``symbols:``
+    or ``docs:`` dir-block, so listing its filename in
+    ``plain_files:<directory>`` would be pure duplication.
+
+    Used by both initial seeding and per-turn refresh to
+    subtract indexed files from the plain-files block.
+    """
+    covered: set[str] = set()
+    if service._symbol_index is not None:
+        try:
+            for path in service._symbol_index._all_symbols.keys():
+                parent = (
+                    path[: path.rfind("/")] if "/" in path else ""
+                )
+                if parent == directory:
+                    covered.add(path)
+        except Exception:
+            pass
+    try:
+        for path in service._doc_index._all_outlines.keys():
+            parent = (
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+            if parent == directory:
+                covered.add(path)
+    except Exception:
+        pass
+    return covered
+
+
 def _enumerate_dir_blocks(
     service: "LLMService",
-) -> list[tuple[str, float]]:
-    """Return ``[(key, mtime), ...]`` for all primary-mode dir-blocks.
+) -> list[tuple[str, float, int]]:
+    """Return ``[(key, mtime, tokens), ...]`` for all primary-mode dir-blocks.
 
     Walks the index and repo to produce three families of
     keys:
@@ -58,19 +96,35 @@ def _enumerate_dir_blocks(
     - ``docs:<dir>`` — directories with at least one
       file in the doc index.
     - ``plain_files:<dir>`` — directories with at least
-      one tracked-or-untracked file.
+      one file NOT already covered by the symbol or doc
+      index. Files that appear in either index are
+      subtracted from the plain-files listing — their
+      filenames are already visible to the LLM through
+      the index block, and listing them again would
+      duplicate tokens for no gain.
 
     The keys are deduplicated within each family (a single
     directory contributes one of each kind it qualifies for).
-    Each key carries the most recent file mtime in its
-    directory so the tracker's quartile-split seeding can put
-    hot directories into warmer tiers.
+    Each key carries:
+
+    - The most recent file mtime in its directory so the
+      tracker's quartile-split seeding can put hot
+      directories into warmer tiers.
+    - The rendered block's real token count, measured here
+      and propagated into :meth:`StabilityTracker.initialize_dir_blocks`
+      so the Context tab shows real numbers immediately
+      instead of the bin-packing placeholder until the
+      first turn completes.
+
+    Rendering errors fall back to a zero token count so the
+    seed still happens; the next :meth:`update` cycle will
+    overwrite tokens with the real count anyway.
     """
     repo = service._repo
     if repo is None:
         return []
 
-    keys: list[tuple[str, float]] = []
+    keys: list[tuple[str, float, int]] = []
 
     # symbols:<dir>
     if service._symbol_index is not None:
@@ -87,7 +141,16 @@ def _enumerate_dir_blocks(
             )
         for directory in symbol_dirs:
             mtime = repo.get_directory_mtime(directory)
-            keys.append((f"symbols:{directory}", mtime))
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"symbols:{directory}", mtime, tokens))
 
     # docs:<dir>
     try:
@@ -101,16 +164,34 @@ def _enumerate_dir_blocks(
         )
     for directory in doc_dirs:
         mtime = repo.get_directory_mtime(directory)
-        keys.append((f"docs:{directory}", mtime))
+        try:
+            block = service._doc_index.get_dir_docs_block(directory)
+            tokens = service._counter.count(block) if block else 0
+        except Exception:
+            tokens = 0
+        keys.append((f"docs:{directory}", mtime, tokens))
 
-    # plain_files:<dir>
+    # plain_files:<dir> — subtract files already covered by
+    # either index. When every file in a directory is indexed,
+    # the plain-files block has nothing to add and is omitted.
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:
         by_dir = {}
-    for directory in by_dir.keys():
+    for directory, files_in_dir in by_dir.items():
+        covered = _indexed_paths_in_dir(service, directory)
+        leftover = sorted(
+            f for f in files_in_dir if f not in covered
+        )
+        if not leftover:
+            continue
         mtime = repo.get_directory_mtime(directory)
-        keys.append((f"plain_files:{directory}", mtime))
+        block = "\n".join(leftover)
+        try:
+            tokens = service._counter.count(block) if block else 0
+        except Exception:
+            tokens = 0
+        keys.append((f"plain_files:{directory}", mtime, tokens))
 
     return keys
 
@@ -266,9 +347,10 @@ def _dir_block_active_items(
                 by_dir = repo.get_files_by_directory()
             except Exception:
                 by_dir = {}
+            covered = _indexed_paths_in_dir(service, directory)
             files_in_dir = sorted(
                 f for f in by_dir.get(directory, [])
-                if f not in active_excluded
+                if f not in active_excluded and f not in covered
             )
             block = "\n".join(files_in_dir)
             tokens = (
@@ -388,13 +470,18 @@ def seed_cross_reference_items(service: "LLMService") -> None:
     which third-splits the new keys across L1/L2/L3 by
     mtime — never L0 (cross-ref dir-blocks earn promotion
     to L0 the same way primary blocks do, via the cascade).
+
+    Each seeded entry carries a measured token count so the
+    Context tab shows real numbers as soon as cross-ref
+    enables, instead of the placeholder until the first
+    turn completes.
     """
     repo = service._repo
     if repo is None:
         return
 
     mode = service._context.mode
-    keys: list[tuple[str, float]] = []
+    keys: list[tuple[str, float, int]] = []
 
     if mode == Mode.CODE:
         try:
@@ -410,7 +497,16 @@ def seed_cross_reference_items(service: "LLMService") -> None:
             )
         for directory in doc_dirs:
             mtime = repo.get_directory_mtime(directory)
-            keys.append((f"docs:{directory}", mtime))
+            try:
+                block = service._doc_index.get_dir_docs_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"docs:{directory}", mtime, tokens))
     else:
         if service._symbol_index is None:
             return
@@ -427,7 +523,16 @@ def seed_cross_reference_items(service: "LLMService") -> None:
             )
         for directory in symbol_dirs:
             mtime = repo.get_directory_mtime(directory)
-            keys.append((f"symbols:{directory}", mtime))
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"symbols:{directory}", mtime, tokens))
 
     if keys:
         service._stability_tracker.cross_ref_seed_dir_blocks(keys)

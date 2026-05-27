@@ -1,4 +1,4 @@
-# Decisions (D1–D35)
+# Decisions (D1–D37)
 
 Historical decision log. Numbered for cross-reference. Order in this file is delivery order, not numerical order — entries are appended as decisions land. Use the table of contents (or a search) to find a specific decision number.
 
@@ -1037,3 +1037,45 @@ D27/D28 were a correct response to the N-counter cascade: the cascade had no glo
 - Whether the mtime prior reads from the filesystem directly or from the index's last-touch timestamp. The index version is preferred (avoids a second stat pass) but requires the index to track mtime per directory rather than just per file.
 
 These are settled at implementation time, not in this decision entry.
+
+### D37 — History isolated from flux dynamics; legacy promote_n thresholds retired
+
+D27's "history piggybacks on L3 invalidation" rule and D36's generalisation of that rule (Active→L3 firings of any kind drag eligible history along) determine *when* history graduates into L3. Neither addressed what happens *after* history is in L3. Under the membrane / flux controller (D35) history sits in L3 like any other item: it contributes to V (token mass) and c (object count) on every membrane, and the rectified GHK equation can in principle pick a history mover to promote upward through L2/L1/L0. In practice this never fires because the user's `is_protected` predicate already returns True for `history:*` keys, but the spec contract was muddled — history was excluded from mover selection but still inflated V and c on every membrane it sat in. A long L3 history block could be read by the controller as "L3 has lots of mass; pressure to evacuate to L2 is high", and the controller would then attempt promotions of file/dir-block movers based on a token budget that included history bytes that nobody wanted moved.
+
+**Resolution.** History becomes structurally invisible to the flux controller once it is in L3:
+
+1. **Stays in L3 forever.** Once a `history:*` item lands in L3 via the piggyback path, the flux equation never moves it upward (its mover-selection exclusion is unchanged), and the rectification clamp prevents downward motion. The only paths out of L3 for a history item are `purge_history` (compaction, new-session reset) and manual rebuild — both already-existing lifecycle events, not flux events.
+2. **Excluded from V (token mass).** When the relaxation loop computes `t_lower` and `t_upper` for any membrane, `history:*` items are filtered out of the accumulation. Their bytes are still in the L3 cache block (the prompt is truthful about what's cached), but the controller does not interpret those bytes as imbalance pressure.
+3. **Excluded from c (object count).** Same treatment for `c_lower` and `c_upper`. A long conversation does not inflate L3's apparent population.
+
+This isolates the L3 cache block as a stable terminus for conversation-history accumulation, while leaving the file/dir-block flux dynamics unchanged.
+
+**Predicate shape.** Two distinct predicates rather than overloading `is_protected`:
+
+- `is_protected(f)` — already in place. Skips a file from mover selection. Covers BOTH pinned `file:<path>` entries (active edits in flight) AND `history:*` entries. Pinned files still contribute to V/c (their bytes really are in their tier and that mass is real); they just can't be picked as movers.
+- `is_balance_excluded(f)` — new. Skips a file from V and c accumulation. Fires only on `history:*`. Pinned files do NOT match.
+
+These differ in semantics and shouldn't be merged. Pinning says "can't move"; balance exclusion says "doesn't count toward the pressure equation." The pinned-file case is still pressure (we just can't act on it); the history case is not pressure at all.
+
+**Legacy promote_n thresholds retired.** D35 replaced the N-counter cascade with the rectified GHK flux equation. The legacy thresholds — `L3 → L2 at N=6, L2 → L1 at N=9, L1 → L0 at N=12` — and the "N-cap-at-promote-when-stable-above" mechanism were removed from the runtime in D35, but the `promote_n` integers survived in `_TIER_CONFIG` and were still surfaced in the cache-viewer HUD's threshold column. Under D37 they are removed entirely from the per-tier config for L0/L1/L2/L3. Active retains its `promote_n` (≡ `n_admit`, default 3) because that gate IS still load-bearing on the admission membrane. The HUD threshold column is blank for L0/L1/L2/L3 entries and populated only for Active.
+
+**What this decision does NOT change.**
+
+- The piggyback admission path itself is unchanged — history still graduates to L3 only on Active→L3 firings. D36's generalisation (dir-block teleport firings count) is preserved verbatim.
+- `purge_history` and the new-session reset are unchanged. Compaction continues to wipe `history:*` entries from the tracker; the next request rebuilds them as new active items at N=0.
+- `is_protected` already excluded history from mover selection. That code is unchanged. The new V/c filter is purely additive.
+- Active's `n_admit` gate is unchanged (default 3); files in Active still need to age before graduating.
+- The system prompt's role as the only fixed (non-flux) prefix anchor is unchanged.
+
+**Implementation touchpoints.**
+
+- `src/ac_dc/cache_membrane.py` — `relax()` accepts a new `is_balance_excluded: Callable[[Any], bool]` keyword (defaulting to `lambda f: False` for backward compatibility). The accumulation loop (`for f in files: ...`) skips files matching the predicate when computing `c_lower`, `c_upper`, `t_lower`, `t_upper`. Mover-selection callsites are unchanged — `is_protected` continues to handle that.
+- `src/ac_dc/stability_tracker.py` — `_run_cascade` passes `is_balance_excluded=lambda f: f.key.startswith("history:")` into `relax()`. The existing `is_protected` lambda is unchanged.
+- `src/ac_dc/stability_tracker.py` — `_TIER_CONFIG` drops the `promote_n` field for L0, L1, L2, L3. Active keeps `promote_n: 3` since that drives admission. Test files referencing `_TIER_CONFIG[Tier.L3]["promote_n"]` (and similar for L1/L2) are updated.
+- `src/ac_dc/llm/_breakdown.py` — drops the `promote_n` lookup from the per-item entry dict for non-Active items. The `entry["threshold"]` field is `None` (or omitted) for cached-tier rows; populated only for Active rows.
+- `src/ac_dc/llm/_types.py` — doc-comment on `_TIER_CONFIG_LOOKUP` updated to reflect that only `entry_n` survives for cached tiers.
+- Frontend (`webapp/src/.../*`) — cache-viewer threshold column renders blank when `threshold` is `None`. (To verify: existing renderer may already handle `None` correctly; this is a display-only change.)
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` (§4.1, § History Graduation, §4.5, § Invariants); `specs4/0-overview/glossary.md` (N value, admission gate, ripple promotion, history isolation); `specs4/impl-history/layer-3.md` (per-tier config narrative).
+
+**Superseded artefacts.** None outright. D37 refines D27's history rule and D35's admission rule rather than replacing them; the piggyback admission path is preserved; only the post-admission V/c contribution changes. The "L3 → L2 at N=6 / L2 → L1 at N=9 / L1 → L0 at N=12" wording, already removed from runtime by D35, is now removed from `_TIER_CONFIG` and from the glossary.

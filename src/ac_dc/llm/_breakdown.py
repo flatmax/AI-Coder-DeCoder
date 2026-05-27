@@ -758,11 +758,17 @@ def get_context_breakdown(
             else:
                 entry["type"] = "other"
             entry["n"] = item.n_value
-            promote_n = None
+            # Per D37, ``promote_n`` only exists in
+            # ``_TIER_CONFIG`` for Active (where it backs the
+            # admission gate ``n_admit``). The cached tiers
+            # L0/L1/L2/L3 no longer carry the field — their
+            # promotions are driven by the flux equation, not by
+            # an N threshold. ``dict.get`` returns ``None`` for
+            # missing keys, so the HUD threshold column renders
+            # blank for cached-tier rows and shows ``n_admit``
+            # only on Active rows.
             tier_cfg = _TIER_CONFIG_LOOKUP.get(item.tier)
-            if tier_cfg is not None:
-                promote_n = tier_cfg.get("promote_n")
-            entry["threshold"] = promote_n
+            entry["threshold"] = tier_cfg.get("promote_n") if tier_cfg else None
             contents.append(entry)
 
         # Under D36 the aggregate symbol/doc map is no longer

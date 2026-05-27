@@ -133,6 +133,7 @@ When a file is **deleted from disk**:
 - History is immutable, so waiting on N is unnecessary — graduation is controlled
 - **Piggyback on Active→L3 flux** — when any Active→L3 promotion fires this cycle (a `file:<path>` graduating, or a dir-block teleported by edit/deletion graduating), all eligible history graduates for free; walks newest → oldest, keeping a verbatim window sized at `cache_target_tokens` in active and graduating everything older to L3
 - **Never** — if cache target is zero, or no Active→L3 flux fired this cycle, history stays active
+- **Stays in L3 forever** (D37) — once a history item lands in L3 via piggyback, the flux equation never moves it upward, the rectification clamp never moves it downward, and mover selection skips it. The only paths out of L3 for a history item are `purge_history` (compaction, new-session reset) and manual rebuild — both already-existing lifecycle hooks, not flux events
 
 Active history is not forced to graduate on its own. A long conversation that never happens to coincide with an Active→L3 firing stays in the uncached active section until compaction deals with it. This is deliberate. `cache_target_tokens` is a per-tier caching floor (typically a few thousand tokens), not a conversation-length cap — comparing total active history against it would force graduation on almost every turn of any real conversation, tearing down the L3 cache block on every request. Compaction, which has its own much larger `trigger_tokens` budget and purges tracker history when it runs, is the correct owner of "active history is too big".
 
@@ -154,7 +155,7 @@ The cascade replaces the spec3-era N-counter promotion algorithm with a per-turn
 
 ### 4.1 The flux equation
 
-For each membrane *m* with lower tier *l* and upper tier *u*, the controller computes a per-turn flux Φₘ from four inputs read from the current tier state: the lower-tier file count *cₗ*, the upper-tier file count *cᵤ*, the lower-tier total token mass *Tₗ*, and the upper-tier total token mass *Tᵤ*. The token-mass imbalance is
+For each membrane *m* with lower tier *l* and upper tier *u*, the controller computes a per-turn flux Φₘ from four inputs read from the current tier state: the lower-tier file count *cₗ*, the upper-tier file count *cᵤ*, the lower-tier total token mass *Tₗ*, and the upper-tier total token mass *Tᵤ*. **`history:*` items are filtered out of all four counts before the equation runs** (D37 — history isolation). They neither contribute mass nor object count to either side of any membrane, so a long L3 history block never inflates V and never triggers churn. The token-mass imbalance is
 
 > V = Tₗ − Tᵤ
 
@@ -183,7 +184,7 @@ Every membrane carries its own (P, V_T, n_admit, pick_mode). Defaults are tuned 
 
 **Why Active → L3 is admission_only and not flux-coupled.** The membrane / flux model treats V (token-mass differential) as the driving force: items climb when the lower side is overfull relative to the upper. That's right for inter-cache balancing (L3 ↔ L2 ↔ L1) where each tier accumulates content over time and the controller's job is to keep them in proportion. It's wrong for the admission boundary because active is **structurally lighter** than the cached tiers — items only stay in active until they age past the admission gate, after which they leave for L3+, so total active token mass tends to *decrease* relative to the cache. With `t_active < t_L3` as the steady state, V is permanently negative and the rectified flux equation's response is permanently zero. Active items would never graduate. The fix is to recognise that admission is fundamentally an age-based gate, not a mass-balance gate, and treat it as such — `n ≥ n_admit` is the entire promotion criterion on this membrane.
 
-Higher membranes use the flux equation alone. `history:*` items are excluded from the regular flux loop entirely — they only enter L3 via the piggyback path (§ History Graduation), which fires when L3 is already broken by another mutation; otherwise the conversation would churn the L3 cache block on every stable turn.
+Higher membranes use the flux equation alone. `history:*` items are excluded from the regular flux loop entirely — they only enter L3 via the piggyback path (§ History Graduation), which fires when L3 is already broken by another mutation; otherwise the conversation would churn the L3 cache block on every stable turn. Per **D37**, history-in-L3 is also invisible to the flux equation's V/c inputs on every membrane, not just the mover-selection step. This makes the L3 cache block a stable terminus for the conversation: history accumulates there without inflating V, and the controller does not interpret a large L3 token mass as pressure to evacuate.
 
 The original tune was run bidirectional (`allow_negative_flux=True`); for the rectified clamp the same P and V_T are a sound starting point, but the optimum may shift slightly. Re-tune later for the last few percent.
 
@@ -242,7 +243,7 @@ The Active → L3 membrane is the entry point for new content into the cached pa
 
 Why not the flux equation here? In AC-DC4, Active is **structurally lighter** than the cached tiers — items only sit in Active until they age past `n_admit`, then leave for L3+, so V (= t_active − t_L3) is permanently negative in steady state. The rectified flux equation responds to V ≥ 0 only, so it would never fire on this membrane. The flux model is a fit to inter-cache *balancing*; admission is fundamentally a *gating* problem (has this item proven stable enough to commit to cache?), and the right primitive for that is an age threshold, not a mass differential.
 
-`history:*` items are excluded from this membrane (filtered as protected in the relax loop). History graduates only via the piggyback path — see § History Graduation — so a stable conversation does not rewrite the L3 cache block on every turn.
+`history:*` items are excluded from this membrane (filtered as protected in the relax loop). History graduates only via the piggyback path — see § History Graduation — so a stable conversation does not rewrite the L3 cache block on every turn. Per **D37**, the same exclusion applies on every higher membrane *and* on the V/c flux inputs: once a history item is in L3, it does not contribute to `c_lower`, `c_upper`, `t_lower`, or `t_upper` on any membrane, and mover selection skips it. The L3 cache block grows arbitrarily large with conversation length without ever pressuring the controller to evacuate it.
 
 ### 4.6 Demotion semantics
 
@@ -411,6 +412,7 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 - **Rebuild does not run the relaxation loop.** The mtime-seeded placement is the final state for that turn; the next real chat request runs flux normally.
 - **Manual rebuild is localhost-only.**
 - **History graduates to L3 only on piggyback** (Active→L3 firing detected this cycle).
+- **History never leaves L3 by flux (D37).** `history:*` items in L3 are protected from movement (skipped by mover selection on every membrane) AND invisible to V/c on every membrane. The flux equation operates on the file/dir-block population only. The only paths out of L3 for a history item are `purge_history` (compaction, new-session reset) and manual rebuild.
 - **Agents inherit the parent's tier distribution at spawn**; agent flux thereafter is independent.
 - **The flux variant is fixed at tracker construction.** Mid-session switching is not supported.
 

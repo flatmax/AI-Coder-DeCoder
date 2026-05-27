@@ -287,10 +287,14 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     if repo is None:
         return
 
-    keys_with_mtimes: list[tuple[str, float]] = []
+    keys_with_mtimes: list[tuple[str, float, int]] = []
     seen_dirs: set[str] = set()
 
-    # Collect directories from the symbol index.
+    # Collect directories from the symbol index. Render each
+    # block here and capture its measured token count so the
+    # cache viewer shows real numbers immediately after a
+    # rebuild — rather than the bin-packing placeholder
+    # until the first turn replays update_stability.
     if service._symbol_index is not None:
         try:
             symbol_paths = list(
@@ -305,8 +309,17 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
             )
         for directory in symbol_dirs:
             mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
             keys_with_mtimes.append(
-                (f"symbols:{directory}", mtime)
+                (f"symbols:{directory}", mtime, tokens)
             )
             seen_dirs.add(directory)
 
@@ -322,21 +335,44 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
         )
     for directory in doc_dirs:
         mtime = repo.get_directory_mtime(directory)
-        keys_with_mtimes.append((f"docs:{directory}", mtime))
+        try:
+            block = service._doc_index.get_dir_docs_block(directory)
+            tokens = service._counter.count(block) if block else 0
+        except Exception:
+            tokens = 0
+        keys_with_mtimes.append(
+            (f"docs:{directory}", mtime, tokens)
+        )
         seen_dirs.add(directory)
 
-    # Plain-files dir-blocks: every directory that owns at
-    # least one tracked-or-untracked file. The block's
-    # content is filled in at assembly time from the leftover
-    # files (those not covered by symbols/docs).
+    # Plain-files dir-blocks: every directory whose listing
+    # has at least one file NOT already covered by the
+    # symbol or doc index. Files that appear in either
+    # index are subtracted — their filenames are already
+    # visible through the corresponding symbols:/docs:
+    # block, and listing them again is pure duplication.
+    # When every file in a directory is indexed, the
+    # plain-files block is omitted entirely.
+    from ac_dc.llm._stability import _indexed_paths_in_dir
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:
         by_dir = {}
-    for directory in by_dir.keys():
+    for directory, files_in_dir in by_dir.items():
+        covered = _indexed_paths_in_dir(service, directory)
+        leftover = sorted(
+            f for f in files_in_dir if f not in covered
+        )
+        if not leftover:
+            continue
         mtime = repo.get_directory_mtime(directory)
+        block = "\n".join(leftover)
+        try:
+            tokens = service._counter.count(block) if block else 0
+        except Exception:
+            tokens = 0
         keys_with_mtimes.append(
-            (f"plain_files:{directory}", mtime)
+            (f"plain_files:{directory}", mtime, tokens)
         )
         seen_dirs.add(directory)
 

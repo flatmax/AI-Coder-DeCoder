@@ -8,6 +8,11 @@ Covers:
 - :class:`TestUpdateStabilityExcludedFiles` — the step-0a
   defensive excluded-files removal pass and its companion
   guards in steps 3 and 4.
+- :class:`TestPlainFilesExcludesIndexed` — files covered by
+  the symbol or doc index are subtracted from the
+  ``plain_files:<dir>`` block listing for that directory.
+  When every file in a directory is indexed, the entry is
+  omitted entirely from the seed.
 """
 
 from __future__ import annotations
@@ -816,3 +821,268 @@ class TestUpdateStabilityExcludedFiles:
         assert "file:drifted.py" not in (
             svc._stability_tracker.get_all_items()
         )
+
+
+class TestPlainFilesExcludesIndexed:
+    """``plain_files:<dir>`` blocks omit files covered by an index.
+
+    Per ``specs4/3-llm/cache-tiering.md`` § Content Categories
+    Tracked, ``plain_files:<dir>`` is "list of filenames in
+    ``<dir>`` for files that have neither a symbol table nor
+    a doc index". Files already represented in
+    ``symbols:<dir>`` or ``docs:<dir>`` are subtracted from
+    the plain-files listing — their filenames are already
+    visible to the LLM through the corresponding index block,
+    and listing them again would duplicate tokens for no gain.
+
+    When every file in a directory is indexed, the
+    ``plain_files:<dir>`` entry is omitted entirely from the
+    seed (rather than being seeded with an empty block).
+
+    These tests exercise the seeding paths in
+    :func:`ac_dc.llm._stability._enumerate_dir_blocks` and
+    :func:`ac_dc.llm._rebuild.seed_dir_blocks_for_rebuild`,
+    plus the per-turn refresh in
+    :func:`ac_dc.llm._stability._dir_block_active_items`.
+    """
+
+    def _make_service(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        symbol_paths: list[str] | None = None,
+        doc_paths: list[str] | None = None,
+    ) -> LLMService:
+        """Service with controlled symbol/doc indexes.
+
+        ``symbol_paths`` populates ``_all_symbols`` (the only
+        attribute the seeding code reads). ``doc_paths``
+        populates ``_doc_index._all_outlines`` via the
+        markdown extractor so outlines are well-formed.
+        """
+        symbol_paths = symbol_paths or []
+        doc_paths = doc_paths or []
+
+        class _SymbolIndexStub:
+            def __init__(self, paths: list[str]) -> None:
+                self._all_symbols = {p: None for p in paths}
+
+            def get_dir_symbols_block(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                # Render a non-empty block so seeding records
+                # a positive token count for symbol dirs.
+                files = sorted(
+                    p for p in self._all_symbols
+                    if (
+                        p[: p.rfind("/")] if "/" in p else ""
+                    ) == directory
+                )
+                if not files:
+                    return ""
+                return "\n".join(f"sym-line-for-{f}" for f in files)
+
+            def get_dir_signature_hash(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                return f"sym-sig-{directory}"
+
+            def get_legend(self) -> str:
+                return ""
+
+            def get_symbol_map(
+                self, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexStub(symbol_paths),
+        )
+
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in doc_paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+        return svc
+
+    def test_seed_omits_plain_files_when_dir_fully_indexed(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A directory where every file is symbol-indexed → no plain_files entry.
+
+        The classic case: ``webapp/src/chat-panel/`` — every
+        ``.js`` file appears in the symbol index, so the
+        ``symbols:webapp/src/chat-panel`` block already
+        lists them. Adding ``plain_files:webapp/src/chat-panel``
+        with the same filenames is pure duplication.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        # Repo holds two files in the same directory.
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        # Symbol index covers both.
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        # Stage the files so get_files_by_directory sees them.
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" in kinds
+        assert "plain_files:src" not in kinds
+
+    def test_seed_includes_plain_files_for_uncovered_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Directory with mixed coverage → plain_files holds leftovers only.
+
+        ``a.py`` is symbol-indexed; ``data.json`` is not.
+        The ``plain_files:src`` block should list
+        ``data.json`` only — ``a.py`` already rides via
+        ``symbols:src``.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "data.json").write_text("{}\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py"],
+        )
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        plain = [k for k, _, _ in keys if k == "plain_files:src"]
+        assert plain  # entry exists
+        # The block content (rebuilt to verify) must mention
+        # data.json and not a.py.
+        from ac_dc.llm._stability import _indexed_paths_in_dir
+        covered = _indexed_paths_in_dir(svc, "src")
+        files_in_dir = repo.get_files_by_directory().get("src", [])
+        leftover = sorted(f for f in files_in_dir if f not in covered)
+        assert "src/data.json" in leftover
+        assert "src/a.py" not in leftover
+
+    def test_seed_includes_plain_files_for_fully_uncovered_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Pure-asset directory → plain_files:<dir> entry as before.
+
+        Regression guard for the unchanged case: a directory
+        with no indexed files at all should still produce a
+        ``plain_files:`` entry.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "plain_files:assets" in kinds
+
+    def test_doc_index_coverage_also_subtracts(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A doc-indexed file is also subtracted from plain_files.
+
+        Symmetric case to symbol-index coverage. ``README.md``
+        appears in the doc index, so it should not show up
+        again in ``plain_files:`` for its directory.
+        """
+        from ac_dc.llm._stability import _indexed_paths_in_dir
+
+        (repo_dir / "docs").mkdir(exist_ok=True)
+        (repo_dir / "docs" / "README.md").write_text("# r\n")
+        (repo_dir / "docs" / "config.toml").write_text("x=1\n")
+        svc = self._make_service(
+            config, repo,
+            doc_paths=["docs/README.md"],
+        )
+        repo._run_git(["add", "-A"])
+
+        covered = _indexed_paths_in_dir(svc, "docs")
+        assert "docs/README.md" in covered
+        assert "docs/config.toml" not in covered
+
+    def test_per_turn_refresh_subtracts_indexed_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """The per-turn ``_dir_block_active_items`` recomputation also subtracts.
+
+        If a ``plain_files:<dir>`` entry exists in the
+        tracker, its per-turn hash and tokens come from
+        :func:`_dir_block_active_items`. That recomputation
+        must apply the same subtraction so the block content
+        stays consistent with what the seed produced.
+        """
+        from ac_dc.llm._stability import _dir_block_active_items
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "data.json").write_text("{}\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py"],
+        )
+        repo._run_git(["add", "-A"])
+
+        # Seed a plain_files:src tracker entry directly so
+        # the per-turn refresh picks it up.
+        svc._stability_tracker._items["plain_files:src"] = TrackedItem(
+            key="plain_files:src",
+            tier=Tier.L3,
+            n_value=3,
+            content_hash="placeholder",
+            tokens=0,
+        )
+
+        scope = svc._default_scope()
+        items = _dir_block_active_items(svc, scope)
+
+        assert "plain_files:src" in items
+        # The block's tokens reflect a single-file listing
+        # (data.json), not two — a.py was subtracted.
+        # Verify by reproducing the expected content.
+        expected_block = "src/data.json"
+        expected_tokens = svc._counter.count(expected_block)
+        assert items["plain_files:src"]["tokens"] == expected_tokens
