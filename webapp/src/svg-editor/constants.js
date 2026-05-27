@@ -47,6 +47,23 @@ export const HANDLE_ROLE_ATTR = 'data-handle-role';
 export const MARQUEE_ID = 'svg-editor-marquee';
 
 /**
+ * Distance in screen pixels from the bbox top edge to
+ * the rotate handle. The handle floats above the bbox
+ * connected by a short tangent line, matching the
+ * convention from Inkscape / Figma. Screen-space so the
+ * gap stays visually constant across zoom levels.
+ */
+export const _ROTATE_HANDLE_OFFSET = 20;
+
+/**
+ * Snap increment (degrees) when Shift is held during
+ * rotate. 5° gives finer control than the typical 15°
+ * vector-editor default — useful for technical diagrams
+ * where small angle adjustments matter.
+ */
+export const _ROTATE_SNAP_DEGREES = 5;
+
+/**
  * Minimum dimension for resize operations. Dragging past
  * the opposite edge clamps dimensions to this value rather
  * than flipping the shape (which would require swapping

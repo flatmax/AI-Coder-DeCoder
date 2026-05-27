@@ -849,9 +849,26 @@ export class SvgEditor {
     if (this._selectedSet.size === 0) return;
     this._clipboard = [];
     for (const el of this._selectedSet) {
-      if (el.outerHTML) {
-        this._clipboard.push(el.outerHTML);
-      }
+      if (!el.outerHTML) continue;
+      // Record the original's parent so paste can
+      // restore the duplicate as a sibling. Without
+      // this, paste would insert at the SVG root,
+      // stripping every ancestor transform along the
+      // way — the duplicate would render at the SVG
+      // origin instead of next to the original.
+      //
+      // We hold a live DOM reference to the parent.
+      // It survives across selection changes (the
+      // user can copy, deselect, click elsewhere,
+      // then paste) but NOT across innerHTML
+      // replacement (undo / file reload destroy DOM
+      // nodes). Paste falls back to the SVG root if
+      // the recorded parent has detached, so an
+      // undo-then-paste still produces a duplicate
+      // — just at root level instead of inside the
+      // original's group.
+      const parent = el.parentNode || this._svg;
+      this._clipboard.push({ html: el.outerHTML, parent });
     }
   }
 
@@ -866,15 +883,58 @@ export class SvgEditor {
    */
   pasteClipboard(offsetX, offsetY) {
     if (this._clipboard.length === 0) return;
-    const ox = typeof offsetX === 'number' ? offsetX : _PASTE_OFFSET;
-    const oy = typeof offsetY === 'number' ? offsetY : _PASTE_OFFSET;
+    const oxScreen = typeof offsetX === 'number' ? offsetX : _PASTE_OFFSET;
+    const oyScreen = typeof offsetY === 'number' ? offsetY : _PASTE_OFFSET;
+    // The default offset is in screen pixels — that's
+    // what makes a duplicate visually distinguishable
+    // from its original. SVG attributes operate in
+    // user-coordinate units, but the right "user
+    // coordinate space" depends on which element we're
+    // moving: the transform / x / y attributes operate
+    // in the element's PARENT space. For elements at
+    // the SVG root, parent-space == root-space; for
+    // elements inside a `<g>` with its own transform
+    // (typical of these diagrams — the parent group
+    // has a uniform scale mapping a large user-coord
+    // canvas onto the screen viewport), parent-space
+    // is scaled relative to root-space, and converting
+    // screen-px → root-units would over- or under-
+    // shoot the visual offset.
+    //
+    // We compute one offset per pasted element below
+    // (inside the loop) using each element's parent
+    // CTM. The default `_PASTE_OFFSET` is 10 screen-px
+    // — small enough to keep the duplicate visually
+    // adjacent to the original, large enough that the
+    // user can see and click the offset version.
+    //
+    // Callers that want zero offset (duplicate-in-
+    // place) pass 0 explicitly, which short-circuits
+    // the per-element conversion. Callers that pass
+    // an explicit numeric offset get screen-pixel
+    // semantics too.
     this._pushUndo();
     const ns = 'http://www.w3.org/2000/svg';
     const newSelection = new Set();
-    // Insert point — before the handle group so pasted
-    // elements render below the selection chrome.
-    const insertBefore = this._handleGroup || null;
-    for (const html of this._clipboard) {
+    for (const entry of this._clipboard) {
+      // Each entry is `{ html, parent }`. Pasting at
+      // root would strip every ancestor transform; we
+      // insert into the original's parent so the
+      // duplicate inherits the same coordinate space.
+      // Falls back to the SVG root when the parent has
+      // detached (undo / reload destroyed the DOM).
+      const html = entry.html;
+      const insertParent = entry.parent && entry.parent.isConnected
+        ? entry.parent
+        : this._svg;
+      // Only place the duplicate before the handle
+      // group when we're pasting into the SVG root —
+      // otherwise the handle group isn't a child of
+      // the insert parent and `insertBefore` would
+      // throw.
+      const insertBefore = insertParent === this._svg
+        ? this._handleGroup
+        : null;
       // Parse the outerHTML via a temporary SVG container.
       // DOMParser with 'image/svg+xml' is the reliable
       // way to parse SVG fragments; innerHTML on a <g>
@@ -889,16 +949,68 @@ export class SvgEditor {
       } catch (_) {
         continue;
       }
+      // Adopt the node into the original's parent
+      // FIRST, before applying the offset. We need the
+      // element to be attached so we can read its
+      // parent's CTM — and `_applyPasteOffset` writes
+      // attributes (transform, x, y, etc.) that are
+      // interpreted in the parent's coordinate space,
+      // so the offset must be expressed there too.
+      // Detached elements have no CTM, so a "compute
+      // offset, then insert" order would force us to
+      // assume root-space which is wrong for elements
+      // that end up inside a scaled group.
+      if (insertBefore) {
+        insertParent.insertBefore(el, insertBefore);
+      } else {
+        insertParent.appendChild(el);
+      }
+      // Compute the per-element parent-space offset.
+      // For root-level elements (parent === svg) and
+      // translate-only ancestor chains, parent-space
+      // == root-space and `_screenDistToSvgDist`
+      // would give the right answer. For elements
+      // inside scaled groups, we need to scale the
+      // root-space offset by the inverse of the
+      // parent-to-root scale to land at a screen-
+      // constant ~10 pixels. Using `getCTM` gives the
+      // composed transform from the element's local
+      // space (which equals its parent's space, since
+      // the element's own transform is read separately
+      // by getCTM as part of the chain — but for our
+      // purpose of "place a translate in parent-space
+      // such that the visual screen offset is N px",
+      // we need parent's CTM, not element's).
+      let oxParent = 0;
+      let oyParent = 0;
+      if (oxScreen !== 0 || oyScreen !== 0) {
+        const parent = el.parentNode;
+        const parentCtm = parent && parent !== this._svg
+          ? parent.getCTM?.()
+          : null;
+        if (parentCtm) {
+          // Parent's CTM maps parent-space → screen-px.
+          // We want the inverse: screen-px → parent-
+          // space. The CTM's `a` and `d` entries give
+          // per-axis scale (assuming no rotation/skew
+          // on the parent chain, which is the typical
+          // case for diagram root-level groups).
+          oxParent = oxScreen / Math.abs(parentCtm.a || 1);
+          oyParent = oyScreen / Math.abs(parentCtm.d || 1);
+        } else {
+          // No parent CTM (element at root, or CTM
+          // not yet computable) — fall back to root-
+          // space conversion via the existing helper.
+          oxParent = this._screenDistToSvgDist(oxScreen);
+          oyParent = this._screenDistToSvgDist(oyScreen);
+        }
+      }
       // Apply offset. Use the same attribute-dispatch
       // logic as drag-to-move to handle each element
-      // type's positioning attributes.
-      this._applyPasteOffset(el, ox, oy);
-      // Adopt the node into our SVG.
-      if (insertBefore) {
-        this._svg.insertBefore(el, insertBefore);
-      } else {
-        this._svg.appendChild(el);
-      }
+      // type's positioning attributes. Offset values
+      // are in the element's PARENT-space — which is
+      // where transform / x / y attributes operate.
+      this._applyPasteOffset(el, oxParent, oyParent);
       newSelection.add(el);
     }
     if (newSelection.size > 0) {
@@ -1076,7 +1188,11 @@ export class SvgEditor {
       );
       if (role) {
         event.stopPropagation();
-        this._beginResizeDrag(event, role);
+        if (role === 'rotate') {
+          this._beginRotateDrag(event);
+        } else {
+          this._beginResizeDrag(event, role);
+        }
         return;
       }
     }
@@ -1175,6 +1291,18 @@ export class SvgEditor {
     }
     if (this._drag.mode === 'resize') {
       this._applyResizeDelta(dx, dy);
+    } else if (this._drag.mode === 'rotate') {
+      // Ctrl (or Cmd on Mac) snaps the rotation to
+      // `_ROTATE_SNAP_DEGREES` increments. Shift is
+      // already taken by the marquee gesture in
+      // `_onPointerDown`, so it can't double as the
+      // rotate-snap modifier — by the time a rotate
+      // drag is in flight, holding Shift would have
+      // started a marquee at pointerdown rather than a
+      // rotate. Ctrl is free during rotation and matches
+      // the convention from technical-CAD tools where
+      // Ctrl typically constrains to discrete values.
+      this._applyRotateDelta(dx, dy, event.ctrlKey || event.metaKey);
     } else {
       this._applyDragDelta(dx, dy);
     }
@@ -1225,11 +1353,17 @@ export class SvgEditor {
     // Roll back to the snapshot. Dispatch by drag mode —
     // move uses position attributes (possibly multiple
     // entries for group drag), resize uses dimension
-    // attributes (always one element).
+    // attributes (always one element), rotate uses the
+    // element's transform attribute.
     if (this._drag.mode === 'resize') {
       this._restoreResizeAttributes(
         this._selected,
         this._drag.originAttrs,
+      );
+    } else if (this._drag.mode === 'rotate') {
+      this._restoreRotateAttributes(
+        this._selected,
+        this._drag.originTransform,
       );
     } else {
       const entries = this._drag.entries || [];
@@ -1258,11 +1392,30 @@ export class SvgEditor {
     //
     // Test: is the event target an input/textarea/
     // contenteditable element? If so, defer to that
-    // element's default handling. Escape is the one
-    // exception — escape should still clear SVG
-    // selection even when focus is elsewhere.
+    // element's default handling. Escape and the
+    // SVG-editor shortcuts (Ctrl+C/V/D/Z) are
+    // exceptions — they should reach the editor when
+    // there's an active SVG selection (or, for paste,
+    // a non-empty clipboard) even when focus has
+    // drifted back to a textarea elsewhere on the
+    // page. Without these exceptions, clicking an SVG
+    // element to select it and then pressing Ctrl+C
+    // routes the keystroke to the chat textarea and
+    // copies its empty/irrelevant content instead of
+    // duplicating the SVG element.
+    //
+    // The textarea's own Ctrl+C/V (real text copy /
+    // paste) keeps working when no SVG is selected,
+    // because the editor's branches all gate on
+    // selection state and fall through when empty.
     if (event.key !== 'Escape' && _isEditableTarget(event)) {
-      return;
+      const ctrlKey = event.ctrlKey || event.metaKey;
+      const k = event.key?.toLowerCase();
+      const isEditorShortcut =
+        ctrlKey &&
+        (k === 'c' || k === 'v' || k === 'd' || k === 'z') &&
+        (this._selectedSet.size > 0 || this._clipboard.length > 0);
+      if (!isEditorShortcut) return;
     }
     if (event.key === 'Escape') {
       if (this._selected) {
