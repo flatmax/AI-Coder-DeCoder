@@ -979,7 +979,13 @@ export class TokenHud extends RpcMixin(LitElement) {
 
   _renderTierSubItem(item, color) {
     const icon = _TYPE_ICONS[item.type] || '📋';
-    const hasN = typeof item.n === 'number'
+    // History items piggyback on file graduation — they
+    // don't age on their own N counter, so showing N/
+    // threshold for them would be misleading. Suppress
+    // the bar and label for type=history regardless of
+    // what the backend reports.
+    const hasN = item.type !== 'history'
+      && typeof item.n === 'number'
       && typeof item.threshold === 'number';
     const nPct = hasN && item.threshold > 0
       ? Math.min(100, (item.n / item.threshold) * 100)
