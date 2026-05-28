@@ -32,6 +32,8 @@ describe('SvgEditor path handle rendering', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 
@@ -552,13 +554,38 @@ describe('SvgEditor path control-point handle rendering', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 
   function getTangentLines(svg) {
     const group = svg.querySelector('#svg-editor-handles');
     if (!group) return [];
-    return Array.from(group.querySelectorAll('line'));
+    // Filter out the rotate-handle's connector line —
+    // it's a generic <line> with no distinguishing
+    // attribute, identified here by matching its (x2,
+    // y2) endpoint to the rotate handle's (cx, cy).
+    const rotateDot = group.querySelector(
+      '[data-handle-role="rotate"]',
+    );
+    const rotateX = rotateDot
+      ? parseFloat(rotateDot.getAttribute('cx'))
+      : null;
+    const rotateY = rotateDot
+      ? parseFloat(rotateDot.getAttribute('cy'))
+      : null;
+    return Array.from(group.querySelectorAll('line')).filter(
+      (l) => {
+        if (rotateDot === null) return true;
+        const x2 = parseFloat(l.getAttribute('x2'));
+        const y2 = parseFloat(l.getAttribute('y2'));
+        return !(
+          Math.abs(x2 - rotateX) < 0.001 &&
+          Math.abs(y2 - rotateY) < 0.001
+        );
+      },
+    );
   }
 
   it('C command produces 3 handles (endpoint + 2 CPs)', () => {
@@ -1101,13 +1128,38 @@ describe('SvgEditor path arc endpoint rendering', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 
   function getTangentLines(svg) {
     const group = svg.querySelector('#svg-editor-handles');
     if (!group) return [];
-    return Array.from(group.querySelectorAll('line'));
+    // Filter out the rotate-handle's connector line —
+    // it's a generic <line> with no distinguishing
+    // attribute, identified here by matching its (x2,
+    // y2) endpoint to the rotate handle's (cx, cy).
+    const rotateDot = group.querySelector(
+      '[data-handle-role="rotate"]',
+    );
+    const rotateX = rotateDot
+      ? parseFloat(rotateDot.getAttribute('cx'))
+      : null;
+    const rotateY = rotateDot
+      ? parseFloat(rotateDot.getAttribute('cy'))
+      : null;
+    return Array.from(group.querySelectorAll('line')).filter(
+      (l) => {
+        if (rotateDot === null) return true;
+        const x2 = parseFloat(l.getAttribute('x2'));
+        const y2 = parseFloat(l.getAttribute('y2'));
+        return !(
+          Math.abs(x2 - rotateX) < 0.001 &&
+          Math.abs(y2 - rotateY) < 0.001
+        );
+      },
+    );
   }
 
   it('A command produces exactly one handle (endpoint only)', () => {

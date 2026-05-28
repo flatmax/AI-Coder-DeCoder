@@ -290,6 +290,12 @@ class StabilityTracker:
         # of each :meth:`update`.
         self._registrations: list[str] = []
         self._broken_tiers: set[Tier] = set()
+        # Set of keys pinned by the edit invariant — protected
+        # from flux moves so a mid-session edit can keep its
+        # truthful current text in cache without competing
+        # for promotion. Cleared on rebuild (see
+        # :mod:`ac_dc.llm._rebuild`).
+        self._pinned_keys: set[str] = set()
         # Parallel diagnostic map — every entry in
         # ``_broken_tiers`` has matching reason strings here.
         # Set membership and reasons are kept in lockstep via
@@ -406,6 +412,66 @@ class StabilityTracker:
             tier: list(reasons)
             for tier, reasons in snapshot.items()
         }
+
+    # ------------------------------------------------------------------
+    # Edit-invariant pinning
+    # ------------------------------------------------------------------
+
+    def pin_file(self, key: str) -> None:
+        """Pin a tracked key so flux cannot move it.
+
+        Used by the edit invariant: when a ``file:<path>``
+        entry's content hash changes mid-session, the truthful
+        current text must stay cached without competing for
+        promotion against unedited content. Pinning excludes
+        the key from the relax loop's mover pool.
+
+        No-op for unknown keys — callers that pin defensively
+        before the entry exists won't crash.
+
+        Cleared by manual cache rebuild (see :mod:`ac_dc.llm
+        ._rebuild`); the user's "fresh start" gesture
+        supersedes per-file edit history.
+        """
+        self._pinned_keys.add(key)
+
+    def unpin_file(self, key: str) -> None:
+        """Remove a pin. No-op for unpinned keys."""
+        self._pinned_keys.discard(key)
+
+    def is_pinned(self, key: str) -> bool:
+        """Return True when ``key`` is pinned (or has the legacy ``_pinned`` flag).
+
+        The first form is the public API — pins set via
+        :meth:`pin_file`. The second form supports tests and
+        any caller that attaches ``_pinned = True`` directly
+        to a :class:`TrackedItem` instance (rebuild's pin-
+        clear path was originally written against this older
+        shape; we keep both readable until that path is
+        rewritten).
+        """
+        if key in self._pinned_keys:
+            return True
+        item = self._items.get(key)
+        if item is not None and getattr(item, "_pinned", False):
+            return True
+        return False
+
+    def clear_all_pins(self) -> None:
+        """Drop every pin — the edit-invariant reset hook.
+
+        Called by manual cache rebuild. Also strips any legacy
+        ``_pinned`` attributes from :class:`TrackedItem`
+        instances so the two pin representations agree on the
+        empty state.
+        """
+        self._pinned_keys.clear()
+        for item in self._items.values():
+            if hasattr(item, "_pinned"):
+                try:
+                    delattr(item, "_pinned")
+                except AttributeError:
+                    pass
 
     # ------------------------------------------------------------------
     # Introspection
@@ -1013,7 +1079,15 @@ class StabilityTracker:
             # only when L3 is already broken by another mutation.
             # Otherwise the conversation would churn the L3 cache
             # block on every stable turn.
-            is_protected=lambda f: f.key.startswith("history:"),
+            #
+            # Pinned items (edit invariant — see :meth:`pin_file`)
+            # are also protected: a file edited mid-session keeps
+            # its truthful current text in its current tier until
+            # the next manual rebuild clears the pin.
+            is_protected=lambda f: (
+                f.key.startswith("history:")
+                or self.is_pinned(f.key)
+            ),
             # D37 — history is also excluded from V/c
             # accumulation, not just mover selection. Bytes still
             # sit in L3 (and the prompt is truthful), but the

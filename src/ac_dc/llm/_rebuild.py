@@ -144,6 +144,11 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     items_before = len(tracker.get_all_items())
 
     # Step 1-2: preserve history, wipe everything else.
+    # Also clear edit-invariant pin flags — the user's "fresh
+    # start" gesture supersedes per-file edit history. Pins
+    # protect mid-session edits from flux moves; rebuild
+    # explicitly resets that protection so re-distributed
+    # files compete normally for tier placement.
     history_items = {
         key: item
         for key, item in tracker.get_all_items().items()
@@ -152,6 +157,7 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     tracker._items.clear()
     for key, item in history_items.items():
         tracker._items[key] = item
+    tracker.clear_all_pins()
 
     # Step 3: mark all tiers broken; configure cache target.
     tracker._broken_tiers = {
