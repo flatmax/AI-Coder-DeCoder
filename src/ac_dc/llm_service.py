@@ -671,6 +671,20 @@ class LLMService:
         # occurred or after the last error was consumed.
         self._last_error_info: dict[str, Any] | None = None
 
+        # Snapshot of the main scope's stability-tracker
+        # change log from the most recent ``_update_stability``
+        # call. Populated inside ``_stability.update_stability``
+        # before ``_print_post_response_hud`` drains the
+        # tracker's live ``_changes`` list. Consumed by
+        # ``_breakdown.get_context_breakdown`` so the
+        # frontend's Token HUD and Context tab show the
+        # tier-change list that the terminal HUD also
+        # printed — the two consumers used to race against
+        # the drain, and whichever ran second saw an empty
+        # list. Replaced (not appended) on every turn, so
+        # the UI always reflects the latest cycle.
+        self._last_tier_changes: list[str] = []
+
         # Readiness flag. When deferred_init=True, chat_streaming
         # rejects with a friendly message until
         # complete_deferred_init fires.

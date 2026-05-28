@@ -423,8 +423,16 @@ export async function dispatchLoadInPanel(host, path, panel) {
     // content from multiple sources.
     const lastSlash = path.lastIndexOf('/');
     const basename = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+    // SVG files route to the SVG viewer's panel slots so
+    // the user gets a rendered visual comparison rather
+    // than raw XML text in the diff viewer. The SVG
+    // viewer's loadPanel method takes the same
+    // (content, panel, label) shape; the shell decides
+    // which viewer the event targets based on event name.
+    const isSvg = /\.svg$/i.test(basename);
+    const eventName = isSvg ? 'load-svg-panel' : 'load-diff-panel';
     window.dispatchEvent(
-      new CustomEvent('load-diff-panel', {
+      new CustomEvent(eventName, {
         detail: {
           content,
           panel,

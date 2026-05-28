@@ -60,7 +60,7 @@ import {
   flushAltArrowPending, onGlobalKeyDown,
 } from './file-nav.js';
 import {
-  onNavigateFile, onLoadDiffPanel, onToggleSvgMode,
+  onNavigateFile, onLoadDiffPanel, onLoadSvgPanel, onToggleSvgMode,
   onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
 } from './viewers.js';
 import {
@@ -352,6 +352,7 @@ export class AppShell extends JRPCClient {
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
+    this._onLoadSvgPanel = this._onLoadSvgPanel.bind(this);
     this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
     this._onGridKeyDown = this._onGridKeyDown.bind(this);
     this._onGridKeyUp = this._onGridKeyUp.bind(this);
@@ -463,6 +464,17 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'load-diff-panel',
       this._onLoadDiffPanel,
+    );
+    // load-svg-panel is the SVG-viewer counterpart,
+    // dispatched by the file picker's "Open in left/right
+    // panel" actions when the file is an SVG. Routes to
+    // the SVG viewer's loadPanel for a rendered visual
+    // comparison instead of the raw XML in the diff
+    // viewer. See files-tab/context-menu.js
+    // dispatchLoadInPanel for the dispatch site.
+    window.addEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
     );
     window.addEventListener('beforeunload', this._onBeforeUnload);
     window.addEventListener('resize', this._onWindowResize);
@@ -587,6 +599,10 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'load-diff-panel',
       this._onLoadDiffPanel,
+    );
+    window.removeEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
     );
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     window.removeEventListener('mode-changed', this._onModeChanged);
@@ -1262,6 +1278,10 @@ export class AppShell extends JRPCClient {
 
   _onLoadDiffPanel(event) {
     return onLoadDiffPanel(this, event);
+  }
+
+  _onLoadSvgPanel(event) {
+    return onLoadSvgPanel(this, event);
   }
 
   _onToggleSvgMode(event) {

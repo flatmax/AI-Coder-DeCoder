@@ -8,6 +8,25 @@ The app shell inspects the file extension on every navigate-file event:
 | SVG | SVG viewer |
 | All others | Diff viewer (Monaco) |
 Both viewers live in the same background layer as absolutely positioned siblings. CSS classes toggle opacity and pointer events with a short transition. When either viewer dispatches active-file-changed, the app shell activates the correct layer based on the active file's extension.
+
+## Panel Loading (Ad-Hoc Visual Comparison)
+The file picker's "Open in left panel" / "Open in right panel" context-menu actions and the history browser's equivalent menu items both dispatch a panel-load event carrying the file's textual content, the target panel, and a label.
+| File extension | Event name | Receiver | Result |
+|---|---|---|---|
+| `.svg` | `load-svg-panel` | SVG viewer | Visual rendered comparison — content loaded into the viewer's left or right pane and rendered as an image |
+| All others | `load-diff-panel` | Diff viewer (Monaco) | Text comparison — content loaded into the corresponding Monaco diff side |
+The dispatcher inspects the file extension and chooses the event name; the app shell routes each event to the matching viewer and flips active-viewer visibility so the result is immediately visible.
+### Virtual-Comparison Slot
+When `loadPanel(content, panel, label)` is called, the SVG viewer populates an internal virtual-comparison slot rather than appending to its multi-file model. Two successive calls (one per panel) accumulate — the second call preserves whatever was loaded into the other side. The slot holds:
+- Left content + left label
+- Right content + right label
+- Right saved-content snapshot (created lazily on first edit)
+The virtual-comparison slot and the multi-file model are mutually exclusive. Opening any real file via `openFile` clears the virtual slot; populating the virtual slot suspends the active multi-file entry (its dirty state and content are preserved, but it is not displayed). Closing in virtual mode (Ctrl+W) clears the slot entirely and returns the viewer to its empty state.
+The pane labels render as the existing static "Original" / "Modified" captions even when virtual content is loaded — the label parameter is preserved on the slot for future per-pane caption use but is not currently surfaced in the rendered template.
+### Active-File Path Dispatch
+The viewer's `active-file-changed` event still fires when virtual content is loaded so the app shell foregrounds the SVG viewer correctly. The reported path is synthesised as `virtual://svg-compare/{label}` (where `{label}` is the right pane's label, falling back to the left pane's, falling back to the literal `panel`). Consumers that need to disambiguate real files from virtual comparisons can check the `virtual://` prefix.
+### Image Href Resolution in Virtual Mode
+Relative `<image>` href resolution uses the right pane's label as the base path when the virtual slot is active (falling back to the left pane's label). Labels are typically basenames, which resolves hrefs against the repo root — sufficient for the common case where the two compared SVGs reference siblings of the original file. Mismatched directory contexts on the two sides may produce broken hrefs on whichever side disagrees with the chosen label; this is acceptable given that ad-hoc visual comparison is the intended use case.
 ## Layout
 ### Normal Layout (Select / Pan Mode)
 - Two side-by-side SVG panels with a resizable splitter
@@ -161,6 +180,19 @@ Stroke width and dash lengths scale inversely with zoom to maintain consistent s
 - Ctrl+S or clicking the dirty status LED saves the modified SVG content to disk via the write-file RPC
 - Editor's get-content method commits any active text edit, removes selection handles, serializes the SVG, then re-renders handles — ensuring saved content is clean
 - A file-saved event is dispatched on success
+
+### Editing in Virtual-Comparison Mode
+The right pane remains fully editable when the viewer is showing virtual-comparison content, with the same select / drag / resize / vertex-edit / text-edit / multi-select / marquee / clipboard surface as in normal file mode. Edit serialisation routes to the virtual slot's right-content field instead of a `_files[]` entry.
+- The first edit lazily initialises a right-saved snapshot from the right-content's pre-edit value, so the dirty comparison has a baseline
+- Subsequent edits flip the dirty LED whenever right-content diverges from right-saved
+- The status LED renders cyan (new-file) when clean and orange-pulsing when dirty — the green "clean against HEAD" state never applies because the virtual slot has no on-disk counterpart
+- The LED tooltip reads `{label} — visual comparison (no save target)` when clean and `{label} — unsaved (click to snapshot)` when dirty, where `{label}` is the right pane's label, falling back to the left pane's
+### Virtual-Mode "Save"
+Clicking a dirty LED in virtual mode (or pressing Ctrl+S) does NOT write to disk — the virtual comparison has no source path. Instead:
+- Right-content is snapshotted into right-saved, clearing the dirty state and returning the LED to cyan
+- A `virtual-svg-save` event is dispatched carrying `{content, label}` for any consumer that wants to capture the edited content (e.g., a future "Save as…" flow or a paste-into-chat affordance)
+- An info toast confirms the snapshot ("Visual edits snapshotted (no file target)") so the user knows their changes were captured even though no file was written
+Closing the viewer or opening a real file discards the virtual buffer along with any unsnapshotted edits — there is no rescue path. The virtual-svg-save event gives consumers an opportunity to persist content if they need to.
 ## Controls
 No persistent toolbar. The viewer uses floating overlay buttons and keyboard shortcuts for all actions.
 ### Floating Action Buttons
@@ -358,6 +390,9 @@ Orchestrates the switch:
 ## Invariants
 
 - Only one viewer is visible at a time — the app shell enforces this via CSS class toggling
+- Panel-load events are routed by file extension at dispatch time: `.svg` → `load-svg-panel` → SVG viewer; everything else → `load-diff-panel` → Monaco diff viewer. The app shell routes each event to the matching viewer and flips active-viewer visibility
+- The virtual-comparison slot and the `_files[]` multi-file model are mutually exclusive — at any moment exactly one is non-null, or both are null (empty state). Opening a real file clears the virtual slot; populating the virtual slot suspends the active multi-file entry without dropping it
+- Virtual-mode "save" never writes to disk — clicking the dirty LED or pressing Ctrl+S snapshots right-content into right-saved and dispatches a `virtual-svg-save` event. Closing the viewer or opening a real file discards the virtual buffer
 - Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set, and the read-only flag is the sole source of truth for which pane-level mutations are allowed
 - In presentation mode, the hidden left pane's defs subtree must remain `visibility: visible` so that `<marker>`, `<linearGradient>`, `<pattern>`, `<filter>`, and any other ID-referenced defs continue to paint when referenced from the visible right pane via `url(#…)`. Hiding the left pane via `display: none` is forbidden — it would prune the first-in-document-order ID matches and break right-pane references
 - The read-only editor never mutates any SVG element — only its own viewBox attribute for pan/zoom/fit, and never the handle overlay

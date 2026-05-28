@@ -451,6 +451,31 @@ def update_stability(
         active_items, existing_files=existing_files
     )
 
+    # Snapshot the change log onto the service so the
+    # frontend's get_context_breakdown can read it. The
+    # terminal HUD's print_post_response_hud drains the
+    # tracker's live _changes list after rendering, which
+    # races against the browser's streamComplete-driven
+    # breakdown fetch — by the time the RPC arrives, the
+    # tracker's log is empty and the UI shows "No changes
+    # this cycle" while the terminal shows 17 promotions.
+    # The snapshot persists across the drain so both
+    # consumers see the same data.
+    #
+    # Stored only for the main scope's tracker (the one
+    # the breakdown RPC reads when no agent_tag is given);
+    # agent scopes get their own snapshot on their own
+    # service field via the agent breakdown path. For now
+    # we snapshot only the main scope — agent breakdowns
+    # currently fall through to live tracker.get_changes()
+    # and inherit the same race, but agents don't have a
+    # terminal HUD draining their tracker so the race is
+    # benign there.
+    if scope.tracker is service._stability_tracker:
+        service._last_tier_changes = list(
+            scope.tracker.get_changes()
+        )
+
 
 # ---------------------------------------------------------------------------
 # Cross-reference item management

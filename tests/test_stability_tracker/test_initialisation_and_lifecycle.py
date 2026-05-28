@@ -318,3 +318,117 @@ class TestHistoryGraduation:
         tracker.update({"history:0": _active_item("h1", 100)})
         item = tracker.get_all_items()["history:0"]
         assert item.tier == Tier.L2
+
+    def test_purge_history_does_not_trigger_piggyback_next_turn(
+        self,
+    ) -> None:
+        """purge_history marks L3 broken — but the next update
+        should NOT graduate freshly-registered history into L3.
+
+        Regression test for the compaction-turn bug: compaction
+        called purge_history (marking L3 broken with reason
+        "history purge"), then the next _update_stability
+        registered the post-compaction history fresh in active
+        and the piggyback gate naively fired on the L3-broken
+        signal — defeating the verbatim window and dragging
+        the user's recent messages straight into L3.
+
+        The fix filters history-caused reasons out of the gate.
+        Only third-party invalidations ("hash changed", flux
+        moves on non-history items, etc.) should trigger
+        piggyback.
+        """
+        tracker = StabilityTracker(cache_target_tokens=10_000)
+        # Seed: history in L3 (simulates a session that's
+        # already been running and had history graduate
+        # naturally in some prior turn).
+        tracker._items["history:0"] = TrackedItem(
+            key="history:0",
+            tier=Tier.L3,
+            n_value=_TIER_CONFIG_PROMOTE_L3,
+            content_hash="h_old",
+            tokens=200,
+        )
+        # Compaction: purge history (mimics what
+        # _post_response does after the compactor returns
+        # a CompactionResult).
+        tracker.purge_history()
+        assert Tier.L3 in tracker._broken_tiers
+        l3_reasons = tracker._broken_reasons.get(Tier.L3, ())
+        assert any("history" in r for r in l3_reasons)
+        # Next turn: register fresh history (the new compacted
+        # history messages from set_history()).
+        tracker.update(
+            {
+                f"history:{i}": _active_item("h_new", 200)
+                for i in range(6)
+            }
+        )
+        # Every fresh history entry must remain in active —
+        # the verbatim window protects them. Without the fix
+        # they all graduate to L3 on this single update call.
+        for i in range(6):
+            item = tracker.get_all_items()[f"history:{i}"]
+            assert item.tier == Tier.ACTIVE, (
+                f"history:{i} graduated prematurely after "
+                f"purge_history; got tier={item.tier}"
+            )
+        # No piggyback change should have been logged either —
+        # the gate correctly suppressed.
+        changes = tracker.get_changes()
+        piggyback_changes = [
+            c for c in changes if "piggyback" in c
+        ]
+        assert piggyback_changes == [], (
+            f"unexpected piggyback changes: {piggyback_changes}"
+        )
+
+    def test_non_history_l3_break_still_triggers_piggyback(
+        self,
+    ) -> None:
+        """A non-history reason on L3 still passes the gate.
+
+        Mirror of the regression test above — ensures the fix
+        doesn't over-filter. When L3's broken-set carries any
+        non-history reason (e.g., a file's hash changed and it
+        teleported out of L3), the piggyback gate must still
+        fire so old history rides the same cache rebuild.
+        """
+        tracker = StabilityTracker(cache_target_tokens=400)
+        # Seed: a file in L3 with a known hash, plus three
+        # history entries already in active that exceed the
+        # verbatim window.
+        tracker._items["file:a.py"] = TrackedItem(
+            key="file:a.py",
+            tier=Tier.L3,
+            n_value=_TIER_CONFIG_PROMOTE_L3,
+            content_hash="h_old",
+            tokens=100,
+        )
+        for i in range(3):
+            tracker._items[f"history:{i}"] = TrackedItem(
+                key=f"history:{i}",
+                tier=Tier.ACTIVE,
+                n_value=0,
+                content_hash="h_hist",
+                tokens=200,
+            )
+        # Update: file's hash changes (teleport L3 → active),
+        # marks L3 broken with a non-history reason
+        # ("hash changed"). History stays at its prior hash.
+        tracker.update(
+            {
+                "file:a.py": _active_item("h_NEW", 100),
+                "history:0": _active_item("h_hist", 200),
+                "history:1": _active_item("h_hist", 200),
+                "history:2": _active_item("h_hist", 200),
+            }
+        )
+        # Older history graduates (window is 400 tokens, two
+        # entries fit, the third spills); newest stays active.
+        items = tracker.get_all_items()
+        # history:2 (newest, idx 2) and history:1 fit in the
+        # window; history:0 spills to L3 via piggyback.
+        assert items["history:0"].tier == Tier.L3
+        assert items["history:1"].tier == Tier.ACTIVE
+        assert items["history:2"].tier == Tier.ACTIVE

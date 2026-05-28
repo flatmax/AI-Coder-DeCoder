@@ -960,8 +960,35 @@ class StabilityTracker:
             return
 
         # Piggyback gate — only fires when L3 is already being
-        # rebuilt this cycle. Nothing else.
-        if Tier.L3 not in self._broken_tiers:
+        # rebuilt this cycle by some *other* cause. Nothing else.
+        #
+        # The original gate was "L3 in broken_tiers". That
+        # misfires when ``purge_history`` (called by
+        # compaction, new_session, session-load) wipes
+        # history items from L3 — purge marks L3 broken with
+        # reason "history purge", and on the next update the
+        # gate naively passes, dragging the freshly-registered
+        # post-compaction history straight into L3 and
+        # defeating the verbatim window. The compaction work
+        # was wasted: the user's recent messages, which
+        # compaction took care to keep verbatim, get cached
+        # away on the very next turn.
+        #
+        # The intent is "free ride on someone *else's*
+        # invalidation". History-caused invalidations
+        # (history purge, history piggyback itself) are
+        # excluded — they're not free rides, they're history
+        # paying its own freight. ``hash changed`` /
+        # ``stale file removal`` / ``flux move`` /
+        # ``cross-ref seed`` / ``item departed`` from
+        # non-history items all qualify; ``history purge``
+        # and ``history piggyback`` do not.
+        l3_reasons = self._broken_reasons.get(Tier.L3, ())
+        non_history_reasons = [
+            r for r in l3_reasons
+            if "history" not in r
+        ]
+        if not non_history_reasons:
             return
 
         # Collect active history items and sort newest → oldest

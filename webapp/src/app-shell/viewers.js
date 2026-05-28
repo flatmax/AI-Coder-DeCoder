@@ -118,6 +118,35 @@ export function onLoadDiffPanel(host, event) {
 }
 
 /**
+ * Route a `load-svg-panel` event to the SVG viewer's
+ * loadPanel method. Dispatched by the file picker's
+ * "Open in left/right panel" actions when the file is
+ * an SVG — the user wants a rendered visual comparison
+ * rather than the XML source. Shows the SVG viewer so
+ * the result is immediately visible.
+ *
+ * Two successive calls (one per panel) populate the
+ * left and right panes of the SVG viewer's existing
+ * two-pane layout, replacing whatever HEAD/working
+ * comparison was previously shown.
+ */
+export function onLoadSvgPanel(host, event) {
+  const detail = event.detail || {};
+  const { content, panel, label } = detail;
+  if (typeof content !== 'string') return;
+  if (panel !== 'left' && panel !== 'right') return;
+  host._activeViewer = 'svg';
+  host.updateComplete.then(() => {
+    const viewer =
+      host.shadowRoot?.querySelector('ac-svg-viewer');
+    if (!viewer || typeof viewer.loadPanel !== 'function') {
+      return;
+    }
+    viewer.loadPanel(content, panel, label);
+  });
+}
+
+/**
  * Handle `toggle-svg-mode` from either viewer. Switches
  * between the visual SVG viewer and the Monaco text diff
  * editor for the same file, carrying content and dirty

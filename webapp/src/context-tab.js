@@ -902,6 +902,19 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._cacheFilter = '';
     this._sortMode = this._loadSortMode();
     this._warmerStatus = null;
+    // Pending-refresh flag. When an event fires while a
+    // refresh is already in flight, ``_refresh`` would
+    // previously short-circuit on ``this._loading`` and
+    // silently drop the second event — leaving the UI
+    // showing data from the first fetch even though the
+    // backend state advanced. Common case: ``stream-complete``
+    // and ``files-changed`` (from post-response edit
+    // application) fire close together; the first refresh
+    // wins, the second drops, and the Context tab shows
+    // pre-edit tier state until the user manually clicks
+    // refresh. The flag instead schedules a second fetch
+    // immediately after the current one completes.
+    this._refreshPending = false;
     // Polling timer for cache-warmer status. Active only
     // while the Cache sub-view is the current view —
     // started by ``_startWarmerPolling`` when the user
@@ -927,6 +940,10 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._onModeChanged = this._onModeChanged.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
+    this._onCompactionEvent = this._onCompactionEvent.bind(this);
+    this._onAgentsSpawned = this._onAgentsSpawned.bind(this);
+    this._onAgentClosed = this._onAgentClosed.bind(this);
+    this._onAgentModeChanged = this._onAgentModeChanged.bind(this);
     this._onModalKeyDown = this._onModalKeyDown.bind(this);
   }
 
@@ -950,6 +967,26 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.addEventListener(
       'active-tab-changed', this._onActiveTabChanged,
     );
+    // Compaction events — when the compactor fires, history
+    // tracker entries get wiped and replaced. The tier state
+    // shifts: graduated history items move to L3, recent
+    // items stay in active, and the summary message takes
+    // their place. Without this listener, the Cache sub-view
+    // shows pre-compaction history entries that no longer
+    // exist on the tracker until the next stream-complete.
+    window.addEventListener(
+      'compaction-event', this._onCompactionEvent,
+    );
+    // Agent lifecycle — these change the live-agents roster
+    // shown in the Budget sub-view (the ``agents-roster``
+    // section). Without these listeners, the roster goes
+    // stale after a spawn/close until the next event from
+    // a different channel triggers a refresh.
+    window.addEventListener('agents-spawned', this._onAgentsSpawned);
+    window.addEventListener('agent-closed', this._onAgentClosed);
+    window.addEventListener(
+      'agent-mode-changed', this._onAgentModeChanged,
+    );
     window.addEventListener('keydown', this._onModalKeyDown);
   }
 
@@ -961,6 +998,14 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener(
       'active-tab-changed', this._onActiveTabChanged,
+    );
+    window.removeEventListener(
+      'compaction-event', this._onCompactionEvent,
+    );
+    window.removeEventListener('agents-spawned', this._onAgentsSpawned);
+    window.removeEventListener('agent-closed', this._onAgentClosed);
+    window.removeEventListener(
+      'agent-mode-changed', this._onAgentModeChanged,
     );
     window.removeEventListener('keydown', this._onModalKeyDown);
     super.disconnectedCallback();
@@ -1022,8 +1067,49 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._refresh();
   }
 
+  _onCompactionEvent(event) {
+    // Only refresh on stages that actually mutate tracker
+    // state. The "compacting" stage is a heads-up that work
+    // is starting; the breakdown at that point still
+    // reflects pre-compaction state. The "compacted" stage
+    // fires after history is replaced and tracker history
+    // entries are purged — that's the moment the breakdown
+    // needs to update. "compaction_error" leaves state
+    // unchanged so no refresh is needed.
+    const stage = event?.detail?.event?.stage;
+    if (stage === 'compacted') {
+      this._refresh();
+    }
+  }
+
+  _onAgentsSpawned() {
+    this._refresh();
+  }
+
+  _onAgentClosed() {
+    this._refresh();
+  }
+
+  _onAgentModeChanged() {
+    this._refresh();
+  }
+
   async _refresh() {
-    if (this._loading) return;
+    // When a refresh is already in flight, mark a follow-up
+    // and return. The in-flight call's ``finally`` block
+    // checks ``_refreshPending`` and re-fires once. This
+    // collapses any number of overlapping events into "one
+    // current fetch + one queued fetch", which is enough
+    // because the queued fetch always reads the latest
+    // backend state. Without this, ``stream-complete``
+    // followed quickly by ``files-changed`` (from
+    // post-response edit application) would silently drop
+    // the second event and leave the UI showing pre-edit
+    // tier state until the next manual refresh.
+    if (this._loading) {
+      this._refreshPending = true;
+      return;
+    }
     if (!this.rpcConnected) return;
     this._loading = true;
     // Resolve the active tab into an agent_tag for the
@@ -1062,6 +1148,15 @@ export class ContextTab extends RpcMixin(LitElement) {
       }
     } finally {
       this._loading = false;
+      // Drain any pending refresh that arrived while this
+      // one was in flight. Single follow-up — multiple
+      // events that fired during the in-flight window all
+      // collapse into one re-fire, since each subsequent
+      // event just re-sets the already-true flag.
+      if (this._refreshPending) {
+        this._refreshPending = false;
+        this._refresh();
+      }
     }
   }
 

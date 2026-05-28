@@ -887,7 +887,23 @@ def get_context_breakdown(
         })
 
     # Promotions and demotions from the most recent update.
-    changes = tracker.get_changes()
+    # For the main scope, read from the snapshot
+    # ``update_stability`` stashes on the service before
+    # ``print_post_response_hud`` drains the tracker's live
+    # change log. Without the snapshot the frontend's
+    # breakdown fetch races the terminal HUD's drain and
+    # the UI flips to "No changes this cycle" while the
+    # terminal shows the full list.
+    #
+    # Agent scopes still read live (agents don't have a
+    # terminal HUD draining their tracker, so the race
+    # doesn't apply).
+    if scope is None:
+        changes = list(
+            getattr(service, "_last_tier_changes", None) or ()
+        )
+    else:
+        changes = tracker.get_changes()
     promotions = [c for c in changes if "promoted" in c or "→ L" in c]
     demotions = [
         c for c in changes
