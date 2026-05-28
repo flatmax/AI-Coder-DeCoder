@@ -327,7 +327,6 @@ export function pushChildProps(host) {
   picker.statusData = host._latestStatusData;
   picker.branchInfo = host._latestBranchInfo;
   picker.excludedFiles = new Set(host._excludedFiles);
-  picker.pinnedFiles = computePinnedFiles(host);
   picker.binaryFiles = host._binaryFiles
     ? new Set(host._binaryFiles)
     : new Set();
@@ -339,28 +338,6 @@ export function pushChildProps(host) {
   chat.requestUpdate();
   host._childPropsPushed = true;
   return true;
-}
-
-/**
- * Build the set of paths that should be pinned to
- * selection — files with working-tree or staged
- * modifications. The picker uses this to suppress the
- * native checkbox toggle on attempted deselection so
- * Lit's reactive binding stays the source of truth.
- * Untracked and deleted files are excluded — see the
- * comment in `applySelection` for the rationale.
- */
-export function computePinnedFiles(host) {
-  const pinned = new Set();
-  const sd = host._latestStatusData;
-  if (!sd) return pinned;
-  if (sd.modified instanceof Set) {
-    for (const p of sd.modified) pinned.add(p);
-  }
-  if (sd.staged instanceof Set) {
-    for (const p of sd.staged) pinned.add(p);
-  }
-  return pinned;
 }
 
 /**

@@ -62,7 +62,6 @@ export class FilePicker extends LitElement {
     branchInfo: { type: Object },
     selectedFiles: { type: Object },
     excludedFiles: { type: Object },
-    pinnedFiles: { type: Object },
     binaryFiles: { type: Object },
     activePath: { type: String },
     reviewState: { type: Object },
@@ -117,7 +116,6 @@ export class FilePicker extends LitElement {
       diffStats: {},
     };
     this.excludedFiles = new Set();
-    this.pinnedFiles = new Set();
     this.binaryFiles = new Set();
     this.activePath = null;
     this.reviewState = null;
@@ -1571,16 +1569,6 @@ export class FilePicker extends LitElement {
     if (event.shiftKey) {
       event.preventDefault();
       this._toggleExclusion(node.path);
-      return;
-    }
-    const isCurrentlySelected = this.selectedFiles.has(node.path);
-    const isPinned =
-      this.pinnedFiles && this.pinnedFiles.has(node.path);
-    if (isCurrentlySelected && isPinned) {
-      event.preventDefault();
-      const next = new Set(this.selectedFiles);
-      next.delete(node.path);
-      this._emitSelectionChanged(next);
       return;
     }
     if (this.excludedFiles.has(node.path)) {

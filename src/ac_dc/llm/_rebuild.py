@@ -72,9 +72,8 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     Under D36 dir-blocks the rebuild sequence is:
 
     1. Preserve history entries.
-    2. Wipe everything else from the tracker — including pin
-       flags. Rebuild is the explicit reset point that
-       supersedes per-file edit history.
+    2. Wipe everything else from the tracker. Rebuild is the
+       explicit reset point.
     3. Mark all tiers broken; configure cache target
        (model-aware).
     4. Load content for selected files (so step 5's bin-pack
@@ -145,17 +144,11 @@ def rebuild_cache_impl(service: "LLMService") -> dict[str, Any]:
     items_before = len(tracker.get_all_items())
 
     # Step 1-2: preserve history, wipe everything else.
-    # Wiping includes any pin flags — rebuild is the
-    # explicit "fresh start" gesture that supersedes
-    # per-file edit history.
     history_items = {
         key: item
         for key, item in tracker.get_all_items().items()
         if key.startswith("history:")
     }
-    for item in history_items.values():
-        if hasattr(item, "_pinned"):
-            item._pinned = False
     tracker._items.clear()
     for key, item in history_items.items():
         tracker._items[key] = item

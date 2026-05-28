@@ -161,7 +161,7 @@ Each tracker entry carries:
 | `content_hash` | string | 64-char SHA-256 hex, or empty string for placeholder-initialised entries |
 | `tokens` | int | Measured token count; 0 for placeholder-initialised entries awaiting first measurement |
 
-The `_anchored` flag is a transient per-cascade attribute set dynamically via `setattr`, not a declared field. It's re-evaluated from scratch on each cascade pass and never persists across update cycles.
+The `_anchored` flag is a transient per-cascade attribute set dynamically via `setattr`, not a declared field. It's re-evaluated from scratch on each cascade pass and never persists across update cycles. Earlier revisions also defined a transient `_pinned` flag protecting edited `file:` entries from cleanup; this is removed under the membrane / flux model. Files (edited or not) can be deselected at any turn — the parent directory's dir-block carries the structural presence, and re-selection brings the full text back.
 
 ### Key prefixes
 
@@ -177,8 +177,6 @@ The `_anchored` flag is a transient per-cascade attribute set dynamically via `s
 The `system:prompt` tracker entry from D27 is **removed**. The system prompt sits before L0 as the only non-flux head anchor and is rendered directly from `ContextManager.get_system_prompt()` at assembly time; it is not represented as a tracker entry and not subject to the N-counter cascade.
 
 The `symbol:{path}` and `doc:{path}` per-file keys from D27 are **removed**. Their content lives inside the directory's `symbols:<dir>` / `docs:<dir>` block, hashed and counted as a unit. A file's symbol-table change perturbs the block's hash, demotes the block to Active, and the block re-rides the flux as a single tracker entry.
-
-`file:` entries acquire an additional transient `_pinned` flag when the file is edited during the session. Pinned entries are not subject to stale-cleanup eviction. Pin flags are cleared by application restart or explicit `rebuild_cache`.
 
 When a file enters Active full-text, the tracker invariant guarantees it is removed from its directory's `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` block at the same time, causing that block's content to shrink (hash change → demote to Active). When the file leaves Active, it re-enters the block, growing it (hash change → demote to Active). This block-rebuild rule keeps every indexed file represented in exactly one place per turn.
 

@@ -8,6 +8,14 @@ via cross_ref_seed_dir_blocks. Both place items at placeholder
 tokens / hash; the membrane controller rebalances over
 subsequent request cycles.
 
+Seed direction is **edit-cost-aware** (inverted from the
+intuitive "hot → L0" reading): hot directories seed *cooler*
+tiers because they are most likely to be edited again soon,
+and an edit teleports the affected block to Active —
+invalidating its current tier. Tearing down a small L3 cache
+block is cheap; tearing down L0 is expensive. Cold content
+sits at L0 where the cache block survives across many turns.
+
 Governing spec: specs-reference/3-llm/cache-tiering
 § Initialization, § Cross-Reference Activation.
 """
@@ -24,10 +32,13 @@ from ac_dc.stability_tracker import (
 
 
 class TestInitializeDirBlocks:
-    """``initialize_dir_blocks`` quartile-splits hottest → L0.
+    """``initialize_dir_blocks`` quartile-splits hottest → L3.
 
-    Hot directories (recently-modified) seed warmer tiers so
-    the first request's cache layout reflects user activity.
+    Hot directories (recently-modified) seed cooler tiers so
+    the cheapest cache block (L3) absorbs the churn when an
+    edit teleports them to Active. Cold directories seed
+    warmer tiers up to L0 because they are unlikely to be
+    edited soon — L0's expensive cache block survives.
     Membrane controller rebalances after a few request cycles.
     """
 
@@ -37,15 +48,15 @@ class TestInitializeDirBlocks:
         tracker.initialize_dir_blocks([])
         assert tracker.get_all_items() == {}
 
-    def test_single_key_lands_in_l0(self) -> None:
-        """A single dir-block goes to L0 (quartile 0)."""
+    def test_single_key_lands_in_l3(self) -> None:
+        """A single dir-block goes to L3 (quartile 0, hottest)."""
         tracker = StabilityTracker()
         tracker.initialize_dir_blocks([("symbols:src", 1000.0)])
         item = tracker.get_all_items()["symbols:src"]
-        assert item.tier == Tier.L0
+        assert item.tier == Tier.L3
 
-    def test_hottest_lands_in_l0_coldest_in_l3(self) -> None:
-        """Quartile split: hottest → L0, coolest → L3."""
+    def test_hottest_lands_in_l3_coldest_in_l0(self) -> None:
+        """Quartile split: hottest → L3, coolest → L0."""
         tracker = StabilityTracker()
         # Four directories, decreasing mtimes (hottest first).
         tracker.initialize_dir_blocks(
@@ -57,10 +68,10 @@ class TestInitializeDirBlocks:
             ]
         )
         items = tracker.get_all_items()
-        assert items["symbols:hot"].tier == Tier.L0
-        assert items["symbols:warm"].tier == Tier.L1
-        assert items["symbols:cool"].tier == Tier.L2
-        assert items["symbols:cold"].tier == Tier.L3
+        assert items["symbols:hot"].tier == Tier.L3
+        assert items["symbols:warm"].tier == Tier.L2
+        assert items["symbols:cool"].tier == Tier.L1
+        assert items["symbols:cold"].tier == Tier.L0
 
     def test_mtime_tiebreak_by_key(self) -> None:
         """Equal mtimes → tie-break by key ascending."""
@@ -74,11 +85,12 @@ class TestInitializeDirBlocks:
             ]
         )
         items = tracker.get_all_items()
-        # Sorted by key (a, b, c, d) → split across quartiles.
-        assert items["symbols:a"].tier == Tier.L0
-        assert items["symbols:b"].tier == Tier.L1
-        assert items["symbols:c"].tier == Tier.L2
-        assert items["symbols:d"].tier == Tier.L3
+        # Sorted by key (a, b, c, d) → split across quartiles
+        # hottest-first: a → L3, b → L2, c → L1, d → L0.
+        assert items["symbols:a"].tier == Tier.L3
+        assert items["symbols:b"].tier == Tier.L2
+        assert items["symbols:c"].tier == Tier.L1
+        assert items["symbols:d"].tier == Tier.L0
 
     def test_placeholder_hash_and_tokens(self) -> None:
         """Seeded items carry placeholder content state.
@@ -105,10 +117,11 @@ class TestInitializeDirBlocks:
         )
         items = tracker.get_all_items()
         # entry_n: L0=12, L1=9, L2=6, L3=3
-        assert items["symbols:a"].n_value == 12
-        assert items["symbols:b"].n_value == 9
-        assert items["symbols:c"].n_value == 6
-        assert items["symbols:d"].n_value == 3
+        # Hottest-first: a → L3, b → L2, c → L1, d → L0.
+        assert items["symbols:a"].n_value == 3
+        assert items["symbols:b"].n_value == 6
+        assert items["symbols:c"].n_value == 9
+        assert items["symbols:d"].n_value == 12
 
     def test_mixed_key_prefixes_supported(self) -> None:
         """``symbols:``, ``docs:``, ``plain_files:`` all valid."""
@@ -131,8 +144,11 @@ class TestCrossRefSeedDirBlocks:
 
     Cross-reference activation seeds opposite-index dir-blocks
     into cached tiers without touching primary-index entries.
-    Distributes hottest → L1, middle → L2, coolest → L3 — never
-    L0 (primary content earns L0 via cascade promotion).
+    Mirrors :meth:`initialize_dir_blocks` direction: hottest
+    → L3 (cheapest to invalidate), middle → L2, coolest → L1.
+    L0 stays reserved for primary content so the secondary
+    index has one membrane of climbing to do before competing
+    for the top slot.
     """
 
     def test_empty_input_is_noop(self) -> None:
@@ -176,8 +192,8 @@ class TestCrossRefSeedDirBlocks:
         for item in tracker.get_all_items().values():
             assert item.tier in (Tier.L1, Tier.L2, Tier.L3)
 
-    def test_thirds_split_hottest_to_l1(self) -> None:
-        """Three keys → one per L1/L2/L3, hottest → L1."""
+    def test_thirds_split_hottest_to_l3(self) -> None:
+        """Three keys → one per L1/L2/L3, hottest → L3."""
         tracker = StabilityTracker()
         tracker.cross_ref_seed_dir_blocks(
             [
@@ -187,9 +203,9 @@ class TestCrossRefSeedDirBlocks:
             ]
         )
         items = tracker.get_all_items()
-        assert items["docs:hot"].tier == Tier.L1
+        assert items["docs:hot"].tier == Tier.L3
         assert items["docs:warm"].tier == Tier.L2
-        assert items["docs:cool"].tier == Tier.L3
+        assert items["docs:cool"].tier == Tier.L1
 
     def test_placeholder_hash_and_tokens(self) -> None:
         """Seeded items get placeholder state, not real counts."""

@@ -63,9 +63,10 @@ Design points pinned by the test suite and spec:
   the flux loop.
 
 - **Edit invariant.** A hash mismatch teleports the file to
-  Active with ``n = 0``. The entry is pinned; subsequent
-  deselection / stale-cleanup skips it. Only application
-  restart or explicit ``rebuild_cache`` clears pins.
+  Active with ``n = 0``. The membrane / flux model handles
+  the rest — when the file is deselected, its parent
+  directory's dir-block continues to carry its structural
+  presence, and re-selection brings the full text back.
 
 Anchoring, N-cap-at-stable-above, and post-cascade underfill
 demotion are all removed — the membrane controller subsumes the
@@ -444,63 +445,6 @@ class StabilityTracker:
         """
         return key in self._items
 
-    # ------------------------------------------------------------------
-    # Pin flag (edit invariant)
-    # ------------------------------------------------------------------
-
-    def pin_file(self, key: str) -> bool:
-        """Mark a ``file:`` entry as edit-pinned.
-
-        Pinned entries are protected from automatic eviction
-        — stale-cleanup and underfill demotion skip them. The
-        edit invariant says: when a file's content hash
-        changes during the session, its full text must remain
-        present in some cached tier until application restart
-        or explicit ``rebuild_cache``, even if the user
-        deselects it. Pinning is the mechanism.
-
-        Only ``file:`` keys can be pinned; calling on other
-        prefixes is a no-op (returns False). Calling on an
-        unknown key is also a no-op (returns False).
-
-        Returns True when the pin was applied (or was already
-        in place), False when the call had no effect.
-
-        Spec: ``specs4/3-llm/cache-tiering.md`` § Edit Invariant.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        item._pinned = True  # type: ignore[attr-defined]
-        return True
-
-    def unpin_file(self, key: str) -> bool:
-        """Clear the edit-pin flag on a ``file:`` entry.
-
-        Used by ``rebuild_cache`` to clear all pins as part of
-        the explicit reset — the user's "fresh start" gesture
-        supersedes per-file edit history. Returns True when the
-        pin was cleared, False when the entry was unknown or
-        was not previously pinned.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        had_pin = bool(getattr(item, "_pinned", False))
-        item._pinned = False  # type: ignore[attr-defined]
-        return had_pin
-
-    def is_pinned(self, key: str) -> bool:
-        """Return True when ``key`` is a pinned ``file:`` entry."""
-        item = self._items.get(key)
-        if item is None:
-            return False
-        return bool(getattr(item, "_pinned", False))
-
     def get_changes(self) -> list[str]:
         """Return change-log entries for the most recent update.
 
@@ -854,19 +798,6 @@ class StabilityTracker:
                 old_tier = existing.tier
                 existing.content_hash = new_hash
                 existing.n_value = 0
-                # Edit invariant — when a ``file:`` entry's
-                # hash changes during the session, the file
-                # has been edited and its full text must
-                # remain cached until the next
-                # ``rebuild_cache`` or application restart.
-                # The pin flag protects against automatic
-                # eviction (stale-cleanup, mover selection in
-                # the relaxation loop).
-                #
-                # Spec: ``specs4/3-llm/cache-tiering.md`` §
-                # Edit Invariant.
-                if key.startswith("file:"):
-                    existing._pinned = True  # type: ignore[attr-defined]
                 if old_tier != Tier.ACTIVE:
                     existing.tier = Tier.ACTIVE
                     self._mark_broken(old_tier, "hash changed")
@@ -885,23 +816,18 @@ class StabilityTracker:
         # and persist in their earned tier even when not
         # actively referenced this request.
         #
-        # Pinned ``file:`` entries (the edit invariant — see
-        # above) are also exempt: they must survive deselection
-        # until the next ``rebuild_cache`` or application
-        # restart. The truthful current text of an edited file
-        # stays in the prompt regardless of selection state.
+        # Under the membrane / flux cache model, deselected
+        # files no longer need pin protection — the parent
+        # directory's ``symbols:<dir>`` / ``docs:<dir>`` /
+        # ``plain_files:<dir>`` block continues to represent
+        # the file's structural presence, and the user can
+        # re-select to pull the full text back into context.
         for key in list(self._items.keys()):
             if key in active_items:
                 continue
             if not (key.startswith("file:") or key.startswith("history:")):
                 continue
             item = self._items[key]
-            if key.startswith("file:") and getattr(item, "_pinned", False):
-                # Pinned — protected from departure cleanup.
-                # Stays in its current tier. Active items list
-                # will see it again on subsequent cycles via
-                # the orchestrator's ``file_context.get_files()``.
-                continue
             self._items.pop(key)
             self._mark_broken(item.tier, "item departed")
             self._log_change(
@@ -1087,10 +1013,7 @@ class StabilityTracker:
             # only when L3 is already broken by another mutation.
             # Otherwise the conversation would churn the L3 cache
             # block on every stable turn.
-            is_protected=lambda f: bool(
-                getattr(f, "_pinned", False)
-                or f.key.startswith("history:")
-            ),
+            is_protected=lambda f: f.key.startswith("history:"),
             # D37 — history is also excluded from V/c
             # accumulation, not just mover selection. Bytes still
             # sit in L3 (and the prompt is truthful), but the
@@ -1151,14 +1074,35 @@ class StabilityTracker:
         """Seed dir-block entries across L0–L3 by directory mtime.
 
         Under D36 the cache initialisation strategy is mtime-
-        based rather than reference-graph clustering. Hot
-        directories (recently-modified) seed warmer tiers so
-        the first request's cache layout reflects "what the
-        user has been working on" — typically the highest-
-        churn content also has the highest churn cost when
-        miscached. Cool directories (untouched in a long time)
-        seed cooler tiers and have less to lose if they get
-        promoted slowly.
+        based rather than reference-graph clustering. The
+        seed direction is **edit-cost-aware**: hot directories
+        (recently-modified) seed *cooler* tiers so they sit
+        near the bottom of the cache, and cold directories
+        (untouched in a long time) seed *warmer* tiers up to
+        and including L0.
+
+        The reasoning: an mtime-hot directory is the most
+        likely to be edited again soon. When that edit lands,
+        the affected dir-block teleports to Active (the
+        rectified membrane's only downward force), invalidating
+        whichever cached tier it currently occupies. Tearing
+        down a small L3 cache block on every edit is cheap;
+        tearing down L0 is expensive — L0 is the largest
+        cached block, sits closest to the prefix root, and a
+        misplaced hot block at L0 forces the rest of L0 to be
+        re-cached on every churn. Seeding hot content at L3
+        absorbs the churn near the membrane's entry point.
+
+        Cold content at L0 is the right invariant: it's
+        unlikely to be edited soon, so the L0 cache block
+        survives across many turns. If a cold directory
+        suddenly *does* get edited, it teleports to Active
+        and re-rides the flux — same cost as any other edit.
+        The bet is that "recently edited" predicts "likely to
+        be edited again soon" more often than not, which
+        matches typical interactive coding (sessions are
+        usually continuations of recent work, not pivots to
+        long-untouched code).
 
         The membrane controller takes over from there: across
         the next few request cycles, the rectified-flux loop
@@ -1173,20 +1117,25 @@ class StabilityTracker:
             fully-prefixed tracker key (``symbols:<dir>``,
             ``docs:<dir>``, ``plain_files:<dir>``). ``mtime``
             is the directory's most recent file mtime (seconds
-            since epoch); 0.0 for empty / non-existent
-            directories. ``tokens`` is the rendered block's
-            real token count when the caller has measured it
-            — passing it here avoids the Context-tab-before-
-            first-turn window where every seeded item shows
-            a placeholder count. When omitted the placeholder
+            since epoch) — :meth:`Repo.get_directory_mtime`
+            returns ``max(file.stat().st_mtime for file in
+            dir)``, so a directory with one freshly-edited
+            file and many cold files registers as hot. 0.0
+            for empty / non-existent directories. ``tokens``
+            is the rendered block's real token count when the
+            caller has measured it — passing it here avoids
+            the Context-tab-before-first-turn window where
+            every seeded item shows a placeholder count. When
+            omitted the placeholder
             (:data:`_PLACEHOLDER_TOKENS`) is used as a stop-
             gap until the first :meth:`update` cycle replaces
             it with a measured value.
 
         Tier assignment splits the sorted-by-mtime-descending
         list into four roughly-equal quartiles: hottest →
-        L0, then L1, L2, and coolest → L3. Ties on mtime fall
-        back to alphabetical key ordering for determinism.
+        **L3**, then L2, L1, and coolest → **L0**. Ties on
+        mtime fall back to alphabetical key ordering for
+        determinism.
 
         Items receive an empty hash regardless; Phase 1 of
         the next :meth:`update` cycle accepts the first real
@@ -1204,10 +1153,11 @@ class StabilityTracker:
             key=lambda pair: (-pair[1], pair[0]),
         )
         n = len(ranked)
-        # Quartile boundaries — ceil-divide gives the same
-        # tier order for any n, even small ones (e.g. 1–3
-        # blocks all land in L0).
-        tier_order = (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
+        # Quartile boundaries — hottest quartile lands at
+        # L3 (cheapest to invalidate when edits happen),
+        # coldest at L0 (most expensive to invalidate, but
+        # least likely to be edited soon).
+        tier_order = (Tier.L3, Tier.L2, Tier.L1, Tier.L0)
         for idx, entry in enumerate(ranked):
             key = entry[0]
             tokens = (
@@ -1255,9 +1205,15 @@ class StabilityTracker:
             here avoids the placeholder-count window in the
             Context tab.
 
-        Distribution strategy: hottest → L1, middle → L2,
-        coolest → L3. The cascade promotes earned content
-        upward across subsequent requests.
+        Distribution strategy mirrors
+        :meth:`initialize_dir_blocks`: hottest → **L3** (the
+        cheapest tier to invalidate when an edit lands),
+        middle → L2, coldest → **L1**. L0 stays reserved for
+        primary content on cross-reference seeding so the
+        secondary index has one membrane of climbing to do
+        before it can compete for the top slot. The cascade
+        promotes earned content upward across subsequent
+        requests.
         """
         if not keys_with_mtimes:
             return
@@ -1275,7 +1231,7 @@ class StabilityTracker:
             key=lambda pair: (-pair[1], pair[0]),
         )
         n = len(ranked)
-        tier_order = (Tier.L1, Tier.L2, Tier.L3)
+        tier_order = (Tier.L3, Tier.L2, Tier.L1)
         affected_tiers: set[Tier] = set()
         for idx, entry in enumerate(ranked):
             key = entry[0]

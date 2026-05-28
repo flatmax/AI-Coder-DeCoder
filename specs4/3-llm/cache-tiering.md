@@ -104,18 +104,18 @@ Every tracked item carries:
 
 When the user selects a file for editing (full-text inclusion in Active):
 
-- A `file:<path>` entry is created in Active with `n = 0`, carrying the full file text. The entry is **pinned** — stale cleanup and automatic eviction skip it.
+- A `file:<path>` entry is created in Active with `n = 0`, carrying the full file text.
 - The file's entry in its directory's dir-block (`symbols:<dir>`, `docs:<dir>`, or `plain_files:<dir>` depending on file type) is **removed**. The dir-block's contents change, so the dir-block is teleported to Active with `n = 0` (the membrane analogue of "ion enters bulk solution"). It rides the cascade upward via flux as it stabilises (see §4).
 - If the dir-block now has zero entries (every file in the directory is in Active full-text), it is **removed entirely** from the cache rather than retained as an empty block.
 
 When the user later **deselects** an edited file, or applies edits and the file leaves Active:
 
-- The `file:<path>` entry is removed from Active.
-- The file's entry rejoins its dir-block on the next freeze. The dir-block grows by one entry, content changes, and is again teleported to Active and re-rides flux upward.
+- The `file:<path>` entry is removed from Active. The file's structural presence is once again carried by its parent directory's dir-block — the user is free to deselect at any time without losing the LLM's awareness of the file.
+- The dir-block grows by one entry, content changes, and is teleported to Active and re-rides flux upward.
 
 When a file's content hash changes while it is in Active (edit applied):
 
-- The `file:<path>` entry is updated in place (still in Active, still pinned). Hash mismatch resets `n = 0`.
+- The `file:<path>` entry is updated in place (still in Active). Hash mismatch resets `n = 0`.
 - The dir-block is unaffected (the file is not represented there while in Active full-text).
 
 When a file is **deleted from disk**:
@@ -124,7 +124,7 @@ When a file is **deleted from disk**:
 - The file's entry is removed from its dir-block. The dir-block shrinks, contents change, and it is teleported to Active to re-ride flux.
 - No deletion-marker entry is created (D27's marker scheme is removed under D36 — there is no monolithic L0 to be stale against).
 
-**The pin flag** applies only to `file:<path>` entries in Active. Dir-blocks carry no pin flag — they are reconstructed from the live index on every freeze and inherit consistency from the index.
+**No pin flag.** Earlier revisions pinned `file:<path>` entries against deselection on hash change, on the theory that an edited file's text must remain cached until rebuild or restart regardless of selection state. The membrane / flux cache model retires that protection: deselected files (edited or not) are simply removed, and the parent directory's dir-block continues to carry their structural presence. Re-selecting the file pulls the full text back into Active and re-teleports the dir-block.
 
 **The unifying rule.** Content change ⇒ teleport to Active. "Size change" (dir-block grows or shrinks because a file moved into or out of Active) is a special case of "contents changed." The truthful, current representation of every indexed file is always present in the prompt — either as full text in Active (selected for edit) or as a dir-block entry somewhere in L0–L3 (the union of all dir-blocks covers the whole repo).
 
@@ -235,7 +235,7 @@ When a membrane has decided to fire (|Φ| ≥ threshold and the direction passes
 - `"fifo"` — smallest `arrived_at_turn`. Pure arrival-order.
 - `"random"` — uniform among admission-eligible files. Ablation only.
 
-Pinned `file:<path>` entries (edited files held in Active) are eligible to participate in V/c counts (they contribute mass to their tier) but are skipped by the mover-selection step — they cannot be promoted *out of* Active as ordinary movers, and `pin_file` flags entries to that effect. This preserves the edit invariant under flux dynamics: an edited file's text stays in Active until edits are done. Dir-blocks have no equivalent pin — they are reconstructed from the live index at every freeze and inherit their consistency from the index.
+`file:<path>` entries participate in V/c counts and mover selection on the same terms as any other tracked item — there is no pin flag protecting them from promotion. An edited file's text climbs the cascade like anything else once it has aged past the `n_admit` floor on Active→L3. Dir-blocks similarly carry no pin — they are reconstructed from the live index at every freeze and inherit their consistency from the index.
 
 ### 4.5 Active → L3 graduation
 
@@ -303,29 +303,37 @@ A file selected for editing has its full text in the Active list AND is removed 
 ## Initialization
 
 - On startup, after the symbol/doc indexes are built, dir-blocks are constructed from the current index state (one block per `(directory, content_type)` for `content_type ∈ {symbols, docs, plain_files}`).
-- Dir-blocks are seeded into L0/L1/L2/L3 using a per-directory **mtime prior**:
-  - Most recently modified directory tree → seeded into L1.
-  - Older directories → seeded into L2 / L3 by mtime quantile.
-  - All-time-cold directories → seeded into L3 (controller may push them up later).
-- L0 starts empty of dir-blocks; flux fills it as V/c warrant over the first few turns. The system prompt sits before L0 and is rendered from turn one regardless.
+- Dir-blocks are seeded into L0/L1/L2/L3 using a per-directory **mtime prior**, with seed direction **inverted from the intuitive reading**:
+  - Most recently modified directory tree → seeded into **L3** (the cheapest cached tier to invalidate).
+  - Older directories → seeded into L2 / L1 by mtime quantile.
+  - All-time-cold directories → seeded into **L0** (the most expensive cached tier to invalidate, but the least likely to need it).
+- The `mtime` for each directory is its **most-recent file mtime** — `Repo.get_directory_mtime` returns `max(file.stat().st_mtime for file in dir)`. A directory with one file edited 10 seconds ago and a hundred files untouched for years is treated as hot, which is the right signal for "any dir-block in this directory is at risk of being teleported soon."
+- The system prompt sits before L0 as a non-flux head anchor and is rendered from turn one regardless.
 - No persistence — rebuilt fresh each session.
 
 ### Why mtime-based seeding
+
+The seed direction is **edit-cost-aware**. The membrane is upward-only (rectified GHK with Φ ≥ 0 clamp); the only downward force is the edit invariant — a hash mismatch teleports the affected block to Active with `n=0`. Whichever tier the block currently occupies has its cache breakpoint invalidated by that teleport, and the cost of re-caching scales with the tier:
+
+- L0 is the largest cached block and sits closest to the prefix root. Tearing it down forces the entire L0 prefix to be re-cached on the next request.
+- L3 is the smallest cached block, freshly-graduated content. Tearing it down costs roughly one block-write.
+
+If "recently edited" predicts "likely to be edited again soon" — which holds for typical interactive coding, where sessions continue recent work rather than pivoting to long-untouched code — then hot directories are exactly the directories whose dir-blocks are most likely to be teleported. Putting them at L3 absorbs the churn near the membrane's entry point. Putting cold directories at L0 means the L0 cache block survives across many turns; if a cold directory does suddenly get edited, it teleports to Active and re-rides flux at the same per-edit cost as anything else — but that's the rare case, not the steady state.
 
 The mtime prior is heuristic, not load-bearing. Flux re-sorts dir-blocks within a few turns regardless of where they start. Two alternatives were considered and rejected:
 
 - **All-cold-into-L3**: cleanest (no heuristic), but wastes a session on warm-up — every dir-block has to climb the full cascade before settling.
 - **Tree-depth-based**: shallower directory paths → higher tier. Tempting but weak — root-level config files are not necessarily hotter than deep core modules. Tree depth correlates with nothing reliable.
 
-mtime gives the first session a usable warm cache for ~5 lines of seed code, and is forgiving (wrong choices are corrected by flux quickly).
+mtime gives the first session a usable cache layout from turn one and is forgiving (wrong choices are corrected by flux quickly).
 
 ### Agent inheritance
 
-When an agent is spawned (parallel-agents, see [parallel-agents.md](../7-future/parallel-agents.md)), the agent's tracker copies the parent's current tier distribution at spawn time — a snapshot of which dir-blocks sit in which tier. Agent flux thereafter is independent; the agent rebalances toward its own working set without affecting the parent. Agents do not inherit pinned `file:<path>` entries (those are scope-bound to the parent's edit invariant).
+When an agent is spawned (parallel-agents, see [parallel-agents.md](../7-future/parallel-agents.md)), the agent's tracker copies the parent's current tier distribution at spawn time — a snapshot of which dir-blocks sit in which tier. Agent flux thereafter is independent; the agent rebalances toward its own working set without affecting the parent. The agent does NOT re-run mtime-based seeding from scratch; the parent's tier layout (which has already absorbed several turns of real flux) is a better starting point than the cold mtime prior would be.
 
 ## Manual Cache Rebuild
 
-A user-initiated disruptive operation that wipes all tier assignments (except history), reconstructs the dir-block set from the current index state, re-seeds dir-blocks via the mtime prior, and clears all edit-invariant pin flags. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
+A user-initiated disruptive operation that wipes all tier assignments (except history), reconstructs the dir-block set from the current index state, and re-seeds dir-blocks via the mtime prior. Exposed via the cache viewer's Rebuild button. Localhost-only — rebuild affects shared session state, remote collaborators cannot trigger it.
 
 Rebuild and application restart are the explicit reset points. Post-commit triggers for automatic rebuild are a planned extension.
 
@@ -335,7 +343,6 @@ Atomic from the RPC caller's perspective:
 
 - Preserve history entries in the current tracker (history graduation is controlled separately below)
 - Wipe all `file:<path>` entries and dir-block entries from L0/L1/L2/L3/Active
-- Clear all edit-invariant pin flags — rebuild is the explicit "fresh start" that supersedes pinning
 - Reconstruct dir-blocks (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) from the current index state
 - Seed dir-blocks across L0/L1/L2/L3 by mtime prior (see Initialization)
 - Load content for selected files into file context so real hashes and token counts can be computed; selected files land in Active as `file:<path>` entries and are removed from their dir-blocks
@@ -348,7 +355,6 @@ Atomic from the RPC caller's perspective:
 - **Does not run the relaxation loop.** The mtime-seeded placement is the final state for this turn. Running flux would recompute V from the just-placed contents and immediately undo some of the placement. The next real chat request runs the relaxation loop normally and rebuilt tiers behave identically to any other tier state.
 - **Does not change file selection.** The user's selected-files list is untouched.
 - **Does not change session state.** History content, session ID, and review state are preserved.
-- **Does not preserve pins.** Files that were pinned by the edit invariant lose pin status — rebuild is the explicit reset point.
 - **Does not persist.** Like startup initialization, the rebuilt state lives only in memory.
 
 ## Cross-Reference Mode
@@ -363,8 +369,7 @@ The previous `backfill_l0_after_measurement` mechanism is removed under D36 — 
 
 ## Item Removal
 
-- **Unmodified file unchecked** — `file:<path>` entry never existed (only edited files create one). The file's representation lives in its dir-block, which is unaffected.
-- **Edited file unchecked** — the `file:<path>` entry in Active is *not* removed (pinned by the edit invariant); the truthful text remains cached until application restart or explicit rebuild. The dir-block already excludes this file (it was excluded when the file entered Active for editing) and stays that way until rebuild.
+- **File unchecked (modified or unmodified)** — the `file:<path>` entry (if any) is removed from Active. The file's structural presence rejoins its parent directory's dir-block, which teleports to Active to re-ride flux. Re-selecting the file at any later turn pulls the full text back into Active.
 - **File deleted from disk** — `file:<path>` entry (if any) removed from Active; file's entry removed from its dir-block; dir-block teleported to Active to re-ride flux. No deletion-marker entry created.
 - **URL removed** — URL entry removed from its tier (cache miss).
 - **Directory deleted entirely** — every dir-block keyed at that path (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) is removed from the cache.
@@ -401,9 +406,8 @@ Users can still explicitly exclude files from indexing via the file picker's thr
 - **The system prompt is the only non-flux head anchor.** L0–L3 are all flux tiers under D36; the L1→L0 membrane is enabled.
 - **Every indexed file is always represented in the prompt** — either as full text in Active (selected for editing) or as an entry in its directory's dir-block (in some tier L0–L3). There is no third state.
 - **A file selected for editing appears in exactly one place.** Its full text is in Active; it is removed from its dir-block. No "structural summary in L0 + full text in lower tier" duplication.
-- **Dir-blocks are reconstructed from the live index at every freeze.** No pin flag on dir-blocks; they inherit consistency from the index.
-- **Edited files are pinned and held in Active.** Hash mismatch resets `n=0`; pin protects from automatic eviction. Cleared only by application restart or explicit `rebuild_cache`.
-- **Unmodified files can be deselected normally** — the pin only protects edited files. Deselection puts the file back into its dir-block (which teleports to Active to re-ride flux).
+- **Dir-blocks are reconstructed from the live index at every freeze.** They inherit consistency from the index.
+- **No pin protection.** Files (edited or not) can be deselected at any turn — the `file:<path>` entry is removed and the file's structural presence rejoins its parent dir-block, which teleports to Active to re-ride flux. Re-selecting brings the full text back.
 - **File deletion shrinks the relevant dir-block; no marker entry is created.** D27's deletion-marker scheme is removed under D36.
 - **The synthetic `meta:file_tree` entry is removed.** Its contents live as `plain_files:<dir>` dir-blocks across the repo.
 - **A URL never appears in both a cached tier and the uncached URL section** (design target).
