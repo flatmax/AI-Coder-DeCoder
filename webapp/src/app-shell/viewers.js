@@ -132,7 +132,7 @@ export function onLoadDiffPanel(host, event) {
  */
 export function onLoadSvgPanel(host, event) {
   const detail = event.detail || {};
-  const { content, panel, label } = detail;
+  const { content, panel, label, path } = detail;
   if (typeof content !== 'string') return;
   if (panel !== 'left' && panel !== 'right') return;
   host._activeViewer = 'svg';
@@ -142,7 +142,13 @@ export function onLoadSvgPanel(host, event) {
     if (!viewer || typeof viewer.loadPanel !== 'function') {
       return;
     }
-    viewer.loadPanel(content, panel, label);
+    // Path is optional — historical callers (or the
+    // history browser, which loads from session
+    // archives without an on-disk source) may pass
+    // null. The viewer treats absence as "no save
+    // target" and falls back to the in-memory
+    // snapshot semantics.
+    viewer.loadPanel(content, panel, label, path || null);
   });
 }
 

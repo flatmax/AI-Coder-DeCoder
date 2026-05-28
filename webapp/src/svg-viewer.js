@@ -619,7 +619,7 @@ export class SvgViewer extends LitElement {
    * value is unrecognised — same defensive-rejection
    * pattern as the diff viewer.
    */
-  async loadPanel(content, panel, _label) {
+  async loadPanel(content, panel, _label, sourcePath = null) {
     if (panel !== 'left' && panel !== 'right') return;
     if (typeof content !== 'string') return;
     // Switching from a real file to virtual content (or
@@ -627,12 +627,21 @@ export class SvgViewer extends LitElement {
     // the shell flips viewer visibility. Determine
     // before-state up front.
     const hadActiveFile = this._activeIndex >= 0;
+    // Source path threaded through so the right pane's
+    // edits can save back to disk via Repo.write_file.
+    // The left pane is read-only by spec contract, so
+    // its sourcePath is recorded for symmetry but never
+    // consumed — kept for image-href resolution fallback
+    // and for any future read-only-but-attributed
+    // affordance (e.g. "open in editor").
     if (this._virtualComparison === null) {
       this._virtualComparison = {
         leftContent: panel === 'left' ? content : '',
         leftLabel: panel === 'left' ? _label || '' : '',
+        leftSourcePath: panel === 'left' ? sourcePath : null,
         rightContent: panel === 'right' ? content : '',
         rightLabel: panel === 'right' ? _label || '' : '',
+        rightSourcePath: panel === 'right' ? sourcePath : null,
       };
     } else {
       const current = this._virtualComparison;
@@ -641,10 +650,14 @@ export class SvgViewer extends LitElement {
           panel === 'left' ? content : current.leftContent,
         leftLabel:
           panel === 'left' ? _label || '' : current.leftLabel,
+        leftSourcePath:
+          panel === 'left' ? sourcePath : current.leftSourcePath,
         rightContent:
           panel === 'right' ? content : current.rightContent,
         rightLabel:
           panel === 'right' ? _label || '' : current.rightLabel,
+        rightSourcePath:
+          panel === 'right' ? sourcePath : current.rightSourcePath,
       };
     }
     // Real file (if any) gets cleared so the panes
@@ -1001,18 +1014,21 @@ export class SvgViewer extends LitElement {
     if (this._virtualComparison !== null) {
       leftContent = this._virtualComparison.leftContent || _EMPTY_SVG;
       rightContent = this._virtualComparison.rightContent || _EMPTY_SVG;
-      // Synthesise a path-like identifier from whichever
-      // label is non-empty so image-href resolution has
-      // a base directory to anchor against. Both panes
-      // sharing one path is a simplification — when the
-      // two sides come from different directories,
-      // relative `<image>` references on one side may
-      // fail to resolve. Acceptable trade-off given that
-      // ad-hoc visual comparison is the primary use
-      // case and the labels are usually the basename
-      // alone (no directory information to disagree on).
+      // Image-href resolution base path. Prefer the
+      // right pane's real source path when available
+      // (passed through by the file picker's
+      // "Open in panel" actions) so relative `<image>`
+      // hrefs in the SVG resolve against the real
+      // sibling directory on disk. Falls back to the
+      // left pane's source path, then to the labels.
+      // When two virtual panes come from different
+      // directories, we still pick one — relative
+      // hrefs on the disagreeing side may break, which
+      // is acceptable for the ad-hoc-comparison use case.
       virtualPath =
-        this._virtualComparison.rightLabel
+        this._virtualComparison.rightSourcePath
+        || this._virtualComparison.leftSourcePath
+        || this._virtualComparison.rightLabel
         || this._virtualComparison.leftLabel
         || null;
     } else {
@@ -1758,15 +1774,21 @@ export class SvgViewer extends LitElement {
       return file.path;
     }
     if (this._virtualComparison !== null) {
+      const vc = this._virtualComparison;
       const label =
-        this._virtualComparison.rightLabel
-        || this._virtualComparison.leftLabel
-        || 'comparison panel';
+        vc.rightLabel || vc.leftLabel || 'comparison panel';
+      const hasSavePath =
+        typeof vc.rightSourcePath === 'string'
+        && vc.rightSourcePath.length > 0;
       const klass = this._statusLedClass();
       if (klass === 'dirty') {
-        return `${label} — unsaved (click to snapshot)`;
+        return hasSavePath
+          ? `${vc.rightSourcePath} — unsaved (click to save)`
+          : `${label} — unsaved (click to snapshot)`;
       }
-      return `${label} — visual comparison (no save target)`;
+      return hasSavePath
+        ? vc.rightSourcePath
+        : `${label} — visual comparison (no save target)`;
     }
     return '';
   }
@@ -1791,32 +1813,78 @@ export class SvgViewer extends LitElement {
       );
       return;
     }
-    // Virtual-comparison mode. There's no on-disk
-    // target for the edited right pane, so "save"
-    // means snapshot the current content as the new
-    // baseline (clearing the dirty state) and emit a
-    // `virtual-svg-save` event carrying the content
-    // for any consumer that wants to capture it. The
-    // toast confirms the user's edits were captured
-    // even though no file was written.
+    // Virtual-comparison mode. Two cases:
+    //
+    //   1. Right pane has a known source path — written
+    //      back to disk via Repo.write_file. The shell
+    //      treats the file-saved event as a normal save
+    //      (refreshing open viewers, etc).
+    //   2. No source path — fall back to the in-memory
+    //      snapshot semantics: copy rightContent to
+    //      rightSaved, dispatch virtual-svg-save, toast.
+    //
+    // Source-path-bearing virtual comparisons come from
+    // the file picker's "Open in left/right panel"
+    // context-menu actions, which carry the repo-relative
+    // path through the load-svg-panel event detail. The
+    // history browser's equivalent action does not (it
+    // loads from session archives without an on-disk
+    // source), so its content gracefully degrades to
+    // the snapshot path.
     const vc = this._virtualComparison;
     if (!vc) return;
     if (!this._isVirtualDirty()) return;
+    if (typeof vc.rightSourcePath === 'string' && vc.rightSourcePath) {
+      this._saveVirtualToDisk(vc);
+    } else {
+      vc.rightSaved = vc.rightContent;
+      this._recomputeDirtyCount();
+      this.dispatchEvent(
+        new CustomEvent('virtual-svg-save', {
+          detail: {
+            content: vc.rightContent,
+            label: vc.rightLabel || vc.leftLabel || '',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      this._emitToast(
+        'Visual edits snapshotted (no file target)',
+        'info',
+      );
+    }
+  }
+
+  /**
+   * Write the virtual comparison's right pane content
+   * back to its source path. Mirrors the shape of
+   * `_saveFile` for real files: dispatches `file-saved`
+   * carrying `{path, content}` so the shell's existing
+   * file-saved handler routes the write through
+   * `Repo.write_file`. On success, updates `rightSaved`
+   * and clears the dirty LED.
+   *
+   * The shell's handler is async and we don't await it
+   * here — the LED clears optimistically. If the write
+   * fails server-side, the shell surfaces an error
+   * toast through its existing path; the dirty state
+   * will reappear on the next edit. This matches the
+   * non-virtual save path's behaviour, which is also
+   * fire-and-forget at this layer.
+   */
+  _saveVirtualToDisk(vc) {
     vc.rightSaved = vc.rightContent;
     this._recomputeDirtyCount();
     this.dispatchEvent(
-      new CustomEvent('virtual-svg-save', {
+      new CustomEvent('file-saved', {
         detail: {
+          path: vc.rightSourcePath,
           content: vc.rightContent,
-          label: vc.rightLabel || vc.leftLabel || '',
         },
         bubbles: true,
         composed: true,
       }),
-    );
-    this._emitToast(
-      'Visual edits snapshotted (no file target)',
-      'info',
     );
   }
 
