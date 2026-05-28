@@ -28,8 +28,25 @@ export function onNavigateFile(host, event) {
   const detail = event.detail || {};
   const path = detail.path;
   if (typeof path !== 'string' || !path) return;
-  const target = viewerForPath(path);
+  let target = viewerForPath(path);
   if (!target) return;
+  // Edit-block clicks on SVG files carry a scroll hint
+  // (`searchText` from the edit anchor, or a `line`).
+  // The visual SVG viewer can't honor those — its
+  // openFile signature has no notion of "scroll to this
+  // text" — so the anchor would be dropped and the user
+  // would land on the canvas with no indication of where
+  // the edit happened. Route to the text diff viewer
+  // instead when a scroll hint is present, matching what
+  // happens on every other file type. The user can
+  // toggle back to the visual editor from the diff
+  // viewer's mode switch if they want.
+  const hasScrollHint =
+    (typeof detail.searchText === 'string' && detail.searchText)
+    || typeof detail.line === 'number';
+  if (target === 'svg' && hasScrollHint) {
+    target = 'diff';
+  }
   // Save viewport of the current file before navigating
   // away (so switching files preserves the prior file's
   // scroll state in localStorage).
@@ -46,6 +63,17 @@ export function onNavigateFile(host, event) {
   if (!detail._fromNav && !detail._refresh) {
     const nav = host._getFileNav();
     if (nav) nav.openFile(path);
+  }
+  // Flip the active viewer to match the resolved target
+  // so the text diff is actually visible when we routed
+  // an SVG path there. Without this, the SVG viewer
+  // stays foregrounded and the diff viewer's openFile
+  // happens behind it. Only set when the routing
+  // diverges from the path's natural viewer — for
+  // non-SVG files, `active-file-changed` from the diff
+  // viewer takes care of foregrounding.
+  if (target === 'diff' && viewerForPath(path) === 'svg') {
+    host._activeViewer = 'diff';
   }
   // Defer until the viewers exist in the DOM. Normally
   // they're rendered from the first template commit and
