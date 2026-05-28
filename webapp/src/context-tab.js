@@ -936,6 +936,7 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._activeTabId = 'main';
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
+    this._onPostResponseComplete = this._onPostResponseComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
@@ -950,6 +951,16 @@ export class ContextTab extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
+    // post-response-complete fires after _post_response
+    // finishes (tier state settled, compaction done). The
+    // earlier stream-complete event races _update_stability
+    // and yields stale tier data; this one is the "now
+    // it's consistent" signal. Both listeners are kept —
+    // the _refreshPending queue collapses overlapping
+    // fetches automatically.
+    window.addEventListener(
+      'post-response-complete', this._onPostResponseComplete,
+    );
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('mode-changed', this._onModeChanged);
     // session-changed fires on startup after _restore_last_session
@@ -993,6 +1004,9 @@ export class ContextTab extends RpcMixin(LitElement) {
   disconnectedCallback() {
     this._stopWarmerPolling();
     window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener(
+      'post-response-complete', this._onPostResponseComplete,
+    );
     window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener('mode-changed', this._onModeChanged);
     window.removeEventListener('session-changed', this._onSessionChanged);
@@ -1044,6 +1058,18 @@ export class ContextTab extends RpcMixin(LitElement) {
     // it, not after a deferred fetch resolves. The cost is
     // one get_context_breakdown RPC per stream completion;
     // cheap relative to the stream itself.
+    this._refresh();
+  }
+
+  _onPostResponseComplete() {
+    // Authoritative tier-state refresh. Fires AFTER
+    // _post_response runs _update_stability, so the
+    // breakdown returns post-update tier state. The
+    // _refreshPending queue collapses this with the
+    // earlier stream-complete-driven fetch into "first
+    // fetch + one queued fetch" — exactly what we want:
+    // the queued fetch reads the now-consistent state
+    // and the UI updates without a manual refresh click.
     this._refresh();
   }
 

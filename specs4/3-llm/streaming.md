@@ -55,10 +55,11 @@ Race window: a user who sends a new message before `state-loaded` resolves still
 - Print terminal HUD
 - Parse and apply edit blocks
 - Persist assistant message
+- Send completion event (`streamComplete`) — fires immediately so the chat panel can finalise the response without waiting for downstream housekeeping
 - Update cache stability
-- Send completion event
-- Launch deferred doc enrichment (if any)
 - Run post-response compaction
+- Launch deferred doc enrichment (if any)
+- Send post-response complete event (`postResponseComplete`) — fires after tier state and compaction have settled, signalling that the breakdown RPC will now return consistent data
 
 ## Aggregate Map Rendering
 
@@ -227,6 +228,25 @@ Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComp
 - Error field (if fatal error)
 - Binary/invalid files rejected
 
+## Two Completion Events
+
+The pipeline fires two distinct events for each successful turn — `streamComplete` and `postResponseComplete` — with different timing semantics and different consumers.
+
+| Event | Fires when | Carries | Consumer |
+|---|---|---|---|
+| `streamComplete` | Immediately after the LLM call returns and edit application completes | Full assistant response, edit results, finish reason, token usage, agent blocks | Chat panel — finalises the streaming message in the UI without waiting for tracker update or compaction |
+| `postResponseComplete` | After `_post_response` finishes (stability tracker update, compaction, terminal HUD) | Just the request ID | Context tab — refetches `get_context_breakdown` knowing tier state is now consistent |
+
+The split exists because the chat panel and the Context tab have opposing latency requirements. The chat panel wants its UI to flip from streaming to complete the moment the LLM stops generating — even a 100ms delay reads as sluggish. The Context tab wants its tier display to match the actual post-response tracker state — refetching during the brief window between `streamComplete` and `_update_stability` returns pre-update data and the user has to manually refresh.
+
+Firing both events lets each consumer pick the right signal:
+
+- The chat panel listens to `streamComplete` and ignores `postResponseComplete`.
+- The Context tab listens to `postResponseComplete` for authoritative refreshes (and also `streamComplete` for partial-data updates that don't depend on tracker state).
+- The Token HUD listens to `streamComplete` because its data comes from the completion result itself, not from the tracker.
+
+When a Context tab subscriber receives both events for the same turn (because it also listens to `streamComplete` for non-tracker reasons), the in-flight refresh queue collapses them into "first fetch + one queued fetch" — the queued fetch reads the post-update state. See [viewers-hud.md § Refresh Queue](../5-webapp/viewers-hud.md#refresh-queue).
+
 ## Client Processing of Completion
 
 - Flush pending chunks
@@ -309,3 +329,5 @@ Three reports printed after each response:
 - Assistant message is persisted after LLM call completes — no partial assistant messages in history
 - The captured event loop reference is always usable from the worker thread
 - The aggregate symbol/doc map in L0 contains every indexed file's block (minus user-excluded paths); duplication with full text in lower tiers is the intended design and is resolved at LLM read time by the system prompt's authority rule
+- `streamComplete` always fires before `postResponseComplete` for the same turn; `postResponseComplete` fires only on successful (non-cancelled, non-errored) turns where post-response housekeeping actually runs
+- Tier-state-dependent UI (Context tab, Token HUD's tier section) reads its authoritative state from `postResponseComplete`, not `streamComplete`; reading from `streamComplete` returns pre-update tracker data because the broadcast races `_update_stability`

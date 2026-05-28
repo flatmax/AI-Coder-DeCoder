@@ -832,6 +832,25 @@ export class AppShell extends JRPCClient {
   }
 
   /**
+   * Server-push callback fired by ``_post_response`` after
+   * tier state, compaction, and any other post-stream
+   * housekeeping has fully settled. Distinct from
+   * ``streamComplete`` (fired earlier for chat-panel UX
+   * latency reasons): this event signals that the
+   * breakdown RPC will now return consistent data.
+   *
+   * Re-dispatched as a window event so the Context tab
+   * can listen without coupling to AppShell. See
+   * specs4/3-llm/streaming.md § Post-Response.
+   */
+  postResponseComplete(requestId) {
+    window.dispatchEvent(new CustomEvent('post-response-complete', {
+      detail: { requestId },
+    }));
+    return true;
+  }
+
+  /**
    * Cache-warmup countdown tick. Fired once per second
    * during the visible 30-second lead-in to a warm-up
    * call. Payload: {seconds_remaining, total}. Re-

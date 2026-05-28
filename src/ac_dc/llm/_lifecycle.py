@@ -411,6 +411,32 @@ async def post_response(
                 },
             )
 
+    # Post-response work has settled — tier state is final,
+    # any compaction has completed, and downstream consumers
+    # can now read consistent breakdown data. Fire a
+    # dedicated event so the Context tab knows when to
+    # refetch.
+    #
+    # ``streamComplete`` fires earlier (in
+    # :func:`stream_chat`) for snappy chat-panel UX — the
+    # user sees their response finalised the moment the
+    # LLM call returns. But that broadcast races
+    # ``_update_stability``: if the Context tab refetches
+    # on ``streamComplete``, it reads pre-update tracker
+    # state and shows stale tiers. The user then has to
+    # click Refresh to see the new state, which is what
+    # they reported.
+    #
+    # ``postResponseComplete`` is the "everything is now
+    # consistent" signal. The Context tab listens to it
+    # for tier/breakdown refreshes; the chat panel
+    # continues to use ``streamComplete`` for response
+    # finalisation. Two events with two distinct purposes,
+    # neither one blocking the other's UX.
+    await service._broadcast_event_async(
+        "postResponseComplete", request_id,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Event broadcast
