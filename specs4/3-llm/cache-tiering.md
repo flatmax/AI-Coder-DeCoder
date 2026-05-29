@@ -467,8 +467,8 @@ The result is discarded. Warm-ups never enter conversation history, never broadc
 ### Lifecycle
 
 - `start()` schedules the first firing.
-- `cancel()` stops the pending timer without rescheduling. Called at the start of every `stream_chat` invocation.
-- `reset(reason)` cancels and reschedules. Called at the end of every `stream_chat` invocation.
+- `cancel()` stops the pending timer without rescheduling. Called from `disable()` and from `reset()`.
+- `reset(reason)` cancels and reschedules. Called at the start of every `stream_chat` invocation (anchoring the next firing 240s from user-send) AND at the end as defensive coverage for early-exit paths.
 - `disable(reason)` cancels and stays inert until `enable()` is called explicitly.
 
 ### Two-phase wait with visible countdown
@@ -480,9 +480,15 @@ Each interval is split into two phases:
 
 When the countdown reaches zero, the warmer broadcasts `cacheWarmupFiring` (frontend flips bar to spinner), issues the call, and broadcasts `cacheWarmupComplete` with `{success: bool, reason?: str}`.
 
-### Single-stream guard interaction
+### Parallel firing during active streams
 
-Warm-ups skip when any LLM stream is in flight — both the main user-facing stream and any agent streams. The warmer reschedules rather than disables in this case.
+Warm-ups fire regardless of whether a stream is in flight. Anthropic supports concurrent requests on the same API key, and a 2-token warm-up ping is negligible against an in-flight reasoning call.
+
+The motivation is long reasoning turns. Anthropic's prompt cache TTL starts at the moment of cache write/read during input pre-fill (close to T=0 of the request), not at stream completion. A reasoning turn that takes 700 seconds therefore loses its cache at T=300 mid-stream, and the next user turn after the stream completes pays a full cache write at 1.25× input cost.
+
+Anchoring the warmer's interval to user-send (via `reset("user-send")` at the top of `stream_chat`) means the first warm-up fires at T=240 — inside the cache TTL window, hitting the user's still-warm cached prefix and extending the TTL by another 5 minutes. A 700-second turn produces two mid-stream warm-ups (T=240 and T=480) plus one post-stream warm-up (T=940 if the stream ends at T=700). The cache stays hot continuously across the long turn and into follow-up user activity.
+
+The `cacheWarmupCancelled` event with `reason: "stream-active"` is no longer emitted — that path is gone. The `reason: "user-activity"` path remains for cases where `reset()` cancels a task mid-visible-countdown (the new task's countdown will resume after the new 240s interval).
 
 ### Retry budget bounded by cache TTL
 

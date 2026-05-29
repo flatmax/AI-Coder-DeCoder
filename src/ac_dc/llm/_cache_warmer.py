@@ -161,18 +161,32 @@ _CACHE_TTL_SECONDS = 300.0
 # to interrupt by sending a real message.
 _COUNTDOWN_SECONDS = 30.0
 
-# Maximum chunk size for the silent-phase polling loop.
-# ``asyncio.sleep(270)`` doesn't guarantee wall-clock
-# fidelity — OS suspensions (laptop sleep, App Nap,
-# container pause) stretch one big sleep by the suspension
-# duration. Polling in ~5-second chunks against a monotonic
-# deadline means the worst-case overshoot is bounded by
-# this constant plus whatever the OS held us paused for.
-# Small enough to keep drift trivial, large enough that we
-# don't waste CPU waking up the loop unnecessarily during
-# a normal 270-second idle window (~54 wakes vs ~0 with
-# one big sleep — still negligible).
-_DRIFT_POLL_SECONDS = 5.0
+# Silent-phase heartbeat cadence. Two jobs:
+#
+# 1. **Drift resistance.** ``asyncio.sleep(N)`` doesn't
+#    guarantee wall-clock fidelity — OS suspensions
+#    (laptop sleep, App Nap, container pause) stretch one
+#    big sleep. Polling in short chunks against a
+#    wall-clock deadline means the worst-case overshoot
+#    is bounded by this constant plus whatever the OS
+#    held us paused for. D34a fixed the post-suspension
+#    overshoot by anchoring deadlines to ``time.time()``
+#    rather than ``time.monotonic()``.
+#
+# 2. **Idle-period kernel throttling.** macOS App Nap and
+#    similar mechanisms aggressively park processes that
+#    look idle. Once parked, timer wakes can slip by tens
+#    of seconds even when nothing is suspended. A 1-second
+#    poll keeps the process visibly active to the OS — the
+#    kernel doesn't park a process that's running a
+#    coroutine every second. Cost is ~270 awaits per
+#    interval, well below the threshold of CPU we'd
+#    measure on any workload.
+#
+# Was 5.0s under D34/D34a; tightened to 1.0s as part of
+# re-plugging the warmer (Option 1 — heartbeat during
+# silent phase).
+_HEARTBEAT_POLL_SECONDS = 1.0
 
 # Circuit breaker — number of consecutive cycles where the
 # firing drifted past ``_CACHE_TTL_SECONDS`` before we
@@ -182,6 +196,17 @@ _DRIFT_POLL_SECONDS = 5.0
 # and we should stop bleeding tokens until the operator
 # investigates. Reset to zero on any in-TTL cycle.
 _CIRCUIT_BREAKER_STRIKES = 3
+
+# Maximum time to wait for a single cacheWarmup* broadcast
+# before logging and continuing. The original parked warmer
+# observed broadcasts hanging for ~120s, wedging the warmer's
+# event loop. With this bound, a hung broadcast affects only
+# the one cycle: log, continue, next cycle gets a fresh
+# attempt. 5s is generous for a healthy WebSocket send
+# (sub-millisecond in normal operation) but short enough
+# that operators see "broadcast timed out" warnings within
+# seconds of the underlying issue manifesting.
+_BROADCAST_TIMEOUT_SECONDS = 5.0
 
 
 def _extract_int(usage: Any, name: str) -> int:
@@ -406,58 +431,46 @@ class CacheWarmer:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Cache warmer is unplugged — see UNPLUG comment below.
+        """Schedule the first firing.
 
-        **UNPLUG (2025).** The cache warmer is currently
-        disabled at the entry point regardless of any
-        flag. Field testing showed that every firing
-        stalled the event loop for ~120 seconds inside
-        the ``await self._broadcast_event_async(...)``
-        calls — broadcasts that complete in
-        sub-milliseconds for normal user-turn events take
-        2 minutes during a warm-up cycle. The cause is
-        not in the warmer's own code (assembly is
-        instant, executor handoff is instant, the
-        LiteLLM call itself is fast); the broadcasts are
-        being queued or held somewhere in the WebSocket
-        / jrpc-oo path during warm-up firings.
+        Re-plugged after the D34/D34a unplug. Two new
+        protections compared to the originally-parked
+        version:
 
-        Combined with timing drift that produces 0% cache
-        hit rate on the firings that do complete (the
-        traces showed ``Cache ROI: -100.0%``), the warmer
-        is currently negative-value: every cycle costs a
-        full cache write at 1.25× input pricing AND
-        stalls every other broadcast event for 2 minutes.
+        - **Sub-second heartbeat during silent phase.** The
+          polling loop wakes every ``_HEARTBEAT_POLL_SECONDS``
+          (1s) instead of the previous 5s. This keeps the
+          process visible to OS-level idle throttling
+          (macOS App Nap and similar) which had been
+          letting timer wakes slip by tens of seconds
+          during long idle windows.
 
-        Until the WebSocket-side stall is diagnosed and
-        fixed, the warmer is unconditionally disabled
-        here. The full code path remains in place
-        (heartbeat instrumentation, circuit breaker,
-        wall-clock anchoring, dedicated executor) so a
-        future fix can re-enable by removing this early
-        return — none of the diagnostics or D34 / D34a
-        infrastructure has to be rebuilt.
+        - **Bounded broadcast waits.** Each cacheWarmup*
+          broadcast is wrapped in ``asyncio.wait_for`` so
+          a hung WebSocket send can't wedge the warmer's
+          event loop the way it did during the field
+          observations that motivated the original
+          unplug. A timed-out broadcast is logged and the
+          warmer continues; subsequent broadcasts get
+          fresh timeout budgets.
 
-        To re-enable for diagnosis: remove this early
-        return AND set ``cache_warmup.enabled: true`` in
-        ``app.json`` AND pass ``--experimental`` on the
-        CLI.
-
-        Spec authority: ``specs4/3-llm/cache-tiering.md``
-        § Cache Warmer notes the parked status and the
-        WebSocket-stall observation.
+        No-op when ``cache_warmup.enabled: false`` in
+        config or when the warmer was disabled at runtime
+        by the circuit breaker or a prior failure.
         """
-        logger.info(
-            "Cache warmer is currently unplugged — "
-            "see UNPLUG comment in CacheWarmer.start. "
-            "All warm-up activity is suppressed regardless "
-            "of config flags."
-        )
-        self._enabled = False
-        self._last_disabled_reason = (
-            "unplugged at entry — see UNPLUG comment"
-        )
-        return
+        cfg = self._service._config.cache_warmup_config
+        if not cfg.get("enabled", True):
+            logger.info(
+                "Cache warmer disabled in config "
+                "(cache_warmup.enabled = false)"
+            )
+            self._enabled = False
+            self._last_disabled_reason = "disabled in config"
+            return
+        self._enabled = True
+        self._last_disabled_reason = None
+        self._start_heartbeat()
+        self._schedule()
 
     def cancel(self) -> None:
         """Cancel the pending timer without rescheduling.
@@ -509,29 +522,39 @@ class CacheWarmer:
     def enable(self) -> None:
         """Re-enable after a runtime disable.
 
-        **Unplugged.** While the warmer is unplugged at the
-        entry point (see :meth:`start`), this RPC is a no-op
-        — re-enabling at runtime would re-introduce the
-        broadcast-stall behaviour that motivated the
-        unplug. The RPC remains wired so the frontend
-        affordance doesn't 404, but it logs the unplug
-        reason and stays disabled.
+        Clears the disabled-reason, restarts the
+        diagnostic heartbeat, and schedules the next
+        firing. Intended for the operator-driven
+        re-enable path after the circuit breaker or a
+        warm-up failure auto-disabled the warmer — once
+        the underlying issue is resolved, the operator
+        can flip the warmer back on without restarting
+        the service.
 
-        When the broadcast stall is diagnosed and the
-        unplug is removed from :meth:`start`, this method
-        reverts to its original behaviour (clear the
-        disabled-reason, schedule the next firing, start
-        the heartbeat).
+        Idempotent — calling on an already-enabled warmer
+        re-runs the schedule (cancelling any pending task
+        first via ``_schedule``'s belt-and-braces guard)
+        but is otherwise a no-op.
+
+        No-op when ``cache_warmup.enabled: false`` in
+        config — the operator cannot re-enable a warmer
+        the config has explicitly disabled. Edit
+        ``app.json`` first.
         """
-        logger.info(
-            "Cache warmer enable() called but warmer is "
-            "currently unplugged — see UNPLUG comment in "
-            "CacheWarmer.start. No-op."
-        )
-        self._enabled = False
-        self._last_disabled_reason = (
-            "unplugged at entry — see UNPLUG comment"
-        )
+        cfg = self._service._config.cache_warmup_config
+        if not cfg.get("enabled", True):
+            logger.info(
+                "Cache warmer enable() called but "
+                "cache_warmup.enabled is false in config — "
+                "no-op. Edit app.json to re-enable."
+            )
+            return
+        logger.info("Cache warmer re-enabled")
+        self._enabled = True
+        self._last_disabled_reason = None
+        self._consecutive_drift_strikes = 0
+        self._start_heartbeat()
+        self._schedule()
 
     def _start_heartbeat(self) -> None:
         """Spawn the diagnostic heartbeat task.
@@ -681,6 +704,11 @@ class CacheWarmer:
         # are well below the 60s margin we already build in.
         scheduled_at = self._scheduled_at or (time.time() + delay)
         silent_deadline = scheduled_at - _COUNTDOWN_SECONDS
+        logger.info(
+            "Cache warmer entering silent phase: %.1fs until "
+            "countdown begins (deadline epoch=%.1f)",
+            silent_deadline - time.time(), silent_deadline,
+        )
         # Silent phase — poll the deadline in short chunks so
         # OS-level suspensions can't stretch a single long
         # sleep past the cache TTL. If ``delay`` is shorter
@@ -691,21 +719,22 @@ class CacheWarmer:
                 remaining = silent_deadline - time.time()
                 if remaining <= 0:
                     break
-                await asyncio.sleep(min(_DRIFT_POLL_SECONDS, remaining))
+                await asyncio.sleep(min(_HEARTBEAT_POLL_SECONDS, remaining))
         except asyncio.CancelledError:
+            logger.info("Cache warmer cancelled during silent phase")
             return
-        # Stream-active check before the visible phase
-        # begins — no point showing a countdown that
-        # we'll just abort. Reschedule rather than disable.
+        logger.info(
+            "Cache warmer silent phase complete; entering "
+            "visible countdown phase",
+        )
+        # No stream-active gate here. The warmer fires in
+        # parallel with any active stream — a long reasoning
+        # turn that exceeds Anthropic's 5-minute cache TTL
+        # would otherwise lose the cache mid-stream and the
+        # next user turn would pay a cold-write cost. Letting
+        # the warmer fire concurrently keeps the cache hot
+        # across in-flight requests of any duration.
         service = self._service
-        if (
-            service._active_user_request is not None
-            or bool(service._active_agent_streams)
-        ):
-            logger.debug("Cache warmer skipping — stream active")
-            self._scheduled_at = None
-            self._schedule()
-            return
         # Visible countdown phase. Anchored on
         # ``scheduled_at`` (a wall-clock epoch) for the same
         # reason the silent phase is — OS suspensions
@@ -737,22 +766,6 @@ class CacheWarmer:
                         },
                     )
                     last_displayed = display
-                # Re-check stream activity each tick so a
-                # request that starts mid-countdown
-                # cancels the visible bar via the bar's
-                # own logic rather than letting it run
-                # to zero and then aborting.
-                if (
-                    service._active_user_request is not None
-                    or bool(service._active_agent_streams)
-                ):
-                    await self._broadcast(
-                        "cacheWarmupCancelled",
-                        {"reason": "stream-active"},
-                    )
-                    self._scheduled_at = None
-                    self._schedule()
-                    return
                 # Sleep until the next whole-second boundary
                 # of the countdown, capped at 1s so we can
                 # re-check activity at least every second.
@@ -925,15 +938,49 @@ class CacheWarmer:
         self._schedule()
 
     async def _broadcast(self, event_name: str, payload: Any) -> None:
-        """Best-effort event broadcast.
+        """Best-effort event broadcast with bounded wait.
 
         Failures here must not break the warmer's state
         machine — the event channel is an observability
         layer, not a correctness dependency.
+
+        Wrapped in ``asyncio.wait_for`` because field
+        observations on the original (parked) warmer
+        showed the WebSocket / jrpc-oo broadcast path
+        sometimes hanging for ~120 seconds during a
+        warm-up cycle (cause not yet diagnosed; tracked
+        as parked work). Without the timeout, a hung
+        broadcast would wedge the warmer's event loop and
+        prevent the rest of ``_run`` from making progress
+        — so a single bad cycle could stall the warmer's
+        timer for the duration of the hang.
+
+        With the timeout, a stall affects only the one
+        broadcast: it logs and we continue. The next
+        warmer cycle gets fresh timeout budgets. The
+        diagnostic heartbeat task runs independently of
+        this loop, so a broadcast hang still surfaces
+        loop-stall warnings via the heartbeat's own log
+        path even when this helper's own log doesn't.
         """
+        logger.debug(
+            "Cache warmer broadcasting %s payload=%s",
+            event_name, payload,
+        )
         try:
-            await self._service._broadcast_event_async(
-                event_name, payload,
+            await asyncio.wait_for(
+                self._service._broadcast_event_async(
+                    event_name, payload,
+                ),
+                timeout=_BROADCAST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Cache warmer broadcast %s timed out after "
+                "%.1fs — continuing. The WebSocket / jrpc-oo "
+                "send path appears stalled; check the "
+                "heartbeat log for event-loop gap warnings.",
+                event_name, _BROADCAST_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             logger.debug(

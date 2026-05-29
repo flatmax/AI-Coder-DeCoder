@@ -100,14 +100,28 @@ async def stream_chat(
     """
     if scope is None:
         scope = service._default_scope()
-    # Cancel any pending cache-warmer call so a real LLM
-    # request doesn't race a warm-up call. The warmer's
-    # _run() also checks for active streams as a second
-    # line of defense, but cancelling here is cheaper than
-    # waking the warmer just to have it skip.
+    # Reset the cache warmer's idle clock to the moment of
+    # user send. Two effects:
+    #
+    # - The next firing is scheduled 240s from now (user
+    #   activity), not 240s from stream-end. Streams of
+    #   any duration produce a predictable cadence relative
+    #   to user interaction.
+    # - For long reasoning turns that exceed Anthropic's
+    #   5-minute cache TTL, the warmer is allowed to fire
+    #   *during* the active stream — its per-tick stream-
+    #   active checks have been removed. A reasoning run
+    #   at T=350+ will see the warmer fire at T=240,
+    #   keeping the cache hot through the in-flight call's
+    #   completion so follow-up turns hit a warm cache.
+    #   This is parallel to the user's main stream, not
+    #   serialised with it; Anthropic supports concurrent
+    #   requests on the same key, and a 2-token warm-up
+    #   ping is negligible against an in-flight reasoning
+    #   call.
     warmer = getattr(service, "_cache_warmer", None)
     if warmer is not None:
-        warmer.cancel()
+        warmer.reset("user-send")
     error: str | None = None
     full_content = ""
     cancelled = False

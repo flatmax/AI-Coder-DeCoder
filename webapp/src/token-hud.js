@@ -478,7 +478,7 @@ export class TokenHud extends RpcMixin(LitElement) {
     // the warm-up's tokens, session totals already include
     // them via the backend's _accumulate_usage call).
     window.addEventListener(
-      'cacheWarmupComplete', this._onCacheWarmupComplete,
+      'cache-warmup-complete', this._onCacheWarmupComplete,
     );
   }
 
@@ -489,7 +489,7 @@ export class TokenHud extends RpcMixin(LitElement) {
       'active-tab-changed', this._onActiveTabChanged,
     );
     window.removeEventListener(
-      'cacheWarmupComplete', this._onCacheWarmupComplete,
+      'cache-warmup-complete', this._onCacheWarmupComplete,
     );
     this._clearTimers();
     super.disconnectedCallback();

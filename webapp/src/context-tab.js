@@ -1027,6 +1027,14 @@ export class ContextTab extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._refresh();
+    // If the persisted sub-view is Cache, start the
+    // warmer-status poll loop now that RPC is up.
+    // _setSubview's polling toggle only runs on user
+    // switches; the initial render needs an explicit
+    // start.
+    if (this._subview === 'cache') {
+      this._startWarmerPolling();
+    }
   }
 
   /**
@@ -1460,6 +1468,14 @@ export class ContextTab extends RpcMixin(LitElement) {
     try {
       localStorage.setItem(_SUBVIEW_KEY, v);
     } catch (_) {}
+    // Cache sub-view shows the warmer status row with a
+    // 1 Hz countdown; budget sub-view doesn't. Start
+    // polling on entry to cache, stop on exit.
+    if (v === 'cache') {
+      this._startWarmerPolling();
+    } else {
+      this._stopWarmerPolling();
+    }
   }
 
   /**
@@ -2035,6 +2051,8 @@ export class ContextTab extends RpcMixin(LitElement) {
           ${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}
         </button>
       </div>
+
+      ${this._renderWarmerStatus()}
 
       <div class="cache-header">
         <div class="cache-hit-label">
