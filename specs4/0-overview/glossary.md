@@ -57,7 +57,7 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 ## Files and Indexing
 
 - **Selected files** — files the user has ticked in the file picker. Full content enters active context; the corresponding index block is excluded from the main symbol/doc map (would be redundant).
-- **Excluded files** — files the user has explicitly excluded from indexing (three-state checkbox). No content, no index block, no tracker entry. Used when a doc repo's map alone exceeds the context budget.
+- **Excluded files** — files the user has explicitly removed from the cache via the file picker's three-state checkbox. The underlying symbol and doc indexes still cover them — exclusion is a cache-shaping filter, not an indexing-time filter — but they are subtracted from every dir-block at seed time and per-turn refresh, and any `file:<path>` tracker entry is dropped on the exclusion event. The LLM does not see them in any tier. Used when a repo's map alone exceeds the context budget. Re-inclusion is instant: the next turn's seed picks the file back up from the live index.
 - **Index-only file** — the default state for a file: not selected, not excluded. Only its index block appears in context (as part of the symbol map / doc map), not its full content.
 - **Reference graph** — the cross-file usage relationships. Code graph: import statements and call sites. Doc graph: heading-anchored links and image embeds. Used for tier initialization (connected components cluster related files into the same tier) and for incoming-ref counts in the compact map output.
 - **Connected component** — a cluster of files linked via mutual bidirectional references. The stability tracker uses connected components as the initial grouping for tier distribution — related files tend to be edited together, so they share stability characteristics.
@@ -134,7 +134,7 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 ## Files and Indexing
 
 - **Selected files** — files the user has checked in the file picker (full content in context)
-- **Excluded files** — files the user has explicitly excluded from indexing (no content, no index block)
+- **Excluded files** — see the full definition under Caching and Content above
 - **Index-only file** — default state (not selected, not excluded) — only the index block is in context
 - **Reference graph** — cross-file usage relationships (imports, calls, doc links)
 - **Connected component** — cluster of files linked via mutual references

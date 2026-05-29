@@ -1086,3 +1086,298 @@ class TestPlainFilesExcludesIndexed:
         expected_block = "src/data.json"
         expected_tokens = svc._counter.count(expected_block)
         assert items["plain_files:src"]["tokens"] == expected_tokens
+
+
+class TestDirBlockExcludesUserExcludedFiles:
+    """Picker-excluded files don't seed dir-blocks.
+
+    When the file picker excludes every file under a
+    directory (the three-state checkbox sends every
+    descendant file path), seeding must skip the
+    corresponding ``symbols:<dir>`` / ``docs:<dir>`` /
+    ``plain_files:<dir>`` entry. Otherwise the cache
+    viewer fills with directories the user explicitly
+    removed from the index.
+
+    Mirror tests run against
+    :func:`ac_dc.llm._stability._enumerate_dir_blocks`
+    (initial init + per-mode init), the
+    :func:`ac_dc.llm._stability._dir_block_active_items`
+    refresh path (per-turn rebuild of block hash and
+    tokens), and
+    :func:`ac_dc.llm._rebuild.seed_dir_blocks_for_rebuild`
+    (manual rebuild). All three call sites must filter
+    by the same set so excluded directories never appear
+    as tracker entries.
+    """
+
+    def _make_service(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        symbol_paths: list[str] | None = None,
+        doc_paths: list[str] | None = None,
+    ) -> LLMService:
+        """Service with a controllable symbol index and seeded doc outlines.
+
+        Same shape as ``TestPlainFilesExcludesIndexed._make_service``
+        — duplicated rather than shared so a future change to
+        either class's stub doesn't accidentally cross-couple.
+        """
+        symbol_paths = symbol_paths or []
+        doc_paths = doc_paths or []
+
+        class _SymbolIndexStub:
+            def __init__(self, paths: list[str]) -> None:
+                self._all_symbols = {p: None for p in paths}
+
+            def get_dir_symbols_block(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                files = sorted(
+                    p for p in self._all_symbols
+                    if (
+                        p[: p.rfind("/")] if "/" in p else ""
+                    ) == directory
+                )
+                if not files:
+                    return ""
+                return "\n".join(f"sym-line-for-{f}" for f in files)
+
+            def get_dir_signature_hash(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                return f"sym-sig-{directory}"
+
+            def get_legend(self) -> str:
+                return ""
+
+            def get_symbol_map(
+                self, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexStub(symbol_paths),
+        )
+
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in doc_paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+        return svc
+
+    def test_seed_skips_fully_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A symbol-indexed directory with every file excluded is dropped."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        # User excludes every file in src/.
+        svc._excluded_index_files = ["src/a.py", "src/b.py"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" not in kinds
+        # And no plain_files:src either — every file is
+        # in the symbol index (covered) so leftover is
+        # empty regardless of exclusions.
+        assert "plain_files:src" not in kinds
+
+    def test_seed_keeps_partially_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """One non-excluded file is enough to keep the symbols block."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        # Only one file excluded; the other still warrants
+        # a symbols:src entry.
+        svc._excluded_index_files = ["src/a.py"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" in kinds
+
+    def test_seed_skips_fully_excluded_docs_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A doc-indexed directory with every file excluded is dropped."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "docs").mkdir(exist_ok=True)
+        (repo_dir / "docs" / "a.md").write_text("# a\n")
+        (repo_dir / "docs" / "b.md").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            doc_paths=["docs/a.md", "docs/b.md"],
+        )
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["docs/a.md", "docs/b.md"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "docs:docs" not in kinds
+        assert "plain_files:docs" not in kinds
+
+    def test_seed_subtracts_excluded_from_plain_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Excluded files are dropped from the plain_files listing.
+
+        Mixed case: a directory with no index coverage at
+        all, partial exclusion. The leftover list excludes
+        the user's excluded files and produces a block
+        only over the remainder.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["assets/data.json"]
+
+        keys = _enumerate_dir_blocks(svc)
+        plain = [k for k, _, _ in keys if k == "plain_files:assets"]
+        assert plain  # entry survives — logo.svg still present
+
+    def test_seed_drops_plain_files_when_all_excluded(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Plain-files dir with every file excluded is omitted entirely."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = [
+            "assets/logo.svg", "assets/data.json",
+        ]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "plain_files:assets" not in kinds
+
+    def test_per_turn_refresh_subtracts_excluded(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """The per-turn refresh path filters excluded files too.
+
+        If a ``plain_files:<dir>`` tracker entry already
+        exists (seeded before exclusion or by some other
+        path), the per-turn rebuild of its hash and
+        tokens must apply the same exclusion filter so
+        the rendered content matches the seed contract.
+        """
+        from ac_dc.llm._stability import _dir_block_active_items
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["assets/data.json"]
+
+        svc._stability_tracker._items["plain_files:assets"] = TrackedItem(
+            key="plain_files:assets",
+            tier=Tier.L3,
+            n_value=3,
+            content_hash="placeholder",
+            tokens=0,
+        )
+
+        scope = svc._default_scope()
+        items = _dir_block_active_items(svc, scope)
+
+        assert "plain_files:assets" in items
+        # Block tokens reflect logo.svg only — data.json
+        # is excluded.
+        expected_block = "assets/logo.svg"
+        expected_tokens = svc._counter.count(expected_block)
+        assert items["plain_files:assets"]["tokens"] == expected_tokens
+
+    def test_rebuild_seed_skips_fully_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Manual rebuild's seeding path applies the same filter.
+
+        The bug that triggered this work: clicking Rebuild
+        re-populated the tracker from the indexes without
+        consulting ``_excluded_index_files``, so the cache
+        view filled with directories the user had
+        excluded. After the fix, rebuild's seed must skip
+        them too.
+        """
+        from ac_dc.llm._rebuild import seed_dir_blocks_for_rebuild
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["src/a.py", "src/b.py"]
+
+        seed_dir_blocks_for_rebuild(svc)
+
+        all_keys = set(svc._stability_tracker.get_all_items().keys())
+        assert "symbols:src" not in all_keys
+        assert "plain_files:src" not in all_keys

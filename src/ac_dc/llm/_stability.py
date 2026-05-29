@@ -45,6 +45,47 @@ logger = logging.getLogger("ac_dc.llm_service")
 # ---------------------------------------------------------------------------
 
 
+def _excluded_set(service: "LLMService") -> set[str]:
+    """Return the user-excluded file paths as a set.
+
+    The frontend's three-state checkbox sends every
+    descendant file path of an excluded directory, so a
+    plain set lookup is sufficient — no prefix matching
+    needed.
+
+    Used by every dir-block enumeration site
+    (initial init, rebuild, per-turn refresh) so a file
+    excluded in the picker is omitted from
+    ``symbols:<dir>`` / ``docs:<dir>`` / ``plain_files:<dir>``
+    seeding alike. When every file under a directory is
+    excluded, the dir-block isn't seeded at all.
+    """
+    excluded = getattr(service, "_excluded_index_files", None)
+    return set(excluded) if excluded else set()
+
+
+def _dir_has_unexcluded_indexed_file(
+    indexed_paths: list[str],
+    directory: str,
+    excluded: set[str],
+) -> bool:
+    """True when ``directory`` has at least one indexed, non-excluded file.
+
+    Used by symbols/docs dir-block enumeration to decide
+    whether to seed a ``symbols:<dir>`` or ``docs:<dir>``
+    entry. If every indexed file in the directory is on
+    the user's exclusion list, the rendered block would be
+    empty and the entry should be skipped.
+    """
+    for path in indexed_paths:
+        parent = path[: path.rfind("/")] if "/" in path else ""
+        if parent != directory:
+            continue
+        if path not in excluded:
+            return True
+    return False
+
+
 def _indexed_paths_in_dir(
     service: "LLMService",
     directory: str,
@@ -124,6 +165,7 @@ def _enumerate_dir_blocks(
     if repo is None:
         return []
 
+    excluded = _excluded_set(service)
     keys: list[tuple[str, float, int]] = []
 
     # symbols:<dir>
@@ -140,6 +182,10 @@ def _enumerate_dir_blocks(
                 path[: path.rfind("/")] if "/" in path else ""
             )
         for directory in symbol_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                symbol_paths, directory, excluded
+            ):
+                continue
             mtime = repo.get_directory_mtime(directory)
             try:
                 block = service._symbol_index.get_dir_symbols_block(
@@ -163,6 +209,10 @@ def _enumerate_dir_blocks(
             path[: path.rfind("/")] if "/" in path else ""
         )
     for directory in doc_dirs:
+        if not _dir_has_unexcluded_indexed_file(
+            doc_paths, directory, excluded
+        ):
+            continue
         mtime = repo.get_directory_mtime(directory)
         try:
             block = service._doc_index.get_dir_docs_block(directory)
@@ -172,8 +222,9 @@ def _enumerate_dir_blocks(
         keys.append((f"docs:{directory}", mtime, tokens))
 
     # plain_files:<dir> — subtract files already covered by
-    # either index. When every file in a directory is indexed,
-    # the plain-files block has nothing to add and is omitted.
+    # either index, and drop user-excluded files. When every
+    # file in a directory is indexed or excluded, the
+    # plain-files block has nothing to add and is omitted.
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:
@@ -181,7 +232,8 @@ def _enumerate_dir_blocks(
     for directory, files_in_dir in by_dir.items():
         covered = _indexed_paths_in_dir(service, directory)
         leftover = sorted(
-            f for f in files_in_dir if f not in covered
+            f for f in files_in_dir
+            if f not in covered and f not in excluded
         )
         if not leftover:
             continue
@@ -303,6 +355,7 @@ def _dir_block_active_items(
     items: dict[str, dict[str, Any]] = {}
 
     active_excluded = set(scope.context.file_context.get_files())
+    user_excluded = _excluded_set(service)
 
     repo = service._repo
     if repo is None:
@@ -350,7 +403,9 @@ def _dir_block_active_items(
             covered = _indexed_paths_in_dir(service, directory)
             files_in_dir = sorted(
                 f for f in by_dir.get(directory, [])
-                if f not in active_excluded and f not in covered
+                if f not in active_excluded
+                and f not in covered
+                and f not in user_excluded
             )
             block = "\n".join(files_in_dir)
             tokens = (
@@ -505,6 +560,7 @@ def seed_cross_reference_items(service: "LLMService") -> None:
     if repo is None:
         return
 
+    excluded = _excluded_set(service)
     mode = service._context.mode
     keys: list[tuple[str, float, int]] = []
 
@@ -521,6 +577,10 @@ def seed_cross_reference_items(service: "LLMService") -> None:
                 path[: path.rfind("/")] if "/" in path else ""
             )
         for directory in doc_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                doc_paths, directory, excluded
+            ):
+                continue
             mtime = repo.get_directory_mtime(directory)
             try:
                 block = service._doc_index.get_dir_docs_block(
@@ -547,6 +607,10 @@ def seed_cross_reference_items(service: "LLMService") -> None:
                 path[: path.rfind("/")] if "/" in path else ""
             )
         for directory in symbol_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                symbol_paths, directory, excluded
+            ):
+                continue
             mtime = repo.get_directory_mtime(directory)
             try:
                 block = service._symbol_index.get_dir_symbols_block(

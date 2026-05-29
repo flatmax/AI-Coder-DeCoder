@@ -129,8 +129,11 @@ Files have three context states controlled via the picker checkbox:
 ### Context Menu
 - File and directory context menus include include/exclude items as an alternative to shift+click
 ### Backend Coordination
-- Excluded files set stored server-side via the excluded-files RPC, persisted in session state
-- Removed from the stability tracker, excluded from map generation, skipped in active items, excluded from tier recomputation
+- Excluded files set stored server-side via the `set_excluded_index_files` RPC, persisted in session state
+- Exclusion is a **cache-shaping filter**, not an indexing-time filter — the underlying symbol and doc indexes remain whole-repo, so re-inclusion is instant
+- Applied at three points: synchronous removal on the exclusion event (drops `file:<path>` tracker entries, marks parent directories' dir-blocks broken), filtered out of dir-block seeding (initial init, rebuild, cross-ref enable), and filtered out of per-turn dir-block refresh
+- A `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` block whose every indexed file is excluded is omitted entirely from seeding rather than seeded as an empty entry
+- Full contract: see [cache-tiering.md § User-Excluded Files](../3-llm/cache-tiering.md#user-excluded-files)
 
 ### Binary File Selection
 - The picker accepts binary file selection (xlsx, pdf, png, zip, etc.) at click time — selection-time rejection would require an 8KB read per click and would surprise users with checkboxes that refuse to stay set

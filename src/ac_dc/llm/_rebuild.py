@@ -286,6 +286,13 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     if repo is None:
         return
 
+    from ac_dc.llm._stability import (
+        _dir_has_unexcluded_indexed_file,
+        _excluded_set,
+        _indexed_paths_in_dir,
+    )
+
+    excluded = _excluded_set(service)
     keys_with_mtimes: list[tuple[str, float, int]] = []
     seen_dirs: set[str] = set()
 
@@ -294,6 +301,9 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     # cache viewer shows real numbers immediately after a
     # rebuild — rather than the bin-packing placeholder
     # until the first turn replays update_stability.
+    # Skip directories whose every indexed file is on the
+    # user's exclusion list — the rendered block would be
+    # empty and the entry would only litter the cache view.
     if service._symbol_index is not None:
         try:
             symbol_paths = list(
@@ -307,6 +317,10 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
                 path[: path.rfind("/")] if "/" in path else ""
             )
         for directory in symbol_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                symbol_paths, directory, excluded
+            ):
+                continue
             mtime = repo.get_directory_mtime(directory)
             try:
                 block = service._symbol_index.get_dir_symbols_block(
@@ -322,7 +336,9 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
             )
             seen_dirs.add(directory)
 
-    # Collect directories from the doc index.
+    # Collect directories from the doc index. Same exclusion
+    # filter — a directory whose every doc file is excluded
+    # contributes no content and should not be seeded.
     try:
         doc_paths = list(service._doc_index._all_outlines.keys())
     except Exception:
@@ -333,6 +349,10 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
             path[: path.rfind("/")] if "/" in path else ""
         )
     for directory in doc_dirs:
+        if not _dir_has_unexcluded_indexed_file(
+            doc_paths, directory, excluded
+        ):
+            continue
         mtime = repo.get_directory_mtime(directory)
         try:
             block = service._doc_index.get_dir_docs_block(directory)
@@ -346,13 +366,13 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
 
     # Plain-files dir-blocks: every directory whose listing
     # has at least one file NOT already covered by the
-    # symbol or doc index. Files that appear in either
-    # index are subtracted — their filenames are already
-    # visible through the corresponding symbols:/docs:
-    # block, and listing them again is pure duplication.
-    # When every file in a directory is indexed, the
-    # plain-files block is omitted entirely.
-    from ac_dc.llm._stability import _indexed_paths_in_dir
+    # symbol or doc index AND not on the user's exclusion
+    # list. Files that appear in either index are subtracted
+    # — their filenames are already visible through the
+    # corresponding symbols:/docs: block, and listing them
+    # again is pure duplication. When every file in a
+    # directory is indexed or excluded, the plain-files
+    # block is omitted entirely.
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:
@@ -360,7 +380,8 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     for directory, files_in_dir in by_dir.items():
         covered = _indexed_paths_in_dir(service, directory)
         leftover = sorted(
-            f for f in files_in_dir if f not in covered
+            f for f in files_in_dir
+            if f not in covered and f not in excluded
         )
         if not leftover:
             continue

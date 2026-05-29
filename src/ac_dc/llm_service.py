@@ -1040,11 +1040,22 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def set_excluded_index_files(
-        self, files: list[str]
+        self,
+        files: list[str],
+        invalidate_l0: bool = False,
     ) -> list[str] | dict[str, Any]:
-        """Delegate to :func:`ac_dc.llm._rpc_state.set_excluded_index_files`."""
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_excluded_index_files`.
+
+        ``invalidate_l0`` is accepted for wire compatibility
+        with the frontend's L0-prompt dispatcher (the file
+        picker's "Apply now / Defer" dialog). Under D36 it is
+        a no-op — there is no monolithic L0 to invalidate.
+        Forwarded to the impl which carries the same shim.
+        """
         from ac_dc.llm._rpc_state import set_excluded_index_files
-        return set_excluded_index_files(self, files)
+        return set_excluded_index_files(
+            self, files, invalidate_l0,
+        )
 
     def get_excluded_index_files(self) -> list[str]:
         """Return the current excluded-files list."""

@@ -476,18 +476,26 @@ export class FilePicker extends LitElement {
 
   _onRootCheckbox(event) {
     event.stopPropagation();
+    // Selection math walks text-only descendants
+    // (binaries can't be sent to the LLM); exclusion
+    // math walks the full set so a fully-excluded
+    // directory's binary children also leave the
+    // backend's cache. See `_collectDescendantFiles`.
     const descendants = this._collectDescendantFiles(this.tree);
-    if (descendants.length === 0) return;
+    const exclusionDescendants = this._collectDescendantFiles(
+      this.tree, { includeBinaries: true },
+    );
+    if (exclusionDescendants.length === 0) return;
     if (event.shiftKey) {
       event.preventDefault();
-      const allExcluded = descendants.every((p) =>
+      const allExcluded = exclusionDescendants.every((p) =>
         this.excludedFiles.has(p),
       );
       const nextExcluded = new Set(this.excludedFiles);
       if (allExcluded) {
-        for (const p of descendants) nextExcluded.delete(p);
+        for (const p of exclusionDescendants) nextExcluded.delete(p);
       } else {
-        for (const p of descendants) nextExcluded.add(p);
+        for (const p of exclusionDescendants) nextExcluded.add(p);
       }
       this._emitExclusionChanged(nextExcluded);
       if (!allExcluded) {
@@ -503,12 +511,12 @@ export class FilePicker extends LitElement {
       }
       return;
     }
-    const anyExcluded = descendants.some((p) =>
+    const anyExcluded = exclusionDescendants.some((p) =>
       this.excludedFiles.has(p),
     );
     if (anyExcluded) {
       const nextExcluded = new Set(this.excludedFiles);
-      for (const p of descendants) nextExcluded.delete(p);
+      for (const p of exclusionDescendants) nextExcluded.delete(p);
       this._emitExclusionChanged(nextExcluded);
     }
     const allSelected = descendants.every((p) =>
@@ -1406,7 +1414,7 @@ export class FilePicker extends LitElement {
   // Selection helpers
   // ---------------------------------------------------------------
 
-  _collectDescendantFiles(node) {
+  _collectDescendantFiles(node, { includeBinaries = false } = {}) {
     const paths = [];
     const binary = this.binaryFiles || new Set();
     function walk(n) {
@@ -1419,7 +1427,17 @@ export class FilePicker extends LitElement {
         // reach the "fully selected" state. Render-side
         // they still appear in the tree with disabled
         // checkboxes — see `_renderFile`.
-        if (binary.has(n.path)) return;
+        //
+        // Exclusion math is the opposite case: a user
+        // excluding a directory means "this directory
+        // and everything under it should not appear in
+        // the cache," and that absolutely covers binary
+        // files. Without `includeBinaries`, a directory
+        // containing PDFs (e.g. `papers/`) would have
+        // its binary children silently retained in the
+        // backend's plain_files dir-block even though
+        // the user struck it through.
+        if (binary.has(n.path) && !includeBinaries) return;
         paths.push(n.path);
         return;
       }
@@ -1445,13 +1463,21 @@ export class FilePicker extends LitElement {
   }
 
   _allDescendantsExcluded(node) {
-    const descendants = this._collectDescendantFiles(node);
+    // Binary descendants count for exclusion badging
+    // because exclusion semantics cover them; selection
+    // badging uses the text-only walk via
+    // `_allDescendantsSelected`.
+    const descendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
     if (descendants.length === 0) return false;
     return descendants.every((p) => this.excludedFiles.has(p));
   }
 
   _someDescendantsExcluded(node) {
-    const descendants = this._collectDescendantFiles(node);
+    const descendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
     if (descendants.length === 0) return false;
     const excluded = descendants.filter((p) =>
       this.excludedFiles.has(p),
@@ -1496,18 +1522,24 @@ export class FilePicker extends LitElement {
 
   _onDirCheckbox(event, node) {
     event.stopPropagation();
+    // See _onRootCheckbox for why exclusion uses the
+    // full descendant list (incl. binaries) while
+    // selection uses the text-only list.
     const descendants = this._collectDescendantFiles(node);
-    if (descendants.length === 0) return;
+    const exclusionDescendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
+    if (exclusionDescendants.length === 0) return;
     if (event.shiftKey) {
       event.preventDefault();
-      const allExcluded = descendants.every((p) =>
+      const allExcluded = exclusionDescendants.every((p) =>
         this.excludedFiles.has(p),
       );
       const nextExcluded = new Set(this.excludedFiles);
       if (allExcluded) {
-        for (const p of descendants) nextExcluded.delete(p);
+        for (const p of exclusionDescendants) nextExcluded.delete(p);
       } else {
-        for (const p of descendants) nextExcluded.add(p);
+        for (const p of exclusionDescendants) nextExcluded.add(p);
       }
       this._emitExclusionChanged(nextExcluded);
       if (!allExcluded) {
@@ -1523,12 +1555,12 @@ export class FilePicker extends LitElement {
       }
       return;
     }
-    const anyExcluded = descendants.some((p) =>
+    const anyExcluded = exclusionDescendants.some((p) =>
       this.excludedFiles.has(p),
     );
     if (anyExcluded) {
       const nextExcluded = new Set(this.excludedFiles);
-      for (const p of descendants) nextExcluded.delete(p);
+      for (const p of exclusionDescendants) nextExcluded.delete(p);
       this._emitExclusionChanged(nextExcluded);
     }
     const allSelected = descendants.every((p) =>

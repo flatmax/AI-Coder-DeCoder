@@ -393,7 +393,15 @@ A file selected for editing appears in exactly one place per turn: its full text
 
 ### User-Excluded Files
 
-Users can still explicitly exclude files from indexing via the file picker's three-state checkbox. Excluded files are removed from the index entirely; their dir-block entry shrinks accordingly and the dir-block is teleported to Active.
+Users can explicitly exclude files from the cache via the file picker's three-state checkbox. The frontend sends the flat set of excluded file paths to the backend (every descendant of an excluded directory, expanded by the picker before transmission). The exclusion set is applied at three points:
+
+- **Synchronous removal on the exclusion event itself.** When `set_excluded_index_files` arrives, the corresponding `file:<path>` tracker entries are dropped immediately and the parent directories' `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` blocks are marked broken so they re-render on the next turn without the excluded file's contribution.
+
+- **Filtered out of dir-block seeding.** Initial init, manual rebuild, and cross-reference enable all enumerate dir-blocks from the live indexes. Excluded files are subtracted from the per-directory file lists at this step. A `plain_files:<dir>` block with no leftover files is omitted entirely. A `symbols:<dir>` or `docs:<dir>` block whose every indexed file is excluded is also omitted — the rendered block would be empty and the entry would only litter the cache view.
+
+- **Filtered out of per-turn dir-block refresh.** When `_dir_block_active_items` recomputes a `plain_files:<dir>` block's hash and tokens each turn, excluded files are subtracted from the listing alongside files currently in Active full-text. The rendered content stays consistent with what the seed produced.
+
+The underlying index data is unchanged by exclusion — the symbol and doc indexes remain whole-repo. Exclusion is a **cache-shaping** filter, not an indexing-time filter. This means re-including a previously-excluded file is instant: the next turn's seed picks it back up from the live index, no re-extraction needed.
 
 ## History Compaction Interaction
 
