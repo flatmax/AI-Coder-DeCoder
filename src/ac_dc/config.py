@@ -884,10 +884,62 @@ class ConfigManager:
         effort = effort_raw.strip().lower()
         if effort not in ("low", "medium", "high"):
             effort = "medium"
+        # First-chunk watchdog override for reasoning calls.
+        # Adaptive-thinking models (Opus 4.5+, Bedrock Opus 4.7
+        # in particular) can take several minutes between
+        # ``litellm.completion`` returning the stream iterator
+        # and the first SSE content chunk arriving — the
+        # provider runs the entire reasoning pass before
+        # yielding any tokens. The default 60s first-chunk
+        # watchdog is correct for non-reasoning calls (a 60s
+        # silence after stream-open really does mean a hung
+        # connection) but trips spuriously on reasoning calls
+        # of any non-trivial complexity.
+        #
+        # Default 900s (15 min). Adaptive-thinking calls on
+        # Opus + xhigh effort with large contexts are
+        # observed taking up to ~15 minutes between
+        # stream-open and the first content chunk; the
+        # whole reasoning pass runs server-side before any
+        # token streams. Lower in user config if you want a
+        # tighter safety net and don't run xhigh reasoning;
+        # non-positive values fall back to the default.
+        try:
+            first_chunk_reasoning = float(
+                section.get("first_chunk_timeout_seconds", 900)
+            )
+        except (TypeError, ValueError):
+            first_chunk_reasoning = 900.0
+        if first_chunk_reasoning <= 0:
+            first_chunk_reasoning = 900.0
+        # Overall request-timeout override for reasoning
+        # calls. ``litellm.completion`` is given this as
+        # its ``timeout`` kwarg — the absolute wall-clock
+        # cap on the request, including the long pre-stream
+        # reasoning phase. Must be >= the first-chunk
+        # watchdog above, otherwise LiteLLM aborts the call
+        # before the watchdog gets a chance to fire and the
+        # finer-grained diagnostic is lost.
+        #
+        # Default 1200s (20 min) — first-chunk watchdog
+        # default + 5 min headroom for the post-first-chunk
+        # streaming phase itself. Lower in user config if
+        # you've also lowered the first-chunk watchdog;
+        # non-positive values fall back to the default.
+        try:
+            request_reasoning = float(
+                section.get("request_timeout_seconds", 1200)
+            )
+        except (TypeError, ValueError):
+            request_reasoning = 1200.0
+        if request_reasoning <= 0:
+            request_reasoning = 1200.0
         return {
             "enabled": bool(section.get("enabled", False)),
             "budget_tokens": budget,
             "effort": effort,
+            "first_chunk_timeout_seconds": first_chunk_reasoning,
+            "request_timeout_seconds": request_reasoning,
         }
 
     @property
@@ -916,6 +968,28 @@ class ConfigManager:
         Anthropic).
         """
         return self.reasoning_config["effort"]
+
+    @property
+    def reasoning_first_chunk_timeout_seconds(self) -> float:
+        """Convenience — first-chunk watchdog for reasoning calls.
+
+        Used by the streaming pipeline when ``thinking`` is
+        active on the request. See ``reasoning_config`` for
+        the prose rationale.
+        """
+        return self.reasoning_config["first_chunk_timeout_seconds"]
+
+    @property
+    def reasoning_request_timeout_seconds(self) -> float:
+        """Convenience — overall request-timeout for reasoning calls.
+
+        Used by the streaming pipeline when ``thinking`` is
+        active on the request. Passed to
+        ``litellm.completion`` as its ``timeout`` kwarg —
+        the absolute wall-clock cap. See
+        ``reasoning_config`` for the prose rationale.
+        """
+        return self.reasoning_config["request_timeout_seconds"]
 
     @property
     def cache_warmup_config(self) -> dict[str, Any]:

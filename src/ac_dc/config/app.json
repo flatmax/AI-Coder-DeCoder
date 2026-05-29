@@ -32,7 +32,9 @@
   "reasoning": {
     "enabled": false,
     "budget_tokens": 10000,
-    "effort": "high"
+    "effort": "xhigh",
+    "first_chunk_timeout_seconds": 1200,
+    "request_timeout_seconds": 1200
   },
   "cache_warmup": {
     "enabled": false,

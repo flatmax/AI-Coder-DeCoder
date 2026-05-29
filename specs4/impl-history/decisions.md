@@ -1079,3 +1079,61 @@ These differ in semantics and shouldn't be merged. Pinning says "can't move"; ba
 **Spec authority.** `specs4/3-llm/cache-tiering.md` (§4.1, § History Graduation, §4.5, § Invariants); `specs4/0-overview/glossary.md` (N value, admission gate, ripple promotion, history isolation); `specs4/impl-history/layer-3.md` (per-tier config narrative).
 
 **Superseded artefacts.** None outright. D37 refines D27's history rule and D35's admission rule rather than replacing them; the piggyback admission path is preserved; only the post-admission V/c contribution changes. The "L3 → L2 at N=6 / L2 → L1 at N=9 / L1 → L0 at N=12" wording, already removed from runtime by D35, is now removed from `_TIER_CONFIG` and from the glossary.
+
+### D38 — Cache warmer re-plugged with bounded broadcasts and runtime reasoning tracking
+
+D34 isolated the warmer's executor and added wall-clock-anchored deadlines; D34a fixed the polling-loop drift on suspended-process resume. Both shipped with the warmer in a "currently unplugged" state — field observation revealed a separate failure mode where `await self._broadcast_event_async(...)` calls inside `_run` stalled the event loop for ~120 seconds per cycle. Broadcasts that ran sub-millisecond on user-turn events took 2 minutes when the warmer issued them. Root cause was not diagnosed; the warmer was disabled at its entry point pending investigation.
+
+D38 plugs the warmer back in by mitigating the stall structurally rather than root-causing the WebSocket / jrpc-oo behaviour, and simultaneously fixes a separate design defect where the warmer's reasoning posture was read from config instead of from runtime user state.
+
+**Bounded broadcast waits.** Each `cacheWarmup*` broadcast is wrapped in `asyncio.wait_for(..., timeout=_BROADCAST_TIMEOUT_SECONDS)` (5 seconds). A hung send logs at WARNING with explanatory text and continues — the rest of `_run` proceeds, the next cycle gets a fresh timeout budget. The diagnostic heartbeat task runs independently of the broadcast loop, so even when a broadcast's own log line is delayed by the timeout, the heartbeat's "event loop stalled" WARNING surfaces the underlying gap on its normal cadence. A stall affects one broadcast for at most 5 seconds, not the warmer's whole timer.
+
+**Tightened polling cadence.** The silent-phase polling loop now wakes every 1 second (was 5). Two jobs:
+
+- **Drift resistance.** Same role as under D34a — short polling chunks against a wall-clock deadline mean the worst-case overshoot from OS suspension is bounded by the poll cadence plus the suspension duration. Lowering the cadence directly tightens the bound.
+- **OS idle-throttling resistance.** macOS App Nap and similar mechanisms aggressively park processes that look idle. Once parked, timer wakes can slip by tens of seconds even when nothing is suspended. A 1-second poll keeps the process visibly active to the kernel — the OS doesn't park a process running a coroutine every second. Cost is ~270 awaits per interval, well below any workload's measurable CPU floor.
+
+The constant was renamed from `_DRIFT_POLL_SECONDS` to `_HEARTBEAT_POLL_SECONDS` to reflect the broader role.
+
+**Runtime reasoning state tracking.** The original warmer disabled reasoning unconditionally on every firing, on the theory that warm-ups never benefit from hidden thinking. That was correct in isolation but wrong in context: Bedrock and Anthropic key the prompt cache against the request shape, and `thinking={"type": "adaptive", "effort": ...}` produces a different cache slot than a non-thinking call. A warmer firing without thinking writes a different slot than the next reasoning user turn would read from — so reasoning user calls landed cold-writes regardless of whether the warmer recently fired the same prefix.
+
+A second-iteration fix read `config.reasoning_enabled` and matched the warmer's call shape to the config default. That worked for users who configured reasoning at config-level but not for users who toggled reasoning per-request via the chat-panel UI (the dominant pattern). Field observation: a session with `reasoning.enabled: false` in `app.json` but reasoning ON in the UI showed warm-ups firing without `thinking`, user calls firing with `thinking`, and 0% cache hit on every reasoning user turn despite 99% warmer drift compliance. The config flag was vestigial — its only consumer was the warmer, which was reading it for the wrong reason.
+
+D38 retires the config read in the warmer's hot path. The streaming pipeline writes `service._last_reasoning_used = bool(thinking_kwargs)` after every user call's reasoning resolution. The warmer's `_completion_sync` reads that flag on each firing:
+
+```python
+last_used = getattr(self._service, "_last_reasoning_used", False)
+thinking_kwargs = (
+    build_thinking_kwargs(config, True) if last_used
+    else {}
+)
+```
+
+Effects:
+
+- The UI toggle is the single user-facing control. Users toggle reasoning per-request via the chat panel; the warmer mirrors automatically.
+- Config-level `reasoning.enabled` is no-longer-load-bearing in the live path. Could be removed in a follow-up but harmless to leave — the field still exists in `ConfigManager.reasoning_config` for the test suite and any future consumer that needs a config default.
+- Defaults to False on startup. Warm-ups fired before any user call are cheap (no reasoning tokens burned).
+- One-cycle adaptation lag, worst case. If the user toggles reasoning OFF mid-session, the next warmer firing (within `interval_seconds`) still uses reasoning shape; the firing after that is correct. Negligible — toggle changes are rare and a single mismatched warm-up costs at most one reasoning ping (a few hundred tokens for adaptive models bound by a "respond with ok" prompt).
+- Reasoning warm-ups use `config.reasoning_request_timeout_seconds` (default 1200s) rather than the aux-call timeout (60s). Adaptive thinking can spend several minutes server-side on the reasoning pass before any byte streams; a 60s timeout would abort the call before output.
+- For legacy (non-adaptive) thinking models, `_WARMUP_MAX_TOKENS` is raised to `budget_tokens + 100` so the call has room for the reasoning pass plus a minimal completion. Adaptive models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) keep `_WARMUP_MAX_TOKENS=2` because they bound their own reasoning internally.
+
+**`enable()` method added.** D34's circuit breaker disabled the warmer on three consecutive TTL-drift cycles but provided no path back to enabled state without application restart. D38 adds `enable()` for operator-driven re-enable: clears the disabled-reason, restarts the heartbeat, schedules the next firing. No-op when `cache_warmup.enabled: false` in config — config-level disable still requires editing `app.json`.
+
+**Reset semantics pinned to user-call start.** D38 also pins `reset()` to the START of every `stream_chat` invocation only (not also at end). Each user-call cycle gets a fresh diagnostic-heartbeat window anchored to a specific call's boundary, so any "event loop stalled" WARNING is attributable to work that call did rather than aggregated noise from earlier idle periods. Previous revisions called `reset()` at both start and end as defensive coverage; D38 narrows to start-only because the heartbeat-restart side effect was producing redundant cycles on every stream completion.
+
+**Field validation.** Two-cycle test post-fix on a reasoning-enabled session:
+
+```
+21:36:54 (user reasoning call): write 19,572 / read 0
+21:37:08 (warmer fire #1): "reasoning shape matched (max_tokens=2, timeout=1200s)"
+21:37:10 (warmer cycle #1):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
+21:41:11 (warmer fire #2): "reasoning shape matched (max_tokens=2, timeout=1200s)"
+21:41:15 (warmer cycle #2):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
+```
+
+Session ROI flipped from −100% (cold start, write-only) through 0% (read = write after one warm-up) to +100% (two reads × one write). Reasoning user calls now hit a warmer-primed cache instead of paying the full cache-write cost on every interactive pause longer than 5 minutes.
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (status updated, lifecycle section updated, warm-up call shape updated, configuration defaults updated). `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table updated for renamed/added constants, runtime reasoning tracking paragraph added, bounded broadcast waits paragraph added, config defaults note updated for `enable()`).
+
+**Open questions.** The original ~120s broadcast stall under D34a remains undiagnosed. D38's bounded waits make the stall non-fatal; they do not explain it. A future investigation pass into the WebSocket / jrpc-oo serialisation path during warmer cycles may identify the actual cause and let the timeout be relaxed or removed. Until then the timeout is the structural safety net.

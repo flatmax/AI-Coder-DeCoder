@@ -593,15 +593,6 @@ async def stream_chat(
                 request_id, exc,
             )
 
-    # Reset the cache warmer — request just finished, so
-    # restart the idle timer. The reset is a no-op when
-    # the warmer is disabled (auto-disabled by a prior
-    # failure, or disabled in config), so it's safe to
-    # call unconditionally on every code path.
-    warmer = getattr(service, "_cache_warmer", None)
-    if warmer is not None:
-        warmer.reset("stream-end")
-
     # Return the completion result so agent spawning's
     # asyncio.gather can collect files_modified /
     # files_created for assimilation.
@@ -770,6 +761,17 @@ def run_completion_sync(
     thinking_kwargs = build_thinking_kwargs(
         service._config, reasoning,
     )
+    # Track the resolved reasoning state so the cache
+    # warmer mirrors it on subsequent firings. The UI
+    # toggle (per-request via ``reasoning`` arg, not
+    # config) is the authoritative user-facing control;
+    # the warmer needs to match the same slot the
+    # provider's prompt cache keyed against, otherwise
+    # reasoning user calls land cold-writes even when
+    # the warmer is "working". Set on every call so
+    # toggling on/off in the UI propagates to the warmer
+    # within one user-call cycle.
+    service._last_reasoning_used = bool(thinking_kwargs)
     if thinking_kwargs:
         # Log shape varies by model family — adaptive
         # payloads carry no budget field, legacy ones do.
@@ -783,8 +785,39 @@ def run_completion_sync(
                 payload.get("budget_tokens", 0),
             )
 
-    request_timeout = service._config.request_timeout_seconds
-    first_chunk_timeout = service._config.first_chunk_timeout_seconds
+    # Reasoning-aware overall request timeout. Same rationale
+    # as the first-chunk watchdog override below — adaptive-
+    # thinking calls can spend many minutes server-side
+    # before any byte streams. The 300s default would abort
+    # the call before reasoning finishes; the reasoning
+    # override (1200s default) gives the provider room.
+    if thinking_kwargs:
+        request_timeout = (
+            service._config.reasoning_request_timeout_seconds
+        )
+        logger.info(
+            "Request timeout: %.0fs (reasoning override)",
+            request_timeout,
+        )
+    else:
+        request_timeout = service._config.request_timeout_seconds
+    # Reasoning-aware first-chunk watchdog. Adaptive-thinking
+    # providers (notably Bedrock Opus on xhigh effort) run the
+    # full reasoning pass before emitting any SSE content, and
+    # 60s between stream-open and first chunk is routinely
+    # exceeded. Use the reasoning override when ``thinking`` is
+    # active; the default tight 60s applies to non-reasoning
+    # calls where it's still the correct safety net.
+    if thinking_kwargs:
+        first_chunk_timeout = (
+            service._config.reasoning_first_chunk_timeout_seconds
+        )
+        logger.info(
+            "First-chunk watchdog: %.0fs (reasoning override)",
+            first_chunk_timeout,
+        )
+    else:
+        first_chunk_timeout = service._config.first_chunk_timeout_seconds
     chunk_timeout = service._config.chunk_timeout_seconds
     num_retries = service._config.num_retries
 

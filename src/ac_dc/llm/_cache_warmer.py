@@ -484,11 +484,14 @@ class CacheWarmer:
         backoff logic on the executor thread (which asyncio
         cannot interrupt).
 
-        Heartbeat is NOT cancelled here — `cancel()` is
-        called between cycles (e.g., on every user stream
-        start) and we want the diagnostic running continuously
-        across the warmer's enabled lifetime. Heartbeat
-        cancellation lives in `disable()`.
+        Heartbeat is NOT touched here. ``reset()`` is the
+        user-call hook and it restarts the heartbeat
+        explicitly; ``cancel()`` is the bare-cancel
+        primitive used by code paths that don't want a
+        diagnostic-window restart (e.g. the warmer's own
+        internal scheduling, ``disable()``'s teardown).
+        Heartbeat cancellation proper lives in
+        ``disable()``.
         """
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -499,9 +502,33 @@ class CacheWarmer:
     def reset(self, reason: str) -> None:
         """Cancel and reschedule.
 
-        Called on every event that resets the activity
-        clock — successful stream completion, mode switch,
-        cross-ref toggle, cache rebuild, new session.
+        Called at the START of every user-initiated LLM
+        call (from ``stream_chat`` with reason
+        ``"user-send"``) so each user-call cycle gets a
+        fresh diagnostic window. Also called by other
+        activity-clock events that should restart the idle
+        timer: mode switch, cross-ref toggle, cache
+        rebuild, new session.
+
+        NOT called at stream end. Pinning resets to LLM-
+        call starts (rather than ends) means the heartbeat
+        and warmer schedule are anchored to the moment a
+        call begins; mid-stream and post-stream activity
+        run under the same diagnostic window as the call
+        itself, which is the boundary worth measuring.
+
+        Restarts the event-loop heartbeat task so its
+        diagnostic window is bounded by LLM-call
+        boundaries rather than running continuously across
+        the warmer's enabled lifetime. Any stall warning is
+        attributable to work that happened during this
+        call, not aggregated noise from earlier cycles.
+
+        The warmer's own firing path uses
+        ``_start_heartbeat`` directly (not ``reset``)
+        because it's already mid-cycle and rescheduling
+        would create a second pending timer.
+
         ``reason`` is logged at debug for diagnostic
         traces.
         """
@@ -509,6 +536,12 @@ class CacheWarmer:
             return
         logger.debug("Cache warmer reset: %s", reason)
         self.cancel()
+        # Restart the heartbeat so each LLM-call cycle's
+        # diagnostic window starts fresh. ``_start_heartbeat``
+        # cancels any stale task before spawning the new one,
+        # so calling it on every reset is idempotent and
+        # safe.
+        self._start_heartbeat()
         self._schedule()
 
     def disable(self, reason: str) -> None:
@@ -991,6 +1024,15 @@ class CacheWarmer:
     async def _fire_warmup(self) -> None:
         """Issue the warm-up call, accumulate, log, and broadcast.
 
+        Restarts the heartbeat as the first action so the
+        warmer's own LLM-call cycle gets a fresh diagnostic
+        window — symmetric with the user-call path, where
+        ``stream_chat`` resets the warmer before sending.
+        Any event-loop stall warning during the warm-up's
+        firing phase is then attributable to work this
+        cycle did, not aggregated noise from earlier idle
+        time.
+
         Three side effects beyond the raw provider call:
 
         - ``service._accumulate_usage(usage)`` — the
@@ -1009,6 +1051,17 @@ class CacheWarmer:
           of the existing payload — older clients that
           ignore the new fields keep working.
         """
+        # Restart the heartbeat for this warmer-LLM-call
+        # cycle. Same rationale as ``stream_chat``'s
+        # ``warmer.reset("user-send")`` — pin the
+        # diagnostic window to LLM-call boundaries so
+        # stalls are attributable to a specific call.
+        # Direct ``_start_heartbeat`` rather than ``reset``
+        # because we don't want the rescheduling side
+        # effect: ``_run`` is already mid-cycle and about
+        # to fire the warm-up; rescheduling would create
+        # a second pending timer.
+        self._start_heartbeat()
         service = self._service
         # Assemble messages exactly as a real turn would,
         # using the main scope so the cached prefix matches.
@@ -1177,7 +1230,10 @@ class CacheWarmer:
                 " (warmer queueing detected — check executor "
                 "isolation)" if queue_duration > 1.0 else "",
             )
-        from ac_dc.llm._helpers import retry_litellm_completion
+        from ac_dc.llm._helpers import (
+            build_thinking_kwargs,
+            retry_litellm_completion,
+        )
         try:
             import litellm
         except ImportError as exc:
@@ -1191,16 +1247,87 @@ class CacheWarmer:
         # retry fire a stale provider call.
         start_generation = self._generation
 
+        # Match the most recent user-call's resolved
+        # reasoning state. The UI toggle (sent per-request
+        # via the ``reasoning`` arg) is the authoritative
+        # user-facing control; the streaming pipeline
+        # writes the resolved bool onto
+        # ``service._last_reasoning_used`` after every
+        # user call, and we mirror that here so warmer
+        # firings prime the same Bedrock cache slot the
+        # next reasoning user call will read from.
+        #
+        # Defaults to False on startup so warm-ups before
+        # any user call are cheap. Once the user fires a
+        # reasoning call the warmer adopts that posture
+        # and stays there until the user toggles back. A
+        # toggle change is reflected on the next warmer
+        # firing (one-cycle adaptation lag, worst case).
+        #
+        # Cost trade-off: with thinking enabled, warm-ups
+        # burn reasoning tokens on every firing. Adaptive
+        # models (Opus 4.5+) decide their own budget; a
+        # "ping respond with ok" prompt should produce
+        # minimal reasoning. Legacy models reason for the
+        # full configured budget regardless of prompt
+        # simplicity. Watch the post-warm-up token HUD —
+        # if reasoning_tokens is non-trivial per cycle,
+        # toggle reasoning off in the UI to suppress.
+        last_used = getattr(
+            self._service, "_last_reasoning_used", False,
+        )
+        thinking_kwargs = (
+            build_thinking_kwargs(config, True) if last_used
+            else {}
+        )
+        if thinking_kwargs:
+            payload = thinking_kwargs["thinking"]
+            if payload.get("type") == "adaptive":
+                # Adaptive models bound their own thinking
+                # budget; max_tokens=2 is fine because the
+                # provider produces only as much completion
+                # as fits. Reasoning tokens are billed
+                # separately, not capped by max_tokens.
+                warmup_max_tokens = _WARMUP_MAX_TOKENS
+            else:
+                # Legacy thinking requires
+                # max_tokens > budget_tokens. The +100
+                # leaves room for a minimal completion
+                # after the reasoning pass.
+                warmup_max_tokens = (
+                    int(payload.get("budget_tokens", 0)) + 100
+                )
+            # Reasoning calls can spend many minutes on the
+            # reasoning pass before producing tokens. Use
+            # the reasoning timeout (default 1200s) rather
+            # than the aux timeout (60s) so the warm-up
+            # doesn't abort prematurely.
+            warmup_timeout = (
+                config.reasoning_request_timeout_seconds
+            )
+            logger.info(
+                "Cache warmer: reasoning shape matched "
+                "(max_tokens=%d, timeout=%.0fs)",
+                warmup_max_tokens, warmup_timeout,
+            )
+        else:
+            warmup_max_tokens = _WARMUP_MAX_TOKENS
+            warmup_timeout = config.aux_request_timeout_seconds
+
         def _call() -> Any:
-            # No ``thinking`` kwarg — warm-ups never reason
-            # regardless of session config. Cheap, fast,
-            # cache-bytes-preserving by design.
+            # ``thinking`` kwarg is empty when reasoning is
+            # off in config — falls through as a normal
+            # non-reasoning call. When reasoning is on,
+            # adaptive payloads carry ``effort`` and legacy
+            # payloads carry ``budget_tokens``; LiteLLM
+            # routes either correctly.
             return litellm.completion(
                 model=config.model,
                 messages=messages,
                 stream=False,
-                max_tokens=_WARMUP_MAX_TOKENS,
-                timeout=config.aux_request_timeout_seconds,
+                max_tokens=warmup_max_tokens,
+                timeout=warmup_timeout,
+                **thinking_kwargs,
             )
 
         # Retry-budget guard. Two reasons to abort a retry:

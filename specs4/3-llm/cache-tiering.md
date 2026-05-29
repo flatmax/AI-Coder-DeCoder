@@ -439,15 +439,9 @@ The underlying index data is unchanged by exclusion — the symbol and doc index
 - **Agents inherit the parent's tier distribution at spawn**; agent flux thereafter is independent.
 - **The flux variant is fixed at tracker construction.** Mid-session switching is not supported.
 
-## Cache Warmer — Currently Unplugged
+## Cache Warmer
 
-**Status (2025).** The cache warmer is currently disabled at the entry point regardless of any config flag. Field testing of the D34 / D34a stack revealed that every firing stalls the event loop for ~120 seconds inside the ``await self._broadcast_event_async(...)`` calls. Broadcasts that complete in sub-milliseconds for normal user-turn events take roughly 2 minutes when the warmer is mid-cycle. The cause is not in the warmer's own code paths (prompt assembly is instant, executor handoff is instant, the LiteLLM call itself completes in 3-15 seconds); the broadcasts are being queued or held somewhere in the WebSocket / jrpc-oo serialization path during warm-up firings. Combined with the timing drift that produces 0% cache hit rate on the firings that do complete, the warmer is currently negative-value.
-
-The D34 (executor isolation, circuit breaker, dedicated thread pool) and D34a (wall-clock deadline anchoring) infrastructure remains in place. Re-enabling requires diagnosing the WebSocket-side stall — that work is parked, not abandoned.
-
-To re-enable for diagnosis: remove the early return in :meth:`CacheWarmer.start`, set ``cache_warmup.enabled: true`` in ``app.json``, and pass ``--experimental`` on the CLI.
-
-## Cache Warmer (parked design — does not currently fire)
+**Status (D38).** The cache warmer is plugged and firing. The D34 / D34a observation that broadcast `await`s could stall the event loop for ~120 seconds is mitigated structurally rather than root-caused: each `cacheWarmup*` broadcast is wrapped in `asyncio.wait_for(..., timeout=5.0)` so a hung WebSocket / jrpc-oo send affects only one cycle (logs and continues; next cycle gets a fresh budget). The silent-phase polling cadence is tightened from 5s to 1s for OS-level idle-throttling resistance — App Nap and similar mechanisms aggressively park processes that look idle, and a 1-second poll keeps the process visibly active to the kernel. Field observation confirms warm-up cycles consistently hit 99% cache read with sub-second drift.
 
 Anthropic's prompt cache uses a 5-minute sliding TTL — any read or write extends the window. During interactive coding sessions the user often pauses for longer than 5 minutes to think, read, or context-switch. When the user returns, the cached prefix has expired and the next turn pays the full cache-write price (1.25× input on Claude) to re-prime.
 
@@ -458,18 +452,20 @@ The cache warmer is a background timer that issues a tiny `litellm.completion` c
 - Reuses the EXACT cached prefix that a real turn would. Messages up to and including the last `cache_control` marker (system + L0 history + L1/L2/L3 pairs) are byte-identical to a real turn, assembled via the same code path as `stream_chat`.
 - **Post-cache content omitted.** Everything after the last `cache_control` marker — Active tier (selected files + active history), file tree, URL context, review context — is skipped. The cached prefix bytes are unchanged so L0–L3 cache hits still land. Saves input tokens on every firing.
 - Appends a minimal user message asking for a 1-token acknowledgement.
-- Sets `max_tokens=2`.
-- Disables reasoning regardless of session config.
-- No streaming. Synchronous completion via the aux executor.
+- Sets `max_tokens=2` for non-reasoning calls. When the warmer mirrors a reasoning posture (next bullet), `max_tokens` is raised to `budget_tokens + 100` for legacy thinking models so the call has room for the reasoning pass plus a minimal completion. Adaptive-thinking models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) keep `max_tokens=2` because they bound their own reasoning internally.
+- **Mirrors the most recent user call's reasoning posture (D38).** The streaming pipeline writes the resolved per-request reasoning bool onto `service._last_reasoning_used` after every user call; the warmer reads it on each firing. UI toggle is the single user-facing control — when the user has reasoning ON, warm-ups fire reasoning-shaped calls so the cached prefix matches the slot the next real turn will read. When OFF, warm-ups fire cheap non-reasoning pings. One-cycle adaptation lag on toggle change. Earlier revisions disabled reasoning unconditionally or read `config.reasoning_enabled`; both shapes wrote a different Bedrock / Anthropic cache slot than reasoning-enabled user calls would read from, so reasoning user calls landed cold-writes even when the warmer was firing on schedule.
+- Reasoning warm-ups use the reasoning request-timeout (`config.reasoning_request_timeout_seconds`, default 1200s) rather than the aux-call timeout (60s) — adaptive thinking can spend several minutes server-side before the first byte streams.
+- No streaming. Synchronous completion via the dedicated warmer executor (D34).
 
 The result is discarded. Warm-ups never enter conversation history, never broadcast `userMessage` or `streamComplete`, never touch the stability tracker.
 
 ### Lifecycle
 
-- `start()` schedules the first firing.
-- `cancel()` stops the pending timer without rescheduling. Called from `disable()` and from `reset()`.
-- `reset(reason)` cancels and reschedules. Called at the start of every `stream_chat` invocation (anchoring the next firing 240s from user-send) AND at the end as defensive coverage for early-exit paths.
-- `disable(reason)` cancels and stays inert until `enable()` is called explicitly.
+- `start()` schedules the first firing AND spawns the diagnostic event-loop heartbeat task.
+- `cancel()` stops the pending timer without rescheduling. Called by `disable()` and as part of `reset()`. Bumps a generation counter so any in-flight retry sleeping in the executor thread aborts before its next attempt rather than firing a stale provider call.
+- `reset(reason)` cancels and reschedules; restarts the heartbeat so each user-call cycle gets a fresh diagnostic window. Called at the START of every `stream_chat` invocation (anchoring the next firing `interval_seconds` from user-send). Heartbeat warnings are then attributable to work this specific call did, not aggregated noise from earlier idle time.
+- `disable(reason)` cancels, stops the heartbeat, and stays inert until `enable()` is called.
+- `enable()` re-arms after a runtime disable (circuit breaker tripping, prior firing failure). No-op when `cache_warmup.enabled: false` in config — config-level disable requires editing `app.json` first. D38 added this affordance so circuit-breaker tripping no longer requires application restart to recover.
 
 ### Two-phase wait with visible countdown
 
@@ -506,8 +502,8 @@ Single-instance per `LLMService`. Only the main conversation is warmed.
 
 Two fields in the `cache_warmup` section of `app.json`:
 
-- `enabled` (default `true`)
-- `interval_seconds` (default `270`)
+- `enabled` (default `false` — bundled config; operators opt in)
+- `interval_seconds` (default `240` — clamped to `_CACHE_TTL_SECONDS - 60 = 240s`; larger configured values are silently lowered with a warning)
 
 ### UI surfacing
 
