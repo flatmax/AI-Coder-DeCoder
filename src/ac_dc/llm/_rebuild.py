@@ -267,16 +267,18 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     .initialize_dir_blocks` consumes, then hands it over for
     the quartile-split mtime-based tier seeding.
 
-    Three key families:
+    Mode-gated, mirroring
+    :func:`ac_dc.llm._stability._enumerate_dir_blocks`:
 
-    - ``symbols:<dir>`` — directories that contain at least
-      one file with a symbol-index block.
-    - ``docs:<dir>`` — directories with at least one
-      doc-outline block.
-    - ``plain_files:<dir>`` — directories whose listed files
-      are not covered by either index (or are partially
-      covered, with the uncovered files becoming the block's
-      content).
+    - ``symbols:<dir>`` — code mode only.
+    - ``docs:<dir>`` — doc mode only.
+    - ``plain_files:<dir>`` — both modes; subtracts files
+      already covered by the active-mode index.
+
+    Cross-reference mode brings the opposite-mode index
+    in on top via the cross-ref seeding step in
+    :func:`rebuild_cache_impl`; this function emits only
+    the primary-mode keys.
 
     The mtime for each key is the most recent file mtime
     inside that directory — :meth:`Repo.get_directory_mtime`
@@ -293,18 +295,19 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
     )
 
     excluded = _excluded_set(service)
+    mode = service._context.mode
     keys_with_mtimes: list[tuple[str, float, int]] = []
     seen_dirs: set[str] = set()
 
-    # Collect directories from the symbol index. Render each
-    # block here and capture its measured token count so the
-    # cache viewer shows real numbers immediately after a
-    # rebuild — rather than the bin-packing placeholder
-    # until the first turn replays update_stability.
-    # Skip directories whose every indexed file is on the
-    # user's exclusion list — the rendered block would be
-    # empty and the entry would only litter the cache view.
-    if service._symbol_index is not None:
+    # symbols:<dir> — code mode only. Render each block here
+    # and capture its measured token count so the cache
+    # viewer shows real numbers immediately after a rebuild
+    # rather than the bin-packing placeholder until the
+    # first turn replays update_stability. Skip directories
+    # whose every indexed file is on the user's exclusion
+    # list — the rendered block would be empty and the
+    # entry would only litter the cache view.
+    if mode == Mode.CODE and service._symbol_index is not None:
         try:
             symbol_paths = list(
                 service._symbol_index._all_symbols.keys()
@@ -336,43 +339,43 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
             )
             seen_dirs.add(directory)
 
-    # Collect directories from the doc index. Same exclusion
-    # filter — a directory whose every doc file is excluded
-    # contributes no content and should not be seeded.
-    try:
-        doc_paths = list(service._doc_index._all_outlines.keys())
-    except Exception:
-        doc_paths = []
-    doc_dirs: set[str] = set()
-    for path in doc_paths:
-        doc_dirs.add(
-            path[: path.rfind("/")] if "/" in path else ""
-        )
-    for directory in doc_dirs:
-        if not _dir_has_unexcluded_indexed_file(
-            doc_paths, directory, excluded
-        ):
-            continue
-        mtime = repo.get_directory_mtime(directory)
+    # docs:<dir> — doc mode only. Same exclusion filter as
+    # symbols above.
+    if mode == Mode.DOC:
         try:
-            block = service._doc_index.get_dir_docs_block(directory)
-            tokens = service._counter.count(block) if block else 0
+            doc_paths = list(service._doc_index._all_outlines.keys())
         except Exception:
-            tokens = 0
-        keys_with_mtimes.append(
-            (f"docs:{directory}", mtime, tokens)
-        )
-        seen_dirs.add(directory)
+            doc_paths = []
+        doc_dirs: set[str] = set()
+        for path in doc_paths:
+            doc_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in doc_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                doc_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._doc_index.get_dir_docs_block(directory)
+                tokens = service._counter.count(block) if block else 0
+            except Exception:
+                tokens = 0
+            keys_with_mtimes.append(
+                (f"docs:{directory}", mtime, tokens)
+            )
+            seen_dirs.add(directory)
 
-    # Plain-files dir-blocks: every directory whose listing
-    # has at least one file NOT already covered by the
-    # symbol or doc index AND not on the user's exclusion
-    # list. Files that appear in either index are subtracted
-    # — their filenames are already visible through the
-    # corresponding symbols:/docs: block, and listing them
-    # again is pure duplication. When every file in a
-    # directory is indexed or excluded, the plain-files
-    # block is omitted entirely.
+    # plain_files:<dir> — both modes. Every directory whose
+    # listing has at least one file NOT already covered by
+    # the active-mode index AND not on the user's exclusion
+    # list. Files that appear in the active-mode index are
+    # subtracted — their filenames are already visible
+    # through the corresponding symbols:/docs: block, and
+    # listing them again is pure duplication. When every
+    # file in a directory is indexed or excluded, the
+    # plain-files block is omitted entirely.
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:

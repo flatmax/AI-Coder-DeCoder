@@ -12,9 +12,11 @@ The cache holds three classes of content. Every indexed file is represented in t
 
 **Dir-blocks** — the bulk of the cache. One block per `(directory, content_type)` where `content_type ∈ {symbols, docs, plain_files}`:
 
-- `symbols:<dir>` — concatenated symbol-table entries for source files in `<dir>` that aren't currently full-text in Active.
-- `docs:<dir>` — concatenated doc-outline entries for documents in `<dir>` that aren't currently full-text in Active.
-- `plain_files:<dir>` — list of filenames in `<dir>` for files that have neither a symbol table nor a doc index (configs, data, assets, fixtures). The union of `plain_files` blocks across the repo replaces the synthetic `meta:file_tree` entry from earlier revisions.
+- `symbols:<dir>` — concatenated symbol-table entries for source files in `<dir>` that aren't currently full-text in Active. Emitted when the symbol index is *surfacing* in the current mode: code mode primary, or any mode with cross-reference enabled.
+- `docs:<dir>` — concatenated doc-outline entries for documents in `<dir>` that aren't currently full-text in Active. Emitted when the doc index is *surfacing* in the current mode: doc mode primary, or any mode with cross-reference enabled.
+- `plain_files:<dir>` — list of filenames in `<dir>` for files NOT covered by any *currently surfacing* index in the active mode. Emitted in every mode. The union of `plain_files` blocks across the repo guarantees that every repo file is at minimum visible by name in every mode, replacing the synthetic `meta:file_tree` entry from earlier revisions.
+
+The active-mode gating means a markdown file in code mode (no cross-reference) is visible by filename via `plain_files:<dir>` — its outline is not surfaced because the doc index is not surfacing in this mode. Cross-reference mode brings the opposite-mode index in on top, at which point the file moves from `plain_files:` to `docs:`.
 
 A file in Active as full text is **removed** from its dir-block — the block shrinks and is teleported (see Edit Invariant). When all files in a directory are pulled into Active full-text, that dir-block has zero entries and is removed entirely from the cache, not retained as an empty block.
 
@@ -387,9 +389,18 @@ Broken tiers set and change log cleared at start of each update cycle.
 
 ## Index Inclusion
 
-Under D36, **every indexed file is always represented in the prompt** — either as full text in Active (selected for edit) or as an entry in its directory's dir-block (in any cached tier). There is no monolithic L0 aggregate map; coverage is distributed across the dir-block set.
+Under D36, **every repo file is always represented in the prompt** — either as full text in Active (selected for edit) or as an entry in its directory's dir-block (in any cached tier). There is no monolithic L0 aggregate map; coverage is distributed across the dir-block set.
+
+The form a file takes depends on the active mode and cross-reference state:
+
+- **Active full-text** if the user has selected it for editing.
+- **`symbols:<dir>` entry** when in code mode (or any mode with cross-reference) and the file is parsed by the symbol index.
+- **`docs:<dir>` entry** when in doc mode (or any mode with cross-reference) and the file is parsed by the doc index.
+- **`plain_files:<dir>` entry** otherwise — including files that *are* indexed but whose index is not currently surfacing. A `.md` file in code mode without cross-reference appears here, by filename only; the LLM sees the file exists but cannot read its outline until cross-reference toggles on or the user switches modes.
 
 A file selected for editing appears in exactly one place per turn: its full text in Active. It is removed from its dir-block at the moment it enters Active. There is no "structural summary in L0 + full text in lower tier" duplication that D27 had to manage with the system-prompt authority rule.
+
+The mode-gated subtraction means `plain_files:<dir>` blocks change shape on mode switches and cross-reference toggles — files migrate between `plain_files:` and `symbols:`/`docs:` as the active index set changes. Each migration is a content-change for both blocks involved, which teleports them to Active under the edit invariant. The next few turns of flux re-distribute them across L1–L3.
 
 ### User-Excluded Files
 

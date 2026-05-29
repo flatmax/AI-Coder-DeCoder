@@ -90,19 +90,32 @@ def _indexed_paths_in_dir(
     service: "LLMService",
     directory: str,
 ) -> set[str]:
-    """Return the set of paths in ``directory`` covered by either index.
+    """Return the set of paths in ``directory`` covered by an active index.
 
-    A file is "covered" when it appears as a key in the
-    symbol index or the doc index — its content already
-    rides the cascade via the corresponding ``symbols:``
-    or ``docs:`` dir-block, so listing its filename in
-    ``plain_files:<directory>`` would be pure duplication.
+    A file is "covered" when it appears as a key in an
+    index that is *currently surfacing dir-blocks to the
+    LLM* — its content already rides the cascade via the
+    corresponding ``symbols:`` or ``docs:`` dir-block, so
+    listing its filename in ``plain_files:<directory>``
+    would be pure duplication.
+
+    Mode-aware: in code mode the symbol index is primary,
+    in doc mode the doc index is primary; cross-reference
+    additionally engages the opposite index on top of the
+    primary one. A file covered only by an index that is
+    *not* surfacing dir-blocks this turn must remain
+    visible through plain_files.
 
     Used by both initial seeding and per-turn refresh to
     subtract indexed files from the plain-files block.
     """
+    mode = service._context.mode
+    xref = service._cross_ref_enabled
+    use_symbols = mode == Mode.CODE or xref
+    use_docs = mode == Mode.DOC or xref
+
     covered: set[str] = set()
-    if service._symbol_index is not None:
+    if use_symbols and service._symbol_index is not None:
         try:
             for path in service._symbol_index._all_symbols.keys():
                 parent = (
@@ -112,37 +125,45 @@ def _indexed_paths_in_dir(
                     covered.add(path)
         except Exception:
             pass
-    try:
-        for path in service._doc_index._all_outlines.keys():
-            parent = (
-                path[: path.rfind("/")] if "/" in path else ""
-            )
-            if parent == directory:
-                covered.add(path)
-    except Exception:
-        pass
+    if use_docs:
+        try:
+            for path in service._doc_index._all_outlines.keys():
+                parent = (
+                    path[: path.rfind("/")] if "/" in path else ""
+                )
+                if parent == directory:
+                    covered.add(path)
+        except Exception:
+            pass
     return covered
 
 
 def _enumerate_dir_blocks(
     service: "LLMService",
 ) -> list[tuple[str, float, int]]:
-    """Return ``[(key, mtime, tokens), ...]`` for all primary-mode dir-blocks.
+    """Return ``[(key, mtime, tokens), ...]`` for primary-mode dir-blocks.
 
     Walks the index and repo to produce three families of
-    keys:
+    keys, gated by the active mode:
 
-    - ``symbols:<dir>`` — directories with at least one
-      file in the symbol index.
-    - ``docs:<dir>`` — directories with at least one
-      file in the doc index.
-    - ``plain_files:<dir>`` — directories with at least
-      one file NOT already covered by the symbol or doc
-      index. Files that appear in either index are
-      subtracted from the plain-files listing — their
-      filenames are already visible to the LLM through
-      the index block, and listing them again would
-      duplicate tokens for no gain.
+    - ``symbols:<dir>`` — emitted in code mode only;
+      directories with at least one file in the symbol
+      index.
+    - ``docs:<dir>`` — emitted in doc mode only;
+      directories with at least one file in the doc
+      index.
+    - ``plain_files:<dir>`` — emitted in both modes;
+      directories with at least one file NOT already
+      covered by the *active mode's* index. Files that
+      appear in the active-mode index are subtracted from
+      the plain-files listing — their filenames are
+      already visible to the LLM through the index block,
+      and listing them again would duplicate tokens for
+      no gain.
+
+    Cross-reference mode brings the opposite-mode index in
+    on top via :func:`seed_cross_reference_items`; this
+    function only emits the *primary* mode's keys.
 
     The keys are deduplicated within each family (a single
     directory contributes one of each kind it qualifies for).
@@ -166,10 +187,11 @@ def _enumerate_dir_blocks(
         return []
 
     excluded = _excluded_set(service)
+    mode = service._context.mode
     keys: list[tuple[str, float, int]] = []
 
-    # symbols:<dir>
-    if service._symbol_index is not None:
+    # symbols:<dir> — code mode only
+    if mode == Mode.CODE and service._symbol_index is not None:
         try:
             symbol_paths = list(
                 service._symbol_index._all_symbols.keys()
@@ -198,33 +220,35 @@ def _enumerate_dir_blocks(
                 tokens = 0
             keys.append((f"symbols:{directory}", mtime, tokens))
 
-    # docs:<dir>
-    try:
-        doc_paths = list(service._doc_index._all_outlines.keys())
-    except Exception:
-        doc_paths = []
-    doc_dirs: set[str] = set()
-    for path in doc_paths:
-        doc_dirs.add(
-            path[: path.rfind("/")] if "/" in path else ""
-        )
-    for directory in doc_dirs:
-        if not _dir_has_unexcluded_indexed_file(
-            doc_paths, directory, excluded
-        ):
-            continue
-        mtime = repo.get_directory_mtime(directory)
+    # docs:<dir> — doc mode only
+    if mode == Mode.DOC:
         try:
-            block = service._doc_index.get_dir_docs_block(directory)
-            tokens = service._counter.count(block) if block else 0
+            doc_paths = list(service._doc_index._all_outlines.keys())
         except Exception:
-            tokens = 0
-        keys.append((f"docs:{directory}", mtime, tokens))
+            doc_paths = []
+        doc_dirs: set[str] = set()
+        for path in doc_paths:
+            doc_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in doc_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                doc_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._doc_index.get_dir_docs_block(directory)
+                tokens = service._counter.count(block) if block else 0
+            except Exception:
+                tokens = 0
+            keys.append((f"docs:{directory}", mtime, tokens))
 
     # plain_files:<dir> — subtract files already covered by
-    # either index, and drop user-excluded files. When every
-    # file in a directory is indexed or excluded, the
-    # plain-files block has nothing to add and is omitted.
+    # the active-mode index, and drop user-excluded files.
+    # When every file in a directory is indexed or excluded,
+    # the plain-files block has nothing to add and is
+    # omitted.
     try:
         by_dir = repo.get_files_by_directory()
     except Exception:
