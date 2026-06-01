@@ -153,3 +153,98 @@ class TestNonCredentialErrorsUnaffected:
         exc = APIConnectionError("connection refused")
         info = _classify_litellm_error(_fake_litellm(), exc)
         assert info["error_type"] != "authentication"
+
+
+class TestBedrockMarketplaceErrors:
+    """Bedrock IAM / Marketplace authorization failures.
+
+    LiteLLM wraps these as ``APIConnectionError`` ("BedrockException")
+    but they're permanent permission errors — no IAM policy is going
+    to materialise during a 60s backoff window. Classifying as
+    ``authentication`` (non-retryable) ensures the retry loop bails
+    out instead of burning 11 attempts, and the UI toast points the
+    user at IAM / Marketplace settings rather than suggesting a
+    transient network blip.
+
+    The reproduction case is the user's screenshot: BedrockException
+    JSON body containing "Model access is denied due to IAM" and
+    explicit ``aws-marketplace:Subscribe`` / ``ViewSubscriptions``
+    permission names.
+    """
+
+    def test_iam_denial_marker_classifies_as_authentication(self) -> None:
+        """The exact marker string from the user-reported error."""
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            'BedrockException - b\'{"message":"Model access is denied '
+            'due to IAM user or service role is not authorized to '
+            'perform the required AWS Marketplace actions '
+            '(aws-marketplace:ViewSubscriptions, '
+            'aws-marketplace:Subscribe) to enable access to this '
+            'model."}\''
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+
+    def test_marketplace_subscribe_marker(self) -> None:
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            "litellm wrapper: missing aws-marketplace:Subscribe permission"
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+
+    def test_marketplace_view_subscriptions_marker(self) -> None:
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            "missing aws-marketplace:ViewSubscriptions"
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+
+    def test_aws_marketplace_subscription_marker(self) -> None:
+        """Some error variants reference the subscription itself."""
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            "Your AWS Marketplace subscription for this model "
+            "cannot be completed at this time."
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+
+    def test_access_denied_exception_marker(self) -> None:
+        """Bedrock surfaces ``AccessDeniedException`` for IAM denials."""
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            "BedrockException - AccessDeniedException: User: "
+            "arn:aws:iam::123:role/foo is not authorized to perform: "
+            "bedrock:InvokeModel"
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+
+    def test_message_surfaces_real_cause(self) -> None:
+        """Toast should show the IAM detail, not the LiteLLM wrapper."""
+        class APIConnectionError(Exception):
+            pass
+
+        exc = APIConnectionError(
+            "litellm.APIConnectionError: BedrockException - "
+            "Model access is denied due to IAM user or service "
+            "role is not authorized"
+        )
+        info = _classify_litellm_error(_fake_litellm(), exc)
+        assert info["error_type"] == "authentication"
+        # The classifier extracts the sentence around the marker
+        # rather than passing through LiteLLM's whole wrapper.
+        assert "Model access is denied due to IAM" in info["message"]

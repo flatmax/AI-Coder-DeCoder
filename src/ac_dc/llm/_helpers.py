@@ -788,6 +788,21 @@ def _classify_litellm_error(
         "The security token included in the request is expired",
         "The security token included in the request is invalid",
         "aws sso login",
+        # Bedrock IAM / Marketplace authorization failures.
+        # These are permanent: the IAM principal lacks
+        # aws-marketplace:Subscribe / ViewSubscriptions, or
+        # the Marketplace subscription is incomplete. Retrying
+        # cannot fix either — surface as authentication so the
+        # retry loop fails fast and the UI toast points the
+        # user at IAM / Marketplace settings.
+        "Model access is denied due to IAM",
+        "not authorized to perform the required AWS Marketplace",
+        "aws-marketplace:Subscribe",
+        "aws-marketplace:ViewSubscriptions",
+        "AWS Marketplace subscription",
+        "is not authorized to perform",
+        "AccessDeniedException",
+        "UnauthorizedOperation",
     )
     # Scan both the flattened exception string and the
     # repr of args — LiteLLM sometimes formats its wrapper
@@ -1019,6 +1034,13 @@ def retry_litellm_completion(
             # when LiteLLM wraps botocore's
             # TokenRetrievalError as APIConnectionError
             # without preserving the exception chain.
+            #
+            # Bedrock IAM / Marketplace authorization
+            # failures land here too: LiteLLM wraps them
+            # as APIConnectionError ("BedrockException")
+            # but they're permanent permission errors —
+            # no IAM policy is going to materialise during
+            # a 60s backoff window.
             _UNAMBIGUOUS_AUTH_MARKERS = (
                 "Token has expired and refresh failed",
                 "Error when retrieving token from sso",
@@ -1026,6 +1048,11 @@ def retry_litellm_completion(
                 "TokenRetrievalError",
                 "InvalidGrantException",
                 "UnauthorizedSSOTokenError",
+                "Model access is denied due to IAM",
+                "not authorized to perform the required AWS Marketplace",
+                "aws-marketplace:Subscribe",
+                "AWS Marketplace subscription",
+                "AccessDeniedException",
             )
             try:
                 _flat = str(exc)

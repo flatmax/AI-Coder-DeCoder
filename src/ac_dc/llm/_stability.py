@@ -108,14 +108,28 @@ def _indexed_paths_in_dir(
 
     Used by both initial seeding and per-turn refresh to
     subtract indexed files from the plain-files block.
-    """
-    mode = service._context.mode
-    xref = service._cross_ref_enabled
-    use_symbols = mode == Mode.CODE or xref
-    use_docs = mode == Mode.DOC or xref
 
+    Coverage is mode-INDEPENDENT. Per
+    ``specs4/3-llm/cache-tiering.md`` § Content Categories
+    Tracked, ``plain_files:<dir>`` lists files that have
+    "neither a symbol table nor a doc index" — so a file
+    present in *either* index is subtracted from the
+    plain-files listing regardless of the active mode. A
+    doc-indexed file viewed in code mode still has its
+    filename surfaced (via the doc index when cross-ref
+    engages, or simply as a known-indexed file that
+    shouldn't be duplicated into plain_files), so listing
+    it in plain_files would be redundant either way.
+
+    Earlier revisions gated this on the active mode
+    (``use_docs = mode == Mode.DOC or xref``), which left
+    doc-indexed files leaking into ``plain_files`` while in
+    code mode — duplicating their filenames against the
+    doc index. Both indexes are now consulted
+    unconditionally.
+    """
     covered: set[str] = set()
-    if use_symbols and service._symbol_index is not None:
+    if service._symbol_index is not None:
         try:
             for path in service._symbol_index._all_symbols.keys():
                 parent = (
@@ -125,16 +139,15 @@ def _indexed_paths_in_dir(
                     covered.add(path)
         except Exception:
             pass
-    if use_docs:
-        try:
-            for path in service._doc_index._all_outlines.keys():
-                parent = (
-                    path[: path.rfind("/")] if "/" in path else ""
-                )
-                if parent == directory:
-                    covered.add(path)
-        except Exception:
-            pass
+    try:
+        for path in service._doc_index._all_outlines.keys():
+            parent = (
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+            if parent == directory:
+                covered.add(path)
+    except Exception:
+        pass
     return covered
 
 
