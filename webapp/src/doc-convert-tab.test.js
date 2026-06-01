@@ -45,11 +45,6 @@ function mountTab(props = {}) {
  * Install a fake RPC proxy. Stubs every method the tab
  * might call with sensible defaults; callers pass
  * `methods` to override per-test.
- *
- * The default `is_clean` returns true (clean tree) so
- * tests don't accidentally trip the dirty-tree gate
- * when they don't care about it. Tests covering the
- * dirty-tree banner explicitly override.
  */
 function publishFakeRpc(methods = {}) {
   const defaults = {
@@ -64,7 +59,6 @@ function publishFakeRpc(methods = {}) {
       status: 'ok',
       results: [],
     }),
-    'Repo.is_clean': () => true,
   };
   const merged = { ...defaults, ...methods };
   const proxy = {};
@@ -362,9 +356,7 @@ describe('DocConvertTab file scanning', () => {
 
   it('skips re-scan while one is already in flight', async () => {
     // Defensive against rapid files-modified bursts. The
-    // scan-in-flight guard short-circuits; cleanliness
-    // re-check runs independently (Commit 5 — it's
-    // cheap and doesn't collide).
+    // scan-in-flight guard short-circuits.
     let resolveFirstScan;
     const firstScanPromise = new Promise((r) => {
       resolveFirstScan = r;
@@ -593,211 +585,6 @@ describe('DocConvertTab filter', () => {
     await t.updateComplete;
     const toolbar = t.shadowRoot.querySelector('.toolbar .count');
     expect(toolbar.textContent).toContain('2 visible');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Clean-tree gate (Commit 5)
-// ---------------------------------------------------------------------------
-
-describe('DocConvertTab clean-tree gate', () => {
-  it('fetches Repo.is_clean on RPC ready', async () => {
-    const isClean = vi.fn().mockResolvedValue(true);
-    publishFakeRpc({ 'Repo.is_clean': isClean });
-    const t = mountTab();
-    await settle(t);
-    expect(isClean).toHaveBeenCalledOnce();
-  });
-
-  it('stores the boolean result', async () => {
-    publishFakeRpc({ 'Repo.is_clean': () => true });
-    const t = mountTab();
-    await settle(t);
-    expect(t._treeClean).toBe(true);
-  });
-
-  it('stores false for a dirty tree', async () => {
-    publishFakeRpc({ 'Repo.is_clean': () => false });
-    const t = mountTab();
-    await settle(t);
-    expect(t._treeClean).toBe(false);
-  });
-
-  it('degrades to null on RPC failure', async () => {
-    const consoleSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      publishFakeRpc({
-        'Repo.is_clean': () => {
-          throw new Error('git unavailable');
-        },
-      });
-      const t = mountTab();
-      await settle(t);
-      expect(t._treeClean).toBeNull();
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it('refetches is_clean on files-modified', async () => {
-    const isClean = vi.fn().mockResolvedValue(true);
-    publishFakeRpc({ 'Repo.is_clean': isClean });
-    const t = mountTab();
-    await settle(t);
-    expect(isClean).toHaveBeenCalledTimes(1);
-    pushEvent('files-modified', {});
-    await settle(t);
-    expect(isClean).toHaveBeenCalledTimes(2);
-  });
-
-  it('renders dirty-tree banner when tree is dirty', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => false,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    const banner = t.shadowRoot.querySelector('.dirty-tree-banner');
-    expect(banner).toBeTruthy();
-    expect(banner.textContent.toLowerCase()).toContain('uncommitted');
-    expect(banner.textContent.toLowerCase()).toContain('commit');
-  });
-
-  it('hides dirty-tree banner when tree is clean', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => true,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    expect(
-      t.shadowRoot.querySelector('.dirty-tree-banner'),
-    ).toBeNull();
-  });
-
-  it('hides dirty-tree banner when cleanliness is null (probe failed)', async () => {
-    // null means the probe hasn't completed or failed —
-    // don't flash the banner. Backend's gate is the
-    // final authority.
-    const consoleSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      publishFakeRpc({
-        'Repo.is_clean': () => {
-          throw new Error('git unavailable');
-        },
-      });
-      const t = mountTab();
-      await settle(t);
-      expect(
-        t.shadowRoot.querySelector('.dirty-tree-banner'),
-      ).toBeNull();
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it('Convert button disabled when tree is dirty', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => false,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    t._selected = new Set(['a.docx']);
-    await t.updateComplete;
-    const convertBtn = Array.from(
-      t.shadowRoot.querySelectorAll('.toolbar-button'),
-    ).find((b) => b.textContent.trim().startsWith('Convert'));
-    expect(convertBtn.disabled).toBe(true);
-  });
-
-  it('Convert button tooltip prioritises dirty-tree message', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => false,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    t._selected = new Set(['a.docx']);
-    await t.updateComplete;
-    const convertBtn = Array.from(
-      t.shadowRoot.querySelectorAll('.toolbar-button'),
-    ).find((b) => b.textContent.trim().startsWith('Convert'));
-    expect(convertBtn.title.toLowerCase()).toContain('commit');
-  });
-
-  it('Convert button enabled when tree clean and files selected', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => true,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    t._selected = new Set(['a.docx']);
-    await t.updateComplete;
-    const convertBtn = Array.from(
-      t.shadowRoot.querySelectorAll('.toolbar-button'),
-    ).find((b) => b.textContent.trim().startsWith('Convert'));
-    expect(convertBtn.disabled).toBe(false);
-  });
-
-  it('Convert button disabled when no files selected (independent of tree)', async () => {
-    publishFakeRpc({
-      'Repo.is_clean': () => true,
-      'DocConvert.scan_convertible_files': () => [
-        fileEntry('a.docx'),
-      ],
-    });
-    const t = mountTab();
-    await settle(t);
-    // Selection is empty.
-    const convertBtn = Array.from(
-      t.shadowRoot.querySelectorAll('.toolbar-button'),
-    ).find((b) => b.textContent.trim().startsWith('Convert'));
-    expect(convertBtn.disabled).toBe(true);
-    expect(convertBtn.title.toLowerCase()).toContain('select files');
-  });
-
-  it('Convert button enabled when cleanliness is null (backend authority)', async () => {
-    // null state doesn't block — the backend's gate is
-    // the final authority when the user clicks.
-    const consoleSpy = vi
-      .spyOn(console, 'warn')
-      .mockImplementation(() => {});
-    try {
-      publishFakeRpc({
-        'Repo.is_clean': () => {
-          throw new Error('unavailable');
-        },
-        'DocConvert.scan_convertible_files': () => [
-          fileEntry('a.docx'),
-        ],
-      });
-      const t = mountTab();
-      await settle(t);
-      t._selected = new Set(['a.docx']);
-      await t.updateComplete;
-      const convertBtn = Array.from(
-        t.shadowRoot.querySelectorAll('.toolbar-button'),
-      ).find((b) => b.textContent.trim().startsWith('Convert'));
-      expect(convertBtn.disabled).toBe(false);
-    } finally {
-      consoleSpy.mockRestore();
-    }
   });
 });
 
