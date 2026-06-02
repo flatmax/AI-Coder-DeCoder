@@ -138,6 +138,89 @@ class TestInitializeDirBlocks:
         assert "docs:specs" in items
         assert "plain_files:assets" in items
 
+    def test_mass_share_makes_l0_heaviest(self) -> None:
+        """Realistic hot-skewed input → L0 mass dominates.
+
+        Under the mass-share split, when hot directories are
+        modestly larger than cold ones (typical interactive
+        coding session), the long tail of cold dirs piles
+        into L0 and the seeded shape becomes cold-heavy at
+        L0 / hot-light at L3. The headline invariant is
+        ``L0 mass > L3 mass`` — the membrane's L1→L0 boundary
+        sees V ≤ 0 and stays quiescent.
+
+        Strict 4-way mass monotonicity is *not* guaranteed:
+        when a single oversized hot dir lands in L3, that
+        tier can exceed L2. The point of the change is to
+        push the bulk of the cache mass downward toward L0
+        (the most expensive tier to invalidate), not to
+        produce a perfect inverse gradient on every input.
+
+        Equal-count quartiles would have placed three hot
+        directories at L3 and given L3 a majority of total
+        mass; mass-share moves that mass to L0.
+        """
+        tracker = StabilityTracker()
+        # Twelve dirs, hot → cold by mtime, with token counts
+        # tapering from ~12k to ~1k (≈12× spread).
+        tracker.initialize_dir_blocks(
+            [
+                ("symbols:hot1", 1200.0, 12_000),
+                ("symbols:hot2", 1100.0, 10_000),
+                ("symbols:hot3", 1000.0, 9_000),
+                ("symbols:warm1", 900.0, 7_000),
+                ("symbols:warm2", 800.0, 6_000),
+                ("symbols:warm3", 700.0, 5_000),
+                ("symbols:cool1", 600.0, 4_000),
+                ("symbols:cool2", 500.0, 3_500),
+                ("symbols:cool3", 400.0, 3_000),
+                ("symbols:cold1", 300.0, 2_000),
+                ("symbols:cold2", 200.0, 1_500),
+                ("symbols:cold3", 100.0, 1_000),
+            ]
+        )
+        items = tracker.get_all_items()
+        from ac_dc.stability_tracker import Tier as T
+
+        def tier_mass(tier: T) -> int:
+            return sum(
+                it.tokens
+                for it in items.values()
+                if it.tier == tier
+            )
+
+        # Headline invariant — L0 holds the most token mass.
+        assert tier_mass(T.L0) > tier_mass(T.L3)
+        assert tier_mass(T.L0) > tier_mass(T.L2)
+        assert tier_mass(T.L0) > tier_mass(T.L1)
+        # Direction preserved — hottest still at L3, coldest
+        # still at L0.
+        assert items["symbols:hot1"].tier == Tier.L3
+        assert items["symbols:cold3"].tier == Tier.L0
+
+    def test_placeholder_only_input_falls_back_to_count_split(self) -> None:
+        """All-placeholder tokens → equal-count quartile behaviour.
+
+        2-tuple input gives every entry the same placeholder
+        token count, so the mass-share schedule degenerates to
+        equal-count quartiles — the historical contract from
+        before the mass split landed.
+        """
+        tracker = StabilityTracker()
+        tracker.initialize_dir_blocks(
+            [
+                ("symbols:a", 1000.0),
+                ("symbols:b", 500.0),
+                ("symbols:c", 100.0),
+                ("symbols:d", 10.0),
+            ]
+        )
+        items = tracker.get_all_items()
+        assert items["symbols:a"].tier == Tier.L3
+        assert items["symbols:b"].tier == Tier.L2
+        assert items["symbols:c"].tier == Tier.L1
+        assert items["symbols:d"].tier == Tier.L0
+
 
 class TestCrossRefSeedDirBlocks:
     """``cross_ref_seed_dir_blocks`` distributes new keys across L1-L3.

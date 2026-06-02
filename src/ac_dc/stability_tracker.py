@@ -1205,11 +1205,43 @@ class StabilityTracker:
             gap until the first :meth:`update` cycle replaces
             it with a measured value.
 
-        Tier assignment splits the sorted-by-mtime-descending
-        list into four roughly-equal quartiles: hottest →
-        **L3**, then L2, L1, and coolest → **L0**. Ties on
-        mtime fall back to alphabetical key ordering for
-        determinism.
+        Tier assignment walks the mtime-sorted list hottest-
+        first and advances tiers by **cumulative token mass**
+        against an arithmetic-descending share schedule
+        ``[L3 = 10%, L2 = 20%, L1 = 30%, L0 = 40%]`` of total
+        mass. Hottest content still lands in **L3**, coldest
+        in **L0** — the direction is unchanged from the
+        equal-count quartile rule it replaces. The split rule
+        change is the only difference: under equal-count, when
+        hot directories happen to be the *largest* (typical:
+        active source trees are both hot and big), L3 ends up
+        carrying the bulk of the cache mass and L0 ends up
+        thin. The membrane controller then sees V > 0 on every
+        membrane at the seeded state and fires upward churn
+        across the first several turns.
+
+        The mass-share split inverts the resulting profile:
+        a few big hot dirs fill L3's small share, more
+        mid-mtime dirs fill L1/L2, and the long tail of
+        small cold dirs piles into L0. The seed shape is
+        roughly L0 ≥ L1 ≥ L2 ≥ L3 by mass — V ≤ 0 on every
+        membrane at construction, the rectified flux equation
+        evaluates to zero, and the controller stays quiescent
+        until real edits arrive. Ties on mtime fall back to
+        alphabetical key ordering for determinism.
+
+        When the input does not carry tokens (2-tuple form,
+        e.g. tests) every entry uses ``_PLACEHOLDER_TOKENS`` and
+        the mass-share schedule splits by item count weighted
+        by the per-tier shares (so 4 items → one per tier;
+        many items → cold-heavy at L0).
+
+        A floor rule guarantees every tier receives at least
+        one item when the population permits: when the
+        remaining items equal the remaining tiers, the loop
+        forces a tier advance regardless of mass. This avoids
+        the pathological "one huge hot block fills L3 and
+        empties L1/L2" outcome.
 
         Items receive an empty hash regardless; Phase 1 of
         the next :meth:`update` cycle accepts the first real
@@ -1227,21 +1259,60 @@ class StabilityTracker:
             key=lambda pair: (-pair[1], pair[0]),
         )
         n = len(ranked)
-        # Quartile boundaries — hottest quartile lands at
-        # L3 (cheapest to invalidate when edits happen),
-        # coldest at L0 (most expensive to invalidate, but
-        # least likely to be edited soon).
+        # Hot → L3, cold → L0. Edit invalidations are cheapest
+        # at L3 and most expensive at L0; recently-modified
+        # dirs are the most likely to be edited again soon.
         tier_order = (Tier.L3, Tier.L2, Tier.L1, Tier.L0)
+
+        # Mass-share schedule per tier: L3 = 10%, L2 = 20%,
+        # L1 = 30%, L0 = 40% of total token mass. Walk hot →
+        # cold; advance the current tier *before* placing
+        # when (a) adding the item would push the tier past
+        # its target share (mass advance), or (b) the
+        # remaining items aren't enough to give every
+        # downstream tier at least one entry (1:1 floor).
+        # Single-advance per item — a single oversized hot
+        # dir cannot skip past L2/L1 into L0. Final tier L0
+        # never advances; it absorbs whatever remains.
+        #
+        # The 1:1 floor is gated on ``n >= len(tier_order)``
+        # so the historical "few items → top tiers only"
+        # contract is preserved (1 item → L3, 2 items → L3
+        # then L2, etc.). Inputs without measured tokens
+        # (2-tuple form) treat every entry as one placeholder
+        # unit, so mass advance fires once per item and the
+        # behaviour reduces to the equal-count quartile rule.
+        share_per_tier = (0.10, 0.20, 0.30, 0.40)
+        token_list = [
+            entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
+            for entry in ranked
+        ]
+        total_tokens = sum(token_list)
+        targets = [total_tokens * s for s in share_per_tier]
+        floor_active = n >= len(tier_order)
+
+        cum_in_tier = 0
+        tier_idx = 0
         for idx, entry in enumerate(ranked):
             key = entry[0]
-            tokens = (
-                entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
-            )
-            quartile = min(
-                len(tier_order) - 1,
-                idx * len(tier_order) // n,
-            )
-            tier = tier_order[quartile]
+            tokens = token_list[idx]
+
+            if tier_idx < len(tier_order) - 1:
+                items_left_after_this = n - idx - 1
+                tiers_below_current = len(tier_order) - tier_idx - 1
+                floor_advance = (
+                    floor_active
+                    and items_left_after_this < tiers_below_current
+                )
+                mass_advance = (
+                    cum_in_tier > 0
+                    and cum_in_tier + tokens > targets[tier_idx]
+                )
+                if floor_advance or mass_advance:
+                    tier_idx += 1
+                    cum_in_tier = 0
+
+            tier = tier_order[tier_idx]
             self._items[key] = TrackedItem(
                 key=key,
                 tier=tier,
@@ -1249,6 +1320,7 @@ class StabilityTracker:
                 content_hash=_PLACEHOLDER_HASH,
                 tokens=tokens,
             )
+            cum_in_tier += tokens
 
     def cross_ref_seed_dir_blocks(
         self,

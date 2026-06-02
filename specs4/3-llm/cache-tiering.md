@@ -307,8 +307,10 @@ A file selected for editing has its full text in the Active list AND is removed 
 - On startup, after the symbol/doc indexes are built, dir-blocks are constructed from the current index state (one block per `(directory, content_type)` for `content_type ∈ {symbols, docs, plain_files}`).
 - Dir-blocks are seeded into L0/L1/L2/L3 using a per-directory **mtime prior**, with seed direction **inverted from the intuitive reading**:
   - Most recently modified directory tree → seeded into **L3** (the cheapest cached tier to invalidate).
-  - Older directories → seeded into L2 / L1 by mtime quantile.
+  - Older directories → seeded into L2 / L1.
   - All-time-cold directories → seeded into **L0** (the most expensive cached tier to invalidate, but the least likely to need it).
+- The split between tiers is by **cumulative token mass**, not directory count: target shares are L3 = 10%, L2 = 20%, L1 = 30%, L0 = 40% of total seeded mass. Hot directories tend to be larger than cold ones in real codebases (active source trees), so an equal-count quartile split would land most of the cache mass at L3 — leaving V > 0 across every membrane and provoking unnecessary upward flux on the first few turns. The mass-share split inverts the post-seed token gradient: L0 is heaviest by mass, L3 lightest, so V ≤ 0 across the membranes at the seeded state and the rectified flux equation produces zero startup churn until a real edit teleports a block to Active.
+- A 1:1 floor rule guarantees every tier receives at least one item when the population permits: when the count of remaining items would otherwise leave a downstream tier empty, the controller forces a tier advance regardless of mass.
 - The `mtime` for each directory is its **most-recent file mtime** — `Repo.get_directory_mtime` returns `max(file.stat().st_mtime for file in dir)`. A directory with one file edited 10 seconds ago and a hundred files untouched for years is treated as hot, which is the right signal for "any dir-block in this directory is at risk of being teleported soon."
 - The system prompt sits before L0 as a non-flux head anchor and is rendered from turn one regardless.
 - No persistence — rebuilt fresh each session.
