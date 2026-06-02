@@ -2,7 +2,7 @@
 
 Stability-based tiering of prompt content to align with provider cache breakpoints. Content that remains unchanged across requests promotes to higher tiers; changed content demotes. Reduces re-ingestion costs for large contexts.
 
-The cascade dynamics are governed by an **electrodiffusion-flux model**: tier boundaries are treated as semi-permeable membranes, and per-membrane promotion is driven by the token-mass imbalance between the lower and upper tier. The model is the cache-tiering specialisation of the multi-membrane controller derived in Flax (2026), *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*. The original derivation lives in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) (linked here for the full discussion); §4 below distils what the implementation needs.
+The cascade dynamics are governed by an **electrodiffusion-flux model**: tier boundaries are treated as semi-permeable membranes, and per-membrane promotion is driven by the token-mass imbalance between the lower and upper tier. The model is the cache-tiering specialisation of the multi-membrane controller derived in Flax (2026), *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*. The original derivation lives in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) (linked here for the full discussion); §4 below distils what the implementation needs. The public reference implementation of the flux approach to tiered cache management — synth model, multi-membrane state, and the parameter-tuning runs that the defaults below are sourced from — is published at <https://github.com/flatmax/membrane.cache>.
 
 Per **D36**, the cache items below the system prompt are **per-directory dir-blocks** rather than monolithic aggregate maps. The system prompt is the only non-flux head anchor; every other block — including the symbol/doc/plain-file listings that D27 had pinned to L0 — rides the membrane.
 
@@ -153,7 +153,7 @@ The piggyback rule's effect is unchanged from D27 in the steady state: stable co
 
 ## §4 — Membrane / Flux Cascade
 
-The cascade replaces the spec3-era N-counter promotion algorithm with a per-turn **iterate-to-equilibrium relaxation loop** driven by Goldman-Hodgkin-Katz (GHK) flux across each tier boundary. The mathematical derivation is in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) and the multi-membrane validation is in `synth/` of the source paper. This section covers the implementation contract.
+The cascade replaces the spec3-era N-counter promotion algorithm with a per-turn **iterate-to-equilibrium relaxation loop** driven by Goldman-Hodgkin-Katz (GHK) flux across each tier boundary. The mathematical derivation is in [`cache-tiering-electrodiffusion.md`](../../docs/cache-tiering-electrodiffusion.md) and the multi-membrane validation lives in `synth/` of the public reference implementation at <https://github.com/flatmax/membrane.cache>. This section covers the implementation contract.
 
 ### 4.1 The flux equation
 
@@ -287,7 +287,7 @@ The membrane controller is configured via `app.json`:
 
 Only the rectified-GHK variant is supported — the linear and bidirectional-GHK forms from earlier revisions were retired when the synth-tuner's headline rectified fit landed as the production default.
 
-The defaults are sourced from `runs/opt-run2/best_params.json` (the synth-tuner's headline fit on the 4-membrane stack). Workloads with very large or very small working sets may benefit from raising or lowering V_T; `flux_threshold` is a coarser knob and rarely needs adjustment.
+The defaults are sourced from `runs/opt-run2/best_params.json` (the synth-tuner's headline fit on the 4-membrane stack) in the public reference implementation at <https://github.com/flatmax/membrane.cache>. Workloads with very large or very small working sets may benefit from raising or lowering V_T; `flux_threshold` is a coarser knob and rarely needs adjustment.
 
 Parameter values are pinned at tracker construction. Mid-session reconfiguration is not supported — edit `app.json` and restart.
 

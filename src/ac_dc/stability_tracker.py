@@ -23,6 +23,8 @@ Governing specs:
   and aggregate L0 maps are replaced by per-directory dir-blocks
 - ``specs4/impl-history/decisions.md`` D35 — the membrane / flux
   controller landed; rectified-GHK is the only supported variant
+- https://github.com/flatmax/membrane.cache — public reference
+  implementation of the flux approach to tiered cache management
 
 Design points pinned by the test suite and spec:
 

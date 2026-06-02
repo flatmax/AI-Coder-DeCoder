@@ -30,7 +30,9 @@ mover discretisation rather than physics.
 Spec authority: ``specs4/3-llm/cache-tiering.md``,
 ``specs4/impl-history/decisions.md`` D35.
 Reference implementation: synth/model.py and
-cache_membrane/state.py in ``~/flatmax/personal.work/research/cache.tiering``.
+cache_membrane/state.py in ``~/flatmax/personal.work/research/cache.tiering``,
+published publicly at https://github.com/flatmax/membrane.cache
+(the canonical flux-approach tiered-cache reference).
 """
 
 from __future__ import annotations
