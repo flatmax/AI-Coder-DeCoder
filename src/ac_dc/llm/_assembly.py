@@ -35,6 +35,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.context_manager import Mode
+from ac_dc.llm._stability import _excluded_set, _indexed_paths_in_dir
 
 if TYPE_CHECKING:
     from ac_dc.llm._types import ConversationScope
@@ -139,15 +140,39 @@ def build_tiered_content(
         str, list[tuple[int, dict[str, Any]]]
     ] = {t: [] for t in ("L0", "L1", "L2", "L3")}
 
-    # Selected files are excluded from the dir-block bodies —
-    # their full text appears in the active "Working Files"
-    # section instead. The dir-block hash already excludes
-    # them, so the live render must too.
+    # Every dir-block's RENDERED bytes must be byte-identical
+    # to the listing that ``_dir_block_active_items`` HASHES.
+    # The provider caches the rendered bytes; the tracker
+    # decides "did this block change?" from the hash. If the
+    # two disagree for a fixed tracker state, the tracker
+    # sees no change (no teleport, no tier reshuffle) while
+    # the cached prefix silently drifts between turns — and
+    # every cache warm-up plus roughly every other real turn
+    # pays a full cold cache write at 0% hit. Aligning the
+    # exclude sets below is the fix for that drift.
+    #
+    # ``_dir_block_active_items`` uses exactly:
+    #   - symbols:/docs: → exclude_active = files loaded in
+    #     Active (``file_context.get_files()``).
+    #   - plain_files:   → subtract Active-loaded files, the
+    #     index-covered set, AND the user-exclusion set.
+    #
+    # We reproduce those exact terms here. Note ``selected_set``
+    # / ``active_excluded`` (picker selection ∪ user
+    # exclusions) is NOT what the hash uses for symbols/docs —
+    # using it would strip binary-deselected or user-excluded
+    # files from the rendered block while the hash kept them.
+    # ``excluded_set`` is retained only for the ``file:``
+    # belt-and-suspenders skip further down.
     selected_set = set(scope.selected_files)
     excluded_set = set(
         getattr(service, "_excluded_index_files", [])
     )
     active_excluded = selected_set | excluded_set
+    plain_files_active = set(
+        scope.context.file_context.get_files()
+    )
+    plain_files_user_excluded = _excluded_set(service)
 
     for key in sorted(all_items.keys()):
         item = all_items[key]
@@ -161,8 +186,19 @@ def build_tiered_content(
             directory = key[len("symbols:"):]
             if service._symbol_index is None:
                 continue
+            # exclude_active MUST be the same set the hash
+            # uses — _dir_block_active_items hashes the block
+            # with exclude_active = file_context.get_files()
+            # (files actually loaded in Active), NOT the
+            # picker's selected ∪ excluded union. Passing the
+            # union here would strip binary-deselected and
+            # user-excluded files from the rendered bytes
+            # while the hash kept them, drifting the cached
+            # prefix between turns and forcing cold cache
+            # writes (same failure mode as the plain_files
+            # block).
             block = service._symbol_index.get_dir_symbols_block(
-                directory, exclude_active=active_excluded
+                directory, exclude_active=plain_files_active
             )
             if block:
                 tier_symbol_fragments[tier_name].append(block)
@@ -170,8 +206,12 @@ def build_tiered_content(
             directory = key[len("docs:"):]
             if service._doc_index is None:
                 continue
+            # Same exclude-set rule as the symbols branch:
+            # match _dir_block_active_items, which hashes
+            # docs blocks with exclude_active =
+            # file_context.get_files().
             block = service._doc_index.get_dir_docs_block(
-                directory, exclude_active=active_excluded
+                directory, exclude_active=plain_files_active
             )
             if block:
                 tier_symbol_fragments[tier_name].append(block)
@@ -189,10 +229,28 @@ def build_tiered_content(
                     exc,
                 )
                 continue
-            files_in_dir = [
+            # MUST render byte-identical to the listing that
+            # _dir_block_active_items hashes — same sort, same
+            # subtractions. The tracker compares the SORTED,
+            # index-subtracted, user-excluded listing; if the
+            # rendered prompt bytes differ from that (e.g.
+            # unsorted git-ls-files order, or covered files
+            # left in), the tracker sees no change (hash
+            # stable, no teleport) while the cached prefix
+            # bytes silently drift between turns — every
+            # cache warm-up and roughly every other real turn
+            # then pays a full cold cache write at 0% hit.
+            # The set subtracted here (active_excluded) already
+            # folds in selected + user-excluded files; covered
+            # (index-surfaced) files are subtracted explicitly
+            # to match the hash's `not in covered` clause.
+            covered = _indexed_paths_in_dir(service, directory)
+            files_in_dir = sorted(
                 f for f in by_dir.get(directory, [])
-                if f not in active_excluded
-            ]
+                if f not in plain_files_active
+                and f not in covered
+                and f not in plain_files_user_excluded
+            )
             if files_in_dir:
                 tier_plain_files_fragments[tier_name].append(
                     "\n".join(files_in_dir)
