@@ -597,3 +597,239 @@ class TestHashFile:
             DocConvert._hash_file(path)
             == hashlib.sha256(b"").hexdigest()
         )
+
+
+# ---------------------------------------------------------------------------
+# Encrypted-OOXML detection at dispatch
+# ---------------------------------------------------------------------------
+
+
+# CDFV2 (OLE compound document) magic — encrypted Office files
+# wrap their payload in this container. Padded out to a credible
+# file size so the size-budget check doesn't reject before the
+# encryption check runs.
+_CDFV2_HEADER = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ENCRYPTED_OOXML_BYTES = _CDFV2_HEADER + b"\x00" * 1024
+
+
+class TestEncryptedOoxmlDetection:
+    """Dispatch-level CDFV2 detection.
+
+    Catching encrypted Office files before any pipeline runs
+    saves the user from a wasted LibreOffice subprocess
+    invocation followed by a misleading "Package not found"
+    error from python-pptx. The check is keyed on the OOXML
+    extensions (.docx / .xlsx / .pptx) only — ODF formats use
+    a different encryption scheme that doesn't surface as
+    CDFV2.
+    """
+
+    def test_encrypted_pptx_returns_error(
+        self, doc_convert, scan_root
+    ):
+        _write_source(scan_root, "deck.pptx", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["deck.pptx"])
+        [entry] = result["results"]
+        assert entry["status"] == "error"
+        assert entry["path"] == "deck.pptx"
+
+    def test_encrypted_docx_returns_error(
+        self, doc_convert, scan_root
+    ):
+        _write_source(scan_root, "doc.docx", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["doc.docx"])
+        [entry] = result["results"]
+        assert entry["status"] == "error"
+
+    def test_encrypted_xlsx_returns_error(
+        self, doc_convert, scan_root
+    ):
+        _write_source(scan_root, "book.xlsx", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["book.xlsx"])
+        [entry] = result["results"]
+        assert entry["status"] == "error"
+
+    def test_message_mentions_password_protection(
+        self, doc_convert, scan_root
+    ):
+        """The error string must tell the user the file is encrypted
+        — that's the point of the dispatch-level check."""
+        _write_source(scan_root, "deck.pptx", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["deck.pptx"])
+        [entry] = result["results"]
+        assert "password-protected" in entry["message"].lower()
+
+    def test_message_suggests_resolution(
+        self, doc_convert, scan_root
+    ):
+        """The user needs actionable next steps, not just a diagnosis."""
+        _write_source(scan_root, "deck.pptx", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["deck.pptx"])
+        [entry] = result["results"]
+        msg = entry["message"]
+        # At least one of the two resolution paths is mentioned.
+        assert (
+            "msoffcrypto-tool" in msg
+            or "Encrypt with Password" in msg
+        )
+
+    def test_path_field_echoes_caller_request(
+        self, doc_convert, scan_root
+    ):
+        """The path in the result must match what the caller passed,
+        not the resolved absolute path or the file basename — the
+        webapp keys per-file rows by request path."""
+        _write_source(
+            scan_root, "nested/deep/deck.pptx",
+            _ENCRYPTED_OOXML_BYTES,
+        )
+        result = doc_convert.convert_files(["nested/deep/deck.pptx"])
+        [entry] = result["results"]
+        assert entry["path"] == "nested/deep/deck.pptx"
+
+    def test_zip_signature_passes_through_to_pipeline(
+        self, doc_convert, scan_root
+    ):
+        """A real OOXML file (ZIP-prefixed) must NOT trigger the
+        encryption check. The pipeline runs and produces whatever
+        result it normally would — for a fake/incomplete ZIP that's
+        an error from the pipeline, but distinct from the
+        encryption error."""
+        # PK\x03\x04 prefix = ZIP local file header.
+        fake_zip = b"PK\x03\x04" + b"\x00" * 1024
+        _write_source(scan_root, "deck.pptx", fake_zip)
+        result = doc_convert.convert_files(["deck.pptx"])
+        [entry] = result["results"]
+        # Pipeline failure on a malformed pptx is distinct from
+        # the encryption error — the message should not mention
+        # password protection.
+        assert "password-protected" not in entry.get("message", "").lower()
+
+    def test_short_file_does_not_trigger(
+        self, doc_convert, scan_root
+    ):
+        """A file shorter than 8 bytes can't match the CDFV2
+        signature. It should fall through to the pipeline and
+        fail there for a normal reason, not be misidentified as
+        encrypted."""
+        _write_source(scan_root, "tiny.pptx", b"PK\x03")
+        result = doc_convert.convert_files(["tiny.pptx"])
+        [entry] = result["results"]
+        # Whatever the pipeline says, it's not the encryption
+        # error. Defensive .get() — pipelines that succeed
+        # don't necessarily produce a message field; we only
+        # care that if one is present, it doesn't claim
+        # password protection.
+        assert "password-protected" not in entry.get("message", "").lower()
+
+    def test_empty_file_does_not_trigger(
+        self, doc_convert, scan_root
+    ):
+        """Zero-byte files fall through to the pipeline."""
+        _write_source(scan_root, "empty.pptx", b"")
+        result = doc_convert.convert_files(["empty.pptx"])
+        [entry] = result["results"]
+        assert "password-protected" not in entry.get("message", "").lower()
+
+    def test_pdf_with_cdfv2_bytes_skips_check(
+        self, doc_convert, scan_root
+    ):
+        """The check is keyed on extension. A .pdf file that
+        happens to start with the CDFV2 magic (extremely unlikely
+        in practice but possible) goes through the PDF pipeline
+        — the OOXML encryption diagnostic doesn't apply."""
+        _write_source(scan_root, "weird.pdf", _ENCRYPTED_OOXML_BYTES)
+        result = doc_convert.convert_files(["weird.pdf"])
+        [entry] = result["results"]
+        # The PDF pipeline will reject it, but not with the OOXML
+        # encryption message.
+        assert "CDFV2 container" not in entry.get("message", "")
+
+    def test_no_pipeline_invoked_for_encrypted_file(
+        self, doc_convert, scan_root, monkeypatch
+    ):
+        """Performance test — the dispatch check must short-circuit
+        before any pipeline runs. Stub every pipeline's convert
+        method and verify none was called."""
+        called = []
+
+        def record(name):
+            def _fn(*args, **kwargs):
+                called.append(name)
+                return {"path": "x", "status": "error",
+                        "message": "should not be called"}
+            return _fn
+
+        monkeypatch.setattr(
+            doc_convert._markitdown, "convert", record("markitdown")
+        )
+        monkeypatch.setattr(
+            doc_convert._xlsx, "convert", record("xlsx")
+        )
+        monkeypatch.setattr(
+            doc_convert._pptx, "convert", record("pptx")
+        )
+        monkeypatch.setattr(
+            doc_convert._pdf, "convert_libreoffice",
+            record("libreoffice"),
+        )
+        monkeypatch.setattr(
+            doc_convert._pdf, "convert_pymupdf",
+            record("pymupdf"),
+        )
+        _write_source(scan_root, "deck.pptx", _ENCRYPTED_OOXML_BYTES)
+        doc_convert.convert_files(["deck.pptx"])
+        assert called == []
+
+
+class TestEncryptionHelperDirectly:
+    """Unit tests on ``DocConvert._is_encrypted_ooxml`` itself.
+
+    Complements the dispatch-level integration tests above by
+    pinning the helper's contract directly. Useful when refactoring
+    the dispatch loop without changing the detection rule.
+    """
+
+    def test_returns_none_for_zip_prefix(self, scan_root):
+        path = scan_root / "deck.pptx"
+        path.write_bytes(b"PK\x03\x04" + b"\x00" * 100)
+        result = DocConvert._is_encrypted_ooxml(path, "deck.pptx")
+        assert result is None
+
+    def test_returns_dict_for_cdfv2_prefix(self, scan_root):
+        path = scan_root / "deck.pptx"
+        path.write_bytes(_ENCRYPTED_OOXML_BYTES)
+        result = DocConvert._is_encrypted_ooxml(path, "deck.pptx")
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["path"] == "deck.pptx"
+
+    def test_returns_none_for_short_file(self, scan_root):
+        path = scan_root / "deck.pptx"
+        path.write_bytes(b"\xd0\xcf\x11")
+        result = DocConvert._is_encrypted_ooxml(path, "deck.pptx")
+        assert result is None
+
+    def test_returns_none_for_unreadable_path(self, scan_root):
+        """Missing file falls through — pipeline handles the I/O
+        error with its own message rather than us inventing a
+        misleading 'encrypted' diagnosis."""
+        path = scan_root / "does-not-exist.pptx"
+        result = DocConvert._is_encrypted_ooxml(
+            path, "does-not-exist.pptx"
+        )
+        assert result is None
+
+    def test_path_field_uses_caller_supplied_rel_path(
+        self, scan_root
+    ):
+        """The result's path field echoes whatever the caller
+        passed, not the basename — webapp matches on request path."""
+        path = scan_root / "nested" / "deck.pptx"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(_ENCRYPTED_OOXML_BYTES)
+        result = DocConvert._is_encrypted_ooxml(
+            path, "nested/deck.pptx"
+        )
+        assert result is not None
+        assert result["path"] == "nested/deck.pptx"

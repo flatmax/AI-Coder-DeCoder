@@ -106,6 +106,27 @@ def test_doc_convert_section_fields() -> None:
     assert max_mb > 0, f"max_source_size_mb must be > 0, got {max_mb}"
 
 
+def test_cache_warmup_section_fields() -> None:
+    """cache_warmup has the fields the warmer reads."""
+    cfg = _load_json("app.json")["cache_warmup"]
+    assert "enabled" in cfg
+    assert "interval_seconds" in cfg
+    assert isinstance(cfg["enabled"], bool)
+    interval = cfg["interval_seconds"]
+    assert isinstance(interval, int)
+    assert interval > 0, f"interval_seconds must be > 0, got {interval}"
+    # Sanity: the interval must sit comfortably inside the
+    # 5-minute Anthropic cache TTL with margin for retry
+    # waits. 270s (4:30) is the recommended value; anything
+    # >= 300 would let the cache expire before our warm-up
+    # fires.
+    assert interval < 300, (
+        f"interval_seconds={interval} is at or beyond the "
+        "5-minute Anthropic cache TTL — warm-ups would fire "
+        "after the cache has already expired"
+    )
+
+
 def test_doc_index_section_fields() -> None:
     """doc_index has the fields the keyword enricher reads."""
     cfg = _load_json("app.json")["doc_index"]

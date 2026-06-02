@@ -106,8 +106,10 @@ class TestRebuildCache:
     ) -> None:
         """Rebuild with no files in the index is a valid no-op path.
 
-        Produces a tracker containing only the re-seeded system
-        prompt. items_before == items_after == 1 (system:prompt).
+        Under D36 the system prompt is not a tracker entry; it
+        sits before L0 as a non-flux head anchor. With an empty
+        repo, the only seeds are root-directory dir-blocks (and
+        only if the repo's seed commit produced one).
         """
         fake_index = _FakeSymbolIndexWithRefs()
         svc = self._make_service(
@@ -119,9 +121,8 @@ class TestRebuildCache:
         )
         result = svc.rebuild_cache()
         assert result["status"] == "rebuilt"
-        assert result["items_after"] >= 1  # system:prompt at least
-        # system:prompt seeded in L0.
-        assert svc._stability_tracker.has_item("system:prompt")
+        # No system:prompt tracker entry under D36.
+        assert not svc._stability_tracker.has_item("system:prompt")
 
     def test_preserves_history_entries_across_rebuild(
         self,
@@ -233,18 +234,16 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Under D27, indexed files are NOT tracker entries.
+        """Under D36, indexed files are NOT individual tracker entries.
 
-        Pre-D27 rebuild bin-packed every indexed file across
-        L0/L1/L2/L3 as ``symbol:{path}`` tracker entries. Under
-        the L0-content-typed model the aggregate symbol map is
-        regenerated from the index at assembly time, not held
-        as tracker entries. Rebuild therefore produces a
-        tracker that contains only ``system:prompt`` (and any
-        preserved history) when no files are selected.
+        Per-file ``symbol:{path}`` / ``doc:{path}`` entries are
+        gone. Repo structure rides as per-directory dir-blocks
+        (``symbols:<dir>``, ``docs:<dir>``, ``plain_files:<dir>``)
+        seeded by mtime. The only file-level entries appear when
+        the file is selected (``file:{path}``).
 
-        Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
-        Contract and § Why no startup file distribution.
+        Spec: ``specs-reference/3-llm/cache-tiering`` § Always-
+        resident invariant.
         """
         fake_index = _FakeSymbolIndexWithRefs(
             blocks={
@@ -269,16 +268,25 @@ class TestRebuildCache:
         result = svc.rebuild_cache()
         assert result["status"] == "rebuilt"
 
-        # No symbol: entries — those live in L0's aggregate
-        # map, not as cascade-tracked items.
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        assert "symbol:central.py" not in all_keys
-        assert "symbol:mod_a.py" not in all_keys
-        assert "symbol:mod_b.py" not in all_keys
-        # Only system:prompt expected (no files selected, no
-        # history seeded).
-        assert all_keys == {"system:prompt"}
+        # No per-file symbol:/doc: entries.
+        assert not any(
+            k.startswith("symbol:") or k.startswith("doc:")
+            for k in all_keys
+        )
+        # No file: entries either (none selected).
+        assert not any(k.startswith("file:") for k in all_keys)
+        # No system:prompt — head anchor, not a tracker entry.
+        assert "system:prompt" not in all_keys
+        # Whatever appears is a dir-block.
+        for key in all_keys:
+            assert (
+                key.startswith("symbols:")
+                or key.startswith("docs:")
+                or key.startswith("plain_files:")
+                or key.startswith("history:")
+            )
 
     def test_selected_files_become_file_entries(
         self,
@@ -374,7 +382,7 @@ class TestRebuildCache:
         assert readme.tier in (Tier.L1, Tier.L2, Tier.L3)
         assert cfg.tier in (Tier.L1, Tier.L2, Tier.L3)
 
-    def test_reseeds_system_prompt_in_l0(
+    def test_no_system_prompt_tracker_entry_after_rebuild(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -383,7 +391,12 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """system:prompt lands in L0 with entry_n after rebuild."""
+        """Under D36 the system prompt is NOT a tracker entry.
+
+        The system prompt is a non-flux head anchor rendered
+        live at assembly time. Rebuild does not seed it as a
+        tracked item.
+        """
         fake_index = _FakeSymbolIndexWithRefs()
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -394,12 +407,10 @@ class TestRebuildCache:
         )
         svc.rebuild_cache()
 
-        from ac_dc.stability_tracker import Tier
         item = svc._stability_tracker.get_all_items().get(
             "system:prompt"
         )
-        assert item is not None
-        assert item.tier == Tier.L0
+        assert item is None
 
     def test_graduates_older_history_to_l3(
         self,
@@ -658,13 +669,12 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doc mode rebuild does NOT create doc: tracker entries.
+        """Doc mode rebuild does NOT create per-file ``doc:`` entries.
 
-        Symmetric to the code-mode case — under D27, the
-        aggregate doc map is regenerated from the doc index
-        at assembly time, not held as tracker entries.
-        Rebuild only places ``system:prompt`` and (if any
-        files are selected) ``file:`` entries.
+        Repo structure rides via ``docs:<dir>`` dir-blocks
+        seeded by mtime, not via per-file ``doc:{path}``
+        entries. Rebuild only places ``file:`` entries for
+        selected files plus dir-blocks.
         """
         fake_symbol_index = _FakeSymbolIndexWithRefs(
             blocks={"ignored.py": "block"},
@@ -690,15 +700,13 @@ class TestRebuildCache:
 
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        # No doc: entries — those live in L0's aggregate map
-        # at assembly time.
+        # No per-file doc:/symbol: entries.
         assert "doc:README.md" not in all_keys
         assert "doc:guide.md" not in all_keys
         assert "doc:api.md" not in all_keys
-        # No symbol: entries either.
         assert "symbol:ignored.py" not in all_keys
-        # Only system:prompt remains.
-        assert all_keys == {"system:prompt"}
+        # No system:prompt entry under D36.
+        assert "system:prompt" not in all_keys
 
     def test_doc_mode_selected_doc_file_becomes_file_entry(
         self,
@@ -831,9 +839,10 @@ class TestRebuildCache:
     ) -> None:
         """Doc mode with no doc outlines still produces a valid rebuild.
 
-        The tracker ends up with just system:prompt (plus any
-        preserved history). No doc: entries because there are
-        no outlines to seed.
+        Empty doc index → no ``docs:<dir>`` seeds. Other
+        dir-block families (``plain_files:<dir>``,
+        ``symbols:<dir>``) may still appear depending on the
+        repo's contents.
         """
         fake_symbol_index = _FakeSymbolIndexWithRefs()
         svc = self._make_service(
@@ -853,12 +862,12 @@ class TestRebuildCache:
 
         tracker = svc._stability_tracker
         all_keys = set(tracker.get_all_items().keys())
-        # No doc: entries.
+        # No per-file doc: entries.
         assert not any(
             k.startswith("doc:") for k in all_keys
         )
-        # system:prompt still reseeded.
-        assert "system:prompt" in all_keys
+        # No system:prompt — head anchor only.
+        assert "system:prompt" not in all_keys
 
     def test_doc_mode_preserves_history_across_rebuild(
         self,
@@ -1238,7 +1247,7 @@ class TestRebuildCache:
         assert new_item is not None
         assert tracker.is_pinned("file:edited.py") is False
 
-    def test_rebuild_clears_deletion_markers(
+    def test_rebuild_wipes_stale_file_entries(
         self,
         config: ConfigManager,
         repo: Repo,
@@ -1247,18 +1256,13 @@ class TestRebuildCache:
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Rebuild removes deletion-marker entries.
+        """Rebuild removes stale ``file:`` entries.
 
-        Deletion markers exist to bridge the gap between a
-        file's deletion and the next ``rebuild_cache`` that
-        re-extracts L0's aggregate maps from the now-current
-        index. Once rebuild runs, the index already excludes
-        the deleted file, so the marker is no longer needed
-        and is cleared along with all other non-history
-        tracker entries.
-
-        Spec: ``specs4/3-llm/cache-tiering.md`` § Item
-        Removal and § Deletion Markers.
+        Under D36 the deletion-marker mechanism is gone;
+        ``file:`` entries for paths that no longer exist on
+        disk are simply dropped during the next phase 0 sweep.
+        Rebuild also wipes them along with all other non-
+        history tracker entries (step 1-2 of the pipeline).
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -1271,21 +1275,18 @@ class TestRebuildCache:
             monkeypatch=monkeypatch,
         )
         tracker = svc._stability_tracker
-        # Pre-seed a deletion-marker file entry.
+        # Pre-seed a stale file entry.
         tracker._items["file:deleted.py"] = TrackedItem(
             key="file:deleted.py",
             tier=Tier.L2,
             n_value=6,
-            content_hash="placeholder",
+            content_hash="some-hash",
             tokens=100,
         )
-        tracker.mark_deleted("file:deleted.py")
-        assert tracker.is_deleted("file:deleted.py") is True
 
         svc.rebuild_cache()
 
-        # Marker gone — the entry was wiped along with all
-        # other non-history items.
+        # Entry gone — wiped with all other non-history items.
         assert "file:deleted.py" not in (
             tracker.get_all_items()
         )

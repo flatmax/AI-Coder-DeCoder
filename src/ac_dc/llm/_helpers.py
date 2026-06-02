@@ -14,7 +14,9 @@ import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
+
+T = TypeVar("T")
 
 from ac_dc.history_compactor import TopicBoundary
 from ac_dc.token_counter import TokenCounter
@@ -491,16 +493,26 @@ def _build_topic_detector(
             # Non-streaming call — we want the full JSON response
             # before parsing. ``timeout=`` is the safety net for
             # hung sockets; a healthy detector call returns in a
-            # few seconds.
-            response = litellm.completion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=False,
-                max_tokens=max_output,
-                timeout=config.aux_request_timeout_seconds,
+            # few seconds. Retry with exponential backoff is
+            # applied via :func:`retry_litellm_completion` rather
+            # than LiteLLM's internal ``num_retries=`` so the
+            # backoff schedule is explicit and provider-agnostic.
+            def _detector_call() -> Any:
+                return litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    stream=False,
+                    max_tokens=max_output,
+                    timeout=config.aux_request_timeout_seconds,
+                )
+            response = retry_litellm_completion(
+                litellm,
+                _detector_call,
+                max_attempts=config.num_retries + 1,
+                context="topic detector",
             )
         except Exception as exc:
             # Classify for richer log output. Topic detection
@@ -693,6 +705,130 @@ def _classify_litellm_error(
     info["model"] = getattr(exc, "model", None)
     info["provider"] = getattr(exc, "llm_provider", None)
 
+    # Credential errors raised by botocore (expired SSO tokens,
+    # missing credentials, invalid refresh tokens) surface
+    # through LiteLLM's Bedrock path as APIConnectionError —
+    # technically accurate (no request left the client) but
+    # operationally wrong for retry policy: re-trying with the
+    # same expired token can only fail. Walk the exception's
+    # __cause__/__context__ chain and check for botocore
+    # credential-type names; if found, classify as
+    # authentication so the retry wrapper fails fast and the
+    # UI surfaces an actionable "credentials" toast instead of
+    # eleven silent retries.
+    _CRED_EXC_NAMES = frozenset({
+        "TokenRetrievalError",
+        "NoCredentialsError",
+        "PartialCredentialsError",
+        "CredentialRetrievalError",
+        "UnauthorizedSSOTokenError",
+        "SSOTokenLoadError",
+        "InvalidGrantException",
+        "ExpiredTokenException",
+        "UnrecognizedClientException",
+    })
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if type(cur).__name__ in _CRED_EXC_NAMES:
+            info["error_type"] = "authentication"
+            # Prefer the credential error's own message over
+            # LiteLLM's wrapper so the toast shows the real
+            # cause (e.g. "Token has expired and refresh failed").
+            cred_msg = str(cur).strip()
+            if cred_msg:
+                info["message"] = cred_msg
+            return info
+        # Follow __cause__ and __context__ (standard chain).
+        if cur.__cause__ is not None:
+            stack.append(cur.__cause__)
+        if cur.__context__ is not None:
+            stack.append(cur.__context__)
+        # LiteLLM occasionally stuffs the original exception
+        # into args as a positional rather than chaining it.
+        # Check args elements that are themselves BaseException
+        # instances so we don't miss credential errors buried
+        # that way.
+        try:
+            for arg in cur.args:
+                if isinstance(arg, BaseException):
+                    stack.append(arg)
+        except Exception:
+            pass
+
+    # Message-substring fallback. LiteLLM sometimes
+    # re-raises with ``raise ... from None`` which wipes
+    # the ``__cause__`` chain, or wraps the botocore error
+    # deep enough that only the string representation
+    # preserves the signal. If the flattened exception text
+    # mentions a known credential-error marker, classify as
+    # authentication anyway. Conservative list — only
+    # markers that are unambiguous auth failures.
+    _CRED_MSG_MARKERS = (
+        "TokenRetrievalError",
+        "NoCredentialsError",
+        "InvalidGrantException",
+        "ExpiredTokenException",
+        "UnauthorizedSSOTokenError",
+        "SSOTokenLoadError",
+        "CredentialRetrievalError",
+        "PartialCredentialsError",
+        "Token for default does not exist",
+        "Error loading SSO Token",
+        "Error when retrieving token from sso",
+        "Token has expired and refresh failed",
+        "Token has expired",
+        "Invalid refresh token provided",
+        "Invalid refresh token",
+        "Unable to locate credentials",
+        "The security token included in the request is expired",
+        "The security token included in the request is invalid",
+        "aws sso login",
+        # Bedrock IAM / Marketplace authorization failures.
+        # These are permanent: the IAM principal lacks
+        # aws-marketplace:Subscribe / ViewSubscriptions, or
+        # the Marketplace subscription is incomplete. Retrying
+        # cannot fix either — surface as authentication so the
+        # retry loop fails fast and the UI toast points the
+        # user at IAM / Marketplace settings.
+        "Model access is denied due to IAM",
+        "not authorized to perform the required AWS Marketplace",
+        "aws-marketplace:Subscribe",
+        "aws-marketplace:ViewSubscriptions",
+        "AWS Marketplace subscription",
+        "is not authorized to perform",
+        "AccessDeniedException",
+        "UnauthorizedOperation",
+    )
+    # Scan both the flattened exception string and the
+    # repr of args — LiteLLM sometimes formats its wrapper
+    # with minimal content but the original botocore error
+    # text survives in args.
+    flat = str(exc)
+    try:
+        flat = flat + " " + repr(exc.args)
+    except Exception:
+        pass
+    if any(marker in flat for marker in _CRED_MSG_MARKERS):
+        info["error_type"] = "authentication"
+        # Try to surface a cleaner message than LiteLLM's
+        # whole stringified wrapper. Look for the marker
+        # and take the sentence around it.
+        for marker in _CRED_MSG_MARKERS:
+            idx = flat.find(marker)
+            if idx >= 0:
+                start = flat.rfind(".", 0, idx) + 1
+                end = flat.find("\n", idx)
+                if end < 0:
+                    end = min(len(flat), idx + 200)
+                info["message"] = flat[start:end].strip()
+                break
+        return info
+
     # Classification. Each branch uses getattr on the module so
     # a LiteLLM version that drops one of these classes doesn't
     # crash classification — the attribute lookup returns None
@@ -761,6 +897,236 @@ def _classify_litellm_error(
         info["error_type"] = "timeout"
 
     return info
+
+
+# ---------------------------------------------------------------------------
+# Retry wrapper for litellm.completion
+# ---------------------------------------------------------------------------
+#
+# LiteLLM's built-in ``num_retries=`` uses a tenacity policy with a short
+# fixed delay and doesn't always treat provider-specific rate-limit errors
+# as retryable (Bedrock 429s in particular fall through on some versions).
+# We wrap the call in our own tenacity retry with:
+#
+# - Exponential backoff with jitter, bounded by a per-attempt ceiling.
+# - Explicit retry predicate based on _classify_litellm_error's output —
+#   retries on rate_limit, api_connection, service_unavailable, timeout;
+#   fails fast on authentication, bad_request, context_window_exceeded,
+#   not_found.
+# - Retry-After header honoring: if the RateLimitError carries a
+#   Retry-After value, wait at least that long on the next attempt.
+#
+# The outer retry REPLACES the ``num_retries=`` kwarg on call sites that
+# use this helper — double-retrying would produce a multiplicative wait
+# that's hard to reason about.
+
+
+_RETRYABLE_ERROR_TYPES = frozenset({
+    "rate_limit",
+    "api_connection",
+    "service_unavailable",
+    "timeout",
+})
+
+# Backoff schedule: wait = min(_MAX_WAIT, _BASE * 2^attempt) + jitter.
+_RETRY_BASE_SECONDS = 2.0
+_RETRY_MAX_SECONDS = 60.0
+_RETRY_JITTER_SECONDS = 1.5
+
+
+def _compute_retry_wait(
+    attempt: int,
+    retry_after: float | None,
+) -> float:
+    """Compute the wait time before a retry attempt.
+
+    ``attempt`` is 0-indexed — the first retry waits
+    ``_RETRY_BASE_SECONDS + jitter`` (~2s), the second
+    ``2 × _RETRY_BASE_SECONDS + jitter`` (~4s), and so on,
+    capped at ``_RETRY_MAX_SECONDS``.
+
+    When the provider supplied a ``Retry-After`` header
+    (surfaced via :func:`_classify_litellm_error`), we
+    respect it as a floor — the computed exponential wait
+    is used when it exceeds ``retry_after``, otherwise we
+    wait the header value. Bedrock sometimes hands back
+    30-60s retry hints; the exponential schedule alone
+    would under-wait and burn retry attempts.
+    """
+    exponential = min(
+        _RETRY_MAX_SECONDS,
+        _RETRY_BASE_SECONDS * (2 ** attempt),
+    )
+    jittered = exponential + random.uniform(
+        0.0, _RETRY_JITTER_SECONDS,
+    )
+    if retry_after is not None and retry_after > 0:
+        return max(jittered, retry_after)
+    return jittered
+
+
+def retry_litellm_completion(
+    litellm_module: Any,
+    call: Callable[[], T],
+    max_attempts: int,
+    *,
+    context: str = "completion",
+    on_retry: Callable[[dict[str, Any]], None] | None = None,
+) -> T:
+    """Invoke ``call`` with retry on transient LiteLLM errors.
+
+    Parameters
+    ----------
+    litellm_module:
+        The imported ``litellm`` module — passed rather than imported here
+        so the heavyweight import happens at the call site.
+    call:
+        Zero-arg callable that invokes ``litellm.completion(...)``. Keeps
+        kwargs at the call site where they're readable.
+    max_attempts:
+        Total attempts including the initial call. ``1`` disables
+        retry. Typically sourced from ``config.num_retries + 1``.
+    context:
+        Human-readable label used in warning logs. Defaults to
+        ``"completion"``; callers can pass ``"commit"``,
+        ``"topic detector"``, etc.
+    on_retry:
+        Optional callback invoked AFTER classification and BEFORE
+        sleeping, only on retryable errors with attempts remaining.
+        Receives a dict with ``attempt`` (1-indexed), ``max_attempts``,
+        ``error_type``, ``wait_seconds``, ``message``, ``provider``,
+        ``context``. Used by the streaming path to emit UI toasts
+        showing retry progress during long backoff waits.
+        Callback exceptions are logged at debug and swallowed so a
+        faulty hook can't break retry semantics.
+
+    Returns
+    -------
+    The return value of ``call()`` on success.
+
+    Raises
+    ------
+    The last exception from ``call()`` once retries are exhausted, or
+    immediately on any non-retryable error.
+    """
+    if max_attempts < 1:
+        max_attempts = 1
+
+    attempt = 0
+    last_exc: BaseException | None = None
+    while attempt < max_attempts:
+        try:
+            return call()
+        except Exception as exc:
+            info = _classify_litellm_error(litellm_module, exc)
+            error_type = info.get("error_type", "llm_error")
+            last_exc = exc
+
+            # Non-retryable error types fail fast.
+            if error_type not in _RETRYABLE_ERROR_TYPES:
+                raise
+
+            # Safety net: if classification missed a
+            # credential error but the exception text
+            # carries an unambiguous marker, upgrade the
+            # classification and fail fast. Prevents the
+            # 11-retry cascade on expired AWS SSO tokens
+            # when LiteLLM wraps botocore's
+            # TokenRetrievalError as APIConnectionError
+            # without preserving the exception chain.
+            #
+            # Bedrock IAM / Marketplace authorization
+            # failures land here too: LiteLLM wraps them
+            # as APIConnectionError ("BedrockException")
+            # but they're permanent permission errors —
+            # no IAM policy is going to materialise during
+            # a 60s backoff window.
+            _UNAMBIGUOUS_AUTH_MARKERS = (
+                "Token has expired and refresh failed",
+                "Error when retrieving token from sso",
+                "Invalid refresh token provided",
+                "TokenRetrievalError",
+                "InvalidGrantException",
+                "UnauthorizedSSOTokenError",
+                "Model access is denied due to IAM",
+                "not authorized to perform the required AWS Marketplace",
+                "aws-marketplace:Subscribe",
+                "AWS Marketplace subscription",
+                "AccessDeniedException",
+            )
+            try:
+                _flat = str(exc)
+                for arg in exc.args:
+                    if isinstance(arg, BaseException):
+                        _flat = _flat + " " + str(arg)
+            except Exception:
+                _flat = str(exc)
+            if any(m in _flat for m in _UNAMBIGUOUS_AUTH_MARKERS):
+                logger.warning(
+                    "%s attempt %d credential marker found "
+                    "in exception text (original type=%s); "
+                    "failing fast without retry",
+                    context,
+                    attempt + 1,
+                    error_type,
+                )
+                raise
+
+            # Final attempt — propagate after exhaustion.
+            if attempt >= max_attempts - 1:
+                logger.warning(
+                    "%s retries exhausted after %d attempts: "
+                    "type=%s provider=%s msg=%s",
+                    context,
+                    max_attempts,
+                    error_type,
+                    info.get("provider"),
+                    info.get("message"),
+                )
+                raise
+
+            retry_after = info.get("retry_after")
+            try:
+                retry_after_f = (
+                    float(retry_after)
+                    if retry_after is not None else None
+                )
+            except (TypeError, ValueError):
+                retry_after_f = None
+
+            wait = _compute_retry_wait(attempt, retry_after_f)
+            logger.warning(
+                "%s attempt %d/%d failed (type=%s); "
+                "sleeping %.1fs before retry",
+                context,
+                attempt + 1,
+                max_attempts,
+                error_type,
+                wait,
+            )
+            if on_retry is not None:
+                try:
+                    on_retry({
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "error_type": error_type,
+                        "wait_seconds": wait,
+                        "message": info.get("message", ""),
+                        "provider": info.get("provider"),
+                        "context": context,
+                    })
+                except Exception as cb_exc:
+                    logger.debug(
+                        "on_retry callback raised: %s", cb_exc,
+                    )
+            time.sleep(wait)
+            attempt += 1
+
+    # Unreachable — loop either returns or raises. Defensive
+    # re-raise for type checkers.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("retry_litellm_completion exited without result")
 
 
 # ---------------------------------------------------------------------------

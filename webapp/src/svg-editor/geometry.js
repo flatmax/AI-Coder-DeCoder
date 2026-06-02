@@ -11,6 +11,99 @@
 // caller never needs the raw count table.
 
 /**
+ * Compute an element's axis-aligned bounding box in
+ * SVG root coordinates. SVG's native `getBBox()` returns
+ * the box in the element's OWN local coordinate space,
+ * which is wrong for any operation that compares boxes
+ * across siblings whose ancestor transforms differ
+ * (alignment, marquee containment under group transforms).
+ *
+ * We get the local box, walk its four corners through
+ * the parent's CTM-relative-to-svg-root, and take the
+ * min/max envelope. This handles arbitrary ancestor
+ * chains (including rotation and skew — the resulting
+ * box is the axis-aligned envelope of the rotated rect).
+ *
+ * Returns null when the element doesn't support
+ * `getBBox()` (e.g., not yet attached, or a tag the
+ * browser refuses to measure).
+ */
+export function _elementRootBBox(el, svgRoot) {
+  if (!el || typeof el.getBBox !== 'function') return null;
+  let local;
+  try {
+    local = el.getBBox();
+  } catch (_) {
+    return null;
+  }
+  if (!local) return null;
+  // Build the element-local-to-root transform. The
+  // element's getBBox() is in the space *before* the
+  // element's own transform attribute is applied — so
+  // we use the element's full CTM (which includes its
+  // own transform) relative to the SVG root.
+  const elCtm = el.getCTM?.();
+  const rootCtm = svgRoot?.getCTM?.();
+  if (!elCtm || !rootCtm) {
+    // No transform info available — return the local
+    // box as-is. Better than failing entirely; callers
+    // get reasonable behavior in the common case where
+    // there are no ancestor transforms.
+    return {
+      x: local.x,
+      y: local.y,
+      width: local.width,
+      height: local.height,
+    };
+  }
+  // We want element-local → svg-root. The element's CTM
+  // maps element-local → screen; the svg root's CTM maps
+  // svg-root → screen. So elementLocalToRoot =
+  // inverse(rootCtm) * elCtm.
+  let toRoot;
+  try {
+    toRoot = rootCtm.inverse().multiply(elCtm);
+  } catch (_) {
+    return {
+      x: local.x,
+      y: local.y,
+      width: local.width,
+      height: local.height,
+    };
+  }
+  const corners = [
+    { x: local.x, y: local.y },
+    { x: local.x + local.width, y: local.y },
+    { x: local.x, y: local.y + local.height },
+    { x: local.x + local.width, y: local.y + local.height },
+  ];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of corners) {
+    const tx = toRoot.a * p.x + toRoot.c * p.y + toRoot.e;
+    const ty = toRoot.b * p.x + toRoot.d * p.y + toRoot.f;
+    if (tx < minX) minX = tx;
+    if (ty < minY) minY = ty;
+    if (tx > maxX) maxX = tx;
+    if (ty > maxY) maxY = ty;
+  }
+  if (
+    !Number.isFinite(minX) || !Number.isFinite(minY)
+    || !Number.isFinite(maxX) || !Number.isFinite(maxY)
+  ) {
+    return null;
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+/**
  * Axis-aligned bounding box in SVG root coords.
  * Used by marquee hit-test to check containment /
  * intersection.
@@ -410,6 +503,38 @@ export function _computePathEndpoints(commands) {
     }
   }
   return result;
+}
+
+/**
+ * Whether a parsed path command list represents a
+ * single straight line segment — exactly one M
+ * followed by exactly one L (absolute or relative
+ * for either), optionally followed by a single Z.
+ *
+ * Used to identify path elements that are arrow
+ * shafts (typically authored as `M x1 y1 L x2 y2`)
+ * for snap-to-axis. Anything else — multi-segment
+ * polylines, curves, multiple subpaths — returns
+ * false.
+ *
+ * Empty / null input returns false.
+ */
+export function _isSingleStraightSegment(commands) {
+  if (!Array.isArray(commands)) return false;
+  const len = commands.length;
+  if (len < 2 || len > 3) return false;
+  const first = commands[0];
+  const second = commands[1];
+  if (!first || !second) return false;
+  if (first.cmd !== 'M' && first.cmd !== 'm') return false;
+  if (second.cmd !== 'L' && second.cmd !== 'l') return false;
+  if (len === 3) {
+    const third = commands[2];
+    if (!third || (third.cmd !== 'Z' && third.cmd !== 'z')) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

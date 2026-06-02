@@ -102,41 +102,8 @@ export const APP_SHELL_STYLES = css`
     }
     .dialog.minimized .dialog-body,
     .dialog.minimized .reconnect-banner,
-    .dialog.minimized .compaction-bar,
-    .dialog.minimized .convert-fab {
+    .dialog.minimized .compaction-bar {
       display: none;
-    }
-    /* Convert FAB — floating button at bottom-left
-     * of the dialog. Replaces the dialog-header
-     * Convert icon. Hidden when the backend reports
-     * markitdown unavailable (the parent template
-     * gates rendering). */
-    .convert-fab {
-      position: absolute;
-      bottom: 0.35rem;
-      left: 0.5rem;
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      background: rgba(22, 27, 34, 0.95);
-      border: 1px solid rgba(240, 246, 252, 0.2);
-      color: var(--text-primary, #c9d1d9);
-      cursor: pointer;
-      font-size: 0.8rem;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 12;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-      transition: background 120ms ease,
-        border-color 120ms ease,
-        transform 120ms ease;
-    }
-    .convert-fab:hover {
-      background: rgba(88, 166, 255, 0.15);
-      border-color: var(--accent-primary, #58a6ff);
-      transform: scale(1.05);
     }
     /* Expand FAB — only rendered when the dialog
      * is minimized. Lives at the top-right of the

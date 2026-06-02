@@ -32,6 +32,20 @@
   "reasoning": {
     "enabled": false,
     "budget_tokens": 10000,
-    "effort": "high"
+    "effort": "xhigh",
+    "first_chunk_timeout_seconds": 1200,
+    "request_timeout_seconds": 1200
+  },
+  "cache_warmup": {
+    "enabled": false,
+    "interval_seconds": 240
+  },
+  "cache_tiering": {
+    "flux_threshold": 1.0,
+    "membranes": [
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 3, "pick_mode": "oldest", "admission_only": true},
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest", "admission_only": false},
+      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest", "admission_only": false}
+    ]
   }
 }

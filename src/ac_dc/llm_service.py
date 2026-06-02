@@ -135,6 +135,7 @@ from ac_dc.llm._types import (
     _TIER_CONFIG_LOOKUP,
     _URL_PER_MESSAGE_LIMIT,
 )
+from ac_dc.cache_membrane import FluxConfig
 from ac_dc.stability_tracker import StabilityTracker, Tier, _TIER_CONFIG
 from ac_dc.token_counter import TokenCounter
 from ac_dc.url_service import URLCache, URLService
@@ -174,6 +175,7 @@ class LLMService:
         event_callback: EventCallback | None = None,
         history_store: Optional["HistoryStore"] = None,
         deferred_init: bool = False,
+        experimental: bool = False,
     ) -> None:
         """Construct the service.
 
@@ -208,6 +210,13 @@ class LLMService:
             service as not-yet-ready for chat. Layer 6's startup
             sequence uses this to get the WebSocket server up
             before heavy indexing completes.
+        experimental:
+            When True, unlock experimental features that are off
+            by default. Currently gates the cache warmer — the
+            warmer requires both this flag AND
+            ``cache_warmup.enabled`` in ``app.json``. Either
+            gate closed keeps the warmer inert. Plumbed through
+            from the CLI's ``--experimental`` flag.
         """
         self._config = config
         self._repo = repo
@@ -318,8 +327,12 @@ class LLMService:
         # created lazily on first switch — it costs nothing
         # while the session stays in code mode.
         cache_target = config.cache_target_tokens_for_model()
+        flux_config = FluxConfig.from_dict(config.cache_tiering_config)
         self._trackers: dict[Mode, StabilityTracker] = {
-            Mode.CODE: StabilityTracker(cache_target_tokens=cache_target),
+            Mode.CODE: StabilityTracker(
+                cache_target_tokens=cache_target,
+                flux_config=flux_config,
+            ),
         }
         # Point the context manager at the current mode's tracker.
         # _stability_tracker is kept as a backwards-compatible
@@ -388,10 +401,23 @@ class LLMService:
             "pre_change_symbol_map": "",
         }
 
-        # Executors. Streaming gets its own pool so aux work doesn't
-        # starve it. Aux pool handles commit-message generation and
-        # topic detection — both blocking LLM calls that should run
-        # off the event loop but can overlap with a stream.
+        # Executors. Three pools, isolated by deadline class:
+        #
+        # - ``_stream_executor`` — user-facing streaming LLM calls.
+        #   Hot path. Latency-sensitive.
+        # - ``_aux_executor`` — soft-deadline batch work: commit
+        #   message generation, topic detection, doc-index build,
+        #   keyword enrichment, URL fetching during streaming.
+        # - ``_warmer_executor`` — cache warmer ONLY. Single
+        #   worker, dedicated. The warmer has a hard wall-clock
+        #   deadline (Anthropic's 5-minute prompt-cache TTL); it
+        #   used to share ``_aux_executor`` and was observed in
+        #   the field queueing behind KeyBERT enrichment, drifting
+        #   +50 to +170 seconds past its scheduled fire time and
+        #   missing the cache window every cycle (0% hit rate,
+        #   pure cache writes). Isolating to a dedicated pool
+        #   removes the queueing path entirely. See decision D34
+        #   and ``specs4/3-llm/cache-tiering.md`` § Cache Warmer.
         self._stream_executor = ThreadPoolExecutor(
             max_workers=_STREAM_EXECUTOR_WORKERS,
             thread_name_prefix="ac-dc-stream",
@@ -399,6 +425,10 @@ class LLMService:
         self._aux_executor = ThreadPoolExecutor(
             max_workers=_AUX_EXECUTOR_WORKERS,
             thread_name_prefix="ac-dc-aux",
+        )
+        self._warmer_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="ac-dc-warmer",
         )
 
         # History compactor — with an injected topic detector that
@@ -514,6 +544,24 @@ class LLMService:
         # Cleared in the background task's finally block, same
         # pattern as ``_active_user_request``.
         self._active_agent_streams: set[str] = set()
+        # Reverse map for stream resumption after browser
+        # refresh / reconnect. Keyed by request id, value is
+        # the agent's LLM-chosen id (== tab id) for tagged
+        # streams, or None for the main user-initiated
+        # stream. Populated alongside ``_active_user_request``
+        # and ``_active_agent_streams`` in ``chat_streaming``;
+        # cleared in ``stream_chat``'s finally block.
+        #
+        # Used by :func:`get_current_state` to surface every
+        # in-flight stream's request id, owning agent (or
+        # main), and accumulated content so a refreshed
+        # browser can re-attach to the live stream rather
+        # than seeing the opaque "Another stream is active"
+        # rejection. See specs4/3-llm/streaming.md § Passive
+        # Stream Adoption — this is the same mechanism
+        # extended to cover the originating client after
+        # reconnect.
+        self._active_request_to_agent: dict[str, str | None] = {}
         # Cancellation flags keyed by request ID. Populated by
         # cancel_streaming; the worker thread polls and breaks out
         # when it finds its ID.
@@ -623,6 +671,20 @@ class LLMService:
         # occurred or after the last error was consumed.
         self._last_error_info: dict[str, Any] | None = None
 
+        # Snapshot of the main scope's stability-tracker
+        # change log from the most recent ``_update_stability``
+        # call. Populated inside ``_stability.update_stability``
+        # before ``_print_post_response_hud`` drains the
+        # tracker's live ``_changes`` list. Consumed by
+        # ``_breakdown.get_context_breakdown`` so the
+        # frontend's Token HUD and Context tab show the
+        # tier-change list that the terminal HUD also
+        # printed — the two consumers used to race against
+        # the drain, and whichever ran second saw an empty
+        # list. Replaced (not appended) on every turn, so
+        # the UI always reflects the latest cycle.
+        self._last_tier_changes: list[str] = []
+
         # Readiness flag. When deferred_init=True, chat_streaming
         # rejects with a friendly message until
         # complete_deferred_init fires.
@@ -639,30 +701,6 @@ class LLMService:
         # session existed.
         self._restored_on_startup = False
 
-        # ---- L0 snapshot fields (D28) ----
-        #
-        # L0's rendered byte sequence — the system message
-        # content the LLM receives — is captured into these
-        # fields at the L0-invalidation events enumerated in
-        # specs4/3-llm/cache-tiering.md § L0 Stability Contract.
-        # Prompt assembly reads from the snapshot, NOT from
-        # live ``SymbolIndex.get_symbol_map()`` /
-        # ``DocIndex.get_doc_map()`` calls. The live indexes
-        # are kept current per-turn (for cascade hash
-        # comparisons on per-file blocks in L1–L3 and for the
-        # next freeze event) but their byte-level drift no
-        # longer affects what the provider caches.
-        #
-        # Empty strings until the first freeze. When deferred
-        # init is active, the freeze is deferred to
-        # ``complete_deferred_init``; flat-assembly fallback
-        # covers the brief pre-freeze window.
-        self._l0_system_prompt: str = ""
-        self._l0_primary_legend: str = ""
-        self._l0_primary_map: str = ""
-        self._l0_secondary_legend: str = ""
-        self._l0_secondary_map: str = ""
-
         # Auto-restore the last session. This happens
         # UNCONDITIONALLY at construction (not deferred) so the
         # first get_current_state call returns previous messages
@@ -672,141 +710,36 @@ class LLMService:
         if self._history_store is not None:
             self._restore_last_session()
 
-        # Initial L0 freeze. Skipped under deferred init —
-        # the symbol index isn't attached yet. The deferred
-        # path runs the freeze in ``complete_deferred_init``
-        # after wiring the index. When not deferred (tests,
-        # synchronous startup paths), freeze immediately so
-        # the first chat request reads from a populated
-        # snapshot.
+        # Experimental features gate. The CLI's
+        # ``--experimental`` flag flows here via ``main.run``
+        # and acts as a master switch for opt-in features.
+        # Currently gates the cache warmer; future
+        # experimental features check this flag too.
+        # Stored on the service so :meth:`CacheWarmer.start`
+        # (called both here and from
+        # :func:`complete_deferred_init`) can check it
+        # without re-plumbing through every call site.
+        self._experimental = bool(experimental)
+
+        # Cache warmer — keeps the provider prompt cache
+        # warm during user idle periods. Inert until
+        # ``start()`` runs. Synchronous-init path calls
+        # start here; deferred-init path calls start from
+        # ``complete_deferred_init`` once the symbol index
+        # and L0 snapshot are ready. Either way, the first
+        # actual scheduling happens once an event loop is
+        # running (i.e. after the first ``stream_chat``
+        # captures one and its trailing ``reset()`` fires).
+        # The warmer is double-gated — both
+        # ``self._experimental`` and
+        # ``app.json::cache_warmup.enabled`` must be True
+        # for any warm-up to fire. The check happens inside
+        # ``CacheWarmer.start`` so the deferred-init path
+        # gets the same gate without re-checking here.
+        from ac_dc.llm._cache_warmer import CacheWarmer
+        self._cache_warmer = CacheWarmer(self)
         if not deferred_init:
-            self._freeze_l0_snapshot()
-
-    # ------------------------------------------------------------------
-    # L0 snapshot
-    # ------------------------------------------------------------------
-
-    def _freeze_l0_snapshot(self) -> None:
-        """Capture L0's rendered bytes from the live indexes.
-
-        Refreezes the five ``_l0_*`` fields from current
-        index, prompt, and cross-reference state. Called at
-        every L0-invalidation event:
-
-        - Service construction (after indexes are ready, or
-          deferred to :meth:`complete_deferred_init`).
-        - Mode switch (system prompt + primary index swap).
-        - Cross-reference enable/disable (secondary content
-          adds/removes).
-        - Settings reload that changed prompt bytes.
-        - File inclusion / user-confirmed file exclusion.
-        - Manual cache rebuild.
-
-        Reads exactly what the prompt assembler used to read
-        live: the current mode's primary index legend and
-        aggregate map, plus the opposite-mode index's
-        secondary legend and map when cross-reference is
-        active. The user's exclusion list is honoured when
-        rendering the maps (excluded files have no
-        representation in the prompt).
-
-        Side-effect-free apart from setting the snapshot
-        fields. Safe to call from any context (event loop or
-        worker thread) — performs no I/O beyond reading the
-        in-memory live indexes.
-        """
-        # System prompt — read from the context manager
-        # (review mode swap, or current mode's prompt set by
-        # switch_mode).
-        self._l0_system_prompt = self._context.get_system_prompt()
-
-        # User-exclusion set — files removed from the index
-        # via the file picker's three-state checkbox have no
-        # representation in L0.
-        from ac_dc.llm._breakdown import user_excluded_paths
-        excluded = user_excluded_paths(self)
-
-        # Primary index — whichever matches the current mode.
-        if self._context.mode == Mode.DOC:
-            try:
-                self._l0_primary_legend = (
-                    self._doc_index.get_legend()
-                )
-                self._l0_primary_map = self._doc_index.get_doc_map(
-                    exclude_files=excluded
-                )
-            except Exception as exc:
-                logger.warning(
-                    "L0 freeze: doc index read failed: %s", exc
-                )
-                self._l0_primary_legend = ""
-                self._l0_primary_map = ""
-        else:
-            if self._symbol_index is not None:
-                try:
-                    self._l0_primary_legend = (
-                        self._symbol_index.get_legend()
-                    )
-                    self._l0_primary_map = (
-                        self._symbol_index.get_symbol_map(
-                            exclude_files=excluded
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "L0 freeze: symbol index read "
-                        "failed: %s",
-                        exc,
-                    )
-                    self._l0_primary_legend = ""
-                    self._l0_primary_map = ""
-            else:
-                self._l0_primary_legend = ""
-                self._l0_primary_map = ""
-
-        # Secondary index — only populated when cross-
-        # reference is on. Routes to the opposite-mode index.
-        self._l0_secondary_legend = ""
-        self._l0_secondary_map = ""
-        if self._cross_ref_enabled:
-            try:
-                if self._context.mode == Mode.DOC:
-                    if self._symbol_index is not None:
-                        self._l0_secondary_legend = (
-                            self._symbol_index.get_legend()
-                        )
-                        self._l0_secondary_map = (
-                            self._symbol_index.get_symbol_map(
-                                exclude_files=excluded
-                            )
-                        )
-                else:
-                    self._l0_secondary_legend = (
-                        self._doc_index.get_legend()
-                    )
-                    self._l0_secondary_map = (
-                        self._doc_index.get_doc_map(
-                            exclude_files=excluded
-                        )
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "L0 freeze: secondary index read "
-                    "failed: %s",
-                    exc,
-                )
-                self._l0_secondary_legend = ""
-                self._l0_secondary_map = ""
-
-        logger.info(
-            "L0 snapshot frozen — primary_map=%d chars, "
-            "primary_legend=%d chars, secondary_map=%d chars, "
-            "system_prompt=%d chars",
-            len(self._l0_primary_map),
-            len(self._l0_primary_legend),
-            len(self._l0_secondary_map),
-            len(self._l0_system_prompt),
-        )
+            self._cache_warmer.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1107,11 +1040,22 @@ class LLMService:
     # ------------------------------------------------------------------
 
     def set_excluded_index_files(
-        self, files: list[str]
+        self,
+        files: list[str],
+        invalidate_l0: bool = False,
     ) -> list[str] | dict[str, Any]:
-        """Delegate to :func:`ac_dc.llm._rpc_state.set_excluded_index_files`."""
+        """Delegate to :func:`ac_dc.llm._rpc_state.set_excluded_index_files`.
+
+        ``invalidate_l0`` is accepted for wire compatibility
+        with the frontend's L0-prompt dispatcher (the file
+        picker's "Apply now / Defer" dialog). Under D36 it is
+        a no-op — there is no monolithic L0 to invalidate.
+        Forwarded to the impl which carries the same shim.
+        """
         from ac_dc.llm._rpc_state import set_excluded_index_files
-        return set_excluded_index_files(self, files)
+        return set_excluded_index_files(
+            self, files, invalidate_l0,
+        )
 
     def get_excluded_index_files(self) -> list[str]:
         """Return the current excluded-files list."""
@@ -1788,11 +1732,6 @@ class LLMService:
         from ac_dc.llm._stability import try_initialize_stability
         try_initialize_stability(self)
 
-    def _measure_tracker_tokens(self) -> None:
-        """Delegate to :func:`ac_dc.llm._stability.measure_tracker_tokens`."""
-        from ac_dc.llm._stability import measure_tracker_tokens
-        measure_tracker_tokens(self)
-
     def _print_init_hud(self) -> None:
         """Delegate to :func:`ac_dc.llm._breakdown.print_init_hud`.
 
@@ -1876,11 +1815,14 @@ class LLMService:
         images: list[str],
         tiered_content: dict[str, dict[str, Any]],
         scope: ConversationScope | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._assembly.assemble_tiered`."""
         from ac_dc.llm._assembly import assemble_tiered
         return assemble_tiered(
-            self, user_prompt, images, tiered_content, scope
+            self, user_prompt, images, tiered_content, scope,
+            skip_active=skip_active,
         )
 
     # ------------------------------------------------------------------
@@ -1892,11 +1834,14 @@ class LLMService:
         user_prompt: str,
         images: list[str],
         scope: ConversationScope | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._assembly.assemble_messages_flat`."""
         from ac_dc.llm._assembly import assemble_messages_flat
         return assemble_messages_flat(
-            self, user_prompt, images, scope
+            self, user_prompt, images, scope,
+            skip_active=skip_active,
         )
 
     # ------------------------------------------------------------------
@@ -1969,6 +1914,78 @@ class LLMService:
         """Delegate to :func:`ac_dc.llm._commit.reset_to_head`."""
         from ac_dc.llm._commit import reset_to_head
         return reset_to_head(self)
+
+    # ------------------------------------------------------------------
+    # Cache warmer status (read-only) and re-enable (localhost-only)
+    # ------------------------------------------------------------------
+    #
+    # The Context tab's Cache sub-view shows an always-on
+    # status row sourced from these methods. The status read
+    # is safe for collaborators (read-only, no state change);
+    # re-enable is a mutation and follows the standard
+    # localhost-only pattern.
+    #
+    # Spec: specs4/3-llm/cache-tiering.md § Cache Warmer.
+
+    def get_cache_warmer_status(self) -> dict[str, Any]:
+        """Return current cache-warmer state for the UI.
+
+        Pure read — no side effects, no localhost guard.
+        Collaborators see the same state as the host so the
+        dialog renders identically for everyone.
+
+        Returns
+        -------
+        dict
+            ``enabled`` (bool) — whether the warmer is
+            currently active. False means either disabled by
+            config or auto-disabled by a runtime failure;
+            ``last_disabled_reason`` distinguishes.
+            ``seconds_remaining`` (float | None) — wall-clock
+            seconds until the next firing, or None when no
+            timer is scheduled (warmer not yet started, or
+            disabled).
+            ``interval_seconds`` (float) — configured idle
+            interval between firings.
+            ``last_disabled_reason`` (str | None) — populated
+            when ``enabled`` is False due to runtime failure.
+            None when disabled by config or never disabled.
+        """
+        warmer = self._cache_warmer
+        return {
+            "enabled": warmer.enabled,
+            "seconds_remaining": warmer.seconds_remaining,
+            "interval_seconds": warmer.interval_seconds,
+            "last_disabled_reason": warmer.last_disabled_reason,
+        }
+
+    def enable_cache_warmer(self) -> dict[str, Any]:
+        """Re-enable the cache warmer after a runtime disable.
+
+        Localhost-only — affects shared session state. Calls
+        :meth:`CacheWarmer.enable`, which today is a no-op
+        because the warmer is unplugged at the entry point
+        (see :meth:`CacheWarmer.start` UNPLUG comment).
+        Returns the actual post-call ``enabled`` state plus
+        the disabled reason when present so the frontend
+        can render an accurate toast — clicking Re-enable
+        on a parked warmer surfaces the parking reason
+        rather than a misleading success message.
+
+        When the warmer is revived, :meth:`CacheWarmer.enable`
+        starts succeeding and this RPC continues to return
+        the current ``enabled`` state truthfully.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        self._cache_warmer.enable()
+        return {
+            "enabled": self._cache_warmer.enabled,
+            "last_disabled_reason": (
+                self._cache_warmer.last_disabled_reason
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Event broadcast

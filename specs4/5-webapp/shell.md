@@ -104,7 +104,7 @@ The dialog has no header bar. The chat panel's tab strip sits directly at the to
 
 **LED strip** (below the textarea, above the compaction-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the tab id, mode, and state-specific diagnostic per [agent-browser.md](agent-browser.md#status-leds).
 
-**Convert FAB**: floating circular button at the dialog's bottom-left. Rendered only when the backend reports markitdown is installed. Hidden when the dialog is minimized.
+**Doc Convert**: lives in the file picker's top toolbar (a 📄 button rendered only when the backend reports markitdown is installed). Clicking dispatches `request-dialog-tab` with `{tab: 'doc-convert'}`. Same toolbar pattern as Settings — both buttons replaced earlier dialog-header / FAB iterations and now live in the picker so the dialog has no header at all.
 
 **Minimize button**: ▾ button rendered at the right edge of each dialog tab's toolbar — the chat panel's tab strip (after the overflow ⋯ menu), and each overlay tab's toolbar/nav-bar (Context, Settings, Convert). Right-edge placement is consistent across all four tabs so the affordance lives in the same spatial location regardless of which tab is active.
 
@@ -112,13 +112,19 @@ All four dispatch `request-dialog-minimize` which the shell catches and routes t
 
 **Expand FAB**: ▴ button at the dialog's top-right, rendered ONLY when the dialog is minimized. The minimized state hides the dialog body, so all in-tab minimize buttons are unreachable; the expand FAB takes over as the only way to restore the dialog.
 
-**Settings**: lives in the file picker's top toolbar (a ⚙️ button between the sort glyphs and the git actions row). Clicking dispatches `request-dialog-tab` with `{tab: 'settings'}`.
+**Settings**: lives in the file picker's top toolbar (a ⚙️ button between the sort split-button and the Doc Convert / git split-button row). Clicking dispatches `request-dialog-tab` with `{tab: 'settings'}`.
 
 **Drag detection**: the dialog as a whole listens for pointerdown. Drag is initiated only when the pointer's `composedPath()` walks through an element with `data-drag-handle="true"` AND no button. Today only the tab strip carries that attribute. This means:
 
 - Pointerdown on a tab button, the per-tab 📊 Context icon, the per-tab ✕ close icon, or the overflow button — `closest('button')` matches, no drag.
 - Pointerdown on the tab strip's background or the gap between buttons — drag begins.
-- Pointerdown anywhere else in the dialog (LEDs, message area, picker, FABs, input) — no drag, normal click handling.
+- Pointerdown anywhere else in the dialog (LEDs, message area, picker, input) — no drag, normal click handling.
+
+**Compaction-capacity bar**: thin 4px strip at the very bottom of the dialog (above the resize handles), rendered when the backend reports compaction is enabled and history-status data has been fetched. The fill width tracks the ratio of current history tokens to the compaction trigger threshold. Colour follows the same tri-state convention as the Context tab budget bar and Token HUD: green ≤75%, amber 75–90%, red >90%. Hidden in minimized mode along with the body and reconnect banner. Tooltip on hover gives exact token counts and percent. Refreshed via `LLMService.get_history_status` after every stream-complete, session-changed, and compaction-event broadcast.
+
+**Doc index progress overlay**: an `ac-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. Distinct from the compaction-progress overlay (an `ac-compaction-progress` component rendered at viewport scope, not inside the dialog), which fires on `compaction-event` and auto-dismisses after success or error. Both overlays exist so background work surfaces without re-showing the startup overlay or stalling chat interaction.
+
+**Cache warmup progress overlay**: an `ac-cache-warmup-progress` component rendered at viewport scope (bottom-center, above the toast layer's z-index but below modals). Listens for the four `cache-warmup-*` window events the shell re-dispatches from server-push callbacks. Renders a 30-second countdown progress bar during the visible phase, flips to a spinner during the firing phase, briefly flashes "Cache refreshed" on success or an error reason on failure, then fades out. Cancelled events close the bar without a flash. See [cache-tiering.md § Cache Warmer](../3-llm/cache-tiering.md#cache-warmer) for the backend lifecycle.
 
 Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
 

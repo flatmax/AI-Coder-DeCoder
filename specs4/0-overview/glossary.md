@@ -6,15 +6,14 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 
 - **Tier** — a stability level assigned to each item the LLM sees. Five levels: L0 (most stable, terminal — no further promotion), L1, L2, L3, active (uncached). Each cached tier maps to one `cache_control` breakpoint in the assembled prompt.
 - **Active** — the uncached content rebuilt on every request. New items, recently-changed items, and the current turn's content all live here. Not a cache tier in the provider sense — the prompt contains it directly, without a cache marker.
-- **N value** — a per-item counter tracking consecutive unchanged appearances in active context. Incremented each request when the item's content hash matches the previous request; reset to zero on any hash mismatch. Used to decide when an item is stable enough to graduate into a cached tier.
-- **Entry N** — the N value assigned when an item enters a cached tier. Items arriving at L3 start with N=3 (the graduation threshold); items promoted to L2 receive N=6; L1 receives N=9; L0 receives N=12. A promoted item does not preserve its source-tier N — it adopts the destination tier's entry N.
-- **Promotion threshold** — the N value an item in tier X must reach to become eligible for promotion to tier X−1. Thresholds: active → L3 at N=3, L3 → L2 at N=6, L2 → L1 at N=9, L1 → L0 at N=12. L0 has no threshold (terminal).
-- **Graduation** — the specific case of promotion from active into L3 when an item reaches N=3 and the cascade runs.
-- **Cascade** — the bottom-up pass (L3 → L2 → L1 → L0) that runs after each LLM response. A tier with an item leaving (demoted or deselected) is "broken"; items from the tier below fill the gap up to the destination tier's capacity. Cascade continues until no tier is broken.
-- **Anchoring** — when a tier is below `cache_target_tokens` in total size, the provider won't actually cache it. To avoid wasting a breakpoint, the tracker "anchors" (freezes N and prevents promotion) enough items in a tier above to keep that tier at least at cache_target. Anchored items don't promote even if their N exceeds the threshold.
-- **Broken tier** — a tier whose cache block has been invalidated this cycle (by demotion, deselection, or explicit invalidation). Cascade runs to refill it.
+- **N value** — a per-item age counter. Increments by 1 every cycle for every item; resets to 0 on hash mismatch (edit) or teleport. Above the Active→L3 admission gate, N has no semantic role in promotion eligibility — the membrane / flux controller (D35) drives promotions on token-mass imbalance, not on per-item N. Below the gate, N is the entire promotion criterion: an Active item graduates to L3 once `N ≥ n_admit` (default 3).
+- **Admission gate (`n_admit`)** — the only live N threshold under D35/D36. Default 3. Files in Active become eligible to graduate to L3 once their N value reaches `n_admit`. Above L3 there are no per-tier N thresholds; the flux equation handles promotion. Configured per-membrane in `app.json`.
+- **Graduation** — the specific case of promotion from active into L3 when an item satisfies `N ≥ n_admit` and the Active→L3 membrane fires.
+- **Cascade** — the bottom-up relaxation pass that runs after each LLM response. Implemented as the membrane / flux controller's iterate-to-equilibrium loop across the four live membranes (Active→L3, L3→L2, L2→L1, L1→L0). A tier with an item leaving (teleport-to-Active on edit/deselect, history graduation, file deletion) is "broken"; the loop redistributes mass upward via the flux equation until a full pass fires no moves.
+- **Broken tier** — a tier whose cache block has been invalidated this cycle (by teleport, deselection, file deletion, or other explicit invalidation). The relaxation loop runs to redistribute mass.
 - **Cache target tokens** — the minimum tokens a cache block must contain for the provider to actually cache it. Computed as `max(user_min, model_min) × buffer_multiplier`. Model minimums: 4096 for Opus 4.5/4.6/Haiku 4.5; 1024 for Sonnet and other Claude models. User minimum configurable via `llm.json`; buffer multiplier defaults to 1.1.
-- **Ripple promotion** — the chain reaction when cascade promotes an item out of a tier, which leaves that tier broken, which pulls an item up from the tier below, which leaves *that* tier broken, and so on. Can propagate from L3 all the way to L0 in a single cycle.
+- **Ripple promotion** — the chain reaction when the relaxation loop's promotion of an item out of a tier alters V on the membrane below, allowing the next pass to fire there too. Can propagate from L3 all the way to L0 in a single cycle. Bounded by `_MAX_RELAX_ITERS` and by the rectified-GHK self-arresting deadband.
+- **History isolation (D37)** — `history:*` items in L3 are protected from movement (cannot be picked as movers) AND invisible to V/c on every membrane (filtered out of `c_lower`, `c_upper`, `t_lower`, `t_upper`). Once history graduates into L3 via the piggyback path, flux never moves it; only `purge_history` (compaction, new-session reset) or manual rebuild can remove it.
 
 ## Context and Content
 
@@ -58,7 +57,7 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 ## Files and Indexing
 
 - **Selected files** — files the user has ticked in the file picker. Full content enters active context; the corresponding index block is excluded from the main symbol/doc map (would be redundant).
-- **Excluded files** — files the user has explicitly excluded from indexing (three-state checkbox). No content, no index block, no tracker entry. Used when a doc repo's map alone exceeds the context budget.
+- **Excluded files** — files the user has explicitly removed from the cache via the file picker's three-state checkbox. The underlying symbol and doc indexes still cover them — exclusion is a cache-shaping filter, not an indexing-time filter — but they are subtracted from every dir-block at seed time and per-turn refresh, and any `file:<path>` tracker entry is dropped on the exclusion event. The LLM does not see them in any tier. Used when a repo's map alone exceeds the context budget. Re-inclusion is instant: the next turn's seed picks the file back up from the live index.
 - **Index-only file** — the default state for a file: not selected, not excluded. Only its index block appears in context (as part of the symbol map / doc map), not its full content.
 - **Reference graph** — the cross-file usage relationships. Code graph: import statements and call sites. Doc graph: heading-anchored links and image embeds. Used for tier initialization (connected components cluster related files into the same tier) and for incoming-ref counts in the compact map output.
 - **Connected component** — a cluster of files linked via mutual bidirectional references. The stability tracker uses connected components as the initial grouping for tier distribution — related files tend to be edited together, so they share stability characteristics.
@@ -135,7 +134,7 @@ Authoritative definitions of terms used across the spec suite. When a spec uses 
 ## Files and Indexing
 
 - **Selected files** — files the user has checked in the file picker (full content in context)
-- **Excluded files** — files the user has explicitly excluded from indexing (no content, no index block)
+- **Excluded files** — see the full definition under Caching and Content above
 - **Index-only file** — default state (not selected, not excluded) — only the index block is in context
 - **Reference graph** — cross-file usage relationships (imports, calls, doc links)
 - **Connected component** — cluster of files linked via mutual references

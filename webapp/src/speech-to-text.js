@@ -99,6 +99,9 @@ export class SpeechToText extends LitElement {
       background: rgba(248, 81, 73, 0.1);
       border-color: rgba(248, 81, 73, 0.3);
       color: #f85149;
+      box-shadow:
+        0 0 0 1px rgba(248, 81, 73, 0.5),
+        0 0 8px rgba(248, 81, 73, 0.4);
     }
     .led {
       width: 8px;

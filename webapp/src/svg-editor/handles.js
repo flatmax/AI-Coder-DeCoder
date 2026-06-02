@@ -12,6 +12,7 @@ import {
   HANDLE_GROUP_ID,
   HANDLE_ROLE_ATTR,
   HANDLE_SCREEN_RADIUS,
+  _ROTATE_HANDLE_OFFSET,
 } from './constants.js';
 import {
   _computePathControlPoints,
@@ -115,7 +116,35 @@ export default {
     this._renderBBoxOverlay(group, this._selected, true);
     // Per-shape resize handles.
     this._renderResizeHandles(group, this._selected, bbox);
+    // Rotate handle — floats above the bbox top edge.
+    this._renderRotateHandle(group, bbox);
     if (marqueeRect) group.appendChild(marqueeRect);
+  },
+
+  /**
+   * Render the rotate handle above the bbox top edge.
+   * A small dashed line connects the bbox top-center to
+   * the handle dot so the spatial relationship is clear.
+   * Both elements opt out of pointer events except the
+   * dot itself, which carries the `rotate` role.
+   *
+   * Offset is in screen pixels (converted to SVG units
+   * per zoom) so the gap stays visually constant.
+   */
+  _renderRotateHandle(group, bbox) {
+    const offset = this._screenDistToSvgDist(_ROTATE_HANDLE_OFFSET);
+    const cx = bbox.x + bbox.width / 2;
+    const topY = bbox.y;
+    const handleY = topY - offset;
+    // Tangent line from bbox top-center to handle.
+    group.appendChild(
+      this._makeTangentLine(cx, topY, cx, handleY),
+    );
+    // Handle dot. Distinct fill from resize handles so
+    // it's visually identifiable as a rotation control.
+    const dot = this._makeHandleDot(cx, handleY, 'rotate');
+    dot.setAttribute('fill', '#ffd54f');
+    group.appendChild(dot);
   },
 
   /**

@@ -29,6 +29,33 @@ import { EMPTY_TREE } from './constants.js';
 import { flattenTreePaths } from './helpers.js';
 
 /**
+ * Walk a file tree and collect every file node's path
+ * for which `is_binary === true`. Binary files can't
+ * usefully participate in LLM context (the backend
+ * silently trims them at sync time), so the picker
+ * disables their checkboxes and excludes them from
+ * select-all / deselect-all descendant math — without
+ * that, root and directory checkboxes could never
+ * reach the "fully selected" or "fully unselected"
+ * state when binaries were present.
+ */
+function collectBinaryPaths(node) {
+  const out = new Set();
+  function walk(n) {
+    if (!n || typeof n !== 'object') return;
+    if (n.type === 'file') {
+      if (n.is_binary === true && typeof n.path === 'string') {
+        out.add(n.path);
+      }
+      return;
+    }
+    for (const child of n.children || []) walk(child);
+  }
+  walk(node);
+  return out;
+}
+
+/**
  * Fetch the file tree + branch info and update every
  * downstream consumer. Two RPCs in parallel; tree
  * failure is fatal for this load (nothing useful to
@@ -142,6 +169,12 @@ export async function loadFileTree(host) {
   // circuits on empty input, so before the first load
   // the cost is zero.
   host._repoFiles = flattenTreePaths(host._latestTree);
+  // Collect binary paths so the picker can disable
+  // their checkboxes and exclude them from select-all
+  // descendant math. Without this, root checkbox
+  // could never reach all/none state when binaries
+  // are present.
+  host._binaryFiles = collectBinaryPaths(host._latestTree);
   // First-load auto-select — picks up every file with
   // pending changes so the user doesn't have to
   // re-tick what they were just working on. Runs
@@ -294,36 +327,17 @@ export function pushChildProps(host) {
   picker.statusData = host._latestStatusData;
   picker.branchInfo = host._latestBranchInfo;
   picker.excludedFiles = new Set(host._excludedFiles);
-  picker.pinnedFiles = computePinnedFiles(host);
+  picker.binaryFiles = host._binaryFiles
+    ? new Set(host._binaryFiles)
+    : new Set();
   picker.activePath = host._activePath;
   picker.reviewState = host._reviewState;
+  picker.docConvertAvailable = !!host._docConvertAvailable;
   picker.requestUpdate();
   chat.repoFiles = host._repoFiles;
   chat.requestUpdate();
   host._childPropsPushed = true;
   return true;
-}
-
-/**
- * Build the set of paths that should be pinned to
- * selection — files with working-tree or staged
- * modifications. The picker uses this to suppress the
- * native checkbox toggle on attempted deselection so
- * Lit's reactive binding stays the source of truth.
- * Untracked and deleted files are excluded — see the
- * comment in `applySelection` for the rationale.
- */
-export function computePinnedFiles(host) {
-  const pinned = new Set();
-  const sd = host._latestStatusData;
-  if (!sd) return pinned;
-  if (sd.modified instanceof Set) {
-    for (const p of sd.modified) pinned.add(p);
-  }
-  if (sd.staged instanceof Set) {
-    for (const p of sd.staged) pinned.add(p);
-  }
-  return pinned;
 }
 
 /**
@@ -393,5 +407,15 @@ export function onStateLoaded(host, event) {
       picker.reviewState = review;
       picker.requestUpdate();
     }
+  }
+  // Doc Convert availability — flagged in the state snapshot
+  // when markitdown is importable on the server. The picker's
+  // toolbar gates a doc-convert button on this flag (replaces
+  // the legacy floating FAB owned by the shell). Push through
+  // pushChildProps so a missing picker mount is retried via
+  // the orchestrator's existing updated() retry path.
+  if (typeof state.doc_convert_available === 'boolean') {
+    host._docConvertAvailable = state.doc_convert_available;
+    pushChildProps(host);
   }
 }

@@ -62,9 +62,10 @@ export class FilePicker extends LitElement {
     branchInfo: { type: Object },
     selectedFiles: { type: Object },
     excludedFiles: { type: Object },
-    pinnedFiles: { type: Object },
+    binaryFiles: { type: Object },
     activePath: { type: String },
     reviewState: { type: Object },
+    docConvertAvailable: { type: Boolean },
     filterQuery: { type: String, state: true },
     _expanded: { type: Object, state: true },
     _focusedPath: { type: String, state: true },
@@ -75,6 +76,8 @@ export class FilePicker extends LitElement {
     _duplicating: { type: String, state: true },
     _creating: { type: Object, state: true },
     _branchMenu: { type: Object, state: true },
+    _gitMenuOpen: { type: Boolean, state: true },
+    _sortMenuOpen: { type: Boolean, state: true },
     _committing: { type: Boolean, state: true },
     _reviewActive: { type: Boolean, state: true },
     _streaming: { type: Boolean, state: true },
@@ -113,9 +116,10 @@ export class FilePicker extends LitElement {
       diffStats: {},
     };
     this.excludedFiles = new Set();
-    this.pinnedFiles = new Set();
+    this.binaryFiles = new Set();
     this.activePath = null;
     this.reviewState = null;
+    this.docConvertAvailable = false;
     this.filterQuery = '';
     this._expanded = new Set();
     this._focusedPath = null;
@@ -125,6 +129,7 @@ export class FilePicker extends LitElement {
     this._expandedSnapshot = null;
     this._contextMenu = null;
     this._branchMenu = null;
+    this._gitMenuOpen = false;
     this._onDocumentClickForMenu = this._onDocumentClickForMenu.bind(this);
     this._onDocumentKeyDownForMenu =
       this._onDocumentKeyDownForMenu.bind(this);
@@ -132,6 +137,15 @@ export class FilePicker extends LitElement {
       this._onDocumentClickForBranchMenu.bind(this);
     this._onDocumentKeyDownForBranchMenu =
       this._onDocumentKeyDownForBranchMenu.bind(this);
+    this._onDocumentClickForGitMenu =
+      this._onDocumentClickForGitMenu.bind(this);
+    this._onDocumentKeyDownForGitMenu =
+      this._onDocumentKeyDownForGitMenu.bind(this);
+    this._onDocumentClickForSortMenu =
+      this._onDocumentClickForSortMenu.bind(this);
+    this._onDocumentKeyDownForSortMenu =
+      this._onDocumentKeyDownForSortMenu.bind(this);
+    this._sortMenuOpen = false;
     this._committing = false;
     this._reviewActive = false;
     this._streaming = false;
@@ -175,6 +189,8 @@ export class FilePicker extends LitElement {
   disconnectedCallback() {
     this._closeContextMenu();
     this._closeBranchMenu();
+    this._closeGitMenu();
+    this._closeSortMenu();
     window.removeEventListener(
       'stream-chunk', this._onStreamChunkGit,
     );
@@ -369,15 +385,7 @@ export class FilePicker extends LitElement {
 
     return html`
       ${this._renderReviewBanner()}
-      <div class="filter-bar">
-        <input
-          type="text"
-          class="filter-input"
-          placeholder="Filter files (fuzzy match)…"
-          .value=${this.filterQuery}
-          @input=${this._onFilterInput}
-          aria-label="Filter files"
-        />
+      <div class="filter-bar filter-bar-top">
         ${this._renderSortButtons()}
       </div>
       <div
@@ -396,6 +404,16 @@ export class FilePicker extends LitElement {
             })
           : ''}
         ${this._renderChildren(filtered, 0, effectiveExpanded)}
+      </div>
+      <div class="filter-bar filter-bar-bottom">
+        <input
+          type="text"
+          class="filter-input"
+          placeholder="Filter files (fuzzy match)…"
+          .value=${this.filterQuery}
+          @input=${this._onFilterInput}
+          aria-label="Filter files"
+        />
       </div>
       ${this._renderContextMenu()}
       ${this._renderBranchMenu()}
@@ -458,18 +476,26 @@ export class FilePicker extends LitElement {
 
   _onRootCheckbox(event) {
     event.stopPropagation();
+    // Selection math walks text-only descendants
+    // (binaries can't be sent to the LLM); exclusion
+    // math walks the full set so a fully-excluded
+    // directory's binary children also leave the
+    // backend's cache. See `_collectDescendantFiles`.
     const descendants = this._collectDescendantFiles(this.tree);
-    if (descendants.length === 0) return;
+    const exclusionDescendants = this._collectDescendantFiles(
+      this.tree, { includeBinaries: true },
+    );
+    if (exclusionDescendants.length === 0) return;
     if (event.shiftKey) {
       event.preventDefault();
-      const allExcluded = descendants.every((p) =>
+      const allExcluded = exclusionDescendants.every((p) =>
         this.excludedFiles.has(p),
       );
       const nextExcluded = new Set(this.excludedFiles);
       if (allExcluded) {
-        for (const p of descendants) nextExcluded.delete(p);
+        for (const p of exclusionDescendants) nextExcluded.delete(p);
       } else {
-        for (const p of descendants) nextExcluded.add(p);
+        for (const p of exclusionDescendants) nextExcluded.add(p);
       }
       this._emitExclusionChanged(nextExcluded);
       if (!allExcluded) {
@@ -485,12 +511,12 @@ export class FilePicker extends LitElement {
       }
       return;
     }
-    const anyExcluded = descendants.some((p) =>
+    const anyExcluded = exclusionDescendants.some((p) =>
       this.excludedFiles.has(p),
     );
     if (anyExcluded) {
       const nextExcluded = new Set(this.excludedFiles);
-      for (const p of descendants) nextExcluded.delete(p);
+      for (const p of exclusionDescendants) nextExcluded.delete(p);
       this._emitExclusionChanged(nextExcluded);
     }
     const allSelected = descendants.every((p) =>
@@ -579,44 +605,194 @@ export class FilePicker extends LitElement {
 
   _renderSortButtons() {
     const dir = this._sortAsc ? '↑' : '↓';
-    const button = (mode, glyph, tooltip) => {
-      const isActive = this._sortMode === mode;
-      return html`
-        <button
-          type="button"
-          class="sort-btn ${isActive ? 'active' : ''}"
-          data-sort-mode=${mode}
-          title=${tooltip}
-          aria-pressed=${isActive}
-          @click=${() => this._onSortButtonClick(mode)}
-        >
-          ${glyph}${isActive
-            ? html`<span class="dir">${dir}</span>`
-            : ''}
-        </button>
-      `;
-    };
+    const modes = [
+      {
+        mode: SORT_MODE_NAME,
+        glyph: 'A',
+        label: 'Name',
+        tooltip: 'Sort by name',
+      },
+      {
+        mode: SORT_MODE_MTIME,
+        glyph: '🕐',
+        label: 'Modified',
+        tooltip: 'Sort by modification time',
+      },
+      {
+        mode: SORT_MODE_SIZE,
+        glyph: '#',
+        label: 'Size',
+        tooltip: 'Sort by size',
+      },
+    ];
+    const active =
+      modes.find((m) => m.mode === this._sortMode) || modes[0];
+    const menuOpen = this._sortMenuOpen;
+    const primaryTitle =
+      `Sorted by ${active.label.toLowerCase()} `
+      + `(${this._sortAsc ? 'ascending' : 'descending'}) `
+      + `— click to reverse direction`;
     return html`
       <div class="sort-buttons">
-        ${button(
-          SORT_MODE_NAME,
-          'A',
-          'Sort by name (click again to reverse)',
-        )}
-        ${button(
-          SORT_MODE_MTIME,
-          '🕐',
-          'Sort by modification time (click again to reverse)',
-        )}
-        ${button(
-          SORT_MODE_SIZE,
-          '#',
-          'Sort by size (click again to reverse)',
-        )}
+        <div
+          class="sort-split"
+          role="group"
+          aria-label="Sort files"
+        >
+          <button
+            type="button"
+            class="sort-btn primary active"
+            data-sort-mode=${active.mode}
+            title=${primaryTitle}
+            aria-label=${primaryTitle}
+            aria-pressed="true"
+            @click=${() => this._onSortButtonClick(active.mode)}
+          >
+            ${active.glyph}<span class="dir">${dir}</span>
+          </button>
+          <button
+            type="button"
+            class="sort-btn chevron"
+            aria-label="Choose sort mode"
+            aria-haspopup="menu"
+            aria-expanded=${menuOpen ? 'true' : 'false'}
+            title="Choose sort mode"
+            @click=${this._onSortMenuToggle}
+          >▾</button>
+          ${menuOpen ? this._renderSortMenu(modes, active) : ''}
+        </div>
         ${this._renderSettingsButton()}
+        ${this._renderDocConvertButton()}
         ${this._renderGitActions()}
       </div>
     `;
+  }
+
+  _renderDocConvertButton() {
+    if (!this.docConvertAvailable) return '';
+    return html`
+      <button
+        type="button"
+        class="picker-doc-convert-btn"
+        title="Convert documents to markdown"
+        aria-label="Convert documents"
+        @click=${this._onDocConvertButtonClick}
+      >📄</button>
+    `;
+  }
+
+  _onDocConvertButtonClick() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'doc-convert' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  _renderSortMenu(modes, active) {
+    const dir = this._sortAsc ? '↑' : '↓';
+    return html`
+      <div
+        class="sort-menu"
+        role="menu"
+        aria-label="Sort files"
+      >
+        ${modes.map((m) => {
+          const isActive = m.mode === active.mode;
+          return html`
+            <button
+              type="button"
+              class="sort-menu-item ${isActive ? 'active' : ''}"
+              role="menuitemradio"
+              aria-checked=${isActive ? 'true' : 'false'}
+              title=${isActive
+                ? `${m.tooltip} (click to reverse direction)`
+                : m.tooltip}
+              @click=${() => this._onSortMenuItemClick(m.mode)}
+            >
+              <span class="icon">${m.glyph}</span>
+              <span class="label">${m.label}</span>
+              ${isActive
+                ? html`<span class="dir">${dir}</span>`
+                : ''}
+            </button>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  _onSortMenuToggle(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._sortMenuOpen) {
+      this._closeSortMenu();
+    } else {
+      this._openSortMenu();
+    }
+  }
+
+  _openSortMenu() {
+    if (this._sortMenuOpen) return;
+    this._sortMenuOpen = true;
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForSortMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForSortMenu,
+      true,
+    );
+  }
+
+  _closeSortMenu() {
+    if (!this._sortMenuOpen) return;
+    this._sortMenuOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForSortMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForSortMenu,
+      true,
+    );
+  }
+
+  _onSortMenuItemClick(mode) {
+    this._closeSortMenu();
+    this._onSortButtonClick(mode);
+  }
+
+  _onDocumentClickForSortMenu(event) {
+    if (!this._sortMenuOpen) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const inside = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        (el.classList.contains('sort-menu') ||
+          el.classList.contains('sort-split')),
+    );
+    if (!inside) {
+      this._closeSortMenu();
+    }
+  }
+
+  _onDocumentKeyDownForSortMenu(event) {
+    if (!this._sortMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeSortMenu();
+    }
   }
 
   _renderSettingsButton() {
@@ -667,43 +843,174 @@ export class FilePicker extends LitElement {
         : this._committing
           ? 'Review disabled during commit'
           : 'Start a code review of a branch';
+    // Chevron is enabled even when the primary action is
+    // disabled — Copy diff is always safe, and the user
+    // may want to inspect the menu while a commit is in
+    // flight. Items inside the menu carry their own
+    // disabled state.
+    const menuOpen = this._gitMenuOpen;
     return html`
       <div
-        class="picker-git-actions"
+        class="picker-git-actions split"
         role="group"
         aria-label="Git actions"
       >
         <button
-          class="picker-git-btn"
-          title="Copy working-tree diff to clipboard"
-          aria-label="Copy diff"
-          @click=${() => this._dispatchGitAction('copy-diff')}
-        >📋</button>
-        <button
-          class="picker-git-btn ${this._committing ? 'in-flight' : ''}"
+          class="picker-git-btn primary ${this._committing ? 'in-flight' : ''}"
           ?disabled=${commitDisabled}
           title=${commitTitle}
           aria-label="Commit all changes"
           @click=${() => this._dispatchGitAction('commit')}
         >${this._committing ? '⏳' : '💾'}</button>
         <button
-          class="picker-git-btn danger"
-          ?disabled=${resetDisabled}
-          title=${resetTitle}
-          aria-label="Reset to HEAD"
-          @click=${() => this._dispatchGitAction('reset')}
-        >⚠️</button>
-        ${reviewActive ? '' : html`
-          <button
-            class="picker-git-btn"
-            ?disabled=${reviewDisabled}
-            title=${reviewTitle}
-            aria-label="Start code review"
-            @click=${this._onReviewButtonClick}
-          >🔍</button>
-        `}
+          class="picker-git-btn chevron"
+          aria-label="More git actions"
+          aria-haspopup="menu"
+          aria-expanded=${menuOpen ? 'true' : 'false'}
+          title="More git actions"
+          @click=${this._onGitMenuToggle}
+        >▾</button>
+        ${menuOpen
+          ? this._renderGitMenu({
+              resetDisabled,
+              resetTitle,
+              reviewActive,
+              reviewDisabled,
+              reviewTitle,
+            })
+          : ''}
       </div>
     `;
+  }
+
+  _renderGitMenu({
+    resetDisabled,
+    resetTitle,
+    reviewActive,
+    reviewDisabled,
+    reviewTitle,
+  }) {
+    return html`
+      <div
+        class="git-menu"
+        role="menu"
+        aria-label="Git actions"
+      >
+        <button
+          type="button"
+          class="git-menu-item"
+          role="menuitem"
+          title="Copy working-tree diff to clipboard"
+          @click=${() => this._onGitMenuItemClick('copy-diff')}
+        >
+          <span class="icon">📋</span>
+          <span class="label">Copy diff</span>
+        </button>
+        ${reviewActive
+          ? ''
+          : html`
+              <button
+                type="button"
+                class="git-menu-item"
+                role="menuitem"
+                ?disabled=${reviewDisabled}
+                title=${reviewTitle}
+                @click=${this._onGitMenuReviewClick}
+              >
+                <span class="icon">🔍</span>
+                <span class="label">Start code review…</span>
+              </button>
+            `}
+        <div class="git-menu-separator"></div>
+        <button
+          type="button"
+          class="git-menu-item destructive"
+          role="menuitem"
+          ?disabled=${resetDisabled}
+          title=${resetTitle}
+          @click=${() => this._onGitMenuItemClick('reset')}
+        >
+          <span class="icon">⚠️</span>
+          <span class="label">Reset to HEAD…</span>
+        </button>
+      </div>
+    `;
+  }
+
+  _onGitMenuToggle(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this._gitMenuOpen) {
+      this._closeGitMenu();
+    } else {
+      this._openGitMenu();
+    }
+  }
+
+  _openGitMenu() {
+    if (this._gitMenuOpen) return;
+    this._gitMenuOpen = true;
+    document.addEventListener(
+      'click',
+      this._onDocumentClickForGitMenu,
+      true,
+    );
+    document.addEventListener(
+      'keydown',
+      this._onDocumentKeyDownForGitMenu,
+      true,
+    );
+  }
+
+  _closeGitMenu() {
+    if (!this._gitMenuOpen) return;
+    this._gitMenuOpen = false;
+    document.removeEventListener(
+      'click',
+      this._onDocumentClickForGitMenu,
+      true,
+    );
+    document.removeEventListener(
+      'keydown',
+      this._onDocumentKeyDownForGitMenu,
+      true,
+    );
+  }
+
+  _onGitMenuItemClick(action) {
+    this._closeGitMenu();
+    this._dispatchGitAction(action);
+  }
+
+  _onGitMenuReviewClick() {
+    this._closeGitMenu();
+    this._onReviewButtonClick();
+  }
+
+  _onDocumentClickForGitMenu(event) {
+    if (!this._gitMenuOpen) return;
+    const path = event.composedPath
+      ? event.composedPath()
+      : [event.target];
+    const inside = path.some(
+      (el) =>
+        el &&
+        el.classList &&
+        (el.classList.contains('git-menu') ||
+          el.classList.contains('picker-git-actions')),
+    );
+    if (!inside) {
+      this._closeGitMenu();
+    }
+  }
+
+  _onDocumentKeyDownForGitMenu(event) {
+    if (!this._gitMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this._closeGitMenu();
+    }
   }
 
   _onReviewButtonClick() {
@@ -903,18 +1210,22 @@ export class FilePicker extends LitElement {
     }
     const isSelected = this.selectedFiles.has(node.path);
     const isExcluded = this.excludedFiles.has(node.path);
+    const isBinary =
+      this.binaryFiles && this.binaryFiles.has(node.path);
     const indentPx = depth * 16;
     const isFocused = node.path === this._focusedPath;
     const isActive = node.path === this.activePath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
-    const tooltip = this._tooltipFor(node, isExcluded, diff);
-    const checkboxTitle = isExcluded
-      ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
-      : 'Click to select, shift+click to exclude from index.';
+    const tooltip = this._tooltipFor(node, isExcluded, diff, isBinary);
+    const checkboxTitle = isBinary
+      ? 'Binary file — cannot be sent to the LLM.'
+      : isExcluded
+        ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
+        : 'Click to select, shift+click to exclude from index.';
     return html`
       <div
-        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isActive ? 'active-in-viewer' : ''}"
+        class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isBinary ? 'is-binary' : ''} ${isActive ? 'active-in-viewer' : ''}"
         style="--row-indent: ${indentPx}px"
         data-row-path=${node.path}
         @click=${(e) => this._onFileClick(e, node)}
@@ -940,6 +1251,7 @@ export class FilePicker extends LitElement {
           type="checkbox"
           class="checkbox"
           .checked=${isSelected}
+          ?disabled=${isBinary}
           @click=${(e) => this._onFileCheckbox(e, node)}
           aria-label="Select ${node.name}"
           title=${checkboxTitle}
@@ -1070,7 +1382,7 @@ export class FilePicker extends LitElement {
     return { added: addedRaw, removed: removedRaw };
   }
 
-  _tooltipFor(node, isExcluded = false, diff = null) {
+  _tooltipFor(node, isExcluded = false, diff = null, isBinary = false) {
     if (!node || typeof node !== 'object') return '';
     const name = typeof node.name === 'string' ? node.name : '';
     const path = typeof node.path === 'string' ? node.path : '';
@@ -1082,6 +1394,7 @@ export class FilePicker extends LitElement {
       if (diff.removed > 0) parts.push(`-${diff.removed}`);
       base = `${base} (${parts.join(' ')})`;
     }
+    if (isBinary) return `${base} (binary — cannot be sent to LLM)`;
     return isExcluded ? `${base} (excluded)` : base;
   }
 
@@ -1101,10 +1414,30 @@ export class FilePicker extends LitElement {
   // Selection helpers
   // ---------------------------------------------------------------
 
-  _collectDescendantFiles(node) {
+  _collectDescendantFiles(node, { includeBinaries = false } = {}) {
     const paths = [];
+    const binary = this.binaryFiles || new Set();
     function walk(n) {
       if (n.type === 'file') {
+        // Binary files are excluded from select-all
+        // descendant math: they can't usefully be sent
+        // to the LLM (the backend trims them at sync
+        // time), so toggling them on bulk select would
+        // never let the root or directory checkbox
+        // reach the "fully selected" state. Render-side
+        // they still appear in the tree with disabled
+        // checkboxes — see `_renderFile`.
+        //
+        // Exclusion math is the opposite case: a user
+        // excluding a directory means "this directory
+        // and everything under it should not appear in
+        // the cache," and that absolutely covers binary
+        // files. Without `includeBinaries`, a directory
+        // containing PDFs (e.g. `papers/`) would have
+        // its binary children silently retained in the
+        // backend's plain_files dir-block even though
+        // the user struck it through.
+        if (binary.has(n.path) && !includeBinaries) return;
         paths.push(n.path);
         return;
       }
@@ -1130,13 +1463,21 @@ export class FilePicker extends LitElement {
   }
 
   _allDescendantsExcluded(node) {
-    const descendants = this._collectDescendantFiles(node);
+    // Binary descendants count for exclusion badging
+    // because exclusion semantics cover them; selection
+    // badging uses the text-only walk via
+    // `_allDescendantsSelected`.
+    const descendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
     if (descendants.length === 0) return false;
     return descendants.every((p) => this.excludedFiles.has(p));
   }
 
   _someDescendantsExcluded(node) {
-    const descendants = this._collectDescendantFiles(node);
+    const descendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
     if (descendants.length === 0) return false;
     const excluded = descendants.filter((p) =>
       this.excludedFiles.has(p),
@@ -1181,18 +1522,24 @@ export class FilePicker extends LitElement {
 
   _onDirCheckbox(event, node) {
     event.stopPropagation();
+    // See _onRootCheckbox for why exclusion uses the
+    // full descendant list (incl. binaries) while
+    // selection uses the text-only list.
     const descendants = this._collectDescendantFiles(node);
-    if (descendants.length === 0) return;
+    const exclusionDescendants = this._collectDescendantFiles(
+      node, { includeBinaries: true },
+    );
+    if (exclusionDescendants.length === 0) return;
     if (event.shiftKey) {
       event.preventDefault();
-      const allExcluded = descendants.every((p) =>
+      const allExcluded = exclusionDescendants.every((p) =>
         this.excludedFiles.has(p),
       );
       const nextExcluded = new Set(this.excludedFiles);
       if (allExcluded) {
-        for (const p of descendants) nextExcluded.delete(p);
+        for (const p of exclusionDescendants) nextExcluded.delete(p);
       } else {
-        for (const p of descendants) nextExcluded.add(p);
+        for (const p of exclusionDescendants) nextExcluded.add(p);
       }
       this._emitExclusionChanged(nextExcluded);
       if (!allExcluded) {
@@ -1208,12 +1555,12 @@ export class FilePicker extends LitElement {
       }
       return;
     }
-    const anyExcluded = descendants.some((p) =>
+    const anyExcluded = exclusionDescendants.some((p) =>
       this.excludedFiles.has(p),
     );
     if (anyExcluded) {
       const nextExcluded = new Set(this.excludedFiles);
-      for (const p of descendants) nextExcluded.delete(p);
+      for (const p of exclusionDescendants) nextExcluded.delete(p);
       this._emitExclusionChanged(nextExcluded);
     }
     const allSelected = descendants.every((p) =>
@@ -1242,19 +1589,18 @@ export class FilePicker extends LitElement {
 
   _onFileCheckbox(event, node) {
     event.stopPropagation();
+    // Defensive: binary files render with disabled
+    // checkboxes, but any programmatic dispatch would
+    // bypass that. Skip silently — the backend would
+    // trim them anyway, but a no-op here keeps the
+    // root checkbox's all/none accounting honest.
+    if (this.binaryFiles && this.binaryFiles.has(node.path)) {
+      event.preventDefault();
+      return;
+    }
     if (event.shiftKey) {
       event.preventDefault();
       this._toggleExclusion(node.path);
-      return;
-    }
-    const isCurrentlySelected = this.selectedFiles.has(node.path);
-    const isPinned =
-      this.pinnedFiles && this.pinnedFiles.has(node.path);
-    if (isCurrentlySelected && isPinned) {
-      event.preventDefault();
-      const next = new Set(this.selectedFiles);
-      next.delete(node.path);
-      this._emitSelectionChanged(next);
       return;
     }
     if (this.excludedFiles.has(node.path)) {

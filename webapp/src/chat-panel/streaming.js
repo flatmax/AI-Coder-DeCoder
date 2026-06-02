@@ -210,6 +210,12 @@ export function onStreamChunk(panel, event) {
   if (!ownerTabId) return;
   const ownerTab = panel._tabs.get(ownerTabId);
   if (!ownerTab) return;
+  // First chunk after a retry means the retry
+  // succeeded — clear the banner so the user sees
+  // content instead of a countdown.
+  if (ownerTab.retryInfo) {
+    clearRetryBanner(panel, ownerTab);
+  }
   // Full-content semantics — overwrite the pending
   // slot, don't append.
   const normalizedContent = content ?? '';
@@ -331,6 +337,14 @@ export function onStreamComplete(panel, event) {
   const ownerTab = panel._tabs.get(ownerTabId);
   if (!ownerTab) return;
   const ownerIsActive = ownerTabId === panel._activeTabId;
+
+  // Stream ended — clear any retry banner the tab
+  // was displaying. Handles both the success path
+  // (completion without a final retry) and the
+  // exhaustion path (error after retries gave up).
+  if (ownerTab.retryInfo) {
+    clearRetryBanner(panel, ownerTab);
+  }
 
   // Flush any pending chunk synchronously so the
   // final content is reflected before we move it
@@ -495,6 +509,198 @@ export function onStreamComplete(panel, event) {
 // ---------------------------------------------------------------
 // Passive observer for user messages
 // ---------------------------------------------------------------
+
+/**
+ * Handle a `stream-retry` window event.
+ *
+ * Fired by the backend's retry wrapper before each
+ * backoff sleep when a retryable LiteLLM error
+ * (rate_limit, api_connection, service_unavailable,
+ * timeout) is encountered during stream
+ * establishment. Payload shape (from
+ * `retry_litellm_completion`'s on_retry callback):
+ *
+ *   { requestId,
+ *     info: { attempt, max_attempts, error_type,
+ *             wait_seconds, message, provider,
+ *             context } }
+ *
+ * User feedback: write a progress banner (attempt
+ * number + live countdown bar) into the owning tab's
+ * state so the UI can show exactly how long is left
+ * before the next attempt. A 100ms ticker drives the
+ * countdown re-render; it's torn down when any tab's
+ * retry slot clears.
+ *
+ * Scoped to the owning tab — if the retry belongs
+ * to a child agent stream, route state to that tab
+ * so the banner shows next to the right transcript.
+ * Collaborator broadcasts for streams we don't own
+ * are dropped at the findTabForRequest gate.
+ */
+export function onStreamRetry(panel, event) {
+  const detail = event.detail || {};
+  const requestId = detail.requestId;
+  const info = detail.info || {};
+  if (!requestId) return;
+  const ownerTabId = findTabForRequest(panel, requestId);
+  if (!ownerTabId) return;
+  const ownerTab = panel._tabs.get(ownerTabId);
+  if (!ownerTab) return;
+
+  const attempt = Number(info.attempt) || 0;
+  const maxAttempts = Number(info.max_attempts) || 0;
+  const waitSeconds = Number(info.wait_seconds) || 0;
+  const errorType = typeof info.error_type === 'string'
+    ? info.error_type
+    : 'llm_error';
+
+  // Emit a warning toast naming the error type and the
+  // wait. The on-screen banner gives precise countdown
+  // feedback inside the chat surface; the toast is
+  // belt-and-braces so users with the chat scrolled
+  // away or in a different tab still notice the retry.
+  emitRetryToast(panel, {
+    attempt, maxAttempts, waitSeconds, errorType,
+  });
+
+  // Stash banner state on the tab. The render path
+  // reads this on every tick to draw the progress bar.
+  ownerTab.retryInfo = {
+    attempt,
+    maxAttempts,
+    waitSeconds,
+    errorType,
+    message: typeof info.message === 'string' ? info.message : '',
+    provider: typeof info.provider === 'string' ? info.provider : '',
+    context: typeof info.context === 'string' ? info.context : '',
+    startedAt: Date.now(),
+  };
+  // Ensure the banner appears immediately on the
+  // active tab (non-active tabs' state is stashed
+  // but not rendered until switched to).
+  if (ownerTabId === panel._activeTabId) {
+    panel.requestUpdate('_retryInfo');
+  }
+  // Start the global tick if not already running.
+  startRetryTick(panel);
+}
+
+/**
+ * Emit a `warning`-severity toast describing a retry.
+ * Shape per specs-reference/5-webapp/chat.md — names
+ * the classified error type, the upcoming wait, and
+ * the attempt number so users can set expectations.
+ *
+ * Wait formatting: long waits (>= 60 s) collapse to
+ * minutes so the toast doesn't show "120 s"; short
+ * waits stay in seconds for granularity.
+ */
+function emitRetryToast(panel, info) {
+  const { attempt, maxAttempts, waitSeconds, errorType } = info;
+  let label;
+  switch (errorType) {
+    case 'rate_limit': label = 'Rate limited'; break;
+    case 'api_connection': label = 'Connection failed'; break;
+    case 'service_unavailable':
+      label = 'Provider unavailable';
+      break;
+    case 'timeout': label = 'Request timed out'; break;
+    case 'authentication':
+      label = 'Authentication failed';
+      break;
+    default: label = 'LLM error'; break;
+  }
+  const waitText = waitSeconds >= 60
+    ? `${Math.round(waitSeconds / 60)} min`
+    : `${Math.max(0, Math.round(waitSeconds))} s`;
+  const attemptText = maxAttempts > 0
+    ? `${attempt}/${maxAttempts}`
+    : `${attempt}`;
+  panel._emitToast(
+    `🔄 ${label} — retrying in ${waitText} (${attemptText})`,
+    'warning',
+  );
+}
+
+/**
+ * Start the 100ms re-render ticker.
+ *
+ * One panel-level interval drives every active
+ * retry banner. Cheap: each tick is a single
+ * requestUpdate call. The render path pulls
+ * current elapsed / remaining from
+ * (Date.now() - startedAt) so the tick only needs
+ * to fire dirty-check — it doesn't mutate state
+ * itself.
+ *
+ * Idempotent — calling it while already running
+ * is a no-op.
+ */
+function startRetryTick(panel) {
+  if (panel._retryTickInterval != null) return;
+  panel._retryTickInterval = setInterval(() => {
+    // Drain any tabs whose banner has expired
+    // (elapsed >= waitSeconds + small grace). The
+    // backend fires either the next streamRetry,
+    // a streamChunk, or a streamComplete when the
+    // wait ends, but network jitter can delay those
+    // beyond the bar filling; hiding the stale
+    // "0s remaining" line keeps the UI honest.
+    let anyActive = false;
+    const now = Date.now();
+    for (const tab of panel._tabs.values()) {
+      if (!tab.retryInfo) continue;
+      const elapsedMs = now - tab.retryInfo.startedAt;
+      const waitMs = tab.retryInfo.waitSeconds * 1000;
+      // 2s grace before we assume the wait slipped
+      // its deadline; without it, rapid successive
+      // retries would blink the banner between
+      // clears and new events.
+      if (elapsedMs > waitMs + 2000) {
+        tab.retryInfo = null;
+        continue;
+      }
+      anyActive = true;
+    }
+    if (anyActive) {
+      panel.requestUpdate('_retryInfo');
+    } else {
+      stopRetryTick(panel);
+      panel.requestUpdate('_retryInfo');
+    }
+  }, 100);
+}
+
+/**
+ * Stop the panel-level ticker. Called when every
+ * tab's retryInfo has cleared, and on panel teardown
+ * from events.js's detach path.
+ */
+export function stopRetryTick(panel) {
+  if (panel._retryTickInterval != null) {
+    clearInterval(panel._retryTickInterval);
+    panel._retryTickInterval = null;
+  }
+}
+
+/**
+ * Clear an owning tab's retry banner. Called from
+ * onStreamChunk (first chunk = retry succeeded) and
+ * onStreamComplete (stream finished one way or
+ * another). Stops the panel ticker if no tab still
+ * has an active banner.
+ */
+function clearRetryBanner(panel, tab) {
+  if (!tab || !tab.retryInfo) return;
+  tab.retryInfo = null;
+  let anyActive = false;
+  for (const t of panel._tabs.values()) {
+    if (t.retryInfo) { anyActive = true; break; }
+  }
+  if (!anyActive) stopRetryTick(panel);
+  panel.requestUpdate('_retryInfo');
+}
 
 /**
  * Handle a `user-message` window event.
@@ -715,11 +921,37 @@ export function handleStreamStartError(
   // to reflect both the new message and the
   // owner-tab outcome we just wrote (LED row
   // re-renders on every panel update).
+  //
+  // Special case: the "Another stream is active"
+  // error fires when the user sends before the
+  // post-reconnect state-loaded handler has
+  // finished resuming the in-flight stream. Race
+  // window is narrow but real on slow connections.
+  // Augment the message with actionable guidance
+  // and emit a toast pointing at the cancel
+  // affordance.
+  let displayMsg = errorMsg;
+  if (
+    typeof errorMsg === 'string'
+    && errorMsg.startsWith('Another stream is active')
+  ) {
+    displayMsg = (
+      `${errorMsg}\n\n`
+      + 'A previous request is still running on the server. '
+      + 'Wait for it to complete (the tab will resume '
+      + 'streaming when the next chunk arrives), or use '
+      + '"New Session" to abandon it.'
+    );
+    panel._emitToast(
+      'Previous stream still running — wait or start a new session',
+      'warning',
+    );
+  }
   panel.messages = [
     ...panel.messages,
     {
       role: 'assistant',
-      content: `**Error:** ${errorMsg}`,
+      content: `**Error:** ${displayMsg}`,
     },
   ];
   panel.requestUpdate();

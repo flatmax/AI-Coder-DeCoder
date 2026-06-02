@@ -131,6 +131,19 @@ class EnrichmentConfig:
     diversity: float = 0.5
     tfidf_fallback_chars: int = 150
     max_doc_freq: float = 0.6
+    # Hard upper bound on per-unit text length, in characters.
+    # Sections / prose blocks above this are skipped and
+    # logged. Field incident: a 1.4MB SVG prose block fed to
+    # KeyBERT triggered an OOM kill at RSS 1.3GB. Sentence-
+    # transformer models truncate input at 512 tokens
+    # (~2KB) anyway, so the embedding never sees more than
+    # the first slice — sending megabytes just causes
+    # numpy/torch to allocate proportional intermediate
+    # buffers in the MMR cosine-similarity step.
+    # 50KB is generous: it covers any realistic markdown
+    # section while staying two orders of magnitude below
+    # the OOM threshold observed in the field.
+    max_section_chars: int = 50_000
 
     @classmethod
     def from_dict(cls, cfg: dict[str, Any]) -> "EnrichmentConfig":
@@ -161,6 +174,9 @@ class EnrichmentConfig:
             ),
             max_doc_freq=float(
                 cfg.get("keywords_max_doc_freq", 0.6)
+            ),
+            max_section_chars=int(
+                cfg.get("keywords_max_section_chars", 50_000)
             ),
         )
 
@@ -525,6 +541,22 @@ class KeywordEnricher:
                     cfg.min_section_chars,
                 ):
                     continue
+                if len(text_for_extraction) > cfg.max_section_chars:
+                    # Oversized section — skip rather than feed
+                    # the embedding model and risk OOM. The
+                    # heading still appears in the structural
+                    # outline; only its keyword list is empty.
+                    logger.warning(
+                        "Skipping oversized section in %s: "
+                        "%d chars > %d limit "
+                        "(heading=%r). Structural outline "
+                        "preserved; no keywords extracted.",
+                        outline.file_path,
+                        len(text_for_extraction),
+                        cfg.max_section_chars,
+                        heading.text[:80],
+                    )
+                    continue
                 units.append(
                     (heading, text_for_extraction, len(body_lines))
                 )
@@ -541,6 +573,22 @@ class KeywordEnricher:
             if not self.is_section_eligible(
                 len(text), cfg.min_section_chars
             ):
+                continue
+            if len(text) > cfg.max_section_chars:
+                # Oversized prose block — skip. SVG extracts
+                # from PyMuPDF can produce single text
+                # elements containing entire page contents;
+                # field incident saw a 1.4MB block trigger
+                # OOM during the embedding's MMR pass.
+                logger.warning(
+                    "Skipping oversized prose block in %s: "
+                    "%d chars > %d limit. Structural "
+                    "outline preserved; no keywords "
+                    "extracted.",
+                    outline.file_path,
+                    len(text),
+                    cfg.max_section_chars,
+                )
                 continue
             # Adaptive top-n for prose doesn't apply
             # meaningfully — use 1 line so the bonus never
@@ -607,6 +655,20 @@ class KeywordEnricher:
         # trim has enough candidates to choose from.
         global_top_n = cfg.top_n + _LARGE_SECTION_TOPN_BONUS
 
+        # Bracket the KeyBERT call with logs so a segfault
+        # in the underlying sentence-transformers / joblib /
+        # torch / OpenBLAS stack leaves a "we were inside
+        # this batch" trace. The crash signature observed
+        # in the field — leaked loky semaphore, OpenBLAS
+        # SGEMM frame on the C stack — points at the call
+        # below; if the next crash logs entry but no exit
+        # the diagnosis is confirmed.
+        logger.debug(
+            "KeyBERT.extract_keywords: enter batch_size=%d "
+            "ngram=%s top_n=%d diversity=%.2f",
+            len(texts), cfg.ngram_range, global_top_n,
+            cfg.diversity,
+        )
         try:
             raw = self._model.extract_keywords(
                 texts,
@@ -625,6 +687,11 @@ class KeywordEnricher:
                 "KeyBERT batch extraction failed: %s", exc
             )
             return [[] for _ in units]
+        finally:
+            logger.debug(
+                "KeyBERT.extract_keywords: exit batch_size=%d",
+                len(texts),
+            )
 
         # KeyBERT returns a list-of-lists when given a list
         # input. Some versions return a flat list when given

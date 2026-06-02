@@ -22,6 +22,8 @@ describe('SvgEditor resize drag: line endpoints', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 
@@ -288,6 +290,8 @@ describe('SvgEditor resize drag: polyline vertices', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 
@@ -640,6 +644,8 @@ describe('SvgEditor resize drag: polygon vertices', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 

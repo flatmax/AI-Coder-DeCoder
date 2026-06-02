@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { computeLastEditOutcome } from './streaming.js';
+import { computeLastEditOutcome, onStreamRetry } from './streaming.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -1047,6 +1047,164 @@ describe('ChatPanel agent tab spawning — defensive', () => {
     });
     await settle(p);
     expect(p._tabs.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stream-retry — backoff feedback toast
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel onStreamRetry toast', () => {
+  async function startMainStream(panel, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    panel._input = message;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  it('emits a warning toast naming the error type and wait', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      pushEvent('stream-retry', {
+        requestId: reqId,
+        info: {
+          attempt: 1,
+          max_attempts: 11,
+          error_type: 'rate_limit',
+          wait_seconds: 4,
+          message: 'throttled',
+          provider: 'bedrock',
+          context: 'streaming completion',
+        },
+      });
+      await settle(p);
+      expect(listener).toHaveBeenCalled();
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.type).toBe('warning');
+      expect(detail.message).toContain('Rate limit');
+      expect(detail.message).toContain('4 s');
+      expect(detail.message).toContain('1/11');
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
+  });
+
+  it('uses a connection icon for api_connection retries', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      pushEvent('stream-retry', {
+        requestId: reqId,
+        info: {
+          attempt: 2,
+          max_attempts: 11,
+          error_type: 'api_connection',
+          wait_seconds: 8,
+        },
+      });
+      await settle(p);
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.message).toContain('Connection failed');
+      expect(detail.message).toContain('8 s');
+      expect(detail.message).toContain('2/11');
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
+  });
+
+  it('formats long waits as minutes', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      pushEvent('stream-retry', {
+        requestId: reqId,
+        info: {
+          attempt: 5,
+          max_attempts: 11,
+          error_type: 'rate_limit',
+          wait_seconds: 120,
+        },
+      });
+      await settle(p);
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.message).toContain('2 min');
+      expect(detail.message).not.toContain('120 s');
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
+  });
+
+  it('ignores retries for unknown request IDs', async () => {
+    // A retry for a collaborator's stream shouldn't flood
+    // our toast area.
+    const p = mountPanel();
+    await settle(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      pushEvent('stream-retry', {
+        requestId: 'someone-else-stream',
+        info: {
+          attempt: 1,
+          max_attempts: 11,
+          error_type: 'rate_limit',
+          wait_seconds: 3,
+        },
+      });
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
+  });
+
+  it('tolerates missing optional fields', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      // Bare minimum payload — no max_attempts, no
+      // error_type. Handler should still produce a toast
+      // without throwing.
+      pushEvent('stream-retry', {
+        requestId: reqId,
+        info: { wait_seconds: 5 },
+      });
+      await settle(p);
+      expect(listener).toHaveBeenCalled();
+      const detail = listener.mock.calls[0][0].detail;
+      expect(detail.type).toBe('warning');
+      expect(detail.message).toContain('5 s');
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
+  });
+
+  it('returns without toast when requestId is missing', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const listener = vi.fn();
+    window.addEventListener('ac-toast', listener);
+    try {
+      pushEvent('stream-retry', {
+        info: { wait_seconds: 5 },
+      });
+      await settle(p);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('ac-toast', listener);
+    }
   });
 });
 

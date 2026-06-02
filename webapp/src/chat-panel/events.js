@@ -42,7 +42,9 @@ import {
   onAgentsSpawned,
   onStreamChunk,
   onStreamComplete,
+  onStreamRetry,
   onUserMessage,
+  stopRetryTick,
 } from './streaming.js';
 
 // ---------------------------------------------------------------
@@ -64,6 +66,7 @@ import {
 export function bindEventHandlers(panel) {
   panel._onStreamChunk = (e) => onStreamChunk(panel, e);
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
+  panel._onStreamRetry = (e) => onStreamRetry(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
   panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
   panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
@@ -76,6 +79,91 @@ export function bindEventHandlers(panel) {
   panel._onAgentModeChanged = (e) => onAgentModeChanged(panel, e);
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
+}
+
+// ---------------------------------------------------------------
+// Stream resumption after reconnect
+// ---------------------------------------------------------------
+
+/**
+ * Resume in-flight streams reported by
+ * ``get_current_state.active_streams``.
+ *
+ * Each entry carries ``{request_id, agent_id,
+ * accumulated_content}``. For each:
+ *
+ *   1. Resolve the target tab — main when
+ *      ``agent_id`` is null, the matching agent
+ *      tab otherwise. Agent tabs that don't yet
+ *      exist (the user refreshed before
+ *      ``list_live_agents`` rehydration completed)
+ *      are skipped — the next tab-creation pass
+ *      will not retroactively attach a stream id,
+ *      but the chunks broadcast by the backend
+ *      will accumulate server-side and the next
+ *      state-loaded (e.g. via reconnect) picks
+ *      them up.
+ *   2. Set the tab's streaming flag, install the
+ *      accumulated content as ``streamingContent``,
+ *      and stamp ``currentRequestId`` so future
+ *      stream-chunk and stream-complete events
+ *      route here via :func:`findTabForRequest`.
+ *
+ * The backend's broadcast path delivers chunks to
+ * every connected websocket for the duration of
+ * the stream; the refreshed browser receives the
+ * NEXT chunk normally, and the accumulated
+ * content bridges the gap between resume and the
+ * next chunk arrival (which may be tens of
+ * seconds away for slow LLM calls).
+ *
+ * Defensive against malformed entries — anything
+ * missing a request_id or with non-string fields
+ * is skipped silently. The contract with the
+ * backend is "active_streams may be missing or
+ * empty"; treat malformed entries the same way.
+ */
+export function resumeActiveStreams(panel, activeStreams) {
+  if (!Array.isArray(activeStreams)) return;
+  if (activeStreams.length === 0) return;
+  let activeChanged = false;
+  for (const entry of activeStreams) {
+    if (!entry || typeof entry !== 'object') continue;
+    const requestId = entry.request_id;
+    if (typeof requestId !== 'string' || !requestId) continue;
+    const agentId =
+      typeof entry.agent_id === 'string' && entry.agent_id
+        ? entry.agent_id
+        : null;
+    const content =
+      typeof entry.accumulated_content === 'string'
+        ? entry.accumulated_content
+        : '';
+    const tabId = agentId === null ? 'main' : agentId;
+    const tab = panel._tabs.get(tabId);
+    if (!tab) {
+      // Agent tab not yet rehydrated. The
+      // backend's broadcast continues; if the
+      // tab materialises later (via
+      // list_live_agents) future chunks land
+      // there but the bridge content is lost.
+      // Acceptable degradation for an edge
+      // case (agent tab present at refresh time,
+      // but list_live_agents hasn't returned
+      // yet when state-loaded fires).
+      continue;
+    }
+    tab.currentRequestId = requestId;
+    tab.streaming = true;
+    tab.streamingContent = content;
+    tab.streams.set(requestId, { content, sticky: true });
+    if (tabId === panel._activeTabId) {
+      activeChanged = true;
+    }
+  }
+  if (activeChanged) {
+    panel.requestUpdate();
+  }
 }
 
 // ---------------------------------------------------------------
@@ -125,6 +213,7 @@ export function bindEventHandlers(panel) {
 export function attachEventListeners(panel) {
   window.addEventListener('stream-chunk', panel._onStreamChunk);
   window.addEventListener('stream-complete', panel._onStreamComplete);
+  window.addEventListener('stream-retry', panel._onStreamRetry);
   window.addEventListener('user-message', panel._onUserMessage);
   window.addEventListener('session-changed', panel._onSessionChanged);
   window.addEventListener('agents-spawned', panel._onAgentsSpawned);
@@ -195,6 +284,7 @@ export function detachEventListeners(panel) {
   document.removeEventListener('keydown', panel._onChatTabShortcutBound);
   window.removeEventListener('stream-chunk', panel._onStreamChunk);
   window.removeEventListener('stream-complete', panel._onStreamComplete);
+  window.removeEventListener('stream-retry', panel._onStreamRetry);
   window.removeEventListener('user-message', panel._onUserMessage);
   window.removeEventListener('session-changed', panel._onSessionChanged);
   window.removeEventListener('agents-spawned', panel._onAgentsSpawned);
@@ -252,6 +342,12 @@ export function detachEventListeners(panel) {
     clearTimeout(panel._urlDetectDebounceTimer);
     panel._urlDetectDebounceTimer = null;
   }
+  // Panel is unmounting — stop the retry ticker
+  // (if any). Unlike the debounce timers above
+  // this is a setInterval that would otherwise
+  // keep firing requestUpdate on a detached
+  // component.
+  stopRetryTick(panel);
 }
 
 // ---------------------------------------------------------------
@@ -352,8 +448,24 @@ export function onSessionChanged(panel, event) {
  * sync.
  */
 export function onStateLoaded(panel, event) {
-  if (panel._streaming) return;
   const state = event.detail || {};
+  // Capture whether we were already streaming
+  // BEFORE the resume call flips the flag. Used
+  // below to gate message restore — a collaborator
+  // with their own stream in flight mustn't have
+  // their messages clobbered by a state-loaded
+  // triggered by some other event.
+  const wasStreaming = panel._streaming;
+  // Resume any in-flight streams the backend
+  // reports. Per spec ``specs4/3-llm/streaming``
+  // § Passive Stream Adoption — the originating
+  // client after refresh re-attaches to the
+  // live stream rather than blocking on the
+  // single-stream guard.
+  if (!wasStreaming) {
+    resumeActiveStreams(panel, state.active_streams);
+  }
+  if (wasStreaming) return;
   const msgs = Array.isArray(state.messages) ? state.messages : [];
   // Only overwrite when we actually have
   // something to restore. An empty snapshot
@@ -422,18 +534,40 @@ function seedIntoHistory(historyEl, msgs) {
   for (const m of msgs) {
     if (m.role !== 'user' || m.system_event) continue;
     let text;
+    let images = [];
     if (typeof m.content === 'string') {
       text = m.content;
     } else if (Array.isArray(m.content)) {
-      text = m.content
-        .filter((b) => b && b.type === 'text' && b.text)
-        .map((b) => b.text)
-        .join('\n');
+      // Multimodal user message — concatenate
+      // text blocks, harvest image_url blocks
+      // for recall.
+      const textParts = [];
+      for (const b of m.content) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'text' && typeof b.text === 'string') {
+          textParts.push(b.text);
+        } else if (
+          b.type === 'image_url' &&
+          b.image_url &&
+          typeof b.image_url.url === 'string'
+        ) {
+          images.push(b.image_url.url);
+        }
+      }
+      text = textParts.join('\n');
     } else {
       continue;
     }
-    if (text && text.trim()) {
-      historyEl.addEntry(text);
+    // Persisted records may also carry a sibling
+    // `images` array (older shape) — prefer it
+    // when present.
+    if (Array.isArray(m.images) && m.images.length > 0) {
+      images = m.images.filter(
+        (s) => typeof s === 'string' && s,
+      );
+    }
+    if ((text && text.trim()) || images.length > 0) {
+      historyEl.addEntry(text || '', images);
     }
   }
 }

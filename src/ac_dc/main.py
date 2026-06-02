@@ -24,16 +24,196 @@ Governing spec: specs4/6-deployment/startup.md
 
 from __future__ import annotations
 
-import asyncio
-import logging
+# os is imported first so the env-var setdefaults below
+# fire before any import that might transitively load
+# numpy / scipy / sklearn / torch and bake in their BLAS
+# thread-pool sizes.
 import os
+
+# Constrain native math libraries to a single thread BEFORE
+# any import that might pull numpy/scipy/sklearn/torch.
+# Field incident: segfault inside OpenBLAS's threaded SGEMM
+# kernel (sgemm_oncopy_SKYLAKEX) during KeyBERT's MMR
+# cosine-similarity computation. The crash reproduces on
+# Python 3.14 + OpenBLAS in threaded mode and disappears
+# when OpenBLAS is restricted to one thread.
+#
+# These env vars only take effect if set BEFORE the library
+# is loaded — once OpenBLAS or MKL has initialised its
+# thread pool the count is baked in for the lifetime of
+# the process. Setting them here, at the top of main.py,
+# ensures the safety net is in place before any ac_dc
+# import runs.
+#
+# setdefault preserves explicit user overrides (e.g. for
+# benchmarking). The cost of single-threaded BLAS for
+# keyword enrichment is negligible — bottleneck is the
+# sentence-transformer forward pass, not the matmul.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("BLIS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+
+import asyncio
+import atexit
+import logging
 import signal
 import sys
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Exit-trigger diagnostics
+# ---------------------------------------------------------------------------
+#
+# Field incident: AC-DC processes have been exiting with no
+# log line preceding the post-exit ``resource_tracker``
+# semaphore warning. The existing signal handler only logs
+# SIGINT/SIGTERM, so any other exit path (uncaught exception
+# in a background task, sys.exit from unexpected code,
+# event-loop crash, OOM kill) leaves no breadcrumbs and we
+# can't distinguish "user closed browser" from "doc-index
+# task crashed silently" from "main coroutine returned
+# normally".
+#
+# Three hooks installed below catch every Python-visible
+# exit path:
+#
+# 1. ``atexit`` — fires on every clean Python interpreter
+#    shutdown. Logs the moment the process starts its
+#    final unwind, regardless of who triggered it.
+# 2. ``sys.excepthook`` — fires on unhandled exceptions in
+#    the main thread. Captures the traceback before
+#    Python's default handler prints to stderr and exits.
+# 3. ``asyncio`` loop exception handler — fires on
+#    unhandled exceptions in background tasks (doc-index
+#    build, enrichment loop, post-write hooks). Without
+#    this, a bug in a task's own error-handling path
+#    silently kills the task; the loop keeps running
+#    but the work it represented is lost.
+#
+# The first two are installed at module load (before any
+# ac_dc import that might transitively spawn threads or
+# tasks). The asyncio handler is installed at the top of
+# ``run()`` once we have a loop reference.
+
+
+def _on_atexit() -> None:
+    """Mark the start of process unwind.
+
+    Fires on any clean exit — signal handler, sys.exit,
+    main coroutine return, exception in main thread that
+    propagates to the top. Pairs with the
+    ``resource_tracker`` warning that fires later in the
+    same unwind: if we see this log line, the unwind was
+    Python-driven; if not, the process died abruptly
+    (segfault, OOM kill, kill -9) and kernel dmesg is the
+    next thing to check.
+
+    Uses ``os.write`` directly rather than the logger
+    because by the time atexit handlers run the logging
+    module's stream handlers may already be torn down by
+    pytest's capture machinery (or any harness that closes
+    stderr early). The logging module catches the
+    resulting ``ValueError`` internally and prints a
+    "--- Logging error ---" diagnostic to stderr, which is
+    noisy and unhelpful at this stage. The raw fd write is
+    both more reliable and quieter.
+    """
+    try:
+        os.write(2, b"[ac-dc] atexit: process unwinding...\n")
+    except Exception:
+        pass
+
+
+atexit.register(_on_atexit)
+
+
+def _excepthook(
+    exc_type: type[BaseException],
+    exc_value: BaseException,
+    exc_tb: Any,
+) -> None:
+    """Log unhandled exceptions in the main thread.
+
+    Replaces Python's default excepthook with one that
+    routes through our logger first, then chains to the
+    default so the user still sees the traceback on
+    stderr. KeyboardInterrupt is handled specially —
+    it's the user's Ctrl+C and shouldn't get a scary
+    "unhandled exception" log line; the signal handler
+    logs the shutdown intent properly.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        # Defer to default — signal handler logs cleanly.
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    try:
+        logger.error(
+            "Unhandled exception in main thread: %s",
+            "".join(
+                traceback.format_exception(
+                    exc_type, exc_value, exc_tb
+                )
+            ),
+        )
+    except Exception:
+        pass
+    # Chain to default so stderr still shows the traceback
+    # for users who don't have the log open.
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _excepthook
+
+
+def _asyncio_exception_handler(
+    loop: asyncio.AbstractEventLoop,
+    context: dict[str, Any],
+) -> None:
+    """Log unhandled exceptions from background asyncio tasks.
+
+    asyncio's default handler logs to its own logger at
+    ERROR level, which the user typically doesn't see in
+    the steady-state output. Routing through our logger
+    plus a structured prefix makes these visible in the
+    same place as the rest of AC-DC's diagnostics.
+
+    The ``context`` dict carries the exception object
+    (``"exception"``), the message (``"message"``), and
+    sometimes the future / task / handle that raised
+    (``"future"`` / ``"task"`` / ``"handle"``). We log
+    all three so a wedged background task can be
+    identified by name in the log.
+    """
+    message = context.get("message", "asyncio error")
+    exception = context.get("exception")
+    task = context.get("task") or context.get("future")
+    try:
+        if exception is not None:
+            tb = "".join(
+                traceback.format_exception(
+                    type(exception), exception, exception.__traceback__
+                )
+            )
+            logger.error(
+                "asyncio unhandled exception: %s | task=%r\n%s",
+                message, task, tb,
+            )
+        else:
+            logger.error(
+                "asyncio unhandled error: %s | task=%r | context=%r",
+                message, task, context,
+            )
+    except Exception:
+        # Logger failure mid-shutdown — fall back to default.
+        loop.default_exception_handler(context)
 
 
 def _find_webapp_dist() -> Path | None:
@@ -303,6 +483,29 @@ async def run(
 
     configure(verbose=verbose)
 
+    # Install the asyncio loop exception handler now that
+    # logging is configured. Must run before any
+    # ``ensure_future`` / ``create_task`` call that could
+    # schedule a background coroutine — placed here, at the
+    # top of run(), so every background task spawned by
+    # subsequent code (doc-index build, enrichment loop,
+    # cache warmer, agent streams, post-write hooks) is
+    # covered.
+    try:
+        _loop = asyncio.get_running_loop()
+        _loop.set_exception_handler(_asyncio_exception_handler)
+        logger.info("asyncio exception handler installed")
+    except RuntimeError:
+        # No running loop yet — caller invoked run() outside
+        # an event loop. Defensive: shouldn't happen in
+        # practice (cli.py calls asyncio.run(main())), but
+        # if it does the handler simply isn't installed and
+        # asyncio's default error logging applies.
+        logger.warning(
+            "run(): no running event loop; asyncio "
+            "exception handler not installed"
+        )
+
     # Resolve repo path
     if repo_path is None:
         repo_path = Path.cwd()
@@ -502,6 +705,7 @@ async def run(
         event_callback=event_callback,
         history_store=history_store,
         deferred_init=True,
+        experimental=experimental,
     )
 
     # Wire the LLMService reference into Settings so
@@ -629,25 +833,25 @@ async def run(
         _heavy_init(llm_service, repo, config, event_callback)
     )
 
-    # Keep the server running
+    # Keep the server running. On Ctrl-C / SIGTERM we exit
+    # via ``os._exit`` to bypass asyncio's runner cleanup —
+    # otherwise the runner re-enters the loop to cancel
+    # tasks and hangs on ``_heavy_init``'s sentence-transformer
+    # load running in the default executor. Vite gets a
+    # SIGTERM via ``terminate()``; we don't wait for it,
+    # vite shuts itself down once the parent dies.
     def _signal_handler(sig: int, frame: Any) -> None:
-        logger.info("Shutting down...")
         if vite_process is not None:
             try:
                 vite_process.terminate()
-                vite_process.wait(timeout=5)
             except Exception:
                 try:
                     vite_process.kill()
                 except Exception:
                     pass
-        llm_service.shutdown()
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    try:
-        await asyncio.Event().wait()
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        _signal_handler(0, None)
+    await asyncio.Event().wait()

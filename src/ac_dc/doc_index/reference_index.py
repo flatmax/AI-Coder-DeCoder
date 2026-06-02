@@ -40,10 +40,9 @@ Design points pinned by the test suite:
 
 - **Same protocol as code-side reference index.** Exposes
   :meth:`connected_components` and :meth:`file_ref_count` so
-  the stability tracker's ``initialize_from_reference_graph``
-  and ``initialize_with_keys`` methods work without changes.
-  Tracker doesn't know or care about symbol vs doc semantics;
-  it operates on file-level connectivity only.
+  consumers that operate on file-level connectivity (clustering,
+  ranking, cross-mode joins) can treat code and doc references
+  uniformly without caring about symbol vs doc semantics.
 
 - **Bidirectional-only clustering.** Connected components are
   built from mutual links (A → B AND B → A). One-way links

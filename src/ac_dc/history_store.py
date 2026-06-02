@@ -720,6 +720,18 @@ class HistoryStore:
         list of data URIs so the chat panel can render
         thumbnails without extra RPC calls.
 
+        When images are present, the message ``content`` is
+        emitted as a multimodal content list rather than a
+        plain string. The text block is sanitised to a single
+        space when the original content was empty/whitespace —
+        Bedrock rejects blank text blocks, and an image-only
+        turn (user pasted an image with no text) is the
+        common case that triggers this. Anthropic-direct and
+        OpenAI tolerate empty text; Bedrock does not. The
+        ``images`` sibling field is also retained so the
+        webapp's chat panel can render thumbnails without
+        re-parsing the content list.
+
         Missing image files are silently skipped — a broken
         images directory should never prevent a session reload.
         Legacy records with an integer ``images`` count yield
@@ -730,9 +742,10 @@ class HistoryStore:
         for rec in self._iter_records():
             if rec.get("session_id") != session_id:
                 continue
+            raw_content = rec.get("content", "")
             shape: dict[str, Any] = {
                 "role": rec.get("role", "user"),
-                "content": rec.get("content", ""),
+                "content": raw_content,
             }
             # turn_id rides along so a restored session keeps
             # the "show agents" affordance for records that
@@ -751,6 +764,27 @@ class HistoryStore:
                     if uri is not None:
                         uris.append(uri)
                 if uris:
+                    # Build a proper multimodal content list.
+                    # Bedrock rejects blank text blocks, so
+                    # sanitise an empty original content to
+                    # a single space.
+                    text = raw_content if (
+                        isinstance(raw_content, str)
+                        and raw_content.strip()
+                    ) else " "
+                    blocks: list[dict[str, Any]] = [
+                        {"type": "text", "text": text}
+                    ]
+                    for uri in uris:
+                        blocks.append({
+                            "type": "image_url",
+                            "image_url": {"url": uri},
+                        })
+                    shape["content"] = blocks
+                    # Keep the sibling field for webapp
+                    # rendering. The chat panel reads from
+                    # here rather than parsing the content
+                    # list back out.
                     shape["images"] = uris
             result.append(shape)
         return result

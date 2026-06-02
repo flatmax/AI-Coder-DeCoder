@@ -119,7 +119,8 @@ def get_file_map_block(
     1. Special keys — ``system:prompt`` returns the system
        prompt + legend for the current mode.
     2. Synthetic meta:* keys dispatch to :func:`get_meta_block`.
-    3. Prefix dispatch — ``file:``, ``symbol:``, ``doc:``.
+    3. Prefix dispatch — ``file:``, ``symbols:``, ``docs:``,
+       ``plain_files:``.
     4. Current mode's index tried first; cross-mode fallback
        if primary has no data.
     5. Error if neither has data.
@@ -238,49 +239,80 @@ def get_file_map_block(
             ),
             "path": path,
         }
-    # symbol: and doc: strip the prefix and fall through.
-    for prefix in ("symbol:", "doc:"):
-        if path.startswith(prefix):
-            path = path[len(prefix):]
-            break
 
-    # Mode-based dispatch for compact blocks.
-    if service._context.mode == Mode.DOC:
-        primary = service._doc_index.get_file_doc_block(path)
-        if primary:
+    # Dir-block prefixes — D36's per-directory cache items.
+    # ``symbols:<dir>`` and ``docs:<dir>`` render the index's
+    # block for the directory minus any files currently in
+    # Active. ``plain_files:<dir>`` enumerates files in the
+    # directory that have no symbol or doc presence.
+    if path.startswith("symbols:"):
+        directory = path[len("symbols:"):]
+        if service._symbol_index is None:
             return {
+                "error": "No symbol index available",
                 "path": path,
-                "content": primary,
-                "mode": "doc",
             }
-        if service._symbol_index is not None:
-            secondary = service._symbol_index.get_file_symbol_block(
-                path
-            )
-            if secondary:
-                return {
-                    "path": path,
-                    "content": secondary,
-                    "mode": "code",
-                }
-    else:
-        if service._symbol_index is not None:
-            primary = service._symbol_index.get_file_symbol_block(
-                path
-            )
-            if primary:
-                return {
-                    "path": path,
-                    "content": primary,
-                    "mode": "code",
-                }
-        secondary = service._doc_index.get_file_doc_block(path)
-        if secondary:
+        active_excluded = set(service._file_context.get_files())
+        block = service._symbol_index.get_dir_symbols_block(
+            directory, exclude_active=active_excluded
+        )
+        if not block:
             return {
+                "error": (
+                    f"No symbol data for directory {directory}"
+                ),
                 "path": path,
-                "content": secondary,
-                "mode": "doc",
             }
+        return {
+            "path": path,
+            "content": block,
+            "mode": "code",
+        }
+
+    if path.startswith("docs:"):
+        directory = path[len("docs:"):]
+        active_excluded = set(service._file_context.get_files())
+        block = service._doc_index.get_dir_docs_block(
+            directory, exclude_active=active_excluded
+        )
+        if not block:
+            return {
+                "error": (
+                    f"No doc data for directory {directory}"
+                ),
+                "path": path,
+            }
+        return {
+            "path": path,
+            "content": block,
+            "mode": "doc",
+        }
+
+    if path.startswith("plain_files:"):
+        directory = path[len("plain_files:"):]
+        if service._repo is None:
+            return {"error": "No repository attached", "path": path}
+        active_excluded = set(service._file_context.get_files())
+        try:
+            by_dir = service._repo.get_files_by_directory()
+        except Exception as exc:
+            return {"error": str(exc), "path": path}
+        files_in_dir = [
+            f for f in by_dir.get(directory, [])
+            if f not in active_excluded
+        ]
+        if not files_in_dir:
+            return {
+                "error": (
+                    f"No plain files in directory {directory}"
+                ),
+                "path": path,
+            }
+        return {
+            "path": path,
+            "content": "\n".join(files_in_dir),
+            "mode": "code",
+        }
 
     return {
         "error": f"No index data found for {path}",
@@ -293,68 +325,16 @@ def get_meta_block(
 ) -> dict[str, Any]:
     """Return the content for a synthetic meta:* cache row.
 
-    The cache viewer emits meta:* rows for sections of the
-    prompt that aren't individual tracker entries — the
-    aggregate repo/doc map, the file tree, fetched URLs,
-    review context, and active files.
+    Under D36 the aggregate symbol/doc maps and the file tree
+    are no longer surfaced as meta rows — they've been replaced
+    by per-directory dir-block tracker entries (``symbols:<dir>``,
+    ``docs:<dir>``, ``plain_files:<dir>``). Use
+    :func:`get_file_map_block` to inspect those.
+
+    The cache viewer still emits meta:* rows for sections that
+    aren't individual tracker entries: fetched URLs, review
+    context, active files, agent descriptor, system reminder.
     """
-    import logging
-    logger = logging.getLogger("ac_dc.llm_service")
-
-    # meta:repo_map / meta:doc_map — aggregate index map body.
-    # Under D27 the aggregate map contains every indexed file's
-    # block; only user-excluded files are filtered out.
-    # Dispatch on the KEY, not the current mode — cross-reference
-    # mode renders both maps in L0, and clicking either one
-    # should return that index's content regardless of which
-    # mode is currently primary.
-    if key in ("meta:repo_map", "meta:doc_map"):
-        exclude = user_excluded_paths(service)
-        content = ""
-        if key == "meta:doc_map":
-            content = service._doc_index.get_doc_map(
-                exclude_files=exclude
-            )
-            mode = "doc"
-        else:
-            if service._symbol_index is not None:
-                try:
-                    content = service._symbol_index.get_symbol_map(
-                        exclude_files=exclude
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Aggregate symbol map fetch failed: %s",
-                        exc,
-                    )
-            mode = "code"
-        if not content:
-            return {
-                "error": (
-                    "Aggregate map is empty — no indexed "
-                    "files (or all are user-excluded)."
-                ),
-                "path": key,
-            }
-        return {
-            "path": key,
-            "content": content,
-            "mode": mode,
-        }
-
-    # meta:file_tree — flat repo file listing.
-    if key == "meta:file_tree":
-        if service._repo is None:
-            return {"error": "No repository attached", "path": key}
-        try:
-            content = service._repo.get_flat_file_list()
-        except Exception as exc:
-            return {"error": str(exc), "path": key}
-        return {
-            "path": key,
-            "content": content or "(empty)",
-            "mode": "code",
-        }
 
     # meta:url:{url} — individual fetched URL body.
     if key.startswith("meta:url:"):
@@ -537,15 +517,18 @@ def get_context_breakdown(
     system_prompt = context.get_system_prompt()
     system_tokens = service._counter.count(system_prompt)
 
-    # Legend tokens — read from the L0 snapshot for the
-    # main scope so the displayed count matches what's
-    # actually in the cached prefix. Agent scopes fall back
-    # to a live read since they don't have their own L0
-    # snapshot under the current design.
-    if scope is None:
-        legend = service._l0_primary_legend
+    # Legend tokens — render live from the index that
+    # corresponds to the current mode. Under D36 the legend
+    # rides with the system prompt as a non-flux head anchor
+    # (no longer a tracker entry), so the breakdown reads
+    # the same source the prompt assembler does.
+    legend = ""
+    if context.mode == Mode.DOC:
+        try:
+            legend = service._doc_index.get_legend()
+        except Exception:
+            pass
     else:
-        legend = ""
         if service._symbol_index is not None:
             try:
                 legend = service._symbol_index.get_legend()
@@ -553,24 +536,14 @@ def get_context_breakdown(
                 pass
     legend_tokens = service._counter.count(legend) if legend else 0
 
-    # Symbol/doc map tokens come from the frozen L0
-    # snapshot — the bytes the LLM actually receives — so
-    # the cache-viewer's displayed L0 size matches what's
-    # actually cached. Per-file details still iterate the
+    # Symbol/doc map per-file details still iterate the
     # live index because the cache viewer uses them for
-    # the expandable Budget sub-view's per-file breakdown
-    # (which doesn't have to match L0's snapshot exactly —
-    # it's a navigation aid showing what's IN the index,
-    # not what's currently cached). The aggregate-map
-    # token count for L0 displays uses the snapshot.
-    #
-    # Only main scope reads service._l0_*; agent scopes
-    # don't have their own L0 snapshot under the current
-    # design (agent ContextManagers share the orchestrator's
-    # L0 prefix per the agent-spawn design). The fallback
-    # for agent scopes still goes live for now —
-    # acceptable because agent breakdowns are diagnostic
-    # and not on a hot per-turn path.
+    # the expandable Budget sub-view's per-file breakdown.
+    # Under D36 there is no aggregate-map snapshot — the
+    # equivalent bytes are spread across per-directory
+    # dir-block tracker entries (``symbols:<dir>``,
+    # ``docs:<dir>``). The aggregate token total is
+    # computed below as the sum of per-file block tokens.
     symbol_map = ""
     symbol_map_files = 0
     symbol_map_details: list[dict[str, Any]] = []
@@ -626,74 +599,52 @@ def get_context_breakdown(
         logger.debug(
             "Symbol map details enumeration failed: %s", exc
         )
-    # Aggregate-map body for the breakdown's UI-displayed
-    # L0 size: read from the snapshot for the main scope,
-    # fall back to live for agent scopes.
-    if scope is None:
-        symbol_map = service._l0_primary_map
-    else:
-        # Agent scope — fall back to a live read scoped to
-        # the agent's own exclusion list. This path is
-        # diagnostic-only.
-        try:
-            if context.mode == Mode.DOC:
-                symbol_map = service._doc_index.get_doc_map(
-                    exclude_files=user_excluded_paths(
-                        service, scope
-                    )
-                )
-            else:
-                if service._symbol_index is not None:
-                    symbol_map = (
-                        service._symbol_index.get_symbol_map(
-                            exclude_files=(
-                                user_excluded_paths(service, scope)
-                            )
-                        )
-                    )
-        except Exception as exc:
-            logger.debug(
-                "Agent-scope aggregate map fetch failed: %s",
-                exc,
-            )
-    symbol_map_tokens = (
-        service._counter.count(symbol_map) if symbol_map else 0
+    # Aggregate primary-map token count under D36 is the sum
+    # of per-file block tokens we just enumerated. This
+    # mirrors what the LLM receives across all
+    # ``symbols:<dir>`` / ``docs:<dir>`` dir-blocks.
+    symbol_map_tokens = sum(
+        d.get("tokens", 0) for d in symbol_map_details
     )
 
-    # Secondary aggregate map (cross-reference only). Same
-    # snapshot-vs-live split as the primary above.
-    secondary_map = ""
+    # Secondary aggregate map (cross-reference only) — sum of
+    # per-file blocks from the opposite index, scoped to the
+    # current excluded set.
     secondary_map_tokens = 0
     if service._cross_ref_enabled:
-        if scope is None:
-            secondary_map = service._l0_secondary_map
-        else:
-            try:
-                if context.mode == Mode.DOC:
-                    if service._symbol_index is not None:
-                        secondary_map = (
-                            service._symbol_index.get_symbol_map(
-                                exclude_files=(
-                                    user_excluded_paths(
-                                        service, scope
-                                    )
-                                )
+        try:
+            if context.mode == Mode.DOC:
+                if service._symbol_index is not None:
+                    for path in (
+                        service._symbol_index._all_symbols.keys()
+                    ):
+                        if path in excluded_set:
+                            continue
+                        block = (
+                            service._symbol_index
+                            .get_file_symbol_block(path)
+                        )
+                        if block:
+                            secondary_map_tokens += (
+                                service._counter.count(block)
                             )
-                        )
-                else:
-                    secondary_map = service._doc_index.get_doc_map(
-                        exclude_files=(
-                            user_excluded_paths(service, scope)
-                        )
+            else:
+                for path in (
+                    service._doc_index._all_outlines.keys()
+                ):
+                    if path in excluded_set:
+                        continue
+                    block = service._doc_index.get_file_doc_block(
+                        path
                     )
-            except Exception as exc:
-                logger.debug(
-                    "Secondary aggregate map fetch failed: %s",
-                    exc,
-                )
-        if secondary_map:
-            secondary_map_tokens = (
-                service._counter.count(secondary_map)
+                    if block:
+                        secondary_map_tokens += (
+                            service._counter.count(block)
+                        )
+        except Exception as exc:
+            logger.debug(
+                "Secondary aggregate map fetch failed: %s",
+                exc,
             )
 
     # File tokens — per-file detail.
@@ -788,13 +739,16 @@ def get_context_breakdown(
                 "path": key.split(":", 1)[1] if ":" in key else key,
                 "tokens": item.tokens,
             }
-            # Classify type from prefix.
-            if key.startswith("system:"):
-                entry["type"] = "system"
-            elif key.startswith("symbol:"):
+            # Classify type from prefix. Under D36 the
+            # per-directory dir-block prefixes
+            # (symbols:/docs:/plain_files:) replace the old
+            # per-file symbol:/doc: keys.
+            if key.startswith("symbols:"):
                 entry["type"] = "symbols"
-            elif key.startswith("doc:"):
+            elif key.startswith("docs:"):
                 entry["type"] = "doc_symbols"
+            elif key.startswith("plain_files:"):
+                entry["type"] = "files"
             elif key.startswith("file:"):
                 entry["type"] = "files"
             elif key.startswith("url:"):
@@ -804,64 +758,25 @@ def get_context_breakdown(
             else:
                 entry["type"] = "other"
             entry["n"] = item.n_value
-            promote_n = None
+            # Per D37, ``promote_n`` only exists in
+            # ``_TIER_CONFIG`` for Active (where it backs the
+            # admission gate ``n_admit``). The cached tiers
+            # L0/L1/L2/L3 no longer carry the field — their
+            # promotions are driven by the flux equation, not by
+            # an N threshold. ``dict.get`` returns ``None`` for
+            # missing keys, so the HUD threshold column renders
+            # blank for cached-tier rows and shows ``n_admit``
+            # only on Active rows.
             tier_cfg = _TIER_CONFIG_LOOKUP.get(item.tier)
-            if tier_cfg is not None:
-                promote_n = tier_cfg.get("promote_n")
-            entry["threshold"] = promote_n
+            entry["threshold"] = tier_cfg.get("promote_n") if tier_cfg else None
             contents.append(entry)
 
-        # Synthetic meta row for L0 only — aggregate repo/doc
-        # map body lives in the system message but has no
-        # tracker key.
-        if tier == Tier.L0 and symbol_map:
-            map_token_count = service._counter.count(symbol_map)
-            if map_token_count > 0:
-                contents.append({
-                    "name": (
-                        "meta:doc_map" if context.mode == Mode.DOC
-                        else "meta:repo_map"
-                    ),
-                    "path": (
-                        "Document structure map"
-                        if context.mode == Mode.DOC
-                        else "Repository structure map"
-                    ),
-                    "tokens": map_token_count,
-                    "type": (
-                        "doc_symbols" if context.mode == Mode.DOC
-                        else "symbols"
-                    ),
-                })
-                tier_tokens += map_token_count
-
-        # Secondary meta row — cross-reference mode only.
-        # The opposite-index aggregate map lives in L0's
-        # system message under the cross-reference header.
-        # See ``specs4/3-llm/modes.md`` § Cross-Reference
-        # Mode.
-        if (
-            tier == Tier.L0
-            and service._cross_ref_enabled
-            and secondary_map_tokens > 0
-        ):
-            contents.append({
-                "name": (
-                    "meta:repo_map" if context.mode == Mode.DOC
-                    else "meta:doc_map"
-                ),
-                "path": (
-                    "Repository structure map"
-                    if context.mode == Mode.DOC
-                    else "Document structure map"
-                ),
-                "tokens": secondary_map_tokens,
-                "type": (
-                    "symbols" if context.mode == Mode.DOC
-                    else "doc_symbols"
-                ),
-            })
-            tier_tokens += secondary_map_tokens
+        # Under D36 the aggregate symbol/doc map is no longer
+        # a synthetic L0 row — it's been decomposed into
+        # per-directory ``symbols:<dir>`` / ``docs:<dir>``
+        # tracker entries that already appear in the contents
+        # loop above as first-class items. No injection
+        # needed.
 
         blocks.append({
             "name": tier.value,
@@ -873,27 +788,12 @@ def get_context_breakdown(
         })
 
     # Uncached tail — sections that always appear after the
-    # last cache breakpoint.
-    file_tree = ""
-    if service._repo is not None:
-        try:
-            file_tree = service._repo.get_flat_file_list()
-        except Exception as exc:
-            logger.debug(
-                "File tree fetch for breakdown failed: %s",
-                exc,
-            )
-
+    # last cache breakpoint. Under D36 there's no flat file
+    # tree section in the prompt — the repo's file structure
+    # is now distributed across per-directory dir-blocks
+    # (``symbols:<dir>``, ``docs:<dir>``, ``plain_files:<dir>``)
+    # which participate in flux as cached tracker entries.
     uncached_contents: list[dict[str, Any]] = []
-    if file_tree:
-        ft_tokens = service._counter.count(file_tree)
-        if ft_tokens > 0:
-            uncached_contents.append({
-                "name": "meta:file_tree",
-                "path": "Repository file listing",
-                "tokens": ft_tokens,
-                "type": "files",
-            })
     for url_entry in url_details:
         uncached_contents.append({
             "name": f"meta:url:{url_entry['url']}",
@@ -987,7 +887,23 @@ def get_context_breakdown(
         })
 
     # Promotions and demotions from the most recent update.
-    changes = tracker.get_changes()
+    # For the main scope, read from the snapshot
+    # ``update_stability`` stashes on the service before
+    # ``print_post_response_hud`` drains the tracker's live
+    # change log. Without the snapshot the frontend's
+    # breakdown fetch races the terminal HUD's drain and
+    # the UI flips to "No changes this cycle" while the
+    # terminal shows the full list.
+    #
+    # Agent scopes still read live (agents don't have a
+    # terminal HUD draining their tracker, so the race
+    # doesn't apply).
+    if scope is None:
+        changes = list(
+            getattr(service, "_last_tier_changes", None) or ()
+        )
+    else:
+        changes = tracker.get_changes()
     promotions = [c for c in changes if "promoted" in c or "→ L" in c]
     demotions = [
         c for c in changes
@@ -1199,18 +1115,23 @@ def print_post_response_hud(
     system_tokens = service._counter.count(
         service._context.get_system_prompt()
     )
-    # Symbol map tokens — read from the L0 snapshot so the
-    # terminal HUD shows the same number as what the LLM
-    # actually receives. Pre-D28 this was a live read with
-    # selected-files exclusion (a pre-D27 leftover that
-    # would have under-reported by excluding selected files
-    # from the displayed total — but the live read was also
-    # the source of the cache-busting drift).
-    symbol_map_tokens = (
-        service._counter.count(service._l0_primary_map)
-        if service._l0_primary_map
-        else 0
+    # Symbol/doc map tokens — sum of all per-directory
+    # dir-block tracker entries for the current mode's
+    # primary index. Under D36 the aggregate map is
+    # decomposed into ``symbols:<dir>`` (or ``docs:<dir>``)
+    # entries; the HUD shows their combined token total so
+    # operators see the structural map's footprint at a
+    # glance.
+    symbol_map_tokens = 0
+    primary_prefix = (
+        "docs:" if service._context.mode.value == "doc"
+        else "symbols:"
     )
+    for key, item in (
+        service._stability_tracker.get_all_items().items()
+    ):
+        if key.startswith(primary_prefix):
+            symbol_map_tokens += item.tokens
     files_tokens = service._file_context.count_tokens(service._counter)
     url_tokens = 0
     url_context_parts = service._context.get_url_context()

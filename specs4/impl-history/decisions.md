@@ -1,4 +1,4 @@
-# Decisions (D1–D30)
+# Decisions (D1–D37)
 
 Historical decision log. Numbered for cross-reference. Order in this file is delivery order, not numerical order — entries are appended as decisions land. Use the table of contents (or a search) to find a specific decision number.
 
@@ -738,6 +738,139 @@ The Context-tab refresh button overlap problem surfaced during integration: the 
 
 ---
 
+### D32 — Dual-event tab-creation idempotency: memoise `spawnAgentTabs` on `parent_request_id`
+
+The frontend's `spawnAgentTabs` entry point is invoked twice per agentic turn by design, and the retask branch needed a way to distinguish "user retasked an existing agent in a new turn" from "this is the same turn's redundant fallback call" without that distinction collapsing into either category swallowing the other.
+
+**The dual-event architecture.** Per the tab-creation-ordering invariant in `specs4/5-webapp/agent-browser.md` § Streaming Routing, `spawnAgentTabs` has two callers:
+
+1. **Eager** — `onAgentsSpawned` runs synchronously when the backend's `agentsSpawned` broadcast arrives. The broadcast is emitted by `_streaming.stream_chat` IMMEDIATELY after the orchestrator's response is parsed and BEFORE any child agent stream dispatches. The frontend has to create tabs in time to claim child request IDs (`{parent_request_id}-agent-{NN:02d}`) before the first child chunk lands. Without this, fast-completing agents finish before any tab claims their child request ID and `findTabForRequest` silently drops every chunk.
+
+2. **Fallback** — `onStreamComplete` for the orchestrator's main-tab completion runs `spawnAgentTabs` again when `result.agent_blocks` is non-empty. The fallback exists for backends that only surface agent blocks via the completion result (older releases, future minimal reimplementations) — in that single-event regime, the fallback IS the only call and runs normally.
+
+Modern backends fire both events for every agentic turn. Without an idempotency primitive, the second call repeats work and produces visible bugs.
+
+**The retask branch's failure mode.** D24's `_resolve_or_spawn_agent_scope` introduced backend retask routing — when the orchestrator emits an `id` that already has a live tab, the new task arrives as the next user message in that agent's existing scope (preserving the ContextManager, file context, stability tracker, and provider cache warmth). The frontend's tab-creation path mirrors this: when `existing` is found, append the new task to `existing.messages`, re-arm `existing.currentRequestId = childId`, set `existing.streaming = true`. This is correct exactly once per turn.
+
+When `spawnAgentTabs` runs twice with the same `parent_request_id`:
+
+- Call 1 (eager) finds no existing tab on first agentic turn → fresh-spawn branch, seeds `state.messages = [{role: 'user', content: task}]`, sets streaming flags.
+- Agent's `_stream_chat` runs, chunks arrive, `streamComplete` fires, owner-tab streaming flags clear.
+- Call 2 (fallback) now finds the tab `existing` → retask branch fires → appends the user task to `existing.messages` (DUPLICATE) → re-sets `existing.streaming = true`, `existing.currentRequestId = childId` (RE-ARMS A FLAG THE COMPLETE EVENT JUST CLEARED).
+
+User-visible symptoms after this sequence:
+
+- Agent tab shows the user prompt twice (the seeded message + the retask append).
+- Streaming cursor stays visible indefinitely because no further chunks arrive on a stream that has already completed; the re-armed `streaming = true` has no event left to clear it.
+
+In two-turn sessions the bug compounded — turn 2's pair of calls each hit the retask branch (tabs exist from turn 1), so each turn appended the user prompt twice. Hard browser reload via `get_agent_history` showed the persisted truth (one user message + one assistant response per agent), confirming the duplicates were entirely frontend.
+
+**Three fix shapes considered.**
+
+1. **Remove the fallback.** Rejected — the fallback exists for older / minimal backends per the spec. A reimplementer building only the `streamComplete` half of the contract would lose tab creation entirely.
+
+2. **Make the retask branch detect "already armed for this child request."** Possible — check `existing.currentRequestId === childId && existing.streaming`. Rejected because the timing depends on whether `streamComplete` has already fired before the fallback call. In practice it has (main's stream completes before the orchestrator's `streamComplete` event handler runs synchronously to fire the fallback), so the check would pass and the fallback would no-op — but the timing could shift with future async refactors. Detection-by-state is fragile in a way detection-by-identity isn't.
+
+3. **Memoise on `parent_request_id`.** Chosen. Each call to `spawnAgentTabs` records its `parent_request_id` in a Set on the panel; subsequent calls with the same id are no-ops. Turn boundaries are distinguished by parent request id (turn 1's parent ≠ turn 2's parent), so retask in turn N still appends correctly while the duplicate fallback inside turn N no-ops. Detection-by-identity, not by state.
+
+**Why `parent_request_id` is the right primitive.**
+
+- Already on every `agentsSpawned` payload (the broadcast carries it explicitly).
+- Already on every main-stream `streamComplete` event (it IS the event's `requestId`).
+- Already epoch-prefixed (`{epoch_ms}-{6-char-alnum}` per `helpers.generateRequestId`), so cross-session collisions are not realistic — a session restart starts at a new epoch, an agentic turn within a session always has a unique parent.
+- No coordination needed between the two callers — both already pass the same value.
+
+**Implementation.** One Set on the panel (`_spawnedParentRequestIds`), lazy-initialised inside `spawnAgentTabs` to keep the change co-located with its consumer. Two if-blocks at function entry — early-return when the parent id is already in the set, add it when not. The fix is two of stuff (one Set, two if-blocks) plus an explanatory comment.
+
+**Spec authority.** `specs4/5-webapp/agent-browser.md` § Tab Creation Ordering gained a new "Idempotency under the dual-event design" paragraph documenting the dual-call architecture and the memoise-on-parent-request-id contract. The paragraph is brief because the rationale lives here in the decisions log; the spec section pins the contract.
+
+**Tests pinning the contract.** Pre-existing tests in `webapp/src/chat-panel/streaming.test.js` and `webapp/src/chat-panel/tabs.test.js` already exercise both call paths (eager via `onAgentsSpawned`, fallback via `onStreamComplete.agent_blocks`). With the memo in place, these tests assert the correct one-shot behaviour. A future regression that broke memoisation would surface as a duplicated message append in the multi-turn agent test cases.
+
+**Lesson for reimplementers.** Two events firing for the same logical operation is a deliberate design choice, not redundancy to clean up. The eager event closes a race window; the fallback event preserves backwards compatibility. Any consumer of `agentsSpawned` + `streamComplete.agent_blocks` MUST expect both events for the same turn under modern backends and MUST be idempotent with respect to repeated calls carrying the same parent request id. Memoising on the parent id is the cheapest correct primitive — comparing arrays of agent blocks would also work but costs more code and offers no advantage.
+
+---
+
+### D34 — Cache warmer isolated to dedicated executor; interval shortened; circuit breaker added
+
+Field observation in 15-file doc-mode sessions: the cache warmer was firing +54 to +170 seconds past its scheduled 270s interval, producing 0% cache hit rate on every warm-up. The cached prefix had already expired by the time the LiteLLM call landed, so each "warm-up" was actually a full cache write at 1.25× input pricing — pure cost, no payoff.
+
+Diagnostic logs showed symmetric ~2-minute gaps between four points in the warmer's lifecycle: (1) `cacheWarmerFiring` event broadcast, (2) `litellm.completion` start, (3) `litellm.completion` return, (4) next-cycle scheduling. The symmetry ruled out provider-side latency (the call itself completed quickly when it eventually ran) and pointed at executor saturation: the warmer's `loop.run_in_executor(_aux_executor, _completion_sync, ...)` was queueing behind something else.
+
+Root cause: KeyBERT keyword enrichment runs in `_aux_executor` (2 workers) per `_doc_index_background.run_enrichment_background`. A 15-file doc-mode session enriches 15 sections sequentially, each taking ~10–60 seconds depending on section size. With both workers occupied by enrichment and the warmer's submission joining the queue, the warmer's actual provider call landed only after both workers finished their current enrichment tasks — a delay of ~2 minutes that shifted every subsequent firing later by the same amount, accumulating into the observed +170s drift.
+
+**Three coordinated fixes shipped in one decision.**
+
+1. **Dedicated single-worker executor for the warmer.** New `_warmer_executor: ThreadPoolExecutor(max_workers=1, thread_name_prefix="ac-dc-warmer")` on `LLMService`. `CacheWarmer._fire_warmup` switches from `_aux_executor` to this pool. Single worker is correct: only one warm-up is ever in flight at a time (the cancel-on-stream-start path guarantees serialisation), so a single worker matches the actual concurrency. Isolating to a dedicated pool removes the queueing path entirely — KeyBERT enrichment, URL fetches, commit-message generation, and topic detection continue to share `_aux_executor` as before.
+
+2. **Interval shortened from 270s to 240s; clamp tightened from `TTL - 30` to `TTL - 60`.** The 30s margin (covering only `_COUNTDOWN_SECONDS = 30s`) left no budget for system-level drift. Field observation showed +50 to +170s of drift in cycles where the 30s margin produced 100% miss rate. Raising the margin to 60s absorbs the observed drift range without consecutive warm-ups overlapping. The interval default also drops correspondingly: 240s = 4:00 with a 60s margin to the 5-minute TTL.
+
+3. **Circuit breaker after 3 consecutive drift-past-TTL cycles.** Even with the dedicated executor, system-level drift (laptop sleep, container freezer, NTP step) can push individual firings past the TTL. A single drift can be a transient pause and shouldn't disable the warmer. Three in a row is the clear "this execution environment is broken" signal — the warmer auto-disables via `disable("circuit breaker — drift exceeded TTL N times")` and broadcasts `cacheWarmupComplete` with `success=false`. Reset to zero on any in-TTL cycle so a recovered session doesn't accumulate strikes from earlier transient pauses. Operators see the strike count in per-cycle WARNING logs (`strikes=N/3`) before the breaker trips.
+
+**Queue-duration instrumentation.** `_completion_sync` accepts a `queue_submitted: float | None` parameter (the `time.monotonic()` timestamp from the moment `loop.run_in_executor` was called) and logs `queue_duration = entry - queue_submitted` on entry. With the dedicated single-worker pool this should always be ~0; a non-trivial reading is the load-bearing diagnostic signal that something has accidentally been routed onto the warmer pool, or the previous firing is somehow still in flight. Logged at INFO when ≤1.0s, WARNING with explanatory tail when >1.0s.
+
+**What this does NOT do.** KeyBERT enrichment is still in `_aux_executor` (2 workers). A future change may move it to a `ProcessPoolExecutor` for true GIL-free parallelism, but that's a separate decision — the warmer-isolation fix removes the immediate user-visible problem (cache misses) without touching enrichment's concurrency model. Enrichment's 10-60s per file is acceptable while it's not blocking cache warming.
+
+**Backwards compatibility.** Tests that don't invoke `LLMService.shutdown` continue to pass — the executor closure is best-effort (`wait=False`) and Python's process exit cleans up unreferenced thread pools. The `_rpc_lifecycle.shutdown` cleanup uses `getattr` to tolerate older test fixtures without `_warmer_executor`. Configurations with `interval_seconds: 600` (or any value above `TTL - 60`) get clamped to 240s with a WARNING log explaining the change; the warning recommends updating `app.json` to silence it.
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (Lifecycle and Configuration subsections); `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table; default config values).
+
+---
+
+### D34a — Cache warmer deadline anchoring uses wall-clock time, not monotonic
+
+D34's executor-isolation fix removed the queueing path that was producing 2-minute broadcast stalls. Field testing afterwards still showed +44s and +84s firing drifts on a 240-second interval with 5-second polling cadence. Diagnostic instrumentation around the broadcast calls confirmed broadcasts were sub-millisecond — the drift was inside the silent-phase polling loop itself, not in any code path that could be GIL-contended or executor-saturated.
+
+Root cause: the polling loop used `time.monotonic()` deadlines. On the operator's macOS laptop, `time.monotonic()` was pausing during system-level process suspension (App Nap or similar), then resuming with the monotonic clock having advanced by less than the wall-clock duration of the suspension. The polling loop's wake-up logic — "if `silent_deadline - time.monotonic() <= 0`, exit" — kept seeing the deadline as still in the future, sleeping another 5-second polling chunk, repeating. By the time the firing landed, the actual elapsed wall-clock time was 280-320 seconds, well past the 300-second cache TTL.
+
+The fix swaps both the silent-phase and visible-phase deadlines to `time.time()` (wall-clock epoch). After resume, the next polling wake sees the deadline as already passed and exits the loop immediately — firing happens within `_DRIFT_POLL_SECONDS` of resume rather than `suspension_duration + _DRIFT_POLL_SECONDS` later. NTP step magnitudes are bounded well below the 60-second TTL margin at the 240-second-interval scale, so the wall-clock anchor's theoretical sensitivity to clock adjustments is not observable in practice.
+
+The TTL-exceeded path also changed shape. Pre-fix, drifts past the TTL still fired the warmup ("writing a fresh cache primes the next 5-minute window"). Post-fix, TTL-exceeded firings are skipped — writing a fresh cache here at provider cost is the same outcome as letting the next user turn do it, at the same provider cost, with no benefit. The skip path still increments the circuit-breaker strike counter so repeated long suspensions trip the breaker.
+
+Two-cycle field test post-fix:
+
+```
+13:33:31 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
+13:37:34 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
+```
+
+Diagnostic instrumentation removed after confirmation. The `Cache warmer firing: planned=Xs, actual=Ys, drift=±Zs` log line stays as the load-bearing signal — a future regression in deadline anchoring will surface as drift-line WARNINGs.
+
+**Spec authority.** `specs-reference/3-llm/cache-tiering.md` § Cache warmer — "Wall-clock deadline anchoring" paragraph appended to the "Executor isolation" discussion.
+
+---
+
+### D33 — Stream resumption on reconnect via `active_streams` snapshot
+
+User-observed bug: refreshing the browser mid-stream produced an opaque "Another stream is active (request {id})" rejection on the next send attempt. The single-stream guard correctly identified that the prior stream was still running server-side (worker thread independent of WebSocket lifecycle, by design — D10's guard scoping covers this), but the originating client had no way to discover the in-flight stream's identity, observe its accumulated content, or recover gracefully. The user's only options were waiting for an unknown duration or starting a new session and losing the in-flight response.
+
+Three fix shapes considered:
+
+1. **Auto-cancel on `remote_disconnected` of the originating client.** Rejected — required tracking caller↔request mapping at the WebSocket layer, breaks the deliberate "stream survives transport drop" property that lets long LLM calls weather flaky networks, and would also kill collaborator-passive-adoption (D10 invariant).
+
+2. **Frontend parses the rejection and offers cancel-and-retry.** Rejected as primary — surfaces an opaque error first, then asks the user to recover. Doesn't preserve the in-flight response. Kept as a fallback for the narrow race window where the user sends faster than `state-loaded` resolves.
+
+3. **Surface in-flight streams via `get_current_state`; frontend re-attaches as a passive observer.** Chosen. Reuses the existing chunk-broadcast path (chunks already broadcast to all connected clients; refreshed browser receives subsequent chunks without backend changes) and the existing chunk-routing layer (`findTabForRequest` keys on `currentRequestId`). The only new infrastructure is the snapshot field itself plus the resume handler.
+
+**Implementation cost.** Two new backend fields (a reverse map `_active_request_to_agent` and the already-populated `_request_accumulators` were both wired up but only the map needed adding), a new `active_streams` field on `get_current_state`'s response, a new `resumeActiveStreams` function in the chat panel's events module, and an extended message in `handleStreamStartError` for the narrow race window where a user sends before `state-loaded` resolves. No changes to the streaming pipeline, the chunk-broadcast path, or the single-stream guard logic.
+
+**The reverse map is load-bearing.** The pre-existing single-stream guards (`_active_user_request: str | None` and `_active_agent_streams: set[str]`) carry "is something running?" but not "what's the request ID?". Without the reverse map, the snapshot couldn't enumerate in-flight streams without scanning every connected client's state — and even then, child agent streams' request IDs (`{parent}-agent-NN`) aren't reconstructable without remembering the original parent ID. The map captures `request_id → agent_id|None` at registration time, cleared at completion. Authoritative; tiny; one-to-one with the existing guard fields.
+
+**The accumulator was already populated for unrelated reasons.** `_request_accumulators` exists so the post-response HUD and the deferred enrichment pipeline can read accumulated content without re-parsing chunks. Surfacing it here is essentially free — no new write path, just a new reader.
+
+**`agent_id: null` for main scope, agent's id otherwise.** Mirrors the per-tab routing the frontend already uses: `parseAgentTabId` returns `null` for `"main"` and the id verbatim otherwise. The state-loaded handler dispatches on the same null check (`null → main tab, otherwise agent tab`), so the resume path doesn't need new tab-resolution logic.
+
+**Race window.** A user who sends a new message before `state-loaded` resolves still hits the single-stream-guard rejection. The frontend augments that error path with a clearer message — "A previous request is still running on the server. Wait for it to complete (the tab will resume streaming when the next chunk arrives), or use 'New Session' to abandon it." Plus a toast with the same guidance. Narrow window (typically <100ms after page load); the augmented message means even users who hit it understand what's happening and have a clear next action.
+
+**Why the `agent_blocks`-style retry mechanism (D32) doesn't apply.** D32 memoises on `parent_request_id` to prevent the dual-event spawn path from creating duplicate tabs. That's a different problem — there, two events fire for one logical operation; here, one event fires once per page load and races against user typing. No memoisation needed; the user's only "retry" is sending another message, which goes through the normal guard path.
+
+**Tests pinning the contract.** `tests/test_llm_service/test_state_snapshot.py::test_snapshot_shape` updated to include `active_streams` in the expected key set. The accumulator behaviour is already covered by `test_request_accumulator.py`. The end-to-end resume path (refresh → state-loaded → re-attach → chunks arrive → completion) is integration-level and not covered by unit tests; manual verification covered the happy path during landing.
+
+**Spec authority:** `specs4/3-llm/streaming.md` § Stream Resumption After Reconnect describes the behavioural contract; `specs-reference/3-llm/streaming.md` § Stream resumption snapshot pins the per-entry field shape; `specs-reference/1-foundation/rpc-inventory.md` § Service: LLMService updates `CurrentState` with the new field.
+
+**Lesson for reimplementers.** When the transport layer is decoupled from a long-running operation's lifecycle (here: WebSocket vs LLM call), the recovery path needs an explicit way for clients to discover and re-attach to operations they originally started. The opposite design — tying operation lifecycle to transport lifecycle — produces the wrong tradeoff for chat: a flaky network would kill the LLM call, wasting tokens and forcing retries. The `active_streams` snapshot is the minimum viable recovery primitive; everything else (the resume handler, the augmented error message) is UX polish around the snapshot's existence.
+
+---
+
 ### D30 — `agent_blocks` persisted on orchestrator records to enable cross-turn reconstruction
 
 Per `specs4/3-llm/history.md` § "Cross-Turn Agent Reconstruction" (committed `bd79d93`), every assistant record produced by a turn that spawned agents persists an ordered list of `{id, agent_idx}` entries — one per spawn block emitted in that turn. The disk layout for agent archives is keyed by a turn-local numeric `agent_idx` (`agent-NN.jsonl`) while the orchestrator addresses agents by an LLM-chosen string `id`. The two namespaces are deliberately separate, and `agent_idx` is NOT stable across turns — a re-use of `agent-backend` in turn 1 (idx 0) and turn 3 (idx 1, because `agent-frontend` was spawned first) writes to two different filenames within their respective turn directories. Without persisting the per-turn id↔idx mapping, a "show me everything `agent-backend` did across the session" view has no way to find the right archive files except by guessing or by reading every archive's first message — both fragile.
@@ -756,3 +889,251 @@ What this decision does NOT deliver:
 The decisive argument for shipping this immediately rather than waiting for the consuming UI: every agent-mode turn that runs without persisting `agent_blocks` becomes a permanent gap in the historical record — the per-turn view via `get_turn_archive` still works, but cross-turn filtering by id is impossible for those turns. The cost of landing now (small, pure addition, fully tested) is much lower than the cost of going back later to manually reconstruct the mapping for turns that ran during the gap.
 
 Spec authority: `specs4/3-llm/history.md` § Cross-Turn Agent Reconstruction (committed `bd79d93`). Ledger reference: `specs4/3-llm/history.md` § Backwards Compatibility — records without `agent_blocks` (predating this decision) load correctly; cross-turn views skip them rather than guess.
+
+---
+
+### D35 — Cache tiering replaced by membrane / flux controller; rectified-GHK is the only variant
+
+> **Note (D36):** D35's geometry assumes the D27/D28 "L0 content-typed, L1→L0 disabled" contract. Under D36, L1→L0 is enabled and the four-membrane stack is uniform; the equation, parameters, and admission_only Active→L3 rule below carry forward unchanged.
+
+The previous cascade contract for `specs4/3-llm/cache-tiering.md` was an N-counter design: each tier held an integer counter that incremented per stable appearance, decremented on edit, and triggered promotion to the next tier when it crossed a per-tier `promote_n` threshold. Anchoring at the L1/L2 boundary, post-cascade underfill demotion, and the "broken or empty upper tier" gating layered on top to keep buildup contained. The N-counter design solved cohesion (no jittery promotions) but exposed two orthogonal problems: the buildup pathology described in the now-retired `specs4/7-future/cache-tiering-piggyback-promotion.md`, and the lack of a tunable knob trading aggregate throughput against worst-class fairness. Both eventually pointed at the same root cause: the cascade had no global signal coupling the tiers, so each tier-pair was promoting independently and there was nothing to negotiate against when one tier filled up.
+
+The replacement is the cache-tiering specialisation of Flax 2026, *A Biophysically-Inspired Feedback Controller for Multi-Class Cache Fairness*, derived in `~/flatmax/personal.work/research/cache.tiering/paper/draft/03_policy.md`. The controller treats each tier boundary as a thin membrane and the integer counter `n` (now a pure age field) as the per-file imbalance state on that membrane. A single global signal `V = Σ_k (T_{l,k} − T_{u,k})` — the token-mass difference between lower and upper sides of every membrane — drives K parallel rectified per-membrane flux accumulators. When an accumulator integrates past unit charge, one promotion fires on that membrane. Eviction is delegated entirely to an age-ordered backstop (the existing `n`-ordered tier draining behaviour), which is exactly the C2 rectification clamp from the paper.
+
+**Only the rectified-GHK variant is supported.**
+
+The flux equation is
+
+> `Φ = max(0, P · V · (c_l − c_u · exp(−V/V_T)) / (1 − exp(−V/V_T)))`
+
+with a Taylor-branch numerical guard at `|V/V_T| < 1e-9` and overflow-safe asymptotic branches at `|V/V_T| > 50`. The hard rectification clamp on the lower side makes flux upward-only — downward motion is reserved for the edit invariant (hash mismatch teleports to Active) and explicit invalidations.
+
+Earlier revisions of this decision exposed three variants — `linear` (Taylor branch as a separate code path), `rectified-ghk`, and `bidirectional-ghk` (no clamp, controller-driven demotion). All three were retired: rectification is **free** on AC-DC4's single-tenant headline (paper §6.3 — the demotion path is empirically dead code), and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default. Carrying the alternates as live code paths added dispatch surface, test surface, and config surface for no production-headline benefit.
+
+AC-DC4 is single-tenant single-class — the K=4 multi-class structure of the paper does not apply; we keep the three-membrane geometry (Active→L3, L3→L2, L2→L1; L1→L0 absent per D27) and treat each membrane as its own one-class controller, with V summed across all membranes per constraint C1.
+
+**Default parameters** are sourced from the synth-tuner's headline rectified-GHK fit (`runs/opt-run2/best_params.json` in `~/flatmax/personal.work/research/cache.tiering`):
+
+- `P = 1.616399379428934e-06`
+- `V_T = 98952.34312610888`
+- Active→L3: `admission_only=True`, `n_admit=3`, `pick_mode="oldest"` (no flux equation; P/V_T unused)
+- L3→L2, L2→L1: flux-driven, `n_admit=0`
+
+The original tune ran bidirectional (`allow_negative_flux=True`); for the rectified clamp the same P/V_T are a sound starting point, with re-tuning available later for the last few percent.
+
+**What changes structurally vs the N-counter spec.**
+
+- `n` is now a pure age counter (turns since last seen at `n=0`), not "consecutive unchanged appearances." The Active→L3 membrane is **admission_only** (`n_admit=3`, `pick_mode="oldest"`) — no flux equation, just an age gate. Higher membranes use the flux controller alone. The `cache-warmup` semantics survive unchanged.
+
+  **Why Active→L3 falls back to admission semantics.** The flux model treats V (token-mass differential) as the driving force, which is right for inter-cache balancing but degenerate at the admission boundary: in AC-DC4, active is structurally lighter than the cached tiers — items live there only until they age past the gate, after which they leave for L3+ — so `t_active < t_L3` is the steady state and rectified Φ is permanently zero. An earlier revision of this decision used flux uniformly (`n_admit=2` as a soft prefer-aged rule with retry-without-floor). It produced a hard regression: active items never graduated, the cache stalled with a permanently-occupied active tier, and the L3 cache hit rate fell off the cliff once the synthetic startup churn ended. The fix is to recognise that admission is fundamentally a gating problem (has this file proven stable enough to commit to cache?) not a balancing problem (which tier is overfull?), and treat it as such — `n ≥ n_admit` is the entire criterion on this membrane.
+
+  `history:*` items are also marked protected against the regular relax flux — they only enter L3 via the piggyback path (which fires when L3 is already broken). Without this guard the admission_only membrane would graduate stable history every few turns and rewrite the L3 cache block on every conversation, defeating the no-churn property the piggyback design was supposed to provide.
+- The `_run_cascade` driver is replaced by an iterate-to-equilibrium relaxation loop: per turn, recompute V, recompute every membrane's `Φ`, drain any membrane whose accumulator has crossed unit charge, repeat until no membrane fires (capped at 1000 iterations as a safety bound, never expected to bind in practice).
+- Anchoring (the L1/L2 stickiness rule) and post-cascade underfill demotion are both **deleted**. The flux controller subsumes anchoring (a stable tier accumulates flux only on imbalance, not on routine refresh) and underfill (the rectification clamp + age backstop together produce the same shape without an explicit demotion pass).
+- `max_membrane` gating from the N-counter cascade is **deleted**. An earlier revision of this decision preserved it verbatim ("flux fires only on membranes whose upper side is already invalidated this turn") on the theory that scope-limiting cache-write cost was load-bearing. In practice the gate prevented quiet turns from firing flux at all — even when V was large and Φ well above threshold, an empty `_broken_tiers` set short-circuited `relax()` and active-tier residents stayed pinned forever. The rectified controller already has two gating mechanisms intrinsic to the equation: the rectification clamp (Φ ≥ 0 — direction is fixed) and the deadband threshold (Φ < 1.0 — quiet turns self-arrest). With both in place the `max_membrane` gate is not just redundant, it inverts the controller's intended behaviour by withholding promotion pressure until an external invalidation arrives. The broken-tier set survives as a HUD diagnostic and as the gate for history-piggyback graduation — it just no longer feeds the flux loop.
+- L0 stays content-typed (D27 unchanged); the L1→L0 membrane is structurally absent from `LIVE_MEMBRANES`. L0 admissions still go through `backfill_l0_after_measurement`, untouched.
+- Edit invariant strengthens: hash mismatch teleports the file to Active with `n=0` (full reset), not just demotes it. The pin-protection invariant from the previous spec carries forward unchanged.
+
+**Why a single variant rather than config-selectable.**
+
+An earlier revision of this decision exposed all three (linear / rectified-GHK / bidirectional-GHK) behind a config switch on the theory that AC-DC4's metric of interest might shift later. In practice the three variants share most of their machinery, the bidirectional path is empirically dead at our operating point (paper §6.3), and the linear form is the V → 0 Taylor branch of GHK — redundant once the GHK form is the production default. Carrying the alternates added dispatch surface in `compute_flux`, two more dataclass branches in `FluxConfig`, and pages of tests pinning behaviours that are decorative on the headline. The simpler module is easier to reason about and easier to retune; if a future workload shift demands the alternates back, they live in git history and in the synth reference implementation alongside the optimisation runs.
+
+**What this decision does NOT change.**
+
+- The cache-warmer (D34, D34a) is independent of the cascade and is not touched.
+- L0 content-typed contract (D27, D28) is preserved.
+- Cross-reference activation, deletion markers, manual rebuild, history piggyback graduation, and the integration with `StabilityTracker.update()`'s call sites all preserve their contract; only the internals of `_run_cascade` change shape.
+- Test contracts at the public-API layer (`pin_file`, `unpin_file`, `mark_deleted`, `is_deleted`, the lifecycle through `update()`) hold; lower-level tests that read `_TIER_CONFIG.promote_n` directly need to be rewritten to assert flux-controller invariants instead.
+
+**Superseded artefacts.** `specs4/7-future/cache-tiering-piggyback-promotion.md` is retired — its buildup pathology is structurally resolved by V coupling (the global signal pulls promotion pressure where it's needed without needing the upper tier to have been "broken" first). The retired spec is left in place with a banner pointing here and to the new `cache-tiering.md`; no content removed, since the analysis of the buildup pathology is still useful as motivation reading.
+
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten); `specs4/7-future/cache-tiering-piggyback-promotion.md` (banner only — superseded). Implementation authority: `src/ac_dc/cache_membrane.py` (new module) + `src/ac_dc/stability_tracker.py` (cascade replaced). Reference implementation: `~/flatmax/personal.work/research/cache.tiering/synth/model.py` and `~/flatmax/personal.work/research/cache.tiering/cache_membrane/state.py`, published publicly at <https://github.com/flatmax/membrane.cache> (the canonical flux-approach tiered-cache reference). Paper sections: §3.1 constraints C1/C2/C3; §3.2 linear; §3.3 GHK; §4 implementation contract; §6.3 rectification ablation; §6.4 GHK-vs-linear ablation.
+
+### D36 — Per-directory dir-blocks supersede L0 aggregate maps; L0 joins the flux path
+
+D27 split the tier model into a content-typed L0 (system prompt + aggregate symbol map + aggregate doc map, never moved by the cascade) and stability-typed L1/L2/L3/Active for full files. D28 added the frozen-snapshot machinery so per-turn live-index updates stop invalidating L0. The pair was correct for the N-counter cascade — items moved by counter, not by global signal, so a monolithic always-resident block at the head of the prompt was the right shape. Under the membrane / flux controller (D35) the same shape is starvation: the aggregate maps are the largest single bytes in the prompt and they never move, so flux has nothing useful to balance until full files start arriving in Active. The controller's coupling signal V is computed against tiers that are mostly empty most of the time.
+
+**Resolution.** Replace the two aggregate maps with **per-directory blocks** (dir-blocks), one block per `(directory, content_type)` where `content_type ∈ {symbols, docs, plain_files}`. Every file in the repo lives in exactly one dir-block somewhere in the cache: source files contribute their symbol-table entry to the directory's `symbols` block, documents contribute their outline entry to the directory's `docs` block, and everything else (configs, data files, assets, fixtures — files with neither a symbol table nor a doc index) contribute their filename to the directory's `plain_files` block. There is no longer a separate `meta:file_tree` synthetic entry; the union of `plain_files` blocks across the repo *is* the file tree.
+
+Dir-blocks are first-class membrane participants. They live in any tier including L0. Flux moves them as the controller sees fit. The system prompt remains the only fixed (non-flux) prefix anchor — everything below it, including the two aggregate maps that D27 placed in L0, now rides the membrane.
+
+**Always-resident invariant.** Every indexed file is represented in the prompt at every turn:
+
+- as a symbol-table entry inside its directory's `symbols` dir-block (somewhere in L0–L3), or
+- as a doc-outline entry inside its directory's `docs` dir-block (somewhere in L0–L3), or
+- as a filename entry inside its directory's `plain_files` dir-block (somewhere in L0–L3), or
+- as full text in Active (only when the user has selected it for editing).
+
+Tier placement affects prefix-cache hit rate, not coverage. xref always resolves; it just resolves against blocks that may sit in different tiers. Cross-directory xref references are unaffected — the rendered prompt contains every directory's block, and resolution walks across blocks regardless of tier.
+
+**Edit ⇒ block rebuild.** Editing a file requires its full text in Active by precondition (you cannot edit what you cannot see). When a file moves into Active for editing:
+
+1. Its entry is removed from its directory's `symbols` (or `docs`, or `plain_files`) dir-block — the block shrinks by one entry.
+2. The shrunk dir-block is teleported to Active and re-emitted, mirroring the file-edit demotion path. The dir-block re-rides flux upward as it stabilises.
+3. The file itself sits in Active as full text until edits are done.
+
+When the file leaves Active (deselected, edits applied and stable), it rejoins its dir-block on the next freeze — the block grows by one entry and is again teleported. The "size change ⇒ demote" rule is a special case of "content change ⇒ demote": rebuild is unconditional whenever a block's contents change.
+
+If every file in a directory is currently in Active as full text, that directory's dir-block has zero entries and is **removed entirely from the cache**, not retained as an empty block.
+
+**Block-size variance.** Directories with hundreds of files produce large blocks; single-file directories produce tiny ones. Under the membrane controller this is fine — V is a token-mass signal, so large blocks naturally exert more promotion pressure than small ones. No max-block chunking is imposed at the spec level; if a workload demands it later, the chunking layer is a per-directory concern (split a directory's `symbols` block into N sub-blocks keyed by a stable partition function), additive to the design here.
+
+**Deletion semantics simplified.** D27's deletion-marker scheme is **deleted entirely**. When a file is removed from disk:
+
+- Source file: its entry is removed from the directory's `symbols` block; the block shrinks and is teleported.
+- Doc file: same, against the `docs` block.
+- Plain file: same, against the `plain_files` block.
+- File currently in Active as full text: its `file:<path>` entry is removed from Active outright.
+
+The "L0 references a deleted file" problem D27's marker bridged is no longer reachable — there is no monolithic L0 aggregate to be stale against. The dir-block carries the live truth of the directory at all times.
+
+**Pin flag retained but narrowed.** Files edited but not yet stable are still pinned in Active so deselection cannot silently evict them. Pinning applies only to `file:<path>` entries in Active. Dir-blocks carry no pin flag — they are reconstructed from disk on every freeze and inherit consistency from the index.
+
+**History piggybacks dir-block flux.** D27's history-graduation rule was "piggyback on L3 invalidation" — when L3 was already broken by a file mutation, eligible history graduated for free. That rule survives, generalised: when any Active→L3 flux fires (file moving up, dir-block moving up after rebuild), eligible history graduates in the same turn. Stable conversations still don't churn the L3 cache block, because steady-state turns produce no Active→L3 flux at all.
+
+**L0 anchoring changes meaningfully.** Under D27/D28, L0 = system prompt + two aggregate maps, refrozen only at enumerated events. Under D36, L0 holds the system prompt and whichever dir-blocks happen to have flowed there via flux. The L0-snapshot freeze mechanism (D28) is **deleted** — there is no longer a static byte sequence to freeze, and the membrane controller now spans L0 just like every other tier. The list of "what invalidates L0" from D27 collapses to: whatever the controller decides to move into or out of L0 this turn. The system prompt is the only non-flux head — it sits in front of L0's flux-managed contents and never moves.
+
+This means L0 *can* be invalidated by routine activity in a way it could not before. The compensation is that L0 also fills automatically with the hottest blocks per the controller's V signal — flux drives the most-stable-and-largest dir-blocks toward L0 organically, where D27 always sat the aggregate maps in L0 by construction. Net cache-write cost depends on workload; the scheme is uniform in tier mechanics rather than special-casing L0 against the rest.
+
+**Initialization seeds by mtime.** On startup, after the symbol/doc indexes are built, dir-blocks are constructed from the current index state and seeded into tiers using a per-directory mtime prior:
+
+- Most recently modified directory tree → seeded into L1 (likely to be touched soon, prime warm).
+- Older directories → seeded into L2 / L3 by mtime quantile.
+- All-time-cold directories → seeded into L3 (controller may push them up later).
+
+The mtime prior is heuristic, not load-bearing. Flux re-sorts within a few turns. The alternative (cold-start everything in L3) was considered and rejected as wasting a session of warm-up; the mtime prior is ~5 lines of seed code and gives the first session a usable warm cache.
+
+**Agent inheritance.** When an agent is spawned, the agent's tracker copies the parent's current tier distribution at spawn time (a snapshot of which dir-blocks sit where). Agent flux thereafter is independent — the agent can rebalance toward its own working set without affecting the parent. Agents do not inherit pinned files (those are scope-bound to the parent's edit invariant).
+
+**Cross-reference scope.** Cross-reference activation no longer adds the *opposite-mode aggregate map* to L0; it adds the opposite-mode dir-blocks (symbol blocks in doc mode, doc blocks in code mode) to the membrane. They participate in flux uniformly with the primary blocks. The `backfill_l0_after_measurement` mechanism is **deleted** — its sole remaining caller (cross-reference activation) is replaced by a normal block-registration pass. The deactivation path likewise just removes the secondary dir-blocks from the membrane.
+
+**`meta:file_tree` removed.** The synthetic `meta:file_tree` entry is no longer produced. Its contents (the flat list of files-without-symbol-or-doc) were already the union of every directory's plain-file listing; under D36 that listing exists as a real cache citizen (the `plain_files` dir-blocks) instead of as a synthesised tail-of-prompt block. Prompt assembly stops emitting `meta:file_tree`; consumers that read it from `_breakdown.py` are updated to read the dir-block set instead.
+
+**Why this design is a good fit for the membrane controller.**
+
+D27/D28 were a correct response to the N-counter cascade: the cascade had no global signal, so freezing L0 against the cascade's per-tier-pair decisions was the only way to keep cache-writes contained. The membrane controller has a global signal (V) and a self-arresting deadband (Φ < threshold), so it can manage the full prefix below the system prompt without runaway churn. Giving it dir-blocks rather than two monolithic blocks gives it enough granularity that V is computed over a meaningful population of mobile items per turn, and rectification pins the direction so we still don't see thrash.
+
+**What this decision does NOT change.**
+
+- The system prompt is still hashed and rendered as the prefix head; nothing about the system prompt's role changes.
+- The cache warmer (D34, D34a) is independent of the membrane geometry and is not touched.
+- The Active tier semantics (full-file selection, edit invariant, pin flag for in-flight edits) are unchanged.
+- D35's flux equation, parameters, admission_only Active→L3 membrane, and history-protection rule all carry forward unchanged. The per-membrane geometry is unchanged: Active→L3 (admission_only), L3→L2, L2→L1, plus L1→L0 now **enabled** as a flux membrane (was disabled under D27).
+- Mode switching (code ↔ doc) still swaps the primary index; under D36 the swap rebuilds the dir-blocks from the new primary index rather than swapping the L0 aggregate map.
+- Manual `rebuild_cache` is preserved as the explicit reset point — wipes tier assignments, re-seeds dir-blocks via the mtime prior, clears pin flags.
+
+**Superseded artefacts.**
+
+- D27 — superseded in part. The "L0 is content-typed; cascade no longer touches it" rule is replaced by "the system prompt is the only non-flux anchor; everything below rides the membrane." The deletion-marker mechanism it introduced is deleted (see above). The pin flag for edited files survives.
+- D28 — superseded in full. There is no L0 snapshot to freeze. Live indexes feed dir-block reconstruction directly at freeze events (turn boundary, edit landing, file deletion, mode switch).
+- The `meta:file_tree` rendering path in `_breakdown.py` (lines around 366–367 and 913 per current grep) is removed.
+
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten under this decision); `specs4/3-llm/prompt-assembly.md` and `specs-reference/3-llm/prompt-assembly.md` (`meta:file_tree` row removed). Implementation: `src/ac_dc/stability_tracker.py` (dir-block registration replaces aggregate-map population; deletion-marker code path removed; L1→L0 membrane enabled), `src/ac_dc/llm/_breakdown.py` (dir-block rendering replaces aggregate-map and `meta:file_tree` rendering), `src/ac_dc/llm/_assembly.py` (L0 freeze removed), `src/ac_dc/cache_membrane.py` (no change — geometry just gains an enabled L1→L0 membrane via config).
+
+**Open implementation questions (deferred to the work commit).**
+
+- Exact within-tier block ordering. Likely: alphabetical by directory path within each `content_type` group, with `content_type` groups in a fixed order (symbols, docs, plain_files). Stable ordering matters for the prefix cache.
+- Block size at the boundary between a directory's three `content_type` blocks — whether a `symbols` block and `docs` block from the same directory render adjacently or grouped by type repo-wide. Default proposal: grouped by type repo-wide, since type-grouped chunks are more cache-stable across selection toggles than directory-grouped ones.
+- Whether the mtime prior reads from the filesystem directly or from the index's last-touch timestamp. The index version is preferred (avoids a second stat pass) but requires the index to track mtime per directory rather than just per file.
+
+These are settled at implementation time, not in this decision entry.
+
+### D37 — History isolated from flux dynamics; legacy promote_n thresholds retired
+
+D27's "history piggybacks on L3 invalidation" rule and D36's generalisation of that rule (Active→L3 firings of any kind drag eligible history along) determine *when* history graduates into L3. Neither addressed what happens *after* history is in L3. Under the membrane / flux controller (D35) history sits in L3 like any other item: it contributes to V (token mass) and c (object count) on every membrane, and the rectified GHK equation can in principle pick a history mover to promote upward through L2/L1/L0. In practice this never fires because the user's `is_protected` predicate already returns True for `history:*` keys, but the spec contract was muddled — history was excluded from mover selection but still inflated V and c on every membrane it sat in. A long L3 history block could be read by the controller as "L3 has lots of mass; pressure to evacuate to L2 is high", and the controller would then attempt promotions of file/dir-block movers based on a token budget that included history bytes that nobody wanted moved.
+
+**Resolution.** History becomes structurally invisible to the flux controller once it is in L3:
+
+1. **Stays in L3 forever.** Once a `history:*` item lands in L3 via the piggyback path, the flux equation never moves it upward (its mover-selection exclusion is unchanged), and the rectification clamp prevents downward motion. The only paths out of L3 for a history item are `purge_history` (compaction, new-session reset) and manual rebuild — both already-existing lifecycle events, not flux events.
+2. **Excluded from V (token mass).** When the relaxation loop computes `t_lower` and `t_upper` for any membrane, `history:*` items are filtered out of the accumulation. Their bytes are still in the L3 cache block (the prompt is truthful about what's cached), but the controller does not interpret those bytes as imbalance pressure.
+3. **Excluded from c (object count).** Same treatment for `c_lower` and `c_upper`. A long conversation does not inflate L3's apparent population.
+
+This isolates the L3 cache block as a stable terminus for conversation-history accumulation, while leaving the file/dir-block flux dynamics unchanged.
+
+**Predicate shape.** Two distinct predicates rather than overloading `is_protected`:
+
+- `is_protected(f)` — already in place. Skips a file from mover selection. Covers BOTH pinned `file:<path>` entries (active edits in flight) AND `history:*` entries. Pinned files still contribute to V/c (their bytes really are in their tier and that mass is real); they just can't be picked as movers.
+- `is_balance_excluded(f)` — new. Skips a file from V and c accumulation. Fires only on `history:*`. Pinned files do NOT match.
+
+These differ in semantics and shouldn't be merged. Pinning says "can't move"; balance exclusion says "doesn't count toward the pressure equation." The pinned-file case is still pressure (we just can't act on it); the history case is not pressure at all.
+
+**Legacy promote_n thresholds retired.** D35 replaced the N-counter cascade with the rectified GHK flux equation. The legacy thresholds — `L3 → L2 at N=6, L2 → L1 at N=9, L1 → L0 at N=12` — and the "N-cap-at-promote-when-stable-above" mechanism were removed from the runtime in D35, but the `promote_n` integers survived in `_TIER_CONFIG` and were still surfaced in the cache-viewer HUD's threshold column. Under D37 they are removed entirely from the per-tier config for L0/L1/L2/L3. Active retains its `promote_n` (≡ `n_admit`, default 3) because that gate IS still load-bearing on the admission membrane. The HUD threshold column is blank for L0/L1/L2/L3 entries and populated only for Active.
+
+**What this decision does NOT change.**
+
+- The piggyback admission path itself is unchanged — history still graduates to L3 only on Active→L3 firings. D36's generalisation (dir-block teleport firings count) is preserved verbatim.
+- `purge_history` and the new-session reset are unchanged. Compaction continues to wipe `history:*` entries from the tracker; the next request rebuilds them as new active items at N=0.
+- `is_protected` already excluded history from mover selection. That code is unchanged. The new V/c filter is purely additive.
+- Active's `n_admit` gate is unchanged (default 3); files in Active still need to age before graduating.
+- The system prompt's role as the only fixed (non-flux) prefix anchor is unchanged.
+
+**Implementation touchpoints.**
+
+- `src/ac_dc/cache_membrane.py` — `relax()` accepts a new `is_balance_excluded: Callable[[Any], bool]` keyword (defaulting to `lambda f: False` for backward compatibility). The accumulation loop (`for f in files: ...`) skips files matching the predicate when computing `c_lower`, `c_upper`, `t_lower`, `t_upper`. Mover-selection callsites are unchanged — `is_protected` continues to handle that.
+- `src/ac_dc/stability_tracker.py` — `_run_cascade` passes `is_balance_excluded=lambda f: f.key.startswith("history:")` into `relax()`. The existing `is_protected` lambda is unchanged.
+- `src/ac_dc/stability_tracker.py` — `_TIER_CONFIG` drops the `promote_n` field for L0, L1, L2, L3. Active keeps `promote_n: 3` since that drives admission. Test files referencing `_TIER_CONFIG[Tier.L3]["promote_n"]` (and similar for L1/L2) are updated.
+- `src/ac_dc/llm/_breakdown.py` — drops the `promote_n` lookup from the per-item entry dict for non-Active items. The `entry["threshold"]` field is `None` (or omitted) for cached-tier rows; populated only for Active rows.
+- `src/ac_dc/llm/_types.py` — doc-comment on `_TIER_CONFIG_LOOKUP` updated to reflect that only `entry_n` survives for cached tiers.
+- Frontend (`webapp/src/.../*`) — cache-viewer threshold column renders blank when `threshold` is `None`. (To verify: existing renderer may already handle `None` correctly; this is a display-only change.)
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` (§4.1, § History Graduation, §4.5, § Invariants); `specs4/0-overview/glossary.md` (N value, admission gate, ripple promotion, history isolation); `specs4/impl-history/layer-3.md` (per-tier config narrative).
+
+**Superseded artefacts.** None outright. D37 refines D27's history rule and D35's admission rule rather than replacing them; the piggyback admission path is preserved; only the post-admission V/c contribution changes. The "L3 → L2 at N=6 / L2 → L1 at N=9 / L1 → L0 at N=12" wording, already removed from runtime by D35, is now removed from `_TIER_CONFIG` and from the glossary.
+
+### D38 — Cache warmer re-plugged with bounded broadcasts and runtime reasoning tracking
+
+D34 isolated the warmer's executor and added wall-clock-anchored deadlines; D34a fixed the polling-loop drift on suspended-process resume. Both shipped with the warmer in a "currently unplugged" state — field observation revealed a separate failure mode where `await self._broadcast_event_async(...)` calls inside `_run` stalled the event loop for ~120 seconds per cycle. Broadcasts that ran sub-millisecond on user-turn events took 2 minutes when the warmer issued them. Root cause was not diagnosed; the warmer was disabled at its entry point pending investigation.
+
+D38 plugs the warmer back in by mitigating the stall structurally rather than root-causing the WebSocket / jrpc-oo behaviour, and simultaneously fixes a separate design defect where the warmer's reasoning posture was read from config instead of from runtime user state.
+
+**Bounded broadcast waits.** Each `cacheWarmup*` broadcast is wrapped in `asyncio.wait_for(..., timeout=_BROADCAST_TIMEOUT_SECONDS)` (5 seconds). A hung send logs at WARNING with explanatory text and continues — the rest of `_run` proceeds, the next cycle gets a fresh timeout budget. The diagnostic heartbeat task runs independently of the broadcast loop, so even when a broadcast's own log line is delayed by the timeout, the heartbeat's "event loop stalled" WARNING surfaces the underlying gap on its normal cadence. A stall affects one broadcast for at most 5 seconds, not the warmer's whole timer.
+
+**Tightened polling cadence.** The silent-phase polling loop now wakes every 1 second (was 5). Two jobs:
+
+- **Drift resistance.** Same role as under D34a — short polling chunks against a wall-clock deadline mean the worst-case overshoot from OS suspension is bounded by the poll cadence plus the suspension duration. Lowering the cadence directly tightens the bound.
+- **OS idle-throttling resistance.** macOS App Nap and similar mechanisms aggressively park processes that look idle. Once parked, timer wakes can slip by tens of seconds even when nothing is suspended. A 1-second poll keeps the process visibly active to the kernel — the OS doesn't park a process running a coroutine every second. Cost is ~270 awaits per interval, well below any workload's measurable CPU floor.
+
+The constant was renamed from `_DRIFT_POLL_SECONDS` to `_HEARTBEAT_POLL_SECONDS` to reflect the broader role.
+
+**Runtime reasoning state tracking.** The original warmer disabled reasoning unconditionally on every firing, on the theory that warm-ups never benefit from hidden thinking. That was correct in isolation but wrong in context: Bedrock and Anthropic key the prompt cache against the request shape, and `thinking={"type": "adaptive", "effort": ...}` produces a different cache slot than a non-thinking call. A warmer firing without thinking writes a different slot than the next reasoning user turn would read from — so reasoning user calls landed cold-writes regardless of whether the warmer recently fired the same prefix.
+
+A second-iteration fix read `config.reasoning_enabled` and matched the warmer's call shape to the config default. That worked for users who configured reasoning at config-level but not for users who toggled reasoning per-request via the chat-panel UI (the dominant pattern). Field observation: a session with `reasoning.enabled: false` in `app.json` but reasoning ON in the UI showed warm-ups firing without `thinking`, user calls firing with `thinking`, and 0% cache hit on every reasoning user turn despite 99% warmer drift compliance. The config flag was vestigial — its only consumer was the warmer, which was reading it for the wrong reason.
+
+D38 retires the config read in the warmer's hot path. The streaming pipeline writes `service._last_reasoning_used = bool(thinking_kwargs)` after every user call's reasoning resolution. The warmer's `_completion_sync` reads that flag on each firing:
+
+```python
+last_used = getattr(self._service, "_last_reasoning_used", False)
+thinking_kwargs = (
+    build_thinking_kwargs(config, True) if last_used
+    else {}
+)
+```
+
+Effects:
+
+- The UI toggle is the single user-facing control. Users toggle reasoning per-request via the chat panel; the warmer mirrors automatically.
+- Config-level `reasoning.enabled` is no-longer-load-bearing in the live path. Could be removed in a follow-up but harmless to leave — the field still exists in `ConfigManager.reasoning_config` for the test suite and any future consumer that needs a config default.
+- Defaults to False on startup. Warm-ups fired before any user call are cheap (no reasoning tokens burned).
+- One-cycle adaptation lag, worst case. If the user toggles reasoning OFF mid-session, the next warmer firing (within `interval_seconds`) still uses reasoning shape; the firing after that is correct. Negligible — toggle changes are rare and a single mismatched warm-up costs at most one reasoning ping (a few hundred tokens for adaptive models bound by a "respond with ok" prompt).
+- Reasoning warm-ups use `config.reasoning_request_timeout_seconds` (default 1200s) rather than the aux-call timeout (60s). Adaptive thinking can spend several minutes server-side on the reasoning pass before any byte streams; a 60s timeout would abort the call before output.
+- For legacy (non-adaptive) thinking models, `_WARMUP_MAX_TOKENS` is raised to `budget_tokens + 100` so the call has room for the reasoning pass plus a minimal completion. Adaptive models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) keep `_WARMUP_MAX_TOKENS=2` because they bound their own reasoning internally.
+
+**`enable()` method added.** D34's circuit breaker disabled the warmer on three consecutive TTL-drift cycles but provided no path back to enabled state without application restart. D38 adds `enable()` for operator-driven re-enable: clears the disabled-reason, restarts the heartbeat, schedules the next firing. No-op when `cache_warmup.enabled: false` in config — config-level disable still requires editing `app.json`.
+
+**Reset semantics pinned to user-call start.** D38 also pins `reset()` to the START of every `stream_chat` invocation only (not also at end). Each user-call cycle gets a fresh diagnostic-heartbeat window anchored to a specific call's boundary, so any "event loop stalled" WARNING is attributable to work that call did rather than aggregated noise from earlier idle periods. Previous revisions called `reset()` at both start and end as defensive coverage; D38 narrows to start-only because the heartbeat-restart side effect was producing redundant cycles on every stream completion.
+
+**Field validation.** Two-cycle test post-fix on a reasoning-enabled session:
+
+```
+21:36:54 (user reasoning call): write 19,572 / read 0
+21:37:08 (warmer fire #1): "reasoning shape matched (max_tokens=2, timeout=1200s)"
+21:37:10 (warmer cycle #1):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
+21:41:11 (warmer fire #2): "reasoning shape matched (max_tokens=2, timeout=1200s)"
+21:41:15 (warmer cycle #2):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
+```
+
+Session ROI flipped from −100% (cold start, write-only) through 0% (read = write after one warm-up) to +100% (two reads × one write). Reasoning user calls now hit a warmer-primed cache instead of paying the full cache-write cost on every interactive pause longer than 5 minutes.
+
+**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (status updated, lifecycle section updated, warm-up call shape updated, configuration defaults updated). `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table updated for renamed/added constants, runtime reasoning tracking paragraph added, bounded broadcast waits paragraph added, config defaults note updated for `enable()`).
+
+**Open questions.** The original ~120s broadcast stall under D34a remains undiagnosed. D38's bounded waits make the stall non-fatal; they do not explain it. A future investigation pass into the WebSocket / jrpc-oo serialisation path during warmer cycles may identify the actual cause and let the timeout be relaxed or removed. Until then the timeout is the structural safety net.

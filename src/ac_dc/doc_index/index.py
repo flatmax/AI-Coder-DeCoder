@@ -542,6 +542,80 @@ class DocIndex:
         return self._cache.get_signature_hash(rel)
 
     # ------------------------------------------------------------------
+    # Per-directory accessors (D36 dir-blocks)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dir_of(rel_path: str) -> str:
+        """Return the directory portion of a repo-relative path."""
+        idx = rel_path.rfind("/")
+        if idx == -1:
+            return ""
+        return rel_path[:idx]
+
+    def get_indexed_directories(self) -> list[str]:
+        """Return a sorted list of directories with at least one indexed doc."""
+        dirs: set[str] = set()
+        for path in self._all_outlines:
+            dirs.add(self._dir_of(path))
+        return sorted(dirs)
+
+    def get_dir_docs_block(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Render the directory's doc-outline block.
+
+        Concatenates each indexed file's compact doc block
+        (from :meth:`get_file_doc_block`) for documents in the
+        directory, excluding those currently in Active full-text.
+        Returns empty string when the directory has no eligible
+        files.
+        """
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._all_outlines
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        if not files:
+            return ""
+        blocks: list[str] = []
+        for path in files:
+            block = self.get_file_doc_block(path)
+            if block:
+                blocks.append(block)
+        return "\n\n".join(blocks)
+
+    def get_dir_signature_hash(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Return a stable hash over the directory's doc-outline contents."""
+        import hashlib
+
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._all_outlines
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        h = hashlib.sha256()
+        for path in files:
+            sig = self._cache.get_signature_hash(path) or ""
+            h.update(path.encode("utf-8"))
+            h.update(b"\0")
+            h.update(sig.encode("utf-8"))
+            h.update(b"\0")
+        return h.hexdigest()
+
+    def get_indexed_files(self) -> list[str]:
+        """Return all repo-relative doc paths currently indexed."""
+        return sorted(self._all_outlines.keys())
+
+    # ------------------------------------------------------------------
     # Enrichment orchestration
     # ------------------------------------------------------------------
 

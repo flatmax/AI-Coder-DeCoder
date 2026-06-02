@@ -137,7 +137,6 @@ from ac_dc.llm._rpc_urls import (
     remove_fetched_url,
 )
 from ac_dc.llm._stability import (
-    measure_tracker_tokens,
     remove_cross_reference_items,
     seed_cross_reference_items,
     try_initialize_stability,
@@ -229,7 +228,6 @@ __all__ = [
     "is_child_request",
     "is_tex_preview_available",
     "load_session_into_context",
-    "measure_tracker_tokens",
     "navigate_file",
     "new_session",
     "on_doc_file_written",

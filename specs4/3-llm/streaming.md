@@ -22,6 +22,19 @@ The single-stream guard gates user-initiated requests, not internal streams. A f
 
 Request IDs are the multiplexing primitive. All server-push events carry the exact ID of the stream they belong to. The transport never assumes a singleton stream.
 
+### Stream Resumption After Reconnect
+
+The server-side stream lifecycle is independent of the websocket transport. When the originating browser disconnects (refresh, network drop, tab swap), the worker thread keeps running the LLM call; chunks accumulate server-side; cleanup happens when the call completes naturally. A reconnecting client must be able to re-attach to its own in-flight stream rather than seeing the opaque single-stream-guard rejection.
+
+The mechanism extends Passive Stream Adoption (below) to cover the originating client. Two pieces of state make this possible:
+
+- A reverse map `_active_request_to_agent: dict[str, str | None]` keyed by request ID, valued by the owning agent ID (or `None` for the main scope). Populated alongside the single-stream guard in `chat_streaming`; cleared in the streaming pipeline's `finally` block.
+- The existing per-request accumulator `_request_accumulators: dict[str, str]` populated by the worker thread on every chunk.
+
+The `get_current_state` RPC's response carries an `active_streams` field — one entry per in-flight stream, each entry containing the request ID, owning agent ID (or null for main), and the accumulated content so far. The frontend's `state-loaded` handler consumes the field, resolves each entry to its tab, and re-attaches: stamps `currentRequestId`, sets `streaming=true`, installs `accumulated_content` as `streamingContent`. Subsequent chunks broadcast on the same request ID then route through the existing chunk-routing path. The next `streamComplete` finalizes the message normally.
+
+Race window: a user who sends a new message before `state-loaded` resolves still sees the single-stream-guard rejection. The frontend augments the rejection toast with guidance to wait for resume or start a new session — small UX patch for a narrow timing window.
+
 ## Background Task Overview
 
 - Remove deselected files from context
@@ -42,17 +55,27 @@ Request IDs are the multiplexing primitive. All server-push events carry the exa
 - Print terminal HUD
 - Parse and apply edit blocks
 - Persist assistant message
+- Send completion event (`streamComplete`) — fires immediately so the chat panel can finalise the response without waiting for downstream housekeeping
 - Update cache stability
-- Send completion event
-- Launch deferred doc enrichment (if any)
 - Run post-response compaction
+- Launch deferred doc enrichment (if any)
+- Send post-response complete event (`postResponseComplete`) — fires after tier state and compaction have settled, signalling that the breakdown RPC will now return consistent data
 
 ## Aggregate Map Rendering
 
 Under the L0-content-typed model, the symbol map (code mode) or doc map (document mode) in L0's system message contains every indexed file's block. Selected files appear in the map AND as full text in a lower tier — that's the design. The system prompt's authority rule instructs the LLM to treat full text in Working Files as canonical when it disagrees with the structural map. The only filter applied at map-render time is the user's index-exclusion set (file picker's three-state checkbox), since excluded files have no representation in the prompt at all.
 
+## Cache Warmer Coordination
+
+A background cache warmer (see [cache-tiering.md § Cache Warmer](cache-tiering.md#cache-warmer)) issues periodic minimal LLM calls during idle periods to keep the provider's prompt cache hot. The streaming pipeline coordinates with it at two points:
+
+- At the top of `stream_chat`: cancel any pending warm-up. A real LLM request is about to fly; the warmer should not race it. Pending countdowns close via the `cacheWarmupCancelled` broadcast (frontend dismisses the progress bar).
+- At the end of `stream_chat`: reset the warmer. User activity just completed; restart the idle timer.
+- The warmer broadcasts four events to the browser via the standard `_event_callback` channel: `cacheWarmupCountdown`, `cacheWarmupFiring`, `cacheWarmupComplete`, `cacheWarmupCancelled`. See [streaming reference](../../specs-reference/3-llm/streaming.md) for payload schemas.
+
+The warmer never registers itself in the single-stream guard — its existence is invisible to `chat_streaming`. Real user requests fire regardless of whether a warm-up is mid-flight.
+
 ## File Context Sync
-🟨🟨🟨 REPL
 
 - Compare current file context against incoming selected files list
 - Remove files present in context but absent from new selection
@@ -128,6 +151,22 @@ The provider reports `finish_reason` on the final chunk (earlier chunks report N
 
 The worker captures whichever chunk first reports a non-null value and propagates it through the stream-complete result. Natural stops log at INFO; non-natural stops log at WARNING so operators can diagnose truncation without trawling debug logs.
 
+### Retry Policy
+
+LiteLLM's built-in `num_retries=` kwarg uses a tenacity policy with a short fixed delay and doesn't treat provider-specific rate-limit errors as retryable on all providers (Bedrock 429s in particular fall through on some LiteLLM versions). AC⚡DC wraps every `litellm.completion(...)` call in its own retry loop with explicit exponential backoff:
+
+- Retries the call up to `num_retries` times on transient error types — rate_limit, api_connection, service_unavailable, timeout. Non-transient types (authentication, bad_request, context_window_exceeded, not_found) fail immediately without retry.
+- Exponential backoff with jitter between attempts. Per-attempt wait is capped at a ceiling (60 seconds) to keep the total retry budget bounded on long runs of 429s.
+- Honours the `Retry-After` header when the provider supplies one. When the header value exceeds the computed exponential wait, the header value wins — Bedrock sometimes hands back 30-60s retry hints that would otherwise be under-respected by the exponential schedule alone.
+
+The outer retry replaces LiteLLM's `num_retries=` kwarg at every call site — stacking both would multiply waits and mask provider retry hints. The three call sites that use it:
+
+- Streaming completion — retry applies only to stream establishment. Once chunks start flowing, a mid-stream failure can't be replayed because partial content has already been delivered to the UI. The 429 pattern this protects against raises before any chunk arrives, so the retry catches it cleanly.
+- Commit-message generation — non-streaming call on the smaller model.
+- Topic boundary detection — non-streaming call on the smaller model; failures still fall back to the safe default after retry exhaustion.
+
+`num_retries` is a config field in `llm.json`, defaulting to 10. Non-positive values disable retry (single attempt). Values larger than a few dozen are pointless in practice — sustained rate-limit windows that last that long require either provider-side quota adjustment or a different model.
+
 ## Chunk Delivery Semantics
 
 - Each chunk carries full accumulated content, not deltas
@@ -188,6 +227,25 @@ Tabs created from `agentsSpawned` are idempotent with the spawn-from-`streamComp
 - Cancelled flag (if cancelled)
 - Error field (if fatal error)
 - Binary/invalid files rejected
+
+## Two Completion Events
+
+The pipeline fires two distinct events for each successful turn — `streamComplete` and `postResponseComplete` — with different timing semantics and different consumers.
+
+| Event | Fires when | Carries | Consumer |
+|---|---|---|---|
+| `streamComplete` | Immediately after the LLM call returns and edit application completes | Full assistant response, edit results, finish reason, token usage, agent blocks | Chat panel — finalises the streaming message in the UI without waiting for tracker update or compaction |
+| `postResponseComplete` | After `_post_response` finishes (stability tracker update, compaction, terminal HUD) | Just the request ID | Context tab — refetches `get_context_breakdown` knowing tier state is now consistent |
+
+The split exists because the chat panel and the Context tab have opposing latency requirements. The chat panel wants its UI to flip from streaming to complete the moment the LLM stops generating — even a 100ms delay reads as sluggish. The Context tab wants its tier display to match the actual post-response tracker state — refetching during the brief window between `streamComplete` and `_update_stability` returns pre-update data and the user has to manually refresh.
+
+Firing both events lets each consumer pick the right signal:
+
+- The chat panel listens to `streamComplete` and ignores `postResponseComplete`.
+- The Context tab listens to `postResponseComplete` for authoritative refreshes (and also `streamComplete` for partial-data updates that don't depend on tracker state).
+- The Token HUD listens to `streamComplete` because its data comes from the completion result itself, not from the tracker.
+
+When a Context tab subscriber receives both events for the same turn (because it also listens to `streamComplete` for non-tracker reasons), the in-flight refresh queue collapses them into "first fetch + one queued fetch" — the queued fetch reads the post-update state. See [viewers-hud.md § Refresh Queue](../5-webapp/viewers-hud.md#refresh-queue).
 
 ## Client Processing of Completion
 
@@ -271,3 +329,5 @@ Three reports printed after each response:
 - Assistant message is persisted after LLM call completes — no partial assistant messages in history
 - The captured event loop reference is always usable from the worker thread
 - The aggregate symbol/doc map in L0 contains every indexed file's block (minus user-excluded paths); duplication with full text in lower tiers is the intended design and is resolved at LLM read time by the system prompt's authority rule
+- `streamComplete` always fires before `postResponseComplete` for the same turn; `postResponseComplete` fires only on successful (non-cancelled, non-errored) turns where post-response housekeeping actually runs
+- Tier-state-dependent UI (Context tab, Token HUD's tier section) reads its authoritative state from `postResponseComplete`, not `streamComplete`; reading from `streamComplete` returns pre-update tracker data because the broadcast races `_update_stability`

@@ -4,16 +4,14 @@ Extracted from :mod:`ac_dc.llm_service` to keep that module
 focused on the streaming pipeline. Contains:
 
 - :func:`try_initialize_stability` — eager + lazy tracker seed
-  from the reference graph. Mode-aware (code → symbol:, doc →
-  doc:). Runs L0 backfill after token measurement.
-- :func:`measure_tracker_tokens` — replace placeholder tokens
-  with real measured counts for symbol: and doc: entries.
+  via D36 dir-block initialisation. Mode-aware (code → symbols:,
+  doc → docs:). Quartile-splits dir-blocks across L0–L3 by
+  directory mtime.
 - :func:`update_stability` — per-request active items build +
-  tracker update. Handles the specs-mandated order of
-  operations including defensive excluded-files removal and
-  cross-reference item registration.
+  tracker update.
 - :func:`seed_cross_reference_items` — populate the tracker
-  with opposite-index items when cross-reference is enabled.
+  with opposite-index dir-blocks when cross-reference is
+  enabled.
 - :func:`remove_cross_reference_items` — strip those items on
   disable / mode switch.
 
@@ -22,8 +20,8 @@ and reads/writes attributes on it. Keeping the service module
 smaller without changing the state graph's shape.
 
 Governing specs:
-:doc:`specs4/3-llm/cache-tiering`,
-:doc:`specs4/3-llm/modes`,
+:doc:`specs-reference/3-llm/cache-tiering`,
+:doc:`specs-reference/3-llm/modes`,
 :doc:`specs-reference/3-llm/streaming` § Order of Operations.
 """
 
@@ -43,6 +41,251 @@ logger = logging.getLogger("ac_dc.llm_service")
 
 
 # ---------------------------------------------------------------------------
+# Dir-block enumeration
+# ---------------------------------------------------------------------------
+
+
+def _excluded_set(service: "LLMService") -> set[str]:
+    """Return the user-excluded file paths as a set.
+
+    The frontend's three-state checkbox sends every
+    descendant file path of an excluded directory, so a
+    plain set lookup is sufficient — no prefix matching
+    needed.
+
+    Used by every dir-block enumeration site
+    (initial init, rebuild, per-turn refresh) so a file
+    excluded in the picker is omitted from
+    ``symbols:<dir>`` / ``docs:<dir>`` / ``plain_files:<dir>``
+    seeding alike. When every file under a directory is
+    excluded, the dir-block isn't seeded at all.
+    """
+    excluded = getattr(service, "_excluded_index_files", None)
+    return set(excluded) if excluded else set()
+
+
+def _dir_has_unexcluded_indexed_file(
+    indexed_paths: list[str],
+    directory: str,
+    excluded: set[str],
+) -> bool:
+    """True when ``directory`` has at least one indexed, non-excluded file.
+
+    Used by symbols/docs dir-block enumeration to decide
+    whether to seed a ``symbols:<dir>`` or ``docs:<dir>``
+    entry. If every indexed file in the directory is on
+    the user's exclusion list, the rendered block would be
+    empty and the entry should be skipped.
+    """
+    for path in indexed_paths:
+        parent = path[: path.rfind("/")] if "/" in path else ""
+        if parent != directory:
+            continue
+        if path not in excluded:
+            return True
+    return False
+
+
+def _indexed_paths_in_dir(
+    service: "LLMService",
+    directory: str,
+) -> set[str]:
+    """Return the set of paths in ``directory`` covered by an active index.
+
+    A file is "covered" when it appears as a key in an
+    index that is *currently surfacing dir-blocks to the
+    LLM* — its content already rides the cascade via the
+    corresponding ``symbols:`` or ``docs:`` dir-block, so
+    listing its filename in ``plain_files:<directory>``
+    would be pure duplication.
+
+    Mode-aware: in code mode the symbol index is primary,
+    in doc mode the doc index is primary; cross-reference
+    additionally engages the opposite index on top of the
+    primary one. A file covered only by an index that is
+    *not* surfacing dir-blocks this turn must remain
+    visible through plain_files.
+
+    Used by both initial seeding and per-turn refresh to
+    subtract indexed files from the plain-files block.
+
+    Coverage is mode-INDEPENDENT. Per
+    ``specs4/3-llm/cache-tiering.md`` § Content Categories
+    Tracked, ``plain_files:<dir>`` lists files that have
+    "neither a symbol table nor a doc index" — so a file
+    present in *either* index is subtracted from the
+    plain-files listing regardless of the active mode. A
+    doc-indexed file viewed in code mode still has its
+    filename surfaced (via the doc index when cross-ref
+    engages, or simply as a known-indexed file that
+    shouldn't be duplicated into plain_files), so listing
+    it in plain_files would be redundant either way.
+
+    Earlier revisions gated this on the active mode
+    (``use_docs = mode == Mode.DOC or xref``), which left
+    doc-indexed files leaking into ``plain_files`` while in
+    code mode — duplicating their filenames against the
+    doc index. Both indexes are now consulted
+    unconditionally.
+    """
+    covered: set[str] = set()
+    if service._symbol_index is not None:
+        try:
+            for path in service._symbol_index._all_symbols.keys():
+                parent = (
+                    path[: path.rfind("/")] if "/" in path else ""
+                )
+                if parent == directory:
+                    covered.add(path)
+        except Exception:
+            pass
+    try:
+        for path in service._doc_index._all_outlines.keys():
+            parent = (
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+            if parent == directory:
+                covered.add(path)
+    except Exception:
+        pass
+    return covered
+
+
+def _enumerate_dir_blocks(
+    service: "LLMService",
+) -> list[tuple[str, float, int]]:
+    """Return ``[(key, mtime, tokens), ...]`` for primary-mode dir-blocks.
+
+    Walks the index and repo to produce three families of
+    keys, gated by the active mode:
+
+    - ``symbols:<dir>`` — emitted in code mode only;
+      directories with at least one file in the symbol
+      index.
+    - ``docs:<dir>`` — emitted in doc mode only;
+      directories with at least one file in the doc
+      index.
+    - ``plain_files:<dir>`` — emitted in both modes;
+      directories with at least one file NOT already
+      covered by the *active mode's* index. Files that
+      appear in the active-mode index are subtracted from
+      the plain-files listing — their filenames are
+      already visible to the LLM through the index block,
+      and listing them again would duplicate tokens for
+      no gain.
+
+    Cross-reference mode brings the opposite-mode index in
+    on top via :func:`seed_cross_reference_items`; this
+    function only emits the *primary* mode's keys.
+
+    The keys are deduplicated within each family (a single
+    directory contributes one of each kind it qualifies for).
+    Each key carries:
+
+    - The most recent file mtime in its directory so the
+      tracker's quartile-split seeding can put hot
+      directories into warmer tiers.
+    - The rendered block's real token count, measured here
+      and propagated into :meth:`StabilityTracker.initialize_dir_blocks`
+      so the Context tab shows real numbers immediately
+      instead of the bin-packing placeholder until the
+      first turn completes.
+
+    Rendering errors fall back to a zero token count so the
+    seed still happens; the next :meth:`update` cycle will
+    overwrite tokens with the real count anyway.
+    """
+    repo = service._repo
+    if repo is None:
+        return []
+
+    excluded = _excluded_set(service)
+    mode = service._context.mode
+    keys: list[tuple[str, float, int]] = []
+
+    # symbols:<dir> — code mode only
+    if mode == Mode.CODE and service._symbol_index is not None:
+        try:
+            symbol_paths = list(
+                service._symbol_index._all_symbols.keys()
+            )
+        except Exception:
+            symbol_paths = []
+        symbol_dirs: set[str] = set()
+        for path in symbol_paths:
+            symbol_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in symbol_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                symbol_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"symbols:{directory}", mtime, tokens))
+
+    # docs:<dir> — doc mode only
+    if mode == Mode.DOC:
+        try:
+            doc_paths = list(service._doc_index._all_outlines.keys())
+        except Exception:
+            doc_paths = []
+        doc_dirs: set[str] = set()
+        for path in doc_paths:
+            doc_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in doc_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                doc_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._doc_index.get_dir_docs_block(directory)
+                tokens = service._counter.count(block) if block else 0
+            except Exception:
+                tokens = 0
+            keys.append((f"docs:{directory}", mtime, tokens))
+
+    # plain_files:<dir> — subtract files already covered by
+    # the active-mode index, and drop user-excluded files.
+    # When every file in a directory is indexed or excluded,
+    # the plain-files block has nothing to add and is
+    # omitted.
+    try:
+        by_dir = repo.get_files_by_directory()
+    except Exception:
+        by_dir = {}
+    for directory, files_in_dir in by_dir.items():
+        covered = _indexed_paths_in_dir(service, directory)
+        leftover = sorted(
+            f for f in files_in_dir
+            if f not in covered and f not in excluded
+        )
+        if not leftover:
+            continue
+        mtime = repo.get_directory_mtime(directory)
+        block = "\n".join(leftover)
+        try:
+            tokens = service._counter.count(block) if block else 0
+        except Exception:
+            tokens = 0
+        keys.append((f"plain_files:{directory}", mtime, tokens))
+
+    return keys
+
+
+# ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
 
@@ -51,62 +294,32 @@ def try_initialize_stability(service: "LLMService") -> None:
     """Initialize the stability tracker for the current mode.
 
     Called eagerly during deferred startup (Phase 2) or lazily
-    on the first chat request if eager init failed. Under the
-    L0-content-typed model (D27) initialization is a thin
-    operation:
+    on the first chat request if eager init failed. Under D36
+    dir-blocks the sequence is:
 
-    1. Re-run the symbol index's incremental pass (code mode
-       only — doc mode has already indexed in the background
-       build) so its mtime cache is current.
-    2. Configure the tracker's cache-target tokens (model-
-       aware).
-    3. Register the system prompt into L0 via
-       :meth:`register_system_prompt`. This is the only
-       cascade-tracked entry that lives in L0; the aggregate
-       symbol/doc maps that L0 also presents to the LLM are
-       regenerated from the index at assembly time, not held
-       as tracker entries.
+    1. Refresh the symbol index in code mode (doc mode has
+       already indexed in the background build).
+    2. Configure the tracker's cache target (model-aware).
+    3. Enumerate dir-block keys with their mtimes and hand
+       them to :meth:`StabilityTracker.initialize_dir_blocks`,
+       which quartile-splits them across L0/L1/L2/L3 by
+       hottest-first.
 
-    What init does NOT do under the new model:
-
-    - **No four-tier file distribution.** Earlier revisions
-      bin-packed every indexed file across L0/L1/L2/L3 via
-      reference-graph clustering. That optimised "every cached
-      tier is full from turn one" but interacted badly with
-      routine churn — every selection toggle and every edit
-      shifted bytes in cached tiers and triggered demotion
-      cascades. Under the new model L1/L2/L3/Active start
-      empty; files enter Active when selected and graduate
-      upward through the cascade as they stabilise. The user
-      can trigger immediate redistribution via
-      ``rebuild_cache`` if they prefer warm caches over the
-      natural graduation path.
-    - **No post-measurement L0 backfill on the init path.**
-      The legacy backfill compensated for placeholder-vs-real
-      token-count divergence after the four-tier seed — with
-      no seed there's nothing to backfill. The
-      :meth:`backfill_l0_after_measurement` call remains
-      wired into the cross-reference activation path, where
-      it serves a different role (promoting the most-
-      connected opposite-index items into L0 alongside the
-      primary aggregate map).
+    The system prompt is no longer a tracker entry — it sits
+    before L0 as a non-flux head anchor and is rendered live
+    from the context manager at assembly time.
 
     Mode-aware dispatch — code mode requires the symbol index
     to be attached; doc mode requires the doc index's
     background build to have completed. In doc mode, if the
     doc index isn't ready yet (``_doc_index_ready is False``),
     the function bails without setting the per-mode init flag.
-    The next chat request's lazy-init retry tries again; once
-    structural extraction completes, init succeeds on the
-    retry.
 
     Safe to call multiple times — sets the per-mode initialized
-    flag on the first successful run. Subsequent calls for the
-    same mode are no-ops; subsequent calls for a DIFFERENT mode
-    (after a switch_mode) initialize that mode's tracker fresh.
+    flag on the first successful run.
 
-    Spec: ``specs4/3-llm/cache-tiering.md`` § Initialization
-    and § Why no startup file distribution.
+    Spec: :doc:`specs-reference/3-llm/cache-tiering`
+    § Initialization.
     """
     mode = service._context.mode
     if service._stability_initialized.get(mode, False):
@@ -114,60 +327,34 @@ def try_initialize_stability(service: "LLMService") -> None:
     if service._repo is None:
         return
 
-    # Mode dispatch — doc mode needs the doc index ready;
-    # code mode needs the symbol index attached.
     if mode == Mode.DOC:
         if not service._doc_index_ready:
-            # Doc index still building. Skip init; the next
-            # request's retry catches it, or a mode switch to
-            # code picks up the code-mode path.
             return
     else:
         if service._symbol_index is None:
             return
 
     try:
-        # Step 1: Refresh the symbol index in code mode. In doc
-        # mode the background build has already indexed every
-        # doc file; we don't re-walk.
         if mode == Mode.CODE:
             assert service._symbol_index is not None
             file_list_raw = service._repo.get_flat_file_list()
             file_list = [f for f in file_list_raw.split("\n") if f]
             service._symbol_index.index_repo(file_list)
 
-        # Step 2: Configure the tracker's cache target. The
-        # tracker uses this for anchoring and underfill
-        # demotion calculations during the cascade.
         cache_target = service._config.cache_target_tokens_for_model()
         service._stability_tracker.set_cache_target_tokens(
             cache_target
         )
 
-        # Step 3: Register the system prompt into L0. The
-        # aggregate symbol/doc maps that L0 also presents to
-        # the LLM are NOT tracker entries — they're rebuilt
-        # at assembly time from the index. Only system:prompt
-        # is cascade-tracked.
-        if mode == Mode.DOC:
-            system_prompt = service._config.get_doc_system_prompt()
-            legend = service._doc_index.get_legend()
-        else:
-            assert service._symbol_index is not None
-            system_prompt = service._config.get_system_prompt()
-            legend = service._symbol_index.get_legend()
-        prompt_hash = hashlib.sha256(
-            system_prompt.encode("utf-8")
-        ).hexdigest()
-        prompt_tokens = service._counter.count(system_prompt + legend)
-        service._stability_tracker.register_system_prompt(
-            prompt_hash, prompt_tokens
-        )
+        keys_with_mtimes = _enumerate_dir_blocks(service)
+        if keys_with_mtimes:
+            service._stability_tracker.initialize_dir_blocks(
+                keys_with_mtimes
+            )
 
         service._stability_initialized[mode] = True
         logger.info(
-            "Stability tracker initialized (%s mode): %d items "
-            "(L0-content-typed: only system:prompt held in tracker)",
+            "Stability tracker initialized (%s mode): %d items",
             mode.value,
             len(service._stability_tracker.get_all_items()),
         )
@@ -180,42 +367,93 @@ def try_initialize_stability(service: "LLMService") -> None:
         )
 
 
-def measure_tracker_tokens(service: "LLMService") -> None:
-    """Replace placeholder token counts with real measured values.
-
-    Iterates all symbol: and doc: items and replaces their
-    placeholder tokens (from ``initialize_with_keys``) with the
-    actual token count of the formatted block. Skips items
-    whose index isn't attached or whose path doesn't resolve to
-    a block — those keep the placeholder, which the next update
-    cycle will refresh from the measured active-items data.
-
-    Both prefixes are handled so doc-mode init gets real token
-    counts too. A tracker may hold items of both kinds
-    simultaneously (cross-reference mode), and each prefix
-    dispatches to its own index.
-    """
-    all_items = service._stability_tracker.get_all_items()
-    for key in all_items:
-        if key.startswith("symbol:"):
-            if service._symbol_index is None:
-                continue
-            path = key[len("symbol:"):]
-            block = service._symbol_index.get_file_symbol_block(path)
-            if block:
-                tokens = service._counter.count(block)
-                service._stability_tracker.measure_tokens(key, tokens)
-        elif key.startswith("doc:"):
-            path = key[len("doc:"):]
-            block = service._doc_index.get_file_doc_block(path)
-            if block:
-                tokens = service._counter.count(block)
-                service._stability_tracker.measure_tokens(key, tokens)
-
-
 # ---------------------------------------------------------------------------
 # Per-request update
 # ---------------------------------------------------------------------------
+
+
+def _dir_block_active_items(
+    service: "LLMService",
+    scope: "ConversationScope",
+) -> dict[str, dict[str, Any]]:
+    """Build the active-items entries for every dir-block.
+
+    Each tracker entry must show up in active_items every
+    turn so its hash and tokens stay current. The hash is the
+    directory's signature hash (which excludes files in
+    Active full-text); tokens come from rendering the block
+    with the same exclude set.
+
+    Files currently in Active full-text move out of their
+    dir-block — the block hash changes, the entry shows up
+    in active_items with the new hash, and the membrane
+    cascade demotes the block to Active to re-ride flux.
+    """
+    items: dict[str, dict[str, Any]] = {}
+
+    active_excluded = set(scope.context.file_context.get_files())
+    user_excluded = _excluded_set(service)
+
+    repo = service._repo
+    if repo is None:
+        return items
+
+    for key in list(scope.tracker.get_all_items().keys()):
+        if key.startswith("symbols:"):
+            if service._symbol_index is None:
+                continue
+            directory = key[len("symbols:"):]
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory, exclude_active=active_excluded
+                )
+                sig = service._symbol_index.get_dir_signature_hash(
+                    directory, exclude_active=active_excluded
+                )
+            except Exception:
+                continue
+            tokens = (
+                service._counter.count(block) if block else 0
+            )
+            items[key] = {"hash": sig, "tokens": tokens}
+        elif key.startswith("docs:"):
+            directory = key[len("docs:"):]
+            try:
+                block = service._doc_index.get_dir_docs_block(
+                    directory, exclude_active=active_excluded
+                )
+                sig = service._doc_index.get_dir_signature_hash(
+                    directory, exclude_active=active_excluded
+                )
+            except Exception:
+                continue
+            tokens = (
+                service._counter.count(block) if block else 0
+            )
+            items[key] = {"hash": sig, "tokens": tokens}
+        elif key.startswith("plain_files:"):
+            directory = key[len("plain_files:"):]
+            try:
+                by_dir = repo.get_files_by_directory()
+            except Exception:
+                by_dir = {}
+            covered = _indexed_paths_in_dir(service, directory)
+            files_in_dir = sorted(
+                f for f in by_dir.get(directory, [])
+                if f not in active_excluded
+                and f not in covered
+                and f not in user_excluded
+            )
+            block = "\n".join(files_in_dir)
+            tokens = (
+                service._counter.count(block) if block else 0
+            )
+            sig = hashlib.sha256(
+                block.encode("utf-8")
+            ).hexdigest()
+            items[key] = {"hash": sig, "tokens": tokens}
+
+    return items
 
 
 def update_stability(
@@ -225,79 +463,46 @@ def update_stability(
     """Build active items and run the tracker update.
 
     Builds the active-items dict from the content categories
-    that legitimately ride the cascade under the L0-content-
-    typed model (D27): the system prompt (stabilises into L0
-    once registered), selected files as full-content
-    ``file:{path}`` entries, and history messages. Per-file
-    ``symbol:{path}`` / ``doc:{path}`` entries are NOT
-    created — the aggregate symbol/doc map lives in L0 and is
-    regenerated from the index at assembly time, not held as
-    cascade-tracked items.
+    that ride the cascade under D36 dir-blocks: selected
+    files as full-content ``file:{path}`` entries, dir-blocks
+    (``symbols:<dir>`` / ``docs:<dir>`` / ``plain_files:<dir>``),
+    and history messages. The system prompt is NOT a tracker
+    entry — it sits before L0 as a non-flux head anchor.
 
     Order of operations:
 
-    0a. Defensive excluded-files removal from the tracker.
-    0b. System prompt + legend — stabilises to L0.
+    0. Defensive excluded-files removal from the tracker.
     1. Selected files — full content hash, ``file:{path}``.
-    2. Defensive sweep — remove any legacy ``symbol:{path}``
-       / ``doc:{path}`` entries left over from earlier code
-       paths or cross-ref migrations. Under D27 these per-
-       file entries must not exist.
-    3. (Removed under D27 — the aggregate symbol/doc map is
-       rendered into L0 at assembly time.)
-    4. (Removed under D27 — cross-reference is L0-only; the
-       secondary aggregate map is rendered into L0 at
-       assembly time.)
-    5. History messages.
-    6. Run tracker.update().
+    2. Dir-blocks — current signature hash + tokens. Files
+       currently in Active full-text are excluded from the
+       block, so a file moving in/out of Active changes the
+       parent directory's hash and re-rides flux.
+    3. History messages.
+    4. Run tracker.update().
 
-    Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
-    Contract and § Index Inclusion.
+    Spec: :doc:`specs-reference/3-llm/cache-tiering`
+    § Always-resident invariant.
     """
     if scope is None:
         scope = service._default_scope()
 
-    # Step 0a — defensive excluded-files removal.
     excluded = getattr(service, "_excluded_index_files", None) or ()
     for path in excluded:
-        for prefix in ("symbol:", "doc:", "file:"):
-            entry_key = prefix + path
-            existing = scope.tracker._items.get(entry_key)
-            if existing is not None:
-                scope.tracker.mark_broken(
-                    existing.tier,
-                    "excluded file (defensive sweep)",
-                )
-                scope.tracker.log_change(
-                    f"{existing.tier.value} → removed: "
-                    f"{entry_key} (excluded by user)"
-                )
-                scope.tracker._items.pop(entry_key, None)
+        file_key = "file:" + path
+        existing = scope.tracker._items.get(file_key)
+        if existing is not None:
+            scope.tracker.mark_broken(
+                existing.tier,
+                "excluded file (defensive sweep)",
+            )
+            scope.tracker.log_change(
+                f"{existing.tier.value} → removed: "
+                f"{file_key} (excluded by user)"
+            )
+            scope.tracker._items.pop(file_key, None)
 
     active_items: dict[str, dict[str, Any]] = {}
 
-    # Step 0b — System prompt + legend.
-    if scope.context.mode == Mode.DOC:
-        system_prompt = service._config.get_doc_system_prompt()
-    else:
-        system_prompt = service._config.get_system_prompt()
-    if system_prompt:
-        legend = ""
-        if service._symbol_index is not None:
-            try:
-                legend = service._symbol_index.get_legend()
-            except Exception:
-                pass
-        system_content = system_prompt + legend
-        prompt_hash = hashlib.sha256(
-            system_prompt.encode("utf-8")
-        ).hexdigest()
-        active_items["system:prompt"] = {
-            "hash": prompt_hash,
-            "tokens": service._counter.count(system_content),
-        }
-
-    # Step 1 — Selected files: full content hash.
     for path in scope.selected_files:
         content = scope.context.file_context.get_content(path)
         if content:
@@ -309,45 +514,8 @@ def update_stability(
                 "tokens": service._counter.count(content),
             }
 
-    # Step 2 — Defensive sweep: remove any legacy
-    # ``symbol:{path}`` / ``doc:{path}`` entries that may
-    # have leaked into the tracker from a previous code
-    # version or a cross-ref mode migration. Under the
-    # L0-content-typed model (D27) these per-file entries
-    # are never created — the aggregate symbol/doc map in
-    # L0 is the only place index content lives. Selected
-    # files are handled separately as ``file:{path}`` (full
-    # content) in Step 1.
-    for key in list(scope.tracker.get_all_items().keys()):
-        if not (key.startswith("symbol:") or key.startswith("doc:")):
-            continue
-        item = scope.tracker._items.get(key)
-        if item is None:
-            continue
-        tier = item.tier
-        scope.tracker._items.pop(key, None)
-        scope.tracker.mark_broken(
-            tier, "legacy per-file index entry (D27 sweep)"
-        )
-        scope.tracker.log_change(
-            f"{tier.value} → removed: {key} "
-            "(L0-content-typed: per-file index entries forbidden)"
-        )
+    active_items.update(_dir_block_active_items(service, scope))
 
-    # Step 3 — Removed under D27. The aggregate symbol/doc
-    # map is regenerated from the index at assembly time
-    # (see :func:`ac_dc.llm._assembly.assemble_tiered`) and
-    # rendered into L0's system message. No per-file
-    # ``symbol:`` / ``doc:`` tracker entries are created;
-    # the cascade does not place index content into L1/L2/L3.
-
-    # Step 4 — Cross-reference is L0-only under D27. The
-    # secondary aggregate map is regenerated from the
-    # opposite-mode index at assembly time (see
-    # :func:`ac_dc.llm._assembly.assemble_tiered`) and does
-    # not produce per-file tracker entries.
-
-    # Step 5 — History messages.
     history = scope.context.get_history()
     for i, msg in enumerate(history):
         role = msg.get("role", "user")
@@ -362,7 +530,6 @@ def update_stability(
             "tokens": service._counter.count(msg),
         }
 
-    # Step 6 — Run tracker update.
     existing_files: set[str] | None = None
     if service._repo is not None:
         try:
@@ -376,6 +543,31 @@ def update_stability(
         active_items, existing_files=existing_files
     )
 
+    # Snapshot the change log onto the service so the
+    # frontend's get_context_breakdown can read it. The
+    # terminal HUD's print_post_response_hud drains the
+    # tracker's live _changes list after rendering, which
+    # races against the browser's streamComplete-driven
+    # breakdown fetch — by the time the RPC arrives, the
+    # tracker's log is empty and the UI shows "No changes
+    # this cycle" while the terminal shows 17 promotions.
+    # The snapshot persists across the drain so both
+    # consumers see the same data.
+    #
+    # Stored only for the main scope's tracker (the one
+    # the breakdown RPC reads when no agent_tag is given);
+    # agent scopes get their own snapshot on their own
+    # service field via the agent breakdown path. For now
+    # we snapshot only the main scope — agent breakdowns
+    # currently fall through to live tracker.get_changes()
+    # and inherit the same race, but agents don't have a
+    # terminal HUD draining their tracker so the race is
+    # benign there.
+    if scope.tracker is service._stability_tracker:
+        service._last_tier_changes = list(
+            scope.tracker.get_changes()
+        )
+
 
 # ---------------------------------------------------------------------------
 # Cross-reference item management
@@ -383,66 +575,111 @@ def update_stability(
 
 
 def seed_cross_reference_items(service: "LLMService") -> None:
-    """No-op under the L0-content-typed model.
+    """Seed opposite-index dir-blocks into the tracker.
 
-    Earlier revisions of cross-reference seeded per-file
-    ``doc:{path}`` (or ``symbol:{path}``) tracker entries
-    into L1/L2/L3 via reference-graph clustering, then
-    backfilled the most-connected ones into L0. That
-    mechanism violates the L0-content-typed invariant
-    pinned by ``specs4/3-llm/cache-tiering.md``:
+    Under D36 cross-reference adds dir-blocks from the
+    *opposite* mode's index — when in code mode with
+    cross-ref on, the doc-index's per-directory ``docs:<dir>``
+    blocks join the cascade alongside the primary
+    ``symbols:<dir>`` blocks.
 
-    > L1, L2, L3 hold promoted concrete content only —
-    > full file text, fetched URL content, graduated
-    > history. Symbol blocks and doc blocks never appear
-    > in L1–L3; the aggregate maps in L0 are their
-    > permanent home.
+    Uses :meth:`StabilityTracker.cross_ref_seed_dir_blocks`
+    which third-splits the new keys across L1/L2/L3 by
+    mtime — never L0 (cross-ref dir-blocks earn promotion
+    to L0 the same way primary blocks do, via the cascade).
 
-    And from ``specs4/3-llm/modes.md`` § Cross-Reference
-    Mode:
-
-    > Both legends included in the L0 cache block
-
-    Cross-reference is now an L0-only affair: the
-    secondary aggregate map is regenerated from the
-    opposite-mode index at assembly time and rendered
-    into L0's system message under the appropriate
-    secondary header. No per-file tracker entries are
-    created, so nothing distributes through L1/L2/L3.
-
-    The seed function remains as a no-op so call sites
-    in :mod:`ac_dc.llm._rebuild` and
-    :mod:`ac_dc.llm._rpc_state` keep working without
-    conditional dispatch. Toggling cross-ref on/off has
-    no effect on the tracker state at all; the next
-    prompt assembly observes the flag directly.
+    Each seeded entry carries a measured token count so the
+    Context tab shows real numbers as soon as cross-ref
+    enables, instead of the placeholder until the first
+    turn completes.
     """
-    del service  # unused — kept for signature stability
+    repo = service._repo
+    if repo is None:
+        return
+
+    excluded = _excluded_set(service)
+    mode = service._context.mode
+    keys: list[tuple[str, float, int]] = []
+
+    if mode == Mode.CODE:
+        try:
+            doc_paths = list(
+                service._doc_index._all_outlines.keys()
+            )
+        except Exception:
+            doc_paths = []
+        doc_dirs: set[str] = set()
+        for path in doc_paths:
+            doc_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in doc_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                doc_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._doc_index.get_dir_docs_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"docs:{directory}", mtime, tokens))
+    else:
+        if service._symbol_index is None:
+            return
+        try:
+            symbol_paths = list(
+                service._symbol_index._all_symbols.keys()
+            )
+        except Exception:
+            symbol_paths = []
+        symbol_dirs: set[str] = set()
+        for path in symbol_paths:
+            symbol_dirs.add(
+                path[: path.rfind("/")] if "/" in path else ""
+            )
+        for directory in symbol_dirs:
+            if not _dir_has_unexcluded_indexed_file(
+                symbol_paths, directory, excluded
+            ):
+                continue
+            mtime = repo.get_directory_mtime(directory)
+            try:
+                block = service._symbol_index.get_dir_symbols_block(
+                    directory
+                )
+                tokens = (
+                    service._counter.count(block) if block else 0
+                )
+            except Exception:
+                tokens = 0
+            keys.append((f"symbols:{directory}", mtime, tokens))
+
+    if keys:
+        service._stability_tracker.cross_ref_seed_dir_blocks(keys)
 
 
 def remove_cross_reference_items(service: "LLMService") -> None:
-    """No-op under the L0-content-typed model.
+    """Strip opposite-index dir-blocks from the tracker.
 
-    Companion to :func:`seed_cross_reference_items` — both
-    are stubs now. Cross-reference state is observed
-    directly at assembly time; there are no per-file
-    tracker entries to strip on disable.
-
-    Defensive sweep: any pre-existing ``doc:{path}`` /
-    ``symbol:{path}`` entries left over from migration
-    (or from a previous build that DID seed them) are
-    cleaned up here so a session that started under the
-    old code and then toggled cross-ref off doesn't keep
-    stale entries scattered across L1/L2/L3. Once those
-    legacy entries are gone, this function does nothing.
+    Companion to :func:`seed_cross_reference_items`. When
+    cross-ref disables (or mode switches), the opposite-mode
+    dir-blocks must leave the tracker so the next prompt
+    assembly doesn't render their content. Marks the affected
+    tiers broken so the cascade rebuilds without them.
     """
     from ac_dc.stability_tracker import Tier
 
     tracker = service._stability_tracker
     if service._context.mode == Mode.CODE:
-        target_prefix = "doc:"
+        target_prefix = "docs:"
     else:
-        target_prefix = "symbol:"
+        target_prefix = "symbols:"
 
     to_remove: list[str] = []
     affected_tiers: set[Tier] = set()
@@ -456,4 +693,4 @@ def remove_cross_reference_items(service: "LLMService") -> None:
         tracker._items.pop(key, None)
 
     for tier in affected_tiers:
-        tracker.mark_broken(tier, "cross-ref legacy sweep")
+        tracker.mark_broken(tier, "cross-ref disabled")

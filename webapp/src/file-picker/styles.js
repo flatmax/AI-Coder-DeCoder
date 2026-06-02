@@ -26,6 +26,10 @@ export const FILE_PICKER_STYLES = css`
       flex-direction: column;
       gap: 0.35rem;
     }
+    .filter-bar.filter-bar-bottom {
+      border-bottom: none;
+      border-top: 1px solid rgba(240, 246, 252, 0.1);
+    }
     .filter-input {
       width: 100%;
       box-sizing: border-box;
@@ -43,8 +47,9 @@ export const FILE_PICKER_STYLES = css`
 
     .sort-buttons {
       display: flex;
-      gap: 0.25rem;
+      gap: 0.4rem;
       align-items: center;
+      justify-content: space-between;
     }
     .sort-buttons .label {
       font-size: 0.6875rem;
@@ -75,9 +80,105 @@ export const FILE_PICKER_STYLES = css`
       border-color: var(--accent-primary, #58a6ff);
       color: var(--accent-primary, #58a6ff);
       font-weight: 600;
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
     }
     .sort-btn .dir {
       margin-left: 0.15rem;
+      opacity: 0.8;
+    }
+
+    .sort-split {
+      position: relative;
+      display: inline-flex;
+      align-items: stretch;
+      gap: 0;
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      border-radius: 3px;
+      overflow: visible;
+    }
+    .sort-split .sort-btn {
+      border-radius: 0;
+      border: none;
+    }
+    .sort-split .sort-btn.primary {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+      padding: 0.2rem 0.5rem;
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
+    }
+    .sort-split .sort-btn.primary:hover {
+      background: rgba(88, 166, 255, 0.2);
+    }
+    .sort-split .sort-btn.chevron {
+      padding: 0.2rem 0.3rem;
+      font-size: 0.7rem;
+      color: var(--text-secondary, #8b949e);
+      border-left: 1px solid rgba(240, 246, 252, 0.12);
+      box-shadow: none;
+    }
+    .sort-split .sort-btn.chevron:hover {
+      color: var(--text-primary, #c9d1d9);
+      background: rgba(240, 246, 252, 0.05);
+    }
+    .sort-split .sort-btn.chevron[aria-expanded="true"] {
+      color: var(--accent-primary, #58a6ff);
+      background: rgba(88, 166, 255, 0.12);
+    }
+
+    .sort-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      z-index: 1000;
+      min-width: 160px;
+      padding: 0.25rem 0;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+    .sort-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+      background: transparent;
+      border: none;
+      width: 100%;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: left;
+    }
+    .sort-menu-item:hover {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .sort-menu-item.active {
+      color: var(--accent-primary, #58a6ff);
+      font-weight: 600;
+    }
+    .sort-menu-item .icon {
+      display: inline-flex;
+      width: 1rem;
+      justify-content: center;
+      opacity: 0.85;
+    }
+    .sort-menu-item .label {
+      flex: 1;
+    }
+    .sort-menu-item .dir {
       opacity: 0.8;
     }
 
@@ -92,10 +193,27 @@ export const FILE_PICKER_STYLES = css`
       font-size: 0.9rem;
       line-height: 1;
       opacity: 0.7;
-      margin-left: 0.4rem;
       transition: opacity 120ms ease, background 120ms ease;
     }
     .picker-settings-btn:hover {
+      opacity: 1;
+      background: rgba(240, 246, 252, 0.08);
+    }
+
+    .picker-doc-convert-btn {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+      opacity: 0.7;
+      transition: opacity 120ms ease, background 120ms ease;
+    }
+    .picker-doc-convert-btn:hover {
       opacity: 1;
       background: rgba(240, 246, 252, 0.08);
     }
@@ -104,7 +222,35 @@ export const FILE_PICKER_STYLES = css`
       display: inline-flex;
       align-items: center;
       gap: 0.2rem;
-      margin-left: 0.25rem;
+    }
+    .picker-git-actions.split {
+      position: relative;
+      gap: 0;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 3px;
+      overflow: visible;
+    }
+    .picker-git-actions.split .picker-git-btn {
+      border-radius: 0;
+      border: none;
+      opacity: 1;
+    }
+    .picker-git-actions.split .picker-git-btn.primary {
+      padding: 0.2rem 0.5rem;
+    }
+    .picker-git-actions.split .picker-git-btn.chevron {
+      padding: 0.2rem 0.3rem;
+      font-size: 0.7rem;
+      opacity: 0.7;
+      border-left: 1px solid rgba(240, 246, 252, 0.12);
+    }
+    .picker-git-actions.split .picker-git-btn.chevron:hover:not([disabled]) {
+      opacity: 1;
+    }
+    .picker-git-actions.split .picker-git-btn.chevron[aria-expanded="true"] {
+      opacity: 1;
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent-primary, #58a6ff);
     }
     .picker-git-btn {
       background: transparent;
@@ -134,6 +280,68 @@ export const FILE_PICKER_STYLES = css`
     .picker-git-btn[disabled] {
       opacity: 0.3;
       cursor: not-allowed;
+    }
+
+    .git-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      z-index: 1000;
+      min-width: 200px;
+      padding: 0.25rem 0;
+      background: rgba(22, 27, 34, 0.96);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      font-size: 0.8125rem;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+    .git-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+      color: var(--text-primary, #c9d1d9);
+      background: transparent;
+      border: none;
+      width: 100%;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: left;
+    }
+    .git-menu-item:hover:not([disabled]) {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+    }
+    .git-menu-item[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .git-menu-item.destructive {
+      color: #f85149;
+    }
+    .git-menu-item.destructive:hover:not([disabled]) {
+      background: rgba(248, 81, 73, 0.15);
+      color: #ff6b6b;
+    }
+    .git-menu-item .icon {
+      display: inline-flex;
+      width: 1rem;
+      justify-content: center;
+      opacity: 0.85;
+      font-size: 0.85rem;
+    }
+    .git-menu-item .label {
+      flex: 1;
+    }
+    .git-menu-separator {
+      height: 1px;
+      margin: 0.25rem 0.4rem;
+      background: rgba(240, 246, 252, 0.1);
     }
 
     .tree-scroll {
@@ -350,6 +558,14 @@ export const FILE_PICKER_STYLES = css`
     }
     .row.is-file.is-excluded .checkbox {
       opacity: 0.5;
+    }
+    .row.is-file.is-binary .name {
+      opacity: 0.4;
+      font-style: italic;
+    }
+    .row.is-file.is-binary .checkbox {
+      opacity: 0.35;
+      cursor: not-allowed;
     }
     .row.is-dir.all-excluded .name,
     .row.is-root.all-excluded .name {

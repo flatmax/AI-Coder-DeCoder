@@ -370,6 +370,15 @@ export class FilesTab extends RpcMixin(LitElement) {
     // explicit refresh) do not re-trigger auto-select.
     this._initialAutoSelect = true;
 
+    // Doc Convert availability — true when the backend
+    // reports markitdown is installed. Gated on the
+    // state-loaded snapshot's `doc_convert_available`
+    // field; pushed through pushChildProps so the picker's
+    // toolbar can render its doc-convert button. Defaults
+    // false so first paint doesn't briefly flash the
+    // button before the snapshot arrives.
+    this._docConvertAvailable = false;
+
     // Review selector state. Null when the modal is
     // closed. The picker dispatches `open-review-selector`
     // when the user clicks the Review button; we fetch

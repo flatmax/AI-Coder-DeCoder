@@ -153,6 +153,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Enter to send, Shift+Enter for newline
 - Image paste — base64 encoded, size and count limits enforced
 - Undo/redo workaround — native undo is broken in shadow DOM textareas when the framework re-renders set value programmatically; intercept Ctrl+Z and delegate via deprecated exec-command fallback
+- Draft persistence — the in-progress draft for the main tab is written to `localStorage` on every input event and restored on reconnect / refresh. Cleared on send. Pending images are not persisted; agent tabs have their own input state but their drafts are not saved (agent tabs are turn-scoped). See `specs-reference/5-webapp/chat.md` for the storage key
 ### Paste Suppression
 - When middle-click inserts a path into the textarea, a flag on the chat panel tells the paste handler to suppress the browser's selection-buffer paste
 - Flag is a one-shot — set on insert, consumed by the next paste event
@@ -217,9 +218,20 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
 
 ### Dual-Mode Search
 
-- 💬 default — message search against raw message content
-- 📁 toggle — file search via repo grep
+- 💬 / 📁 segmented control — both buttons always visible when the search bar has focus; active mode shows the accent halo. Click the inactive button to switch; clicking the active button refocuses the input
+- 💬 — message search against raw message content (default)
+- 📁 — file search via repo grep
+- The whole search bar (segmented control, option toggles, counter, nav arrows) collapses to just the input when focus leaves; placeholder text indicates the active mode at rest
 - See [search.md](search.md) for the full search behavior
+
+### Focus-Driven Collapse
+
+The action bar uses a dual-direction collapse pattern keyed on whether the search bar has focus:
+
+- **Search has focus** → neighbouring action-bar controls (mode toggle, reasoning toggle, session buttons, and their dividers) hide via the `.search-collapsible` CSS rule. The search bar expands to fill the row, exposing its segmented mode control, option toggles (Aa / .* / ab), match counter, and prev/next nav arrows
+- **Search loses focus** → those controls return, and the search bar's own inner controls collapse via `.search-bar:not(:focus-within)` so only the text input remains visible. Placeholder text (`Search messages…` / `Search files…`) carries the active mode at rest
+
+The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (mode toggle, reasoning, sessions visible) — never both fighting for the same row. Active toggles inside the search bar (segmented mode, option toggles) and outside it (mode toggle, cross-reference, reasoning) share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
 
 ## Mode Toggle
 
@@ -234,7 +246,7 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 ### Primary Mode (Segmented)
 
 - Two mutually-exclusive icon buttons — `💻` (code mode) and `📄` (document mode)
-- Active button shows accent-coloured background and pressed-state border
+- Active button shows accent-coloured background, a 1px ring, and a soft outer halo in the same accent colour — the halo is the load-bearing affordance because the icon-only buttons live on a dark background where a tint shift alone is hard to read at a glance
 - Clicking the inactive button calls the mode-switch RPC
 - No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
 - Disabled when RPC isn't connected
@@ -243,7 +255,7 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 ### Cross-Reference (Overlay Toggle)
 
 - Single icon button — `🔀`
-- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue)
+- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue), with the same ring + halo treatment so users learn one "this is glowing therefore active" rule across both controls
 - Clicking calls the set-cross-reference RPC with the inverted current state
 - Disabled under the same conditions as the primary mode buttons
 - Tooltip switches between "Cross-reference ON — both indexes active (click to disable)" and "Cross-reference OFF — click to add the other index alongside" depending on state
@@ -285,8 +297,8 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 
 Turns in which the main LLM spawned agents have an associated archive of per-agent conversations (see [history.md](../3-llm/history.md#agent-turn-archive) and [agent-browser.md](agent-browser.md) for the UI spec).
 
-- The chat panel surfaces these via additional tabs in its own tab strip — one "Main" tab plus one tab per agent spawned in the active turn
-- Each agent tab is a full chat panel instance targeting the agent's `ContextManager`, not a read-only viewer — the user can reply to an agent in its tab to resume its work, grant files by ticking the picker while that tab is active, or close the tab to kill the agent
+- The chat panel surfaces these via additional tabs in its own tab strip — one "Main" tab plus one tab per agent spawned in any turn within the current session
+- Each agent tab is a full chat panel instance targeting the agent's `ContextManager`, not a read-only viewer — the user can reply to an agent in its tab to resume its work, or grant files by ticking the picker while that tab is active. There is no per-tab close affordance; agents are dismissed only by `new_session` (which clears the entire agent team alongside main's history) or by loading a different session. See [agent-browser.md § Tab Lifetime](agent-browser.md#tab-lifetime) for the full lifecycle
 - The chat itself IS the spine of every turn — the Main tab shows the user message and the assistant response. In agent-mode turns, the assistant response's `content` naturally includes the main LLM's decomposition narration, any review-and-iterate decisions, and the final synthesis, because all of that came from the same LLM's output stream. The Main tab renders it exactly as any other assistant message; no special card layout is needed for agent-mode turns
 - Assistant messages in the Main tab are schema-identical between agent-mode and non-agent-mode turns. The distinguishing signal is the tab strip — a turn that spawned agents surfaces its agent tabs for as long as they're live, and surfaces a "View agents" affordance in the Main tab's scrollback for historical turns whose archives still exist on disk
 - Per-tab state (selection, URL chips, input draft, scroll position, active request ID) is scoped to each tab; switching tabs swaps the visible state without discarding any tab's values

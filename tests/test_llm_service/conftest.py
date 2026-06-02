@@ -239,17 +239,46 @@ def _run_git(cwd: Path, *args: str) -> None:
 class _FakeSymbolIndex:
     """Minimal symbol index stub for tier-builder tests.
 
-    Exposes ``get_file_symbol_block(path)`` matching the real
-    interface. Returns pre-seeded blocks from an in-memory dict;
-    missing paths return None (matches the real index's behaviour
-    for unknown files).
+    Exposes ``get_file_symbol_block(path)`` and the D36
+    ``get_dir_symbols_block(directory)`` dispatch entry point.
+    Returns pre-seeded blocks from an in-memory dict; missing
+    paths return None (matches the real index's behaviour for
+    unknown files).
     """
 
     def __init__(self, blocks: dict[str, str] | None = None) -> None:
         self._blocks = dict(blocks or {})
+        self._all_symbols = {p: None for p in self._blocks}
+
+    @staticmethod
+    def _dir_of(path: str) -> str:
+        idx = path.rfind("/")
+        return path[:idx] if idx > 0 else ""
 
     def get_file_symbol_block(self, path: str) -> str | None:
         return self._blocks.get(path)
+
+    def get_dir_symbols_block(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Concat per-file blocks for files in ``directory``."""
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._blocks
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        blocks: list[str] = []
+        for path in files:
+            blk = self._blocks.get(path)
+            if blk:
+                blocks.append(blk)
+        return "\n\n".join(blocks)
+
+    def get_legend(self) -> str:
+        return ""
 
 
 class _FakeRefIndex:
@@ -403,8 +432,26 @@ def repo(repo_dir: Path) -> Repo:
 
 @pytest.fixture
 def config(config_dir: Path, repo_dir: Path) -> ConfigManager:
-    """Configured ConfigManager — triggers first-install bundle copy."""
-    return ConfigManager(repo_root=repo_dir)
+    """Configured ConfigManager — triggers first-install bundle copy.
+
+    The cache warmer is force-disabled for the LLM service test
+    suite. The bundled default is enabled-on; tests that don't
+    cancel the warmer would leak a 270-second
+    :class:`asyncio.Task` per test, producing pytest-asyncio
+    teardown warnings and (in tightly-scheduled CI runs) timing
+    flake. Tests that specifically exercise the warmer should
+    use a service constructed with their own ConfigManager
+    rather than this fixture.
+    """
+    cfg = ConfigManager(repo_root=repo_dir)
+    # Force-load the app config dict, then mutate the cached
+    # copy. The accessor reads through ``_app_config`` on every
+    # access, so this disables the warmer for the rest of the
+    # test without touching the bundled JSON.
+    _ = cfg.app_config
+    if isinstance(cfg._app_config, dict):
+        cfg._app_config.setdefault("cache_warmup", {})["enabled"] = False
+    return cfg
 
 
 @pytest.fixture

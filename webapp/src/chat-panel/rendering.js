@@ -51,6 +51,7 @@ import {
   segmentResponse,
 } from '../edit-blocks.js';
 import { renderEditCard } from '../edit-block-render.js';
+import { renderAgentCard } from '../agent-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderLedRow } from './led-row.js';
@@ -184,7 +185,7 @@ function renderModeToggle(panel) {
       ? 'Cross-reference ON — both indexes active (click to disable)'
       : 'Cross-reference OFF — click to add the other index alongside';
   return html`
-    <div class="mode-toggle" role="group"
+    <div class="mode-toggle search-collapsible" role="group"
       aria-label="Context mode">
       <div class="mode-segmented">
         <button
@@ -266,6 +267,7 @@ export function render(panel) {
           renderMessage(panel, msg, index),
         )}
         ${panel._streaming ? renderStreamingMessage(panel) : ''}
+        ${panel._retryInfo ? renderRetryBanner(panel) : ''}
       </div>
       ${fileMode ? renderFileSearchOverlay(panel) : ''}
     </div>
@@ -277,7 +279,7 @@ export function render(panel) {
     <div class="input-area">
       <div class="action-bar" role="toolbar">
         ${renderModeToggle(panel)}
-        <div class="action-group">
+        <div class="action-group search-collapsible">
           ${_EXPERIMENTAL_ENABLED
             ? html`<button
                 class="action-button reasoning-toggle ${panel
@@ -297,13 +299,13 @@ export function render(panel) {
               </button>`
             : ''}
         </div>
-        <div class="action-divider" aria-hidden="true"></div>
+        <div class="action-divider search-collapsible" aria-hidden="true"></div>
         ${renderSearchBar(panel)}
         ${panel._searchMode === 'file' || panel._activeTabId !== 'main'
           ? ''
           : html`
               <div class="action-divider" aria-hidden="true"></div>
-              <div class="action-group">
+              <div class="action-group search-collapsible">
                 <button
                   class="action-button new-session-button"
                   ?disabled=${!panel.rpcConnected || panel._streaming}
@@ -1194,6 +1196,41 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
         <div class="md-content">${unsafeHTML(html_)}</div>
       `;
     }
+    if (seg.type === 'agent' || seg.type === 'agent-pending') {
+      // Agent-spawn cards. Status comes from the per-tab
+      // streaming state — the agent's tab id is its id under
+      // the flat-identity contract, so we can look it up
+      // directly. Pending segments (mid-stream block
+      // truncation) always render as 'pending' regardless.
+      const status = _resolveAgentStatus(panel, seg);
+      // Mode fallback: on retask, the orchestrator commonly
+      // omits the `mode:` field from the spawn block (mode is
+      // preserved from the existing agent's scope, not
+      // re-specified). The block body therefore parses to an
+      // empty mode, but the live tab in `_tabModes` carries
+      // the resolved value from the agentsSpawned broadcast.
+      // Enrich the segment in-place when its mode is empty
+      // and we can recover it from the registry — the card
+      // renders with the correct pill instead of dropping it.
+      let segForCard = seg;
+      if (!seg.mode && typeof seg.id === 'string' && seg.id) {
+        const liveMode = panel._tabModes?.get(seg.id);
+        if (typeof liveMode === 'string' && liveMode) {
+          segForCard = { ...seg, mode: liveMode };
+        }
+      }
+      const cardHtml = renderAgentCard(segForCard, status);
+      // Wrap the unsafeHTML in a Lit div with a delegated
+      // click handler so the id chip can flip the active tab
+      // without needing a separate event listener wired
+      // through events.js. The handler reads data-agent-id
+      // off the event target's closest ancestor — same
+      // pattern the diff viewer uses for file-path chips.
+      return html`<div
+        class="agent-block-wrapper"
+        @click=${(e) => _onAgentCardClick(panel, e)}
+      >${unsafeHTML(cardHtml)}</div>`;
+    }
     // edit and edit-pending both go through
     // renderEditCard. Pending segments resolve
     // to the 'pending' status badge; completed
@@ -1202,6 +1239,68 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
     return html`${unsafeHTML(cardHtml)}`;
   });
   return html`<div class="assistant-body">${parts}</div>`;
+}
+
+/**
+ * Resolve the live execution status for an agent-spawn
+ * segment. Reads the per-tab state map. Returns one of
+ * 'pending', 'streaming', 'complete', 'error'.
+ *
+ * Tab id == agent id under the flat-identity contract from
+ * specs4/7-future/parallel-agents.md, so this is a direct
+ * Map lookup with no parsing.
+ *
+ * Pending segments (mid-stream truncation) get 'pending' from
+ * the renderer's resolver — this function only runs for
+ * fully-parsed `agent` segments.
+ */
+function _resolveAgentStatus(panel, segment) {
+  if (segment.type === 'agent-pending') return 'pending';
+  const id = segment.id;
+  if (typeof id !== 'string' || !id) return 'pending';
+  const tab = panel._tabs?.get(id);
+  if (!tab) {
+    // Block parsed but no tab yet — either the backend
+    // hasn't dispatched agentsSpawned, or this is a
+    // historical message whose tab was closed. Both render
+    // as pending; the user can click the View Agents
+    // affordance below the message to reload from archive.
+    return 'pending';
+  }
+  if (tab.streaming) return 'streaming';
+  const outcome = tab.lastEditOutcome;
+  if (outcome && outcome.status === 'error') return 'error';
+  if (outcome && outcome.status === 'clean') return 'complete';
+  // Tab exists but no completion recorded yet — agent was
+  // spawned, hasn't started streaming. Show as pending.
+  return 'pending';
+}
+
+/**
+ * Delegated click handler for agent-card chips. The id chip
+ * carries `data-agent-id`; clicking flips the chat panel's
+ * active tab to that id (which the setter handles —
+ * snapshot URL chips, restore on the new tab, requestUpdate).
+ *
+ * No-op when the click didn't land on a chip with the
+ * attribute (e.g. clicking on the task body, the status
+ * badge, or the card chrome).
+ *
+ * No-op when the agent's tab no longer exists — historical
+ * messages whose tabs have closed don't get a switch
+ * affordance from the inline card; the user reaches archive
+ * tabs via the "View agents" affordance instead.
+ */
+function _onAgentCardClick(panel, event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const chip = target.closest('[data-agent-id]');
+  if (!chip) return;
+  const agentId = chip.getAttribute('data-agent-id');
+  if (typeof agentId !== 'string' || !agentId) return;
+  if (!panel._tabs?.has(agentId)) return;
+  event.stopPropagation();
+  panel._activeTabId = agentId;
 }
 
 /**
@@ -1231,6 +1330,100 @@ export function renderStreamingMessage(panel) {
         true,
       )}
       <span class="cursor"></span>
+    </div>
+  `;
+}
+
+/**
+ * Render the retry-progress banner for the active
+ * tab. Only called when `panel._retryInfo` is
+ * truthy.
+ *
+ * Reads elapsed / remaining from
+ * (Date.now() - startedAt) every render so the
+ * 100ms ticker in streaming.js just needs to kick
+ * requestUpdate — we don't mutate state here.
+ *
+ * Layout:
+ *
+ *   [icon] Retrying (attempt N/M) — error_type
+ *   [================>          ] 4.2s remaining
+ *   provider message (smaller, muted)
+ *
+ * Bar fills as elapsed approaches waitSeconds;
+ * countdown text shows remaining to one decimal.
+ * Error-type colouring mirrors the toast path:
+ * rate_limit / api_connection / timeout get an
+ * amber accent, everything else neutral.
+ */
+function renderRetryBanner(panel) {
+  const info = panel._retryInfo;
+  if (!info) return '';
+  const now = Date.now();
+  const elapsed = Math.max(0, (now - info.startedAt) / 1000);
+  const wait = Math.max(0.001, info.waitSeconds);
+  const remaining = Math.max(0, wait - elapsed);
+  const pct = Math.min(100, (elapsed / wait) * 100);
+  // Icon + accent class by error type. Rate-limit
+  // gets a clock; connection / timeout get a retry
+  // swirl; everything else a generic warning.
+  let icon = '🔄';
+  let severity = 'neutral';
+  if (info.errorType === 'rate_limit') {
+    icon = '⏱️';
+    severity = 'amber';
+  } else if (
+    info.errorType === 'api_connection'
+    || info.errorType === 'service_unavailable'
+    || info.errorType === 'timeout'
+  ) {
+    icon = '🔄';
+    severity = 'amber';
+  }
+  // Pretty label — reuse the same mapping the
+  // toast path would have used.
+  let label;
+  switch (info.errorType) {
+    case 'rate_limit': label = 'Rate limited'; break;
+    case 'api_connection': label = 'Connection failed'; break;
+    case 'service_unavailable': label = 'Provider unavailable'; break;
+    case 'timeout': label = 'Request timed out'; break;
+    case 'authentication': label = 'Authentication failed'; break;
+    default: label = 'LLM error'; break;
+  }
+  const remainingText = remaining >= 10
+    ? `${Math.round(remaining)}s remaining`
+    : `${remaining.toFixed(1)}s remaining`;
+  const attemptText = info.maxAttempts > 0
+    ? `attempt ${info.attempt}/${info.maxAttempts}`
+    : `attempt ${info.attempt}`;
+  return html`
+    <div
+      class="retry-banner severity-${severity}"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div class="retry-banner-header">
+        <span class="retry-banner-icon">${icon}</span>
+        <span class="retry-banner-title">
+          Retrying (${attemptText}) — ${label}
+        </span>
+        <span class="retry-banner-remaining">
+          ${remainingText}
+        </span>
+      </div>
+      <div class="retry-banner-track" aria-hidden="true">
+        <div
+          class="retry-banner-fill"
+          style="width: ${pct.toFixed(1)}%"
+        ></div>
+      </div>
+      ${info.message
+        ? html`<div class="retry-banner-detail">
+            ${info.message}
+          </div>`
+        : ''}
     </div>
   `;
 }
@@ -1299,22 +1492,25 @@ export function renderSearchBar(panel) {
   const onNext = fileMode
     ? () => onFileSearchNext(panel)
     : () => onSearchNext(panel);
+  // The mode toggle is a single button that flips
+  // between message and file search. Its glyph shows
+  // the mode you'd switch INTO when in message mode
+  // (so 💬 actually means "currently in message
+  // mode"); when active (file mode) it switches to
+  // 📁 and gets the .active class for visual
+  // feedback.
+  const toggleTitle = fileMode
+    ? 'Switch to message search'
+    : 'Switch to file search';
   return html`
     <div class="search-bar" role="search">
       <button
-        class="action-button search-mode-toggle ${fileMode
-          ? 'active'
-          : ''}"
+        type="button"
+        class="search-mode-toggle ${fileMode ? 'active' : ''}"
         @click=${() => toggleSearchMode(panel)}
-        aria-label=${fileMode
-          ? 'Switch to message search'
-          : 'Switch to file search'}
-        title=${fileMode
-          ? 'File search — click to switch to messages'
-          : 'Message search — click to switch to files'}
-      >
-        ${fileMode ? '📁' : '💬'}
-      </button>
+        aria-pressed=${fileMode}
+        title=${toggleTitle}
+      >${fileMode ? '📁' : '💬'}</button>
       <div class="search-input-wrapper">
         <input
           type="text"

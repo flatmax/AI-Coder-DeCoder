@@ -136,6 +136,27 @@ Implements agent-browser.md § "Historical Turns". Three commits:
 Deferred:
 - **Scroll-away cleanup.** Spec says historical tabs should disappear when the user scrolls away from their parent message. Currently the user closes them explicitly via the existing tab close button or by triggering another View Agents click (which clears the strip first). Not critical to D's value; revisit if the manual-close UX produces complaints.
 
+### ~~Increment D.5 — Inline agent-spawn card rendering~~ — delivered
+
+Closes a gap that D and the original A–E plan both missed: when the orchestrator emits a `🟧🟧🟧 AGENT … 🟩🟩🟩 AGEND` block in its assistant response, the chat panel now renders it as a card inline in the message body — symmetric to edit-block cards. Before this, the markers fell through the segmenter as plain `text` segments and rendered as preformatted prose, which read as visual garbage in the orchestrator's output.
+
+Three files, one new module, no backend changes:
+
+- **`webapp/src/edit-blocks.js`** — `segmentResponse` learned a `reading-agent` state and emits `agent` / `agent-pending` segments alongside the existing `text` / `edit` / `edit-pending` types. Body parsed into `{id, task, mode}` via a new `_parseAgentBody` helper that uses a field-name allowlist (`id` / `task` / `mode`) so multi-line task bodies containing `Requirements:` / `Notes:` / `Examples:` headings don't truncate. Mirrors the backend `EditParser`'s allowlist contract from `specs-reference/3-llm/edit-protocol.md`.
+
+- **`webapp/src/agent-block-render.js`** (new) — pure rendering helpers symmetric to `edit-block-render.js`. Exports `renderAgentCard(segment, status)` plus piecewise helpers (`renderAgentId`, `renderModePill`, `renderTaskBody`, `renderStatusBadge`, `resolveDisplayStatus`) and the `STATUS_META` table for tests. Status enum is `pending` / `streaming` / `complete` / `error` per `specs4/7-future/parallel-agents.md` § Frontend agent-block rendering. Long task bodies (more than ~6 lines or 600 chars) wrap in `<details>` so the card doesn't dominate the message.
+
+- **`webapp/src/chat-panel/rendering.js`** — `renderAssistantBody` dispatches `agent` / `agent-pending` segments to `renderAgentCard`. Wraps the unsafeHTML output in a Lit `<div class="agent-block-wrapper">` with a delegated click handler `_onAgentCardClick` that reads `data-agent-id` off the chip and flips `panel._activeTabId` directly when a tab with that id exists. No round-trip through `events.js` — same in-file pattern the file summary chips use.
+
+- **`webapp/src/chat-panel/styles.js`** — agent-card styling. Magenta accent (`rgba(210, 168, 255, ...)`) distinct from the edit-block blue so users can tell at a glance whether a card is "the LLM proposes a file edit" or "the LLM spawned a worker agent". Status-badge variants for the four statuses with a `agent-pulse` keyframe for the streaming state. Long-task `<details>` styling.
+
+Status binding reads per-tab streaming state via the same Map the LED row uses: tab id == agent id under D26's flat-identity contract, so `_resolveAgentStatus` is a direct `panel._tabs.get(id)` lookup with no parsing. `tab.streaming` → `streaming`; `tab.lastEditOutcome.status === 'clean'` → `complete`; `tab.lastEditOutcome.status === 'error'` → `error`; tab present but no completion yet → `pending`; tab missing entirely (historical message whose agent has been closed) → `pending`. Card status reflects state at render time; live updates piggyback on the message card's existing re-render triggers (chunk arrivals, completion events) — no separate subscription.
+
+What this delivery does NOT cover:
+
+- **Tests for the new behaviour.** `agent-block-render.test.js` and the new `reading-agent` cases in `edit-blocks.test.js` should land as a follow-up.
+- **Status-update push.** A historical-but-still-live agent's card may show stale status until the parent message re-renders for some other reason. A `requestUpdate` on `agentsSpawned` and on each agent's `streamComplete` would fix this; deferred until a real case appears where the staleness is visible.
+
 ### Increment E — Cross-turn agent history view
 
 Implements the feature D30's `agent_blocks` persistence enables. UI affordance: a control on a live agent's tab (e.g., "show full history across all turns") that walks the main store, finds turns where that agent's `id` appears in `agent_blocks`, and presents a unified view. Or equivalently: a "filter by agent id" view in the history browser.
@@ -356,6 +377,36 @@ Each increment gets its own delivery-note section here when it lands. Strike-thr
 - **Agent-to-agent communication.** Agents converse with the user (via their tab) and with the main LLM (via assimilation). Not with each other. Out of scope here, out of scope in `parallel-agents.md`.
 
 ## Known bugs — per-tab state
+
+### ~~Agent tab shows duplicated user prompt + stuck cursor after agent completes~~ — fixed
+
+**Symptom.** When the orchestrator spawned agents, the agent's tab showed the user prompt twice — once before the streamed response, once after — and the streaming cursor remained visible indefinitely even though the backend log confirmed `finish_reason='stop'` had fired. After hard browser reload (which loads from archive via `get_agent_history`), the persisted state showed exactly one user prompt + one assistant response per agent, confirming the duplicates were frontend-only.
+
+In two-turn agent sessions the bug compounded:
+
+```
+- user prompt 1
+- agent response 1
+- user prompt 1 (duplicate)
+- user prompt 2
+- agent response 2
+- user prompt 2 (duplicate)
+```
+
+Hard reload shrunk this to four items (the persisted truth).
+
+**Root cause.** `spawnAgentTabs` was invoked twice per agentic turn:
+
+1. Eagerly from `onAgentsSpawned` when the backend's `agentsSpawned` broadcast arrived (BEFORE child streams dispatched, so tabs could claim child request IDs in time to route chunks).
+2. As a fallback inside main's `onStreamComplete` handler when `result.agent_blocks` was non-empty (intended for older backends that only surface agent blocks via `streamComplete`).
+
+Modern backends emit BOTH events for every agentic turn. The second call hit the retask branch (added in the earlier per-tab streaming routing fix) for every tab — because the tabs already existed from call 1 — and the retask branch appended the user task to `existing.messages` and re-set `existing.currentRequestId = childId`, `existing.streaming = true`. By the time the fallback fired, the agent's child stream had already completed and cleared those flags, so the re-arm produced a cursor that would never advance.
+
+**Fix.** Memoise on `parent_request_id` inside `spawnAgentTabs`. The first invocation for a given parent request runs the create/retask logic; subsequent invocations with the same parent request id no-op. Turn boundaries are distinguished by parent request id (each turn has its own), so retask in turn 2 still appends correctly while the duplicate fallback inside turn 2 no-ops. The memo set is session-scoped — `new_session` doesn't clear it, but parent request ids carry an epoch prefix and don't collide across sessions in practice.
+
+**Why memoise rather than remove the fallback.** The fallback path's stated purpose (older-backend support) is preserved — for a backend that emits only `streamComplete` and not `agentsSpawned`, the first invocation IS the fallback, and it runs normally because no prior call recorded the parent request id. The memo only suppresses redundant work, not necessary work.
+
+**Spec updates.** `specs4/5-webapp/agent-browser.md` § Tab Creation Ordering gained a new "Idempotency under the dual-event design" paragraph documenting the dual-call architecture and the memoise-on-parent-request-id contract. See D32 in [`decisions.md`](decisions.md) for the deeper architectural rationale.
 
 ### URL fetch result lands in wrong tab when user switches tabs mid-fetch
 

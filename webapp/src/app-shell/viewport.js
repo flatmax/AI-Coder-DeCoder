@@ -16,6 +16,81 @@ export function onBeforeUnload(host) {
 }
 
 /**
+ * Capture the diff viewer's current scroll/cursor/preview
+ * state for the active file as a plain object, or return
+ * null when no active file or editor is available. Used
+ * by the in-session per-path viewport memory (alt-arrow
+ * navigation) — distinct from `saveViewportState` which
+ * writes to localStorage for the across-reload case.
+ *
+ * Same layout as the `diff` / `preview` blocks in
+ * `saveViewportState` so the apply helper below can
+ * reuse the diff-restore logic verbatim.
+ */
+export function captureDiffViewportState(host) {
+  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  if (!viewer) return null;
+  const file = viewer._file;
+  if (!file || !file.path) return null;
+  try {
+    const modifiedEditor = viewer._getModifiedEditor?.();
+    if (!modifiedEditor) return null;
+    const pos = modifiedEditor.getPosition?.();
+    const state = {
+      path: file.path,
+      diff: {
+        scrollTop: modifiedEditor.getScrollTop?.() || 0,
+        scrollLeft: modifiedEditor.getScrollLeft?.() || 0,
+        lineNumber: pos?.lineNumber || 1,
+        column: pos?.column || 1,
+      },
+    };
+    if (typeof viewer.isPreviewOpen === 'function'
+        && viewer.isPreviewOpen()) {
+      state.preview = {
+        open: true,
+        scrollTop:
+          (typeof viewer.getPreviewScrollTop === 'function'
+            ? viewer.getPreviewScrollTop()
+            : 0) || 0,
+      };
+    }
+    return state;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Apply a previously-captured diff viewport state to the
+ * diff viewer's active file. The viewer is assumed to
+ * have already opened the target file (caller awaits
+ * `openFile` first).
+ *
+ * Same preview-before-scroll ordering as the localStorage
+ * restore path in `doReopenLastFile`: preview toggle
+ * changes the editor pane width, so the layout must land
+ * before the scroll write or Monaco's layout math runs
+ * twice and the scroll snaps to the wrong position.
+ */
+export function applyDiffViewportState(host, state) {
+  if (!state || !state.diff) return;
+  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  if (!viewer) return;
+  const wantsPreview = !!(state.preview && state.preview.open);
+  if (wantsPreview && typeof viewer.setPreviewMode === 'function') {
+    try {
+      viewer.setPreviewMode(true);
+    } catch (err) {
+      console.debug(
+        '[app-shell] in-session preview restore failed', err,
+      );
+    }
+  }
+  restoreViewport(host, viewer, state.diff, state.preview);
+}
+
+/**
  * Save the current diff viewer's viewport state to
  * localStorage. SVG files are excluded (SVG zoom
  * restore is not yet supported).

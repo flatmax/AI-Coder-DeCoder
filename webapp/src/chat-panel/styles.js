@@ -892,6 +892,9 @@ export const STYLES = css`
     background: rgba(88, 166, 255, 0.12);
     color: var(--accent-primary, #58a6ff);
     border-color: rgba(88, 166, 255, 0.3);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   /* Search bar — sits inside the action bar between the
    * snippet-drawer toggle and the session buttons. Flex-1
@@ -904,6 +907,43 @@ export const STYLES = css`
     align-items: center;
     gap: 0.25rem;
     min-width: 0;
+  }
+  /* When the search bar has focus, hide the
+   * surrounding action-bar buttons (mode +
+   * cross-ref toggle on the left, new-session +
+   * history on the right) so the search bar
+   * itself — input, mode toggle, count, prev/next
+   * — can claim the whole row.
+   *
+   * The hidden buttons get a 'search-collapsible'
+   * class. When focus leaves the search bar
+   * (Escape, click outside, Tab away), they
+   * reappear. The hide is achieved by collapsing
+   * the parent action-group / control wrapper to
+   * zero width via 'display: none', so flex gaps
+   * around them collapse too — no awkward empty
+   * space. */
+  .action-bar:has(.search-bar:focus-within) .search-collapsible {
+    display: none;
+  }
+  /* Symmetric rule: when the search bar does NOT
+   * have focus, hide every affordance except the
+   * input itself — the 💬/📁 segmented mode
+   * toggle, the option toggles (Aa / .* / ab),
+   * the match counter, and the prev/next arrows.
+   * Rest state collapses to a single text box
+   * whose placeholder ("Search messages…" /
+   * "Search files…") indicates the active mode.
+   * As soon as focus enters the search bar
+   * (clicking the input itself counts), the full
+   * toolbar reappears via the :focus-within
+   * branch above so the user can pick a mode,
+   * flip an option, or step through matches. */
+  .search-bar:not(:focus-within) .search-mode-segmented,
+  .search-bar:not(:focus-within) .search-toggle,
+  .search-bar:not(:focus-within) .search-counter,
+  .search-bar:not(:focus-within) .search-nav {
+    display: none;
   }
   .search-input-wrapper {
     display: flex;
@@ -949,6 +989,9 @@ export const STYLES = css`
   .search-toggle.active {
     background: rgba(88, 166, 255, 0.2);
     color: var(--accent-primary, #58a6ff);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   .search-counter {
     font-size: 0.75rem;
@@ -983,6 +1026,47 @@ export const STYLES = css`
     opacity: 0.35;
     cursor: not-allowed;
   }
+  /* Search mode segmented control — two side-by-side
+   * buttons at the left of the search bar
+   * (💬 messages / 📁 files). Always visible
+   * regardless of focus state so the active mode and
+   * the toggle to the other mode are both immediately
+   * discoverable. Mirrors the .mode-segmented pattern
+   * used for the code/doc toggle. */
+  .search-mode-segmented {
+    display: inline-flex;
+    flex-shrink: 0;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    border-radius: 4px;
+  }
+  .search-mode-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    padding: 0.25rem 0.4rem;
+    font-size: 0.85rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .search-mode-btn:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+  .search-mode-btn:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+  .search-mode-btn:hover {
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-primary, #c9d1d9);
+  }
+  .search-mode-btn.active {
+    background: rgba(88, 166, 255, 0.22);
+    color: var(--accent-primary, #58a6ff);
+    border-radius: 3px;
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
+  }
   /* Mode + cross-ref buttons — sit at the right end of
    * the search bar. Compact icon-only presentation
    * matches the search nav arrows. */
@@ -996,7 +1080,6 @@ export const STYLES = css`
     display: inline-flex;
     border: 1px solid rgba(240, 246, 252, 0.15);
     border-radius: 4px;
-    overflow: hidden;
   }
   .mode-segmented .mode-btn {
     background: transparent;
@@ -1008,13 +1091,25 @@ export const STYLES = css`
     cursor: pointer;
     transition: background 120ms ease, color 120ms ease;
   }
+  .mode-segmented .mode-btn:first-child {
+    border-radius: 3px 0 0 3px;
+  }
+  .mode-segmented .mode-btn:last-child {
+    border-radius: 0 3px 3px 0;
+  }
+  .mode-segmented .mode-btn.active {
+    border-radius: 3px;
+  }
   .mode-segmented .mode-btn:hover:not([disabled]) {
     background: rgba(240, 246, 252, 0.06);
     color: var(--text-primary, #c9d1d9);
   }
   .mode-segmented .mode-btn.active {
-    background: rgba(88, 166, 255, 0.15);
+    background: rgba(88, 166, 255, 0.22);
     color: var(--accent-primary, #58a6ff);
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.55),
+      0 0 8px rgba(88, 166, 255, 0.45);
   }
   .mode-segmented .mode-btn[disabled] {
     opacity: 0.35;
@@ -1036,9 +1131,12 @@ export const STYLES = css`
     color: var(--text-primary, #c9d1d9);
   }
   .crossref-btn.active {
-    background: rgba(210, 153, 34, 0.15);
-    border-color: rgba(210, 153, 34, 0.4);
+    background: rgba(210, 153, 34, 0.22);
+    border-color: rgba(210, 153, 34, 0.65);
     color: #d29922;
+    box-shadow:
+      0 0 0 1px rgba(210, 153, 34, 0.5),
+      0 0 8px rgba(210, 153, 34, 0.4);
   }
   .crossref-btn[disabled] {
     opacity: 0.35;
@@ -1345,6 +1443,162 @@ export const STYLES = css`
     color: #f85149;
     font-size: 0.8125rem;
     border-top: 1px solid rgba(248, 81, 73, 0.15);
+  }
+
+  /* Agent-spawn cards — rendered inline in the
+   * orchestrator's assistant message when it emits a
+   * 🟧🟧🟧 AGENT block. Symmetric to edit-block cards
+   * but with a magenta accent so users can tell at a
+   * glance whether a card is "the LLM proposes a file
+   * edit" vs. "the LLM spawned a worker agent".
+   *
+   * The id chip is clickable and, when the agent's tab
+   * exists, switches the chat panel to that tab. Click
+   * delegation lives on the wrapper div in rendering.js.
+   * Per specs4/7-future/parallel-agents.md § Frontend
+   * agent-block rendering. */
+  .agent-block-wrapper {
+    display: contents;
+  }
+  .agent-block-card {
+    border: 1px solid rgba(210, 168, 255, 0.35);
+    border-radius: 6px;
+    background: rgba(210, 168, 255, 0.04);
+    overflow: hidden;
+    font-size: 0.875rem;
+  }
+  .agent-block-card.agent-status-streaming {
+    border-color: rgba(210, 168, 255, 0.55);
+    box-shadow: 0 0 0 1px rgba(210, 168, 255, 0.15);
+  }
+  .agent-block-card.agent-status-complete {
+    border-color: rgba(126, 231, 135, 0.4);
+  }
+  .agent-block-card.agent-status-error {
+    border-color: rgba(248, 81, 73, 0.45);
+  }
+  .agent-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: rgba(22, 27, 34, 0.7);
+    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .agent-card-header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    flex: 1;
+  }
+  .agent-id-chip {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.8125rem;
+    color: #c8a2ff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    padding: 0.1rem 0.35rem;
+    margin: -0.1rem -0.35rem;
+    border-radius: 3px;
+    transition: background 120ms ease;
+  }
+  .agent-id-chip:hover {
+    background: rgba(210, 168, 255, 0.15);
+    text-decoration: underline;
+  }
+  .agent-id-chip:focus-visible {
+    outline: 2px solid #c8a2ff;
+    outline-offset: 1px;
+  }
+  .agent-id-chip.agent-id-empty {
+    color: var(--text-secondary, #8b949e);
+    cursor: default;
+    font-style: italic;
+  }
+  .agent-id-chip.agent-id-empty:hover {
+    background: transparent;
+    text-decoration: none;
+  }
+  .agent-mode-pill {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    background: rgba(13, 17, 23, 0.6);
+    color: var(--text-secondary, #8b949e);
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    border-radius: 3px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  .agent-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(13, 17, 23, 0.6);
+  }
+  .agent-status-icon {
+    font-size: 0.875rem;
+  }
+  .agent-status-badge.agent-status-pending {
+    color: var(--text-secondary, #8b949e);
+  }
+  .agent-status-badge.agent-status-streaming {
+    color: #c8a2ff;
+  }
+  .agent-status-badge.agent-status-streaming .agent-status-icon {
+    animation: agent-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .agent-status-badge.agent-status-complete {
+    color: #7ee787;
+  }
+  .agent-status-badge.agent-status-error {
+    color: #f85149;
+  }
+  .agent-task-body {
+    padding: 0.5rem 0.75rem;
+  }
+  .agent-task-empty {
+    padding: 0.5rem 0.75rem;
+    color: var(--text-secondary, #8b949e);
+    font-style: italic;
+    font-size: 0.8125rem;
+  }
+  .agent-task-long {
+    padding: 0;
+  }
+  .agent-task-long .agent-task-summary {
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.8125rem;
+    user-select: none;
+  }
+  .agent-task-long .agent-task-summary:hover {
+    background: rgba(240, 246, 252, 0.04);
+    color: var(--text-primary, #c9d1d9);
+  }
+  .agent-task-long[open] .agent-task-summary {
+    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .agent-task-long .agent-task-markdown {
+    padding: 0.5rem 0.75rem;
+  }
+  .agent-task-markdown :first-child {
+    margin-top: 0;
+  }
+  .agent-task-markdown :last-child {
+    margin-bottom: 0;
   }
 
   /* Edit summary banner — rendered at the end of an
@@ -1720,6 +1974,84 @@ export const STYLES = css`
     background: rgba(88, 166, 255, 0.9);
     border-color: var(--accent-primary, #58a6ff);
     color: #fff;
+  }
+
+  /* Retry-progress banner — inserted at the bottom of
+   * the messages list when the backend's retry wrapper
+   * emits a streamRetry event. Shows attempt counter,
+   * error-type label, a filling progress bar, and the
+   * provider's original message. Updates every 100ms
+   * via a panel-level ticker in streaming.js.
+   *
+   * Severity variants:
+   *   .severity-amber — rate_limit, api_connection,
+   *     timeout, service_unavailable. These are the
+   *     retryable-by-design cases where waiting helps.
+   *   .severity-neutral — anything else that somehow
+   *     made it into the retry loop. Muted grey so it
+   *     doesn't shout. */
+  .retry-banner {
+    margin-top: 0.5rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    background: rgba(22, 27, 34, 0.7);
+    font-size: 0.8125rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .retry-banner.severity-amber {
+    border-color: rgba(210, 153, 34, 0.5);
+    background: rgba(210, 153, 34, 0.08);
+  }
+  .retry-banner.severity-neutral {
+    border-color: rgba(240, 246, 252, 0.15);
+    background: rgba(240, 246, 252, 0.04);
+  }
+  .retry-banner-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .retry-banner-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+  .retry-banner-title {
+    flex: 1;
+    font-weight: 500;
+    color: var(--text-primary, #c9d1d9);
+  }
+  .retry-banner.severity-amber .retry-banner-title {
+    color: #d29922;
+  }
+  .retry-banner-remaining {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.75rem;
+    color: var(--text-secondary, #8b949e);
+  }
+  .retry-banner-track {
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(240, 246, 252, 0.08);
+    overflow: hidden;
+  }
+  .retry-banner-fill {
+    height: 100%;
+    background: var(--accent-primary, #58a6ff);
+    transition: width 100ms linear;
+    border-radius: 2px;
+  }
+  .retry-banner.severity-amber .retry-banner-fill {
+    background: #d29922;
+  }
+  .retry-banner-detail {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #8b949e);
+    line-height: 1.4;
+    word-break: break-word;
   }
 
   /* Lightbox overlay — full-screen with centered content.

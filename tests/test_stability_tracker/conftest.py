@@ -30,18 +30,36 @@ from __future__ import annotations
 import pytest
 
 from ac_dc.stability_tracker import (
-    DELETION_MARKER_TEXT,
     StabilityTracker,
     Tier,
     TrackedItem,
-    _DELETION_MARKER_HASH,
-    _TIER_CONFIG,
 )
 
-# Convenience alias for the L3 promote threshold — used by
-# tests that seed items directly into L3 and want to exercise
-# promotion without reproducing the numeric literal.
-_TIER_CONFIG_PROMOTE_L3 = _TIER_CONFIG[Tier.L3]["promote_n"]
+# Frozen historical value for legacy (xfail) tests that seeded
+# items at L3's old "promote_n" threshold. Under D37 the field
+# itself is gone from ``_TIER_CONFIG[Tier.L3]``; the literal
+# survives only so the legacy-cascade tests below can still
+# import and the xfail marker can carry their historical intent.
+_TIER_CONFIG_PROMOTE_L3 = 6
+
+
+# Shared xfail marker for tests that encode the legacy N-counter
+# cascade semantics removed by D35 (membrane / flux controller).
+# The legacy mechanisms — anchoring, underfill demotion,
+# ripple-promotion-without-flux, N-threshold graduation — no
+# longer exist. Tests asserting their behaviour are kept in the
+# tree as historical record but excluded from CI; replacements
+# covering flux-driven promotion live in ``test_membrane_flux.py``.
+xfail_legacy_cascade = pytest.mark.xfail(
+    reason=(
+        "Legacy N-counter cascade behaviour removed by D35 "
+        "(membrane / flux controller). See "
+        "specs4/3-llm/cache-tiering.md and "
+        "specs4/impl-history/decisions.md D35. "
+        "Replacements in test_membrane_flux.py."
+    ),
+    strict=False,
+)
 
 
 # ---------------------------------------------------------------------------

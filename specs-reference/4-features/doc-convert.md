@@ -297,17 +297,18 @@ Externalized image filenames are included in the parent `.md`'s `images=` field 
 
 ### SVG text preservation in PDF pipeline
 
-PyMuPDF's `page.get_svg_image()` emits text as `<text>` elements when called with `text_as_path=0`. This preserves selectable text and produces smaller SVGs than glyph-path decomposition would. What happens next is origin-aware:
+PyMuPDF's `page.get_svg_image()` emits text as `<text>` elements when called with `text_as_path=0`. This preserves selectable text and produces smaller SVGs than glyph-path decomposition would. What happens next depends on the routing source and an opt-in config flag:
 
-| Source | Page has extractable text? | SVG `<text>`/`<tspan>` |
-|---|---|---|
-| Direct `.pdf` | yes | **stripped** after export |
-| Direct `.pdf` | no (figure-only) | kept (labels the figure) |
-| `.pptx`/`.odp` via LibreOffice → PDF | any | kept (labels the diagram) |
+| Source | Page has extractable text? | `strip_svg_text_when_present` | SVG `<text>`/`<tspan>` |
+|---|---|---|---|
+| Direct `.pdf` | yes | false (default) | kept (preserves figure labels) |
+| Direct `.pdf` | yes | true | **stripped** after export |
+| Direct `.pdf` | no (figure-only) | any | kept (labels the figure) |
+| `.pptx`/`.odp` via LibreOffice → PDF | any | any | kept (labels the diagram) |
 
-The direct-PDF strip is implemented as a regex pass over the SVG string after image externalization, removing both `<text>...</text>` block forms and any stray `<tspan>` elements. The markdown always carries the extracted paragraphs, so the prose is never lost — it just lives in exactly one place per page per source type.
+The strip pass is implemented as a regex over the SVG string after image externalization, removing both `<text>...</text>` block forms and any stray `<tspan>` elements. The markdown body always carries the extracted paragraphs.
 
-The routing flag is `strip_text_when_present`: the direct-PDF dispatch defaults it to True; the LibreOffice dispatch passes False. Figure-only pages skip stripping regardless because the decision AND-combines the flag with "page has extractable text" — no text means nothing to dedup against.
+The routing flag is `strip_text_when_present` on the pipeline call; it defaults to False because PDF figures often carry internal labels (architecture diagrams, flow charts, legends) that the page-level text extractor cannot distinguish from body paragraphs — stripping silently produces nameless coloured rectangles. The direct-PDF dispatch reads `doc_convert.strip_svg_text_when_present` from app config to flip the flag on for users who prefer leaner output. The LibreOffice dispatch passes False unconditionally — presentation text is the diagram. Figure-only pages skip stripping regardless of the flag because the decision AND-combines with "page has extractable text".
 
 ### LibreOffice path dependency
 

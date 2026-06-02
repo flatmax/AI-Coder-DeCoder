@@ -25,16 +25,23 @@ class TreeMixin:
     # File tree and flat listing
     # ------------------------------------------------------------------
 
-    def get_flat_file_list(self) -> str:
-        """Return a sorted newline-separated list of all repo files.
+    def get_files_by_directory(
+        self,
+        skip_paths: set[str] | None = None,
+    ) -> dict[str, list[str]]:
+        """Return repo files grouped by their directory.
 
-        Combines tracked files (``git ls-files``) with untracked
-        non-ignored files (``git ls-files --others --exclude-standard``).
-        Used as the file-tree section in LLM prompts — flat, one per
-        line, no tree indentation.
+        Same source as :meth:`get_flat_file_list` (tracked +
+        untracked-non-ignored, filtered to files that exist on
+        disk), but bucketed by directory and skipping any path
+        in ``skip_paths`` (used by D36 dir-block construction
+        to drop paths already covered by `symbols:<dir>` /
+        `docs:<dir>` blocks).
 
-        Returns an empty string when the repo has no files (fresh
-        init, no commits, nothing untracked).
+        Returns a dict mapping directory path → sorted list of
+        repo-relative filenames. Top-level files use empty
+        string as the directory key. Directories with no
+        eligible files after filtering are omitted entirely.
         """
         tracked = self._run_git(
             ["ls-files"],
@@ -45,7 +52,106 @@ class TreeMixin:
             check=True,
         ).stdout.splitlines()
         all_files = sorted(set(tracked) | set(untracked))
-        return "\n".join(all_files)
+        skip = skip_paths or set()
+        by_dir: dict[str, list[str]] = {}
+        for rel in all_files:
+            if rel in skip:
+                continue
+            if not (self._root / rel).exists():
+                continue
+            idx = rel.rfind("/")
+            directory = rel[:idx] if idx != -1 else ""
+            by_dir.setdefault(directory, []).append(rel)
+        return by_dir
+
+    def get_directory_mtime(self, directory: str) -> float:
+        """Return the most recent file mtime within ``directory``.
+
+        Used by D36's mtime-based dir-block seeding: directories
+        with recently-modified contents seed into warmer tiers.
+        Returns 0.0 when the directory does not exist or contains
+        no files.
+
+        ``directory`` is repo-relative (forward-slash, no leading
+        slash). The empty string means the repo root.
+        """
+        base = self._root / directory if directory else self._root
+        if not base.exists() or not base.is_dir():
+            return 0.0
+        latest = 0.0
+        try:
+            for entry in base.iterdir():
+                if not entry.is_file():
+                    continue
+                try:
+                    mtime = entry.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > latest:
+                    latest = mtime
+        except OSError:
+            return 0.0
+        return latest
+
+    def get_flat_file_list(self) -> str:
+        """Return a sorted newline-separated list of all repo files.
+
+        Combines tracked files (``git ls-files``) with untracked
+        non-ignored files (``git ls-files --others --exclude-standard``).
+        Filters out paths that no longer exist on disk — git's
+        index keeps tracked files in ``ls-files`` output until
+        their deletion is staged with ``git rm``, so a plain
+        ``rm path`` in a terminal leaves the path in the index
+        listing for one or more turns. Without the on-disk
+        filter, three subsystems silently feed stale paths to
+        downstream consumers:
+
+        - The LLM-facing file listing (rendered from
+          ``plain_files:<dir>`` blocks in tiered prompts) would
+          list the deleted file as still present, contradicting
+          what the LLM sees in selected-file content.
+        - :func:`update_stability` builds its ``existing_files``
+          set from this output and passes it to
+          :meth:`StabilityTracker.update`. A path that's
+          tracked-but-deleted-on-disk shows up as "still
+          existing" to the tracker's stale-removal pass, so
+          its ``file:`` entry never gets pruned and the cache
+          carries a phantom file across turns. Untracked-and-deleted
+          files were already handled correctly because git drops
+          them from ``ls-files`` output the moment they vanish.
+        - The per-turn ``index_repo`` call in
+          :func:`stream_chat` would re-extract symbols from a
+          path that no longer exists — defended downstream by
+          the symbol index's own mtime-based pruning, but the
+          spurious work is wasted.
+
+        Used as the file-tree section in LLM prompts — flat,
+        one per line, no tree indentation. Returns an empty
+        string when the repo has no files (fresh init, no
+        commits, nothing untracked) or when every listed file
+        has been deleted on disk.
+
+        Cost note: one ``Path.exists()`` (stat) per listed
+        file per call. On a 5K-file repo, this is well under
+        10ms. The picker's :meth:`get_file_tree` deliberately
+        keeps deleted files visible with a "deleted" badge so
+        the user can recover them — that path uses a different
+        source set and is unaffected.
+        """
+        tracked = self._run_git(
+            ["ls-files"],
+            check=True,
+        ).stdout.splitlines()
+        untracked = self._run_git(
+            ["ls-files", "--others", "--exclude-standard"],
+            check=True,
+        ).stdout.splitlines()
+        all_files = sorted(set(tracked) | set(untracked))
+        existing = [
+            rel for rel in all_files
+            if (self._root / rel).exists()
+        ]
+        return "\n".join(existing)
 
     def _count_lines(self, absolute: Path) -> int:
         """Count newlines in a file for the tree-line-count badge.
@@ -70,6 +176,26 @@ class TreeMixin:
                 return count
         except OSError:
             return 0
+
+    def _probe_is_binary(self, absolute: Path) -> bool:
+        """Return True when the file looks binary at the head.
+
+        Mirrors :meth:`_count_lines`'s probe: we sniff the first
+        ``BINARY_PROBE_BYTES`` and ask the shared classifier. Used
+        by :meth:`get_file_tree` to tag file nodes so the webapp
+        picker can disable their checkboxes (binary files can't be
+        sent to the LLM, so toggling them on selection is futile).
+
+        Errors fall back to "not binary" — the picker will accept
+        the file, the backend's binary trim at sync time will catch
+        it, and the user gets the existing toast warning.
+        """
+        try:
+            with absolute.open("rb") as fh:
+                probe = fh.read(BINARY_PROBE_BYTES)
+                return self._is_binary_bytes(probe)
+        except OSError:
+            return False
 
     @staticmethod
     def _unquote_porcelain_path(raw: str) -> str:
@@ -298,8 +424,10 @@ class TreeMixin:
             absolute = self._root / rel_path
             lines = 0
             mtime = 0.0
+            is_binary = False
             if absolute.is_file():
-                lines = self._count_lines(absolute)
+                is_binary = self._probe_is_binary(absolute)
+                lines = 0 if is_binary else self._count_lines(absolute)
                 try:
                     mtime = absolute.stat().st_mtime
                 except OSError:
@@ -310,6 +438,7 @@ class TreeMixin:
                 "type": "file",
                 "lines": lines,
                 "mtime": mtime,
+                "is_binary": is_binary,
             }
             parent_children = index[parent_path]["children"]
             assert isinstance(parent_children, list)

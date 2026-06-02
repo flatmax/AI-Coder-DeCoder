@@ -53,6 +53,44 @@ import { scheduleUrlDetection } from './urls.js';
 import { handleStreamStartError } from './streaming.js';
 import { setSearchMode } from './search.js';
 
+// localStorage key for the in-progress textarea
+// draft. Persisted on every input event so a
+// browser refresh, tab reload, or accidental
+// close doesn't lose unsent text. Cleared on
+// send. Global rather than per-repo because the
+// draft is short-lived and threading repoName
+// into the chat panel isn't currently wired —
+// worst case on repo switch the draft surfaces
+// in another repo, which the user can clear with
+// one keystroke.
+//
+// Exported so the test suite can clear it in
+// afterEach — without that cleanup, persisted
+// drafts from earlier tests leak into later
+// mounts via `connectedCallback` and corrupt
+// assertions on `_input`.
+export const _DRAFT_STORAGE_KEY = 'ac-dc.chat.draft';
+
+export function _loadDraft() {
+  try {
+    return localStorage.getItem(_DRAFT_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function _saveDraft(value) {
+  try {
+    if (value) {
+      localStorage.setItem(_DRAFT_STORAGE_KEY, value);
+    } else {
+      localStorage.removeItem(_DRAFT_STORAGE_KEY);
+    }
+  } catch {
+    /* localStorage unavailable — silent. */
+  }
+}
+
 // ---------------------------------------------------------------
 // Send + cancel
 // ---------------------------------------------------------------
@@ -123,14 +161,15 @@ export async function send(panel) {
   // Record this message in input history before
   // we clear the textarea — up-arrow recall
   // wants the full text, not the empty string
-  // we're about to replace it with. Only text
-  // goes into recall; images don't round-trip
-  // through a plain textarea.
+  // we're about to replace it with. Image-only
+  // messages aren't recorded: there's no text
+  // to recall and an empty entry would clutter
+  // the up-arrow list.
   if (text) {
     const history = panel.shadowRoot?.querySelector(
       'ac-input-history',
     );
-    if (history) history.addEntry(text);
+    if (history) history.addEntry(text, images);
   }
 
   // Add the user message optimistically. The
@@ -144,6 +183,10 @@ export async function send(panel) {
   };
   panel.messages = [...panel.messages, optimistic];
   panel._input = '';
+  // Draft has been committed — clear the
+  // persisted copy so the next refresh starts
+  // clean.
+  _saveDraft('');
   panel._pendingImages = [];
   panel._streaming = true;
   panel._streamingContent = '';
@@ -381,6 +424,9 @@ export function insertSnippet(panel, snippet) {
  */
 export function onInputChange(panel, event) {
   panel._input = event.target.value;
+  // Persist the draft so a refresh / reload
+  // doesn't lose unsent text. Cleared on send.
+  _saveDraft(panel._input);
   // Auto-resize. Reset height first so shrinking
   // works when the user deletes content; then
   // measure and clamp to CSS max.
@@ -515,13 +561,36 @@ export function onInputKeyDown(panel, event) {
 
 /**
  * Handle `history-select` from the input-history
- * component. The event carries the selected
- * text; we replace the textarea content and
- * focus it so the user can edit before sending.
+ * component. The event carries the selected text
+ * and any images that were attached when the
+ * message was originally sent. We replace the
+ * textarea content with the text, replace the
+ * pending-image strip with the recalled images,
+ * and focus the textarea so the user can edit
+ * before re-sending.
+ *
+ * Image restore goes through `addPendingImage`
+ * one-by-one so the standard limit / dedup /
+ * size checks apply uniformly. If a stored
+ * image now exceeds the size cap (e.g. config
+ * was tightened since the original send) it
+ * silently drops with a toast — better than
+ * surfacing a recalled message in an
+ * un-sendable state.
  */
 export function onHistorySelect(panel, event) {
   const text = event.detail?.text ?? '';
+  const images = Array.isArray(event.detail?.images)
+    ? event.detail.images
+    : [];
   panel._input = text;
+  // Replace pending images with the recalled set.
+  // Clear first so a recall doesn't accumulate
+  // on top of whatever the user had drafted.
+  panel._pendingImages = [];
+  for (const dataUri of images) {
+    addPendingImage(panel, dataUri);
+  }
   panel.updateComplete.then(() => {
     const ta = panel.shadowRoot?.querySelector('.input-textarea');
     if (ta) {

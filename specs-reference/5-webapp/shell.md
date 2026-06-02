@@ -110,6 +110,33 @@ The picker's checkboxes update independently via the `filesChanged` broadcast th
 
 Cross-reference: `specs-reference/3-llm/context-model.md` § Binary files in selection are trimmed at turn-start materialisation.
 
+### Cache warmup overlay
+
+The `<ac-cache-warmup-progress>` component renders the cache warmer's countdown and firing UI. Mounted at viewport scope (sibling of `<ac-compaction-progress>` and `<ac-token-hud>`).
+
+| Constant | Value |
+|---|---|
+| Position | `position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%)` |
+| z-index | 500 (above the dialog at z 10 and below modal overlays at 1000+) |
+| Width | min-width 280px, content-driven |
+| Pointer events | `none` on host, `auto` on overlay child (so users can dismiss accidental hovers without intercepting clicks elsewhere) |
+| Success flash duration | 1500ms before fade |
+| Error flash duration | 1500ms before fade |
+| Fade transition | 400ms |
+| Bar fill transition | `width 1s linear` (matches the 1Hz countdown tick) |
+
+State machine driven by four window events:
+
+| Event | New state | Visual |
+|---|---|---|
+| `cache-warmup-countdown` | `counting` | Progress bar fills as `(total - remaining) / total`, label "Refreshing cache in… {remaining}s" |
+| `cache-warmup-firing` | `firing` | Spinner, label "Sending cache warm-up…" |
+| `cache-warmup-complete` (success: true) | `success` for 1500ms → fade → `idle` | Green border-left, ✓ glyph, label "Cache refreshed" |
+| `cache-warmup-complete` (success: false) | `error` for 1500ms → fade → `idle` | Red border-left, ⚠ glyph, label "Cache warm-up failed: {reason}" |
+| `cache-warmup-cancelled` | `idle` immediately | No flash, no fade — closes silently so a user-initiated stream isn't visually competed-with |
+
+Cross-reference: `specs-reference/3-llm/streaming.md` § Cache warmer events for the broadcast schemas, and `specs4/3-llm/cache-tiering.md` § Cache Warmer for the backend lifecycle.
+
 ### Proportional rescaling baselines
 
 Used by the "same fraction of viewport" rule in `specs4/5-webapp/shell.md` § Proportional Rescaling.

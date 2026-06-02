@@ -89,6 +89,24 @@ export class SvgViewer extends LitElement {
     _dirtyCount: { type: Number, state: true },
     /** Interaction mode — 'select' (default) or 'present'. */
     _mode: { type: String, state: true },
+    /**
+     * Virtual comparison slot for `loadPanel`'s ad-hoc
+     * content view. Shape: `{leftContent, leftLabel,
+     * rightContent, rightLabel}`. When non-null, the
+     * panes render from this slot instead of from the
+     * active `_files[]` entry — the user has loaded SVG
+     * content into one or both panes for visual
+     * side-by-side comparison rather than viewing a
+     * file's HEAD vs working diff. Two successive
+     * `loadPanel` calls accumulate (one per side).
+     * Mutually exclusive with `_files[_activeIndex]` —
+     * opening any real file via `openFile` clears this
+     * slot. Mirrors the diff viewer's
+     * `_virtualComparison` shape so the wiring from the
+     * file picker's "Open in left/right panel" actions
+     * is symmetric across viewers.
+     */
+    _virtualComparison: { type: Object, state: true },
   };
 
   static styles = css`
@@ -181,6 +199,27 @@ export class SvgViewer extends LitElement {
       min-width: 0;
       visibility: hidden;
       border-left: none;
+    }
+    /* Keep referenced defs paintable even though the left
+     * pane is visibility-hidden. Both panes inject the same
+     * SVG content, so both contain a <defs> with the same
+     * IDs. When the right pane's content references one
+     * (e.g. marker-end="url(#arrowhead)"), the browser
+     * resolves to the first matching ID in document order
+     * — the left pane's. For gradients/patterns/filters
+     * that's fine: a hidden ancestor doesn't suppress fill
+     * painting. But <marker> is rendered at path endpoints
+     * with visibility inherited from the marker element's
+     * tree — so the right pane's arrowheads silently
+     * disappear because they're "drawn" through the
+     * hidden left pane's marker.
+     *
+     * Forcing defs subtrees back to visibility:visible
+     * keeps the marker paintable. The pane itself stays
+     * invisible — defs don't render in flow regardless. */
+    .split.present .pane-left svg defs,
+    .split.present .pane-left svg defs * {
+      visibility: visible;
     }
     .split.present .pane-right {
       flex: 1 1 100%;
@@ -316,6 +355,43 @@ export class SvgViewer extends LitElement {
     .context-menu-item:hover {
       background: rgba(88, 166, 255, 0.12);
     }
+    .context-menu-divider {
+      height: 1px;
+      background: rgba(240, 246, 252, 0.12);
+      margin: 0.25rem 0;
+    }
+    .context-menu-section-label {
+      padding: 0.3rem 0.75rem 0.15rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-secondary, #8b949e);
+      user-select: none;
+    }
+    .align-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 2px;
+      padding: 0 0.5rem 0.25rem;
+    }
+    .align-btn {
+      background: rgba(13, 17, 23, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      color: var(--text-primary, #c9d1d9);
+      padding: 0.35rem 0;
+      font-family: inherit;
+      font-size: 0.95rem;
+      line-height: 1;
+      cursor: pointer;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .align-btn:hover {
+      background: rgba(88, 166, 255, 0.18);
+      border-color: rgba(88, 166, 255, 0.5);
+    }
   `;
 
   constructor() {
@@ -324,6 +400,7 @@ export class SvgViewer extends LitElement {
     this._activeIndex = -1;
     this._dirtyCount = 0;
     this._mode = _MODE_SELECT;
+    this._virtualComparison = null;
     // Concurrent-openFile guard. Same pattern as diff viewer.
     this._openingPath = null;
     // Last-rendered content per side. Lets `updated()`
@@ -415,6 +492,17 @@ export class SvgViewer extends LitElement {
       return;
     }
     const { path } = opts;
+    // Opening a real file clears any virtual comparison —
+    // the slots are mutually exclusive (the panes render
+    // either a file's HEAD/working diff or the virtual
+    // left/right content, never a mix). Cleared up front
+    // so the injection cache invalidation below sees the
+    // correct destination state.
+    if (this._virtualComparison !== null) {
+      this._virtualComparison = null;
+      this._lastLeftContent = null;
+      this._lastRightContent = null;
+    }
     const existing = this._files.findIndex((f) => f.path === path);
     if (existing !== -1 && existing === this._activeIndex) {
       // Same-file open — state is unchanged, but the
@@ -501,6 +589,98 @@ export class SvgViewer extends LitElement {
     this._lastLeftContent = null;
     this._lastRightContent = null;
     this._recomputeDirtyCount();
+    this.requestUpdate();
+  }
+
+  /**
+   * Load arbitrary SVG content into one of the two
+   * panes for visual side-by-side comparison. Mirrors
+   * the diff viewer's `loadPanel` API — same
+   * `(content, panel, label)` shape so the file
+   * picker's "Open in left/right panel" actions route
+   * symmetrically to either viewer based on file type.
+   *
+   * Two successive calls (one per panel) populate left
+   * and right; the second call preserves whatever was
+   * loaded into the other side. Opening a real file via
+   * `openFile` clears this slot — the slots are
+   * mutually exclusive.
+   *
+   * The `label` is kept for API symmetry with the diff
+   * viewer but isn't currently rendered as a per-pane
+   * caption (the SVG viewer's static "Original" /
+   * "Modified" labels still show because the existing
+   * pane DOM is reused). A future pass could swap them
+   * for the per-call labels when a virtual comparison
+   * is active; that's UI polish, not a correctness
+   * concern.
+   *
+   * No-op when content isn't a string or the panel
+   * value is unrecognised — same defensive-rejection
+   * pattern as the diff viewer.
+   */
+  async loadPanel(content, panel, _label, sourcePath = null) {
+    if (panel !== 'left' && panel !== 'right') return;
+    if (typeof content !== 'string') return;
+    // Switching from a real file to virtual content (or
+    // vice versa) needs the active-file event to fire so
+    // the shell flips viewer visibility. Determine
+    // before-state up front.
+    const hadActiveFile = this._activeIndex >= 0;
+    // Source path threaded through so the right pane's
+    // edits can save back to disk via Repo.write_file.
+    // The left pane is read-only by spec contract, so
+    // its sourcePath is recorded for symmetry but never
+    // consumed — kept for image-href resolution fallback
+    // and for any future read-only-but-attributed
+    // affordance (e.g. "open in editor").
+    if (this._virtualComparison === null) {
+      this._virtualComparison = {
+        leftContent: panel === 'left' ? content : '',
+        leftLabel: panel === 'left' ? _label || '' : '',
+        leftSourcePath: panel === 'left' ? sourcePath : null,
+        rightContent: panel === 'right' ? content : '',
+        rightLabel: panel === 'right' ? _label || '' : '',
+        rightSourcePath: panel === 'right' ? sourcePath : null,
+      };
+    } else {
+      const current = this._virtualComparison;
+      this._virtualComparison = {
+        leftContent:
+          panel === 'left' ? content : current.leftContent,
+        leftLabel:
+          panel === 'left' ? _label || '' : current.leftLabel,
+        leftSourcePath:
+          panel === 'left' ? sourcePath : current.leftSourcePath,
+        rightContent:
+          panel === 'right' ? content : current.rightContent,
+        rightLabel:
+          panel === 'right' ? _label || '' : current.rightLabel,
+        rightSourcePath:
+          panel === 'right' ? sourcePath : current.rightSourcePath,
+      };
+    }
+    // Real file (if any) gets cleared so the panes
+    // render exclusively from the virtual slot. The
+    // file's own dirty state is preserved in `_files[]`
+    // — closing then reopening it would restore the
+    // editor view; for now we just stop showing it.
+    if (hadActiveFile) {
+      this._activeIndex = -1;
+    }
+    // Force re-injection — content has changed and the
+    // editors need fresh DOM references.
+    this._lastLeftContent = null;
+    this._lastRightContent = null;
+    this._recomputeDirtyCount();
+    if (hadActiveFile) {
+      this._dispatchActiveFileChanged();
+    } else {
+      // First loadPanel call into an empty viewer also
+      // needs the event so the shell knows to make the
+      // SVG viewer foreground.
+      this._dispatchActiveFileChanged();
+    }
     this.requestUpdate();
   }
 
@@ -801,14 +981,15 @@ export class SvgViewer extends LitElement {
   // ---------------------------------------------------------------
 
   _injectSvgContent() {
-    if (this._activeIndex < 0) {
+    // Empty state — neither a real file nor a virtual
+    // comparison is active. Clear caches and tear down
+    // editors so a subsequent open starts fresh.
+    if (this._activeIndex < 0 && this._virtualComparison === null) {
       this._lastLeftContent = null;
       this._lastRightContent = null;
       this._disposeEditors();
       return;
     }
-    const file = this._files[this._activeIndex];
-    if (!file) return;
     const rightContainer =
       this.shadowRoot?.querySelector('.pane-right .svg-container');
     if (!rightContainer) return;
@@ -820,8 +1001,42 @@ export class SvgViewer extends LitElement {
     const leftContainer = this.shadowRoot?.querySelector(
       '.pane-left .svg-container',
     );
-    const leftContent = file.original || _EMPTY_SVG;
-    const rightContent = file.modified || _EMPTY_SVG;
+    // Read content from whichever slot is active. Real
+    // file: HEAD on the left, working copy on the right.
+    // Virtual comparison: per-pane content set by
+    // `loadPanel` calls, with empty string falling back
+    // to the placeholder so the pane renders rather than
+    // collapsing.
+    let leftContent;
+    let rightContent;
+    let file = null;
+    let virtualPath = null;
+    if (this._virtualComparison !== null) {
+      leftContent = this._virtualComparison.leftContent || _EMPTY_SVG;
+      rightContent = this._virtualComparison.rightContent || _EMPTY_SVG;
+      // Image-href resolution base path. Prefer the
+      // right pane's real source path when available
+      // (passed through by the file picker's
+      // "Open in panel" actions) so relative `<image>`
+      // hrefs in the SVG resolve against the real
+      // sibling directory on disk. Falls back to the
+      // left pane's source path, then to the labels.
+      // When two virtual panes come from different
+      // directories, we still pick one — relative
+      // hrefs on the disagreeing side may break, which
+      // is acceptable for the ad-hoc-comparison use case.
+      virtualPath =
+        this._virtualComparison.rightSourcePath
+        || this._virtualComparison.leftSourcePath
+        || this._virtualComparison.rightLabel
+        || this._virtualComparison.leftLabel
+        || null;
+    } else {
+      file = this._files[this._activeIndex];
+      if (!file) return;
+      leftContent = file.original || _EMPTY_SVG;
+      rightContent = file.modified || _EMPTY_SVG;
+    }
     // Track whether either side actually changed. If yes,
     // we tear down and re-init pan/zoom; if no, we leave
     // existing instances alone (avoids resetting the
@@ -895,10 +1110,22 @@ export class SvgViewer extends LitElement {
       // origin URL — which doesn't serve repo files — so
       // they silently fail. Fetch via Repo.get_file_base64
       // and rewrite in-place.
-      if (leftContainer) {
-        this._resolveImageHrefs(leftContainer, file.path);
+      //
+      // Virtual comparison mode falls back to the label
+      // string as the path — labels are usually basenames
+      // alone, which produces an empty base directory
+      // and resolves `<image>` hrefs against the repo
+      // root. That's good enough for the typical "open
+      // these two slide SVGs side by side" workflow;
+      // perfect path-aware resolution would need each
+      // virtual side to track its own source path.
+      const resolvePath = file ? file.path : virtualPath;
+      if (resolvePath) {
+        if (leftContainer) {
+          this._resolveImageHrefs(leftContainer, resolvePath);
+        }
+        this._resolveImageHrefs(rightContainer, resolvePath);
       }
-      this._resolveImageHrefs(rightContainer, file.path);
     }
   }
 
@@ -988,11 +1215,18 @@ export class SvgViewer extends LitElement {
    * file's `modified` field and recomputes dirty state.
    * Temporarily removes the handle overlay group during
    * serialisation so it doesn't leak into saved content.
+   *
+   * In virtual-comparison mode the right pane isn't
+   * backed by an entry in `_files[]` — edits route to
+   * the virtual slot's `rightContent` instead, and the
+   * dirty LED tracks `rightContent` vs `rightSaved`.
+   * The early-return below covers the empty state where
+   * neither slot is active.
    */
   _onEditorChange() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
+    const file =
+      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    if (!file && this._virtualComparison === null) return;
     const rightContainer =
       this.shadowRoot?.querySelector('.pane-right .svg-container');
     if (!rightContainer) return;
@@ -1152,14 +1386,35 @@ export class SvgViewer extends LitElement {
         }
       }
     }
-    if (html !== file.modified) {
-      file.modified = html;
-      // Keep the injection cache in sync so a future
-      // `_injectSvgContent` call (on file switch) doesn't
-      // treat this content as changed and re-inject the
-      // same bytes we just read.
-      this._lastRightContent = html;
-      this._recomputeDirtyCount();
+    if (file) {
+      if (html !== file.modified) {
+        file.modified = html;
+        // Keep the injection cache in sync so a future
+        // `_injectSvgContent` call (on file switch) doesn't
+        // treat this content as changed and re-inject the
+        // same bytes we just read.
+        this._lastRightContent = html;
+        this._recomputeDirtyCount();
+      }
+    } else {
+      // Virtual-comparison mode. Route the serialised
+      // edit to the virtual slot's right side. Initialise
+      // `rightSaved` lazily on first edit so the dirty
+      // comparison has a baseline — until then any edit
+      // would always look dirty against an undefined
+      // savedContent.
+      const vc = this._virtualComparison;
+      if (vc) {
+        if (typeof vc.rightSaved !== 'string') {
+          vc.rightSaved = vc.rightContent || '';
+        }
+        if (html !== vc.rightContent) {
+          vc.rightContent = html;
+          this._lastRightContent = html;
+          this._recomputeDirtyCount();
+          this.requestUpdate();
+        }
+      }
     }
   }
 
@@ -1448,8 +1703,26 @@ export class SvgViewer extends LitElement {
     return file.modified !== file.savedContent;
   }
 
+  /**
+   * Whether the virtual-comparison right pane has
+   * unsaved edits. Returns false when no virtual
+   * comparison is active or when `rightSaved` hasn't
+   * been initialised (no edits since the slot was
+   * populated). The right side is the only editable
+   * pane — the left is read-only — so dirty tracking
+   * only ever applies there.
+   */
+  _isVirtualDirty() {
+    const vc = this._virtualComparison;
+    if (!vc) return false;
+    if (typeof vc.rightSaved !== 'string') return false;
+    return vc.rightContent !== vc.rightSaved;
+  }
+
   _recomputeDirtyCount() {
-    this._dirtyCount = this._files.filter((f) => this._isDirty(f)).length;
+    let count = this._files.filter((f) => this._isDirty(f)).length;
+    if (this._isVirtualDirty()) count += 1;
+    this._dirtyCount = count;
   }
 
   async _saveFile(path) {
@@ -1471,31 +1744,148 @@ export class SvgViewer extends LitElement {
   // ---------------------------------------------------------------
 
   _statusLedClass() {
-    if (this._activeIndex < 0) return '';
-    const file = this._files[this._activeIndex];
-    if (!file) return '';
-    if (this._isDirty(file)) return 'dirty';
-    if (file.isNew) return 'new-file';
-    return 'clean';
+    if (this._activeIndex >= 0) {
+      const file = this._files[this._activeIndex];
+      if (!file) return '';
+      if (this._isDirty(file)) return 'dirty';
+      if (file.isNew) return 'new-file';
+      return 'clean';
+    }
+    // Virtual-comparison mode. The right pane is
+    // editable; show dirty when its content has
+    // diverged from the snapshot taken on the last
+    // save click, otherwise show the new-file blue
+    // (the virtual slot has no on-disk counterpart,
+    // so "clean" green would be misleading).
+    if (this._virtualComparison !== null) {
+      if (this._isVirtualDirty()) return 'dirty';
+      return 'new-file';
+    }
+    return '';
   }
 
   _statusLedTitle() {
-    if (this._activeIndex < 0) return '';
-    const file = this._files[this._activeIndex];
-    if (!file) return '';
-    const klass = this._statusLedClass();
-    if (klass === 'dirty') return `${file.path} — unsaved (click to save)`;
-    if (klass === 'new-file') return `${file.path} — new file`;
-    return file.path;
+    if (this._activeIndex >= 0) {
+      const file = this._files[this._activeIndex];
+      if (!file) return '';
+      const klass = this._statusLedClass();
+      if (klass === 'dirty') return `${file.path} — unsaved (click to save)`;
+      if (klass === 'new-file') return `${file.path} — new file`;
+      return file.path;
+    }
+    if (this._virtualComparison !== null) {
+      const vc = this._virtualComparison;
+      const label =
+        vc.rightLabel || vc.leftLabel || 'comparison panel';
+      const hasSavePath =
+        typeof vc.rightSourcePath === 'string'
+        && vc.rightSourcePath.length > 0;
+      const klass = this._statusLedClass();
+      if (klass === 'dirty') {
+        return hasSavePath
+          ? `${vc.rightSourcePath} — unsaved (click to save)`
+          : `${label} — unsaved (click to snapshot)`;
+      }
+      return hasSavePath
+        ? vc.rightSourcePath
+        : `${label} — visual comparison (no save target)`;
+    }
+    return '';
   }
 
   _onStatusLedClick() {
-    if (this._activeIndex < 0) return;
-    const file = this._files[this._activeIndex];
-    if (!file) return;
-    if (this._isDirty(file)) {
-      this._saveFile(file.path);
+    if (this._activeIndex >= 0) {
+      const file = this._files[this._activeIndex];
+      if (!file) return;
+      if (this._isDirty(file)) {
+        this._saveFile(file.path);
+        return;
+      }
+      // Clean file — reveal in the file picker. Mirrors
+      // the diff viewer's LED behaviour so the affordance
+      // is consistent across viewers.
+      this.dispatchEvent(
+        new CustomEvent('reveal-file-in-picker', {
+          detail: { path: file.path },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
     }
+    // Virtual-comparison mode. Two cases:
+    //
+    //   1. Right pane has a known source path — written
+    //      back to disk via Repo.write_file. The shell
+    //      treats the file-saved event as a normal save
+    //      (refreshing open viewers, etc).
+    //   2. No source path — fall back to the in-memory
+    //      snapshot semantics: copy rightContent to
+    //      rightSaved, dispatch virtual-svg-save, toast.
+    //
+    // Source-path-bearing virtual comparisons come from
+    // the file picker's "Open in left/right panel"
+    // context-menu actions, which carry the repo-relative
+    // path through the load-svg-panel event detail. The
+    // history browser's equivalent action does not (it
+    // loads from session archives without an on-disk
+    // source), so its content gracefully degrades to
+    // the snapshot path.
+    const vc = this._virtualComparison;
+    if (!vc) return;
+    if (!this._isVirtualDirty()) return;
+    if (typeof vc.rightSourcePath === 'string' && vc.rightSourcePath) {
+      this._saveVirtualToDisk(vc);
+    } else {
+      vc.rightSaved = vc.rightContent;
+      this._recomputeDirtyCount();
+      this.dispatchEvent(
+        new CustomEvent('virtual-svg-save', {
+          detail: {
+            content: vc.rightContent,
+            label: vc.rightLabel || vc.leftLabel || '',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      this._emitToast(
+        'Visual edits snapshotted (no file target)',
+        'info',
+      );
+    }
+  }
+
+  /**
+   * Write the virtual comparison's right pane content
+   * back to its source path. Mirrors the shape of
+   * `_saveFile` for real files: dispatches `file-saved`
+   * carrying `{path, content}` so the shell's existing
+   * file-saved handler routes the write through
+   * `Repo.write_file`. On success, updates `rightSaved`
+   * and clears the dirty LED.
+   *
+   * The shell's handler is async and we don't await it
+   * here — the LED clears optimistically. If the write
+   * fails server-side, the shell surfaces an error
+   * toast through its existing path; the dirty state
+   * will reappear on the next edit. This matches the
+   * non-virtual save path's behaviour, which is also
+   * fire-and-forget at this layer.
+   */
+  _saveVirtualToDisk(vc) {
+    vc.rightSaved = vc.rightContent;
+    this._recomputeDirtyCount();
+    this.dispatchEvent(
+      new CustomEvent('file-saved', {
+        detail: {
+          path: vc.rightSourcePath,
+          content: vc.rightContent,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   // ---------------------------------------------------------------
@@ -1691,6 +2081,294 @@ export class SvgViewer extends LitElement {
   }
 
   // ---------------------------------------------------------------
+  // Copy as SVG
+  // ---------------------------------------------------------------
+
+  /**
+   * Copy the current modified SVG to the clipboard as a
+   * multi-format payload — `image/png` (rendered raster)
+   * plus `image/svg+xml` (source). Chat applications and
+   * image-aware paste targets pick the PNG and render the
+   * image inline; SVG-aware editors (Inkscape, browsers)
+   * pick the SVG source. This matches the spec's intent
+   * for "Copy as SVG" — the user wants an *image* on the
+   * clipboard, not the XML text.
+   *
+   * The PNG side reuses the same render pipeline as
+   * `_copyAsPng` (parse viewBox, scale for quality, draw
+   * to canvas, blob). The SVG side uses the serialised
+   * form `_onEditorChange` produces — handle overlay
+   * stripped, pan-zoom viewport unwrapped, inlined data-
+   * URI hrefs swapped back to their externalised on-disk
+   * paths. So a paste into a code editor (which falls
+   * through to text/plain when the target doesn't grok
+   * either MIME type) still gives clean SVG source.
+   *
+   * Calling `_onEditorChange` first guarantees
+   * `file.modified` is current — there may be
+   * uncommitted edits in the SvgEditor that haven't been
+   * serialised yet.
+   *
+   * Falls back to text-only `writeText` when
+   * `ClipboardItem` is unavailable (older browsers, non-
+   * secure contexts).
+   */
+  async _copyAsSvg() {
+    this._contextMenu = null;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    // Refresh file.modified from the live editor state.
+    // Idempotent — re-reads the same bytes when nothing
+    // has changed since the last commit.
+    this._onEditorChange();
+    const svgText = file.modified || '';
+    if (!svgText) {
+      this._emitToast('Nothing to copy', 'info');
+      return;
+    }
+    if (!navigator.clipboard) {
+      this._emitToast('Clipboard not available', 'error');
+      return;
+    }
+    // Preferred path: ClipboardItem with both PNG and
+    // SVG MIME types. Receiving app picks whichever it
+    // understands.
+    if (
+      typeof navigator.clipboard.write === 'function' &&
+      typeof ClipboardItem !== 'undefined'
+    ) {
+      try {
+        const pngBlob = await this._renderSvgToPngBlob(svgText);
+        const svgBlob = new Blob([svgText], {
+          type: 'image/svg+xml',
+        });
+        const item = new ClipboardItem({
+          'image/png': pngBlob,
+          'image/svg+xml': svgBlob,
+        });
+        await navigator.clipboard.write([item]);
+        this._emitToast('Image copied to clipboard', 'success');
+        return;
+      } catch (err) {
+        // Fall through to text-only writeText. Common
+        // failure modes: ClipboardItem MIME-type rejection
+        // (some browsers gate non-image types behind a
+        // flag), document not focused, render failure
+        // (malformed SVG). Logging for diagnosis; user
+        // gets a working text fallback.
+        console.warn('[svg-viewer] image copy failed', err);
+      }
+    }
+    // Fallback: text-only.
+    if (typeof navigator.clipboard.writeText !== 'function') {
+      this._emitToast('Clipboard not available', 'error');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(svgText);
+      this._emitToast('SVG source copied as text', 'info');
+    } catch (err) {
+      this._emitToast(
+        `Failed to copy: ${err?.message || 'unknown error'}`,
+        'error',
+      );
+    }
+  }
+
+  /**
+   * Render an SVG string to an `image/png` Blob. Shared
+   * pipeline between `_copyAsSvg` (which combines this
+   * with the SVG source for a multi-format clipboard
+   * item) and any future raster export. Returns a Blob
+   * ready to drop into a `ClipboardItem`.
+   *
+   * Frames the output to match the right editor's
+   * current viewBox — what the user actually sees on
+   * screen — rather than the SVG's authored
+   * viewBox/width/height. After fit-to-content, pan/zoom,
+   * or presentation toggle, the live viewBox can differ
+   * substantially from the authored one; rendering against
+   * the authored frame produces a PNG with mismatched
+   * margins (extra whitespace, or content cropped). We
+   * clone the parsed SVG, overwrite its viewBox with the
+   * live one, force `preserveAspectRatio="xMidYMid meet"`
+   * so the renderer doesn't stretch (the live editor uses
+   * `none` for its own coordinate math, but a standalone
+   * raster wants the natural aspect), and re-serialise
+   * before handing to the Image loader.
+   *
+   * Throws on render failure — caller decides whether to
+   * fall back to text-only or surface an error. The PNG
+   * pipeline can fail when the SVG references resources
+   * the renderer can't resolve (cross-origin images,
+   * tainted canvas). The error message is opaque on
+   * purpose; callers handle by falling through.
+   */
+  async _renderSvgToPngBlob(svgText) {
+    // Parse the SVG into a fresh document so we can
+    // mutate its root attributes without affecting the
+    // live editor.
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    const svgEl = doc.querySelector('svg');
+    // Default frame from the authored SVG. Used when no
+    // live editor is attached (defensive — `_copyAsSvg`
+    // already gates on activeIndex, but the helper is
+    // self-contained).
+    let width = 1920;
+    let height = 1080;
+    if (svgEl) {
+      const vb = svgEl.getAttribute('viewBox');
+      if (vb) {
+        const parts = vb.split(/[\s,]+/).map(Number);
+        if (parts.length >= 4 && parts[2] > 0 && parts[3] > 0) {
+          width = parts[2];
+          height = parts[3];
+        }
+      }
+      const w = parseFloat(svgEl.getAttribute('width'));
+      const h = parseFloat(svgEl.getAttribute('height'));
+      if (w > 0 && h > 0) {
+        width = w;
+        height = h;
+      }
+    }
+    // Determine the rendering frame. Priority order:
+    //
+    //   1. Content bbox of the live right-pane SVG. The
+    //      editor's viewBox is sized to the container's
+    //      aspect ratio (after fitContent), which means
+    //      it carries letterbox padding around the
+    //      actual content. Rendering against that
+    //      viewBox produces a PNG with visible margins
+    //      above/below or left/right of the content.
+    //      Reading `getBBox()` on the live SVG root
+    //      gives the tight content extent — which is
+    //      what the user wants on the clipboard.
+    //
+    //   2. The editor's reported viewBox. Used when the
+    //      bbox read fails (detached element, malformed
+    //      SVG) but the editor is still alive. May
+    //      include letterbox padding but at least
+    //      reflects pan/zoom state.
+    //
+    //   3. The authored viewBox/width/height already
+    //      parsed above. Fallback for the no-editor
+    //      case.
+    let liveVb = null;
+    const rightContainer = this.shadowRoot?.querySelector(
+      '.pane-right .svg-container',
+    );
+    const liveSvg = rightContainer
+      ? rightContainer.querySelector('svg')
+      : null;
+    if (liveSvg && typeof liveSvg.getBBox === 'function') {
+      try {
+        const bbox = liveSvg.getBBox();
+        if (
+          bbox && Number.isFinite(bbox.width)
+          && Number.isFinite(bbox.height)
+          && bbox.width > 0 && bbox.height > 0
+        ) {
+          // Add a small margin so glyphs at the bbox
+          // edge don't get clipped by sub-pixel
+          // rendering rounding. 2% of the longer edge
+          // is invisible on small content and adds at
+          // most a few pixels on large.
+          const pad = Math.max(bbox.width, bbox.height) * 0.02;
+          liveVb = {
+            x: bbox.x - pad,
+            y: bbox.y - pad,
+            width: bbox.width + pad * 2,
+            height: bbox.height + pad * 2,
+          };
+        }
+      } catch (_) {
+        liveVb = null;
+      }
+    }
+    if (!liveVb && this._editorRight) {
+      try {
+        liveVb = this._editorRight.getViewBox();
+      } catch (_) {
+        liveVb = null;
+      }
+    }
+    if (
+      liveVb
+      && Number.isFinite(liveVb.x)
+      && Number.isFinite(liveVb.y)
+      && Number.isFinite(liveVb.width)
+      && Number.isFinite(liveVb.height)
+      && liveVb.width > 0
+      && liveVb.height > 0
+      && svgEl
+    ) {
+      svgEl.setAttribute(
+        'viewBox',
+        `${liveVb.x} ${liveVb.y} ${liveVb.width} ${liveVb.height}`,
+      );
+      // The live editor sets preserveAspectRatio="none" so
+      // its viewBox writes drive coordinate math directly.
+      // Standalone raster output should fit naturally —
+      // override to "xMidYMid meet" so the renderer
+      // letterboxes rather than stretching.
+      svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      // Strip declared width/height so the browser uses
+      // the viewBox as the intrinsic size. Without this,
+      // the authored width/height would override and we'd
+      // be back to the original mismatch.
+      svgEl.removeAttribute('width');
+      svgEl.removeAttribute('height');
+      width = liveVb.width;
+      height = liveVb.height;
+    }
+    // Re-serialise with the (possibly mutated) root.
+    const serializer = new XMLSerializer();
+    const renderText = serializer.serializeToString(doc);
+    // Scale for quality. Same heuristic as `_copyAsPng`:
+    // tiny SVGs get 4x oversampling for crisp text;
+    // larger SVGs get 2x; clamp the long edge to 4096
+    // so we don't allocate gigabyte canvases.
+    const maxDim = Math.max(width, height);
+    let scale = maxDim < 1024 ? 4 : 2;
+    const maxPx = 4096;
+    if (maxDim * scale > maxPx) {
+      scale = maxPx / maxDim;
+    }
+    const canvasWidth = Math.round(width * scale);
+    const canvasHeight = Math.round(height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    const blob = new Blob([renderText], {
+      type: 'image/svg+xml;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => {
+        if (b) resolve(b);
+        else reject(new Error('canvas.toBlob returned null'));
+      }, 'image/png');
+    });
+  }
+
+  // ---------------------------------------------------------------
   // SVG ↔ text diff toggle
   // ---------------------------------------------------------------
 
@@ -1736,7 +2414,11 @@ export class SvgViewer extends LitElement {
 
   _onKeyDown(event) {
     if (!this.isConnected) return;
-    if (this._activeIndex < 0) return;
+    // No content at all — neither a real file nor a
+    // virtual comparison. Nothing to act on.
+    if (this._activeIndex < 0 && this._virtualComparison === null) {
+      return;
+    }
     // Gate shortcuts on whether the SVG viewer is the
     // foreground viewer. Focus typically lives in the
     // chat textarea regardless of which viewer is
@@ -1784,14 +2466,37 @@ export class SvgViewer extends LitElement {
     }
     if (event.key === 's' || event.key === 'S') {
       event.preventDefault();
-      const file = this._files[this._activeIndex];
-      if (file) this._saveFile(file.path);
+      if (this._activeIndex >= 0) {
+        const file = this._files[this._activeIndex];
+        if (file) this._saveFile(file.path);
+      } else if (this._virtualComparison !== null) {
+        // Virtual mode — route through the LED click
+        // handler so Ctrl+S and the LED affordance share
+        // one save semantics (snapshot + event + toast).
+        this._onStatusLedClick();
+      }
       return;
     }
     if (event.key === 'w' || event.key === 'W') {
       event.preventDefault();
-      const file = this._files[this._activeIndex];
-      if (file) this.closeFile(file.path);
+      if (this._activeIndex >= 0) {
+        const file = this._files[this._activeIndex];
+        if (file) this.closeFile(file.path);
+      } else if (this._virtualComparison !== null) {
+        // Closing in virtual mode discards both panes'
+        // content. The slot is cleared and the viewer
+        // returns to empty state — same lifecycle as
+        // closing the last real file.
+        this._virtualComparison = null;
+        this._lastLeftContent = null;
+        this._lastRightContent = null;
+        this._disposeEditors();
+        this._mode = _MODE_SELECT;
+        this._contextMenu = null;
+        this._recomputeDirtyCount();
+        this._dispatchActiveFileChanged();
+        this.requestUpdate();
+      }
       return;
     }
     if (event.key === 'PageDown') {
@@ -1824,11 +2529,27 @@ export class SvgViewer extends LitElement {
   }
 
   _dispatchActiveFileChanged() {
-    const activeFile =
-      this._activeIndex >= 0 ? this._files[this._activeIndex] : null;
+    // Resolve the path to report. Real file: use its
+    // path. Virtual comparison: synthesise a path-like
+    // identifier from the labels so the shell's
+    // `onActiveFileChanged` doesn't early-return on a
+    // null path and skip foregrounding the SVG viewer.
+    // The synthesised string starts with `virtual://`
+    // so any consumer that wants to disambiguate real
+    // vs virtual can check the prefix.
+    let path = null;
+    if (this._activeIndex >= 0) {
+      const activeFile = this._files[this._activeIndex];
+      path = activeFile ? activeFile.path : null;
+    } else if (this._virtualComparison !== null) {
+      const left = this._virtualComparison.leftLabel || '';
+      const right = this._virtualComparison.rightLabel || '';
+      const tag = right || left || 'panel';
+      path = `virtual://svg-compare/${tag}`;
+    }
     this.dispatchEvent(
       new CustomEvent('active-file-changed', {
-        detail: { path: activeFile ? activeFile.path : null },
+        detail: { path },
         bubbles: true,
         composed: true,
       }),
@@ -1840,7 +2561,14 @@ export class SvgViewer extends LitElement {
   // ---------------------------------------------------------------
 
   render() {
-    if (this._files.length === 0 || this._activeIndex < 0) {
+    // Empty state requires both no real file AND no
+    // virtual comparison. The two slots are mutually
+    // exclusive but either being populated is enough to
+    // render the split layout.
+    const hasRealFile =
+      this._files.length > 0 && this._activeIndex >= 0;
+    const hasVirtual = this._virtualComparison !== null;
+    if (!hasRealFile && !hasVirtual) {
       return html`
         <div class="empty-state">
           <div class="watermark">
@@ -1914,10 +2642,157 @@ export class SvgViewer extends LitElement {
               >
                 📋 Copy as PNG
               </button>
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                @click=${this._copyAsSvg}
+              >
+                📄 Copy as SVG
+              </button>
+              ${this._canSnapToAxis()
+                ? html`
+                    <div class="context-menu-divider"></div>
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      title="Snap line to horizontal"
+                      @click=${() => this._onSnapToAxis('horizontal')}
+                    >
+                      ━ Make horizontal
+                    </button>
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      title="Snap line to vertical"
+                      @click=${() => this._onSnapToAxis('vertical')}
+                    >
+                      ┃ Make vertical
+                    </button>
+                  `
+                : ''}
+              ${this._canAlign()
+                ? html`
+                    <div class="context-menu-divider"></div>
+                    <div class="context-menu-section-label">
+                      Align horizontal
+                    </div>
+                    <div class="align-grid" role="group" aria-label="Align horizontal">
+                      <button
+                        class="align-btn"
+                        title="Align left edges"
+                        aria-label="Align left edges"
+                        @click=${() => this._onAlign('horizontal', 'left')}
+                      >⇤</button>
+                      <button
+                        class="align-btn"
+                        title="Align horizontal centers"
+                        aria-label="Align horizontal centers"
+                        @click=${() => this._onAlign('horizontal', 'center')}
+                      >⇔</button>
+                      <button
+                        class="align-btn"
+                        title="Align right edges"
+                        aria-label="Align right edges"
+                        @click=${() => this._onAlign('horizontal', 'right')}
+                      >⇥</button>
+                    </div>
+                    <div class="context-menu-section-label">
+                      Align vertical
+                    </div>
+                    <div class="align-grid" role="group" aria-label="Align vertical">
+                      <button
+                        class="align-btn"
+                        title="Align top edges"
+                        aria-label="Align top edges"
+                        @click=${() => this._onAlign('vertical', 'top')}
+                      >⤒</button>
+                      <button
+                        class="align-btn"
+                        title="Align vertical middles"
+                        aria-label="Align vertical middles"
+                        @click=${() => this._onAlign('vertical', 'middle')}
+                      >⇕</button>
+                      <button
+                        class="align-btn"
+                        title="Align bottom edges"
+                        aria-label="Align bottom edges"
+                        @click=${() => this._onAlign('vertical', 'bottom')}
+                      >⤓</button>
+                    </div>
+                  `
+                : ''}
             </div>
           `
         : ''}
     `;
+  }
+
+  /**
+   * Whether the alignment section should appear in the
+   * context menu. Requires the right (editable) editor
+   * to be live AND at least two selected elements —
+   * single-element alignment has no group reference and
+   * the editor itself no-ops on it, so we hide the UI
+   * rather than show disabled buttons.
+   */
+  _canAlign() {
+    if (!this._editorRight) return false;
+    try {
+      return this._editorRight.getSelectionSet().size >= 2;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Whether the snap-to-axis entries should appear.
+   * The editor's own `canSnapSelectionToAxis` checks
+   * for exactly-one selection of a snappable shape
+   * (line, two-point polyline, or single-segment
+   * straight path).
+   */
+  _canSnapToAxis() {
+    if (!this._editorRight) return false;
+    try {
+      return this._editorRight.canSnapSelectionToAxis();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Context-menu snap-to-axis click. Delegates to the
+   * editor and lets its onChange callback handle
+   * dirty-tracking + re-render. Same dispatch shape as
+   * `_onAlign`.
+   */
+  _onSnapToAxis(axis) {
+    if (!this._editorRight) return;
+    this._contextMenu = null;
+    try {
+      this._editorRight.snapSelectionToAxis(axis);
+    } catch (err) {
+      console.warn('[svg-viewer] snapSelectionToAxis failed', err);
+    }
+    this.requestUpdate();
+  }
+
+  /**
+   * Context-menu alignment click. Dispatches to the
+   * editor's `alignSelection`, dismisses the menu, and
+   * lets the editor's own onChange callback handle
+   * dirty-tracking and re-render — same path as drag,
+   * delete, paste.
+   */
+  _onAlign(axis, mode) {
+    if (!this._editorRight) return;
+    this._contextMenu = null;
+    try {
+      this._editorRight.alignSelection(axis, mode);
+    } catch (err) {
+      console.warn('[svg-viewer] alignSelection failed', err);
+    }
+    this.requestUpdate();
   }
 }
 

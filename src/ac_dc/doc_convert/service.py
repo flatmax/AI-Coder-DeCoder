@@ -521,13 +521,10 @@ class DocConvert:
         available, falling back to python-pptx (pptx) or
         markitdown (odp); ``.pdf`` uses PyMuPDF directly.
 
-        Runs the clean-tree gate first: refuses if the repo has
-        uncommitted changes. Without a git working tree to diff
-        against, the converted output wouldn't be reviewable
-        before commit. The gate requires a repo with an
-        ``is_clean()`` method; when constructed without a repo
-        (tests, standalone CLI use), the gate is skipped —
-        caller accepts the risk.
+        Does not require a clean working tree. Converted files
+        appear in the file picker as new/modified entries the
+        user reviews and stages like any other edit; there is
+        no reason to block conversion on uncommitted changes.
 
         Two execution modes:
 
@@ -565,36 +562,6 @@ class DocConvert:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-
-        # Clean-tree gate — refuse conversion if the repo has
-        # uncommitted changes. Without a working tree to diff
-        # against, converted output can't be reviewed before
-        # commit. Only runs when a repo with is_clean() is
-        # attached; tests and CLI use without a full repo
-        # skip the gate (caller accepts the risk).
-        if self._repo is not None:
-            is_clean_fn = getattr(self._repo, "is_clean", None)
-            if callable(is_clean_fn):
-                try:
-                    clean = is_clean_fn()
-                except Exception as exc:
-                    logger.debug(
-                        "Repo is_clean() raised: %s", exc,
-                    )
-                    return {
-                        "error": (
-                            "Could not verify working tree "
-                            f"state: {exc}"
-                        ),
-                    }
-                if not clean:
-                    return {
-                        "error": (
-                            "Working tree has uncommitted "
-                            "changes. Commit or stash before "
-                            "converting."
-                        ),
-                    }
 
         # Decide execution mode. Background requires both a
         # running loop AND a wired callback — if either is
@@ -790,6 +757,25 @@ class DocConvert:
 
         suffix = source_abs.suffix.lower()
 
+        # Detect password-protected OOXML files at dispatch
+        # (.docx / .xlsx / .pptx). Encrypted Office documents
+        # are wrapped in a CDFV2 (OLE compound) container with
+        # the signature D0 CF 11 E0 A1 B1 1A E1, instead of the
+        # ZIP/OPC PK\x03\x04 prefix a real OOXML file uses.
+        # Catching this at dispatch saves the user from a
+        # silent LibreOffice failure followed by a misleading
+        # "Package not found" from python-pptx — both spend
+        # real time before producing an opaque error. ODF
+        # formats (.odt / .odp) use a different ZIP-based
+        # encryption scheme that doesn't surface as CDFV2,
+        # so they're not in scope for this check.
+        if suffix in (".docx", ".xlsx", ".pptx"):
+            encrypted = self._is_encrypted_ooxml(
+                source_abs, rel_path
+            )
+            if encrypted is not None:
+                return encrypted
+
         # markitdown handles the simple formats (.docx, .rtf,
         # .odt, .csv).
         if suffix in _MARKITDOWN_EXTENSIONS:
@@ -824,12 +810,34 @@ class DocConvert:
             )
 
         # pdf goes directly to PyMuPDF — hybrid text + SVG
-        # output. Text extracted into markdown paragraphs;
-        # pages with significant graphics also get companion
-        # SVGs with glyphs stripped (text already in markdown).
+        # output. Text extracted into markdown paragraphs.
+        # Pages with significant graphics get companion
+        # SVGs; the strip pass is bbox-scoped: ``<text>``
+        # whose anchor falls outside every figure bbox is
+        # removed (body prose, already in markdown), and
+        # figure-internal labels survive. The legacy
+        # ``doc_convert.strip_svg_text_when_present`` flag
+        # is no longer honoured — bbox-scoping replaces the
+        # all-or-nothing strip with a precise rule. A
+        # one-time warning logs when the flag is present
+        # so users editing legacy configs know it can be
+        # removed.
         if suffix in _PDF_EXTENSIONS:
+            legacy_flag = (
+                self._config.doc_convert_config.get(
+                    "strip_svg_text_when_present"
+                )
+            )
+            if legacy_flag is not None:
+                logger.warning(
+                    "doc_convert.strip_svg_text_when_present "
+                    "is deprecated and ignored — bbox-scoped "
+                    "SVG text stripping is now the default. "
+                    "Remove the setting from app.json to "
+                    "silence this warning."
+                )
             return self._pdf.convert_pymupdf(
-                root, source_abs, rel_path
+                root, source_abs, rel_path,
             )
 
         # Other supported extensions — explicit "not yet
@@ -856,6 +864,63 @@ class DocConvert:
     # ------------------------------------------------------------------
     # Result-dict builders
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_encrypted_ooxml(
+        source_abs: Path,
+        rel_path: str,
+    ) -> dict[str, Any] | None:
+        """Return an error result if the file is encrypted, else None.
+
+        Encrypted Office documents (Word, Excel, PowerPoint
+        with a password set) wrap their payload in a CDFV2
+        compound container starting with the OLE signature
+        ``D0 CF 11 E0 A1 B1 1A E1``. A normal OOXML file is a
+        ZIP archive starting with ``PK\\x03\\x04``. python-pptx
+        / openpyxl / markitdown all raise opaque errors on
+        encrypted input ("Package not found", "not a zip
+        file"), and LibreOffice's headless converter exits
+        silently without producing a PDF when no
+        ``--password`` is supplied.
+
+        Detecting encryption at dispatch saves the user from
+        a useless soffice subprocess followed by a misleading
+        downstream error. The result message tells them how
+        to resolve it (remove the password in the source
+        application, or decrypt with msoffcrypto-tool).
+
+        Returns ``None`` when the file is not encrypted (or
+        unreadable, or shorter than 8 bytes — those cases are
+        handled by the pipeline-level error paths). I/O
+        failures here fall through to the pipeline so the
+        user sees one error per file, not two.
+
+        ``rel_path`` is echoed verbatim into the result's
+        ``path`` field so the webapp can match the per-file
+        error back to the request — webapp keys progress
+        rows by the path it sent, not by the file's basename.
+        """
+        try:
+            with open(source_abs, "rb") as fh:
+                header = fh.read(8)
+        except OSError:
+            return None
+        if not header.startswith(
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        ):
+            return None
+        return {
+            "path": rel_path,
+            "status": "error",
+            "message": (
+                "File is password-protected (encrypted "
+                "CDFV2 container). Remove the password in the "
+                "source application (File → Info → Protect "
+                "Document → Encrypt with Password → clear and "
+                "save) or decrypt with msoffcrypto-tool, then "
+                "retry."
+            ),
+        }
 
     @staticmethod
     def _fail(rel_path: str, message: str) -> dict[str, Any]:

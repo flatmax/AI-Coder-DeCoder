@@ -31,6 +31,7 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 - Document conversion — enabled flag, supported extensions, max source size
 - Document index — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
 - Agents — `enabled` flag gating the parallel-agents capability (default `false`). When `false`, the system prompt omits the agent-spawn block description and the main LLM cannot emit agent-spawn blocks regardless of task shape. See [parallel-agents.md](../7-future/parallel-agents.md#user-control--agent-mode-toggle) for the user-facing toggle and [settings.md](../5-webapp/settings.md#agentic-coding-toggle) for the Settings card
+- Cache warmup — `enabled` flag (default `true`) and `interval_seconds` (default `270`) controlling the background cache warmer. Keeps the provider prompt cache hot during idle periods by issuing periodic minimal warm-up calls. See [cache-tiering.md § Cache Warmer](../3-llm/cache-tiering.md#cache-warmer) for the full lifecycle
 
 ## Snippets
 

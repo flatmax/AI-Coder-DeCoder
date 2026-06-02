@@ -14,6 +14,22 @@
 | Hover behavior | Pauses timer; mouse leave restarts auto-hide |
 | Dismiss button | Hides immediately (no fade) |
 
+### Token HUD warm-up variant
+
+The HUD also fires on successful cache warm-ups (window event `cacheWarmupComplete` with `success: true`). Rendered identically to a per-turn HUD with two differences:
+
+| Aspect | Per-turn | Per-warmup |
+|---|---|---|
+| Header label | Configured model name | `🌡️ Cache warmup` |
+| Header tooltip | Empty | Explanation of the warm-up's billing model |
+| Request grid `Completion` row | Provider's completion_tokens | 0 (warm-ups set `max_tokens=2`) |
+| Request grid `Reasoning` row | Provider's reasoning_tokens | 0 |
+| Request grid `Prompt` / `Cache Read` / `Cache Write` rows | Real-turn values | Warm-up's values |
+| Session totals section | Reflects cumulative real-turn usage | Reflects cumulative warm-up + real-turn usage (warm-up tokens already accumulated server-side) |
+| Tier / Budget / Changes sections | Same | Same — no warm-up-specific behavior |
+
+Failure broadcasts (`success: false`) do NOT trigger the HUD. The `ac-cache-warmup-progress` floating overlay already shows the failure flash, and a HUD populated with zeros would be misleading.
+
 ### HUD geometry
 
 | Constant | Value |
@@ -252,6 +268,48 @@ One line per change from the stability tracker's change log. Promotions first, t
 | `ac-dc-hud-collapsed` | JSON-serialized array of collapsed section names in the Token HUD |
 
 Cache sub-view defaults: L0 and active expanded; L1/L2/L3 collapsed.
+
+### Cache warmer status row
+
+Always-on indicator at the top of the Cache sub-view, above the cache-hit-rate header. Complementary to the floating `ac-cache-warmup-progress` overlay (which handles the loud final-30 s heads-up regardless of which dialog tab is open) — the dialog row covers the silent 240 s before that, plus the disabled state.
+
+**Render states:**
+
+| State | Glyph | Label | Right-side affordance | Border |
+|---|---|---|---|---|
+| Active | 🌡️ | `Cache warmer active — next firing in` | Countdown `M:SS` (or `Ns` under a minute) | Blue left-border (`var(--accent-primary, #58a6ff)`) |
+| Disabled by runtime failure | ⚠️ | `Warmer disabled — <last_disabled_reason>` | Re-enable button | Red left-border (`#f85149`) |
+| Disabled by config | 🌡️ | `Warmer disabled in config` | None | Grey left-border (`#8b949e`) |
+| Pre-first-fetch | 🌡️ | `Cache warmer status…` | None | None (placeholder, prevents pop-in) |
+
+**Polling:**
+
+| Aspect | Value |
+|---|---|
+| Interval | 1000 ms |
+| Lifecycle | Started on Cache sub-view activation; stopped on sub-view switch or component unmount |
+| Inactive cost | Zero — Budget sub-view does not poll |
+| RPC | `LLMService.get_cache_warmer_status()` — read-only, safe for collaborators |
+
+**Re-enable button:**
+
+| Aspect | Value |
+|---|---|
+| RPC | `LLMService.enable_cache_warmer()` — localhost-only mutation |
+| Behavior | Calls `CacheWarmer.enable()` server-side; clears `last_disabled_reason` and reschedules next firing |
+| Feedback | Success toast `"Cache warmer re-enabled"` (`type: success`); on restricted error, info toast with the server's reason; on transport error, error toast with the message |
+| Disabled when | `!rpcConnected` |
+
+**Countdown formatting:**
+
+`_formatWarmerCountdown(seconds)` returns:
+- `"—"` when `seconds` is null/non-finite
+- `"Ns"` when `seconds < 60` (ceiled to whole seconds)
+- `"M:SS"` otherwise (minutes floored, seconds ceiled to fill, zero-padded)
+
+**Drift between layers:**
+
+The dialog row's countdown and the floating overlay's countdown can drift by ±1 s during the visible-30 s phase — the overlay updates per-broadcast (server-side ticker), the dialog row updates per-poll-tick (client-side). Drift is harmless; the two indicators agreeing reinforces the "warmer is firing" signal.
 
 ## Cross-references
 

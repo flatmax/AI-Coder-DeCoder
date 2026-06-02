@@ -10,6 +10,10 @@
 
 import { ALT_ARROW_DEBOUNCE_MS } from './constants.js';
 import { viewerForPath } from '../viewer-routing.js';
+import {
+  captureDiffViewportState,
+  applyDiffViewportState,
+} from './viewport.js';
 
 export function getFileNav(host) {
   return host.shadowRoot?.querySelector('ac-file-nav') || null;
@@ -84,6 +88,23 @@ export function onGridKeyDown(host, event) {
  * Fire the pending Alt+Arrow navigation. Called from the
  * debounce timer and from Alt release (`_onGridKeyUp`).
  * No-op when nothing is pending.
+ *
+ * For diff-viewer targets, this captures the outgoing
+ * file's scroll/cursor/preview state into an in-session
+ * per-path map keyed on the host (`_diffViewportMemory`),
+ * then restores the incoming file's stored state after
+ * `openFile` resolves. The SVG viewer is multi-file in
+ * memory (`_files[]` with per-entry viewBox) so it
+ * already preserves viewport across alt-arrow swaps —
+ * the diff viewer is single-file (D18) and discards
+ * Monaco model state on `swapModel`, so we mirror the
+ * SVG viewer's behaviour at the shell level for the
+ * diff path.
+ *
+ * The map is in-memory only; it does not persist across
+ * page reloads. `loadViewportState` / `doReopenLastFile`
+ * cover the reload case via the single localStorage slot
+ * keyed by repo + last-open-file.
  */
 export function flushAltArrowPending(host) {
   const targetPath = host._altArrowPending;
@@ -91,13 +112,36 @@ export function flushAltArrowPending(host) {
   if (!targetPath) return;
   const target = viewerForPath(targetPath);
   if (!target) return;
+  if (!host._diffViewportMemory) {
+    host._diffViewportMemory = new Map();
+  }
+  // Capture the outgoing diff-viewer state synchronously,
+  // before updateComplete resolves and openFile runs.
+  // Reading after openFile would see the new file's
+  // (zero) scroll, not the outgoing file's.
+  const outgoing = captureDiffViewportState(host);
+  if (outgoing && outgoing.path && outgoing.path !== targetPath) {
+    host._diffViewportMemory.set(outgoing.path, outgoing);
+  }
   host.updateComplete.then(() => {
     const viewer =
       target === 'svg'
         ? host.shadowRoot?.querySelector('ac-svg-viewer')
         : host.shadowRoot?.querySelector('ac-diff-viewer');
-    if (viewer) {
-      viewer.openFile({ path: targetPath });
+    if (!viewer) return;
+    const result = viewer.openFile({ path: targetPath });
+    if (target !== 'diff') return;
+    const stored = host._diffViewportMemory.get(targetPath);
+    if (!stored) return;
+    // openFile is async on the diff viewer (fetches file
+    // content). Wait for it before restoring; if it isn't
+    // a thenable for some reason, fall back to a one-frame
+    // delay so the editor at least has a chance to mount.
+    const apply = () => applyDiffViewportState(host, stored);
+    if (result && typeof result.then === 'function') {
+      result.then(apply);
+    } else {
+      requestAnimationFrame(apply);
     }
   });
 }
@@ -124,9 +168,10 @@ export function onGridKeyUp(host, event) {
 }
 
 /**
- * Global Alt+digit / Alt+M keyboard shortcuts. Fires
- * on any keydown that isn't hitting the capture-phase
- * grid handler (Alt+Arrow is already consumed there).
+ * Global Alt+digit / Alt+M / Ctrl+Shift+F keyboard
+ * shortcuts. Fires on any keydown that isn't hitting
+ * the capture-phase grid handler (Alt+Arrow is already
+ * consumed there).
  *
  *   Alt+1 → Chat (returns to default body from any overlay)
  *   Alt+2 → Context tab
@@ -134,6 +179,10 @@ export function onGridKeyUp(host, event) {
  *   Alt+4 → Convert tab (when available — silently consumed
  *           but no-op when Convert is unavailable)
  *   Alt+M → Toggle minimize
+ *   Ctrl+Shift+F → Activate file search in the chat panel,
+ *           prefilling with the current text selection
+ *           (single-line selections only; multi-line and
+ *           empty selections produce an empty prefill).
  *
  * Alt+1 acts as a "back to chat" shortcut equivalent to
  * clicking the back arrow on whichever overlay is open.
@@ -142,7 +191,14 @@ export function onGridKeyUp(host, event) {
  * availability — muscle memory shouldn't shift just because
  * markitdown is or isn't installed. Alt+4 is the optional
  * Convert slot.
-🟨🟨🟨 REPL
+ *
+ * Ctrl+Shift+F MUST capture window.getSelection() as its
+ * first synchronous operation. Any deferred work (Lit
+ * property updates, requestAnimationFrame, RPC calls) loses
+ * the selection because the focus changes that follow tab
+ * switching clear it. See specs-reference/5-webapp/shell.md
+ * § Ctrl+Shift+F selection capture.
+
  *
  * Guards:
  *   - Skips when Ctrl / Meta / Shift are also held.
@@ -162,6 +218,39 @@ export function onGridKeyUp(host, event) {
  * browser chrome level) don't steal the keystroke.
  */
 export function onGlobalKeyDown(host, event) {
+  // Ctrl+Shift+F — activate file search. Read the
+  // selection FIRST, synchronously, before any await
+  // or property update. Tab switching clears focus
+  // which clears the selection; reading later returns
+  // empty.
+  if (
+    event.ctrlKey
+    && event.shiftKey
+    && !event.altKey
+    && !event.metaKey
+    && (event.key === 'f' || event.key === 'F')
+  ) {
+    event.preventDefault();
+    const raw = window.getSelection?.()?.toString?.() || '';
+    const trimmed = raw.trim();
+    // Multi-line selections aren't sensible as a search
+    // query (file search is single-line by design), so
+    // discard them. Empty selection → empty prefill,
+    // which just opens the search bar with focus.
+    const prefill = trimmed && !trimmed.includes('\n')
+      ? trimmed
+      : '';
+    host._switchTab('files');
+    host.updateComplete.then(() => {
+      const filesTab = host.shadowRoot?.querySelector('ac-files-tab');
+      const chatPanel = filesTab?.shadowRoot?.querySelector('ac-chat-panel');
+      if (chatPanel
+          && typeof chatPanel.activateFileSearch === 'function') {
+        chatPanel.activateFileSearch(prefill);
+      }
+    });
+    return;
+  }
   if (!event.altKey) return;
   if (event.ctrlKey || event.metaKey || event.shiftKey) return;
   // Alt+M — toggle minimize. Accept both cases so

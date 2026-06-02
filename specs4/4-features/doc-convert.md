@@ -37,12 +37,10 @@ For each PDF page:
 - SVG export emits text as text elements rather than decomposing each character into individual glyph paths
 - Keeps sentences intact, produces smaller SVGs, makes text selectable and searchable in the SVG viewer
 - Extracted text is always written to the companion markdown file for searchability and LLM context
-- Origin-aware dedup: whether SVG text survives depends on how the page reached the PyMuPDF stage
-- For real PDFs (report pages where text flows in paragraphs), `<text>` and `<tspan>` elements are stripped from the SVG when the page also has extractable text — the markdown carries the paragraphs, the SVG carries only the graphics, and duplicating text in both places would bloat output without benefit
-- For presentations (pptx/odp routed through LibreOffice → intermediate PDF → PyMuPDF), text stripping is disabled on every page — slide text like "Runtime Environment" or "Calibration Unit" labels the shapes in a diagram and dropping it leaves meaningless coloured rectangles
-- Figure-only pages (no extractable text) always keep their SVG text regardless of source — any `<text>` element there probably labels the figure itself (axis labels, legend entries)
-- Result for PDFs — text in markdown, graphics in SVG, no duplication on text pages
-- Result for presentations — text in both SVG (so the diagram renders correctly) and markdown (for grep)
+- SVGs preserve every `<text>` element verbatim. Body prose appears in both the markdown (for grep / LLM context) and the SVG (for visual fidelity). The cost is mild output bloat; the alternative — stripping body prose from the SVG when the markdown has it — silently lost diagram labels because PyMuPDF's text-anchor coordinates and figure bboxes live in different coordinate spaces with no reliable conversion between them
+- Result for PDFs — text in both markdown and SVG; diagrams remain self-describing because their internal labels are never at risk
+- Result for presentations — same as PDFs: text in both artifacts, layout preserved
+- The legacy `doc_convert.strip_svg_text_when_present` config flag is deprecated and ignored. Setting the flag logs a one-time warning at startup
 ### SVG Image Externalization
 - SVGs produced by the PDF pipeline may contain embedded base64 image data URIs
 - Externalization scans the SVG, extracts the embedded images, saves them as separate files
@@ -101,12 +99,6 @@ Images embedded in source documents (e.g. figures in docx) are extracted alongsi
 ### Filename Convention
 - Image filenames derived from source document stem with a numeric suffix
 - Extracted SVG images carry a provenance header and are indexed by the doc index
-## Clean Working Tree Gate
-Document convert requires a clean git working tree — same prerequisite as code review mode. Ensures:
-- All new/modified files from conversion are clearly attributable to the convert operation
-- User can review diffs, edit results, and commit — or discard everything via git commands
-- No risk of interleaving conversion output with unrelated uncommitted changes
-If the working tree is dirty when the user opens the Doc Convert tab, a message is shown telling the user to commit or stash changes first. Conversion controls are disabled until clean.
 ## Provenance Headers
 Converted files carry self-documenting provenance via HTML/XML comments — no external manifest file needed.
 ### Markdown Output Header
@@ -159,9 +151,9 @@ Visible only when:
 2. At least one convertible file exists in the repository
 When hidden — no tab slot consumed, layout identical to a repo without convertible documents.
 ### Layout
-- Status banner — shows working tree state (clean or dirty with remediation); controls below disabled when dirty
-- Toolbar — select-all / deselect-all buttons, file count summary, "Convert Selected (N)" button disabled when nothing selected or tree dirty
+- Toolbar — select-all / deselect-all buttons, file count summary, "Convert Selected (N)" button disabled when nothing selected
 - Filter bar — text input with fuzzy matching against file paths; match count when filter active
+🟨🟨🟨 REPL
 - File list — scrollable list of convertible files (filtered when filter active), each row shows checkbox, file path, size, status badge
 - Progress area — replaces the file list during conversion, showing per-file progress
 
@@ -191,25 +183,24 @@ Status determined by:
 ### Conversion Flow
 
 1. User opens Doc Convert tab
-2. Clean tree check runs — if dirty, banner warning, controls disabled
-3. File list populates with all convertible files and status badges
-4. User selects files via checkboxes (none pre-selected — opt-in)
-5. User clicks Convert Selected
-6. Progress view replaces file list, showing per-file status — pending, converting, done, failed with reason
-7. Conversions run sequentially
-8. Data URI images in markdown output decoded and saved as separate files
-9. On completion — progress view shows summary with counts
-10. File picker refreshes — new files appear as untracked
-11. User reviews diffs in the diff viewer, edits if needed, commits normally
+2. File list populates with all convertible files and status badges
+3. User selects files via checkboxes (none pre-selected — opt-in)
+4. User clicks Convert Selected
+5. Progress view replaces file list, showing per-file status — pending, converting, done, failed with reason
+6. Conversions run sequentially
+7. Data URI images in markdown output decoded and saved as separate files
+8. On completion — progress view shows summary with counts
+9. File picker refreshes — new files appear as untracked
+10. User reviews diffs in the diff viewer, edits if needed, commits normally
 
 ### Conflict Handling
 
 When a conflict file is selected and converted:
 
 - Existing output is overwritten with converted content (including docuvert provenance header)
-- Since working tree was clean on entry, overwritten file appears as a modification in git diff
+- Overwritten file appears as a modification in git diff
 - User can review the diff and decide whether to commit or discard
-- Safe because clean-tree gate ensures original content is committed and recoverable
+- Originals remain recoverable via git as long as they were previously committed
 
 ### Re-Conversion of Stale Files
 
@@ -219,7 +210,7 @@ When a stale file is selected and converted:
 - Provenance header updated with new source hash
 - Any images listed in the old header but not produced by the new conversion are deleted (orphan cleanup)
 - New images are written and linked
-- If user edited the output since last conversion, those edits are lost — acceptable because the clean-tree gate means edits are committed and recoverable, and the stale badge explicitly signals outdated content
+- If user edited the output since last conversion, those edits are lost — the stale badge explicitly signals outdated content. Edits committed to git remain recoverable
 
 ## Directory Exclusions
 
@@ -277,15 +268,14 @@ The feature is entirely optional — document index, mode toggle, keyword enrich
 
 ## Service Methods
 
-- Scan convertible files — returns list with status badges; includes clean-tree check
-- Convert files — returns started status immediately, progress via events, requires clean tree; falls back to synchronous conversion if no event loop
+- Scan convertible files — returns list with status badges
+- Convert files — returns started status immediately, progress via events; falls back to synchronous conversion if no event loop
 - Is available — returns dict with availability of all dependencies
 
 ## Invariants
 
 - Converted files always carry a docuvert provenance header
 - Provenance header is invisible to markdown renderers and to the document index extractor
-- Clean working tree is enforced — a dirty tree can never trigger conversion
 - Error results are never silently overwritten — all conversion failures are reported
 - Re-conversion of a stale file always cleans up orphan images from the previous conversion
 - Files without a docuvert header are always treated as conflict — never silently overwritten without user selection

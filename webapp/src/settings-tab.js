@@ -264,6 +264,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
     .toggle-switch.on .toggle-track {
       background: var(--accent-primary, #58a6ff);
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.55),
+        0 0 8px rgba(88, 166, 255, 0.45);
     }
     .toggle-thumb {
       position: absolute;

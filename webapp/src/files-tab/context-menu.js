@@ -423,12 +423,30 @@ export async function dispatchLoadInPanel(host, path, panel) {
     // content from multiple sources.
     const lastSlash = path.lastIndexOf('/');
     const basename = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+    // SVG files route to the SVG viewer's panel slots so
+    // the user gets a rendered visual comparison rather
+    // than raw XML text in the diff viewer. The SVG
+    // viewer's loadPanel method takes the same
+    // (content, panel, label) shape; the shell decides
+    // which viewer the event targets based on event name.
+    //
+    // The full repo-relative path also flows through in
+    // the event detail so the SVG viewer can save the
+    // right pane back to disk via Repo.write_file when
+    // the user edits it. The diff viewer doesn't need
+    // it (the path-aware save flow there is handled by
+    // the diff viewer's own multi-file model), but
+    // sending it on both event types keeps the dispatch
+    // shape uniform.
+    const isSvg = /\.svg$/i.test(basename);
+    const eventName = isSvg ? 'load-svg-panel' : 'load-diff-panel';
     window.dispatchEvent(
-      new CustomEvent('load-diff-panel', {
+      new CustomEvent(eventName, {
         detail: {
           content,
           panel,
           label: basename,
+          path,
         },
         bubbles: false,
       }),

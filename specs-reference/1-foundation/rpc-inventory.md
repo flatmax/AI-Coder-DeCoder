@@ -202,6 +202,7 @@ CurrentState:
     selected_files: list[string]
     excluded_index_files: list[string]
     streaming_active: bool
+    active_streams: list[ActiveStream]    // empty when no stream in flight
     session_id: string
     repo_name: string
     init_complete: bool
@@ -211,7 +212,14 @@ CurrentState:
     doc_convert_available: bool
     review_state: ReviewState         // always present; check `active` flag
     enrichment_status: "unavailable" | "pending" | "building" | "complete"
+
+ActiveStream:
+    request_id: string
+    agent_id: string | null            // null for main scope; agent's id for agent scope
+    accumulated_content: string        // chunks received so far; full content semantics
 ```
+
+The `active_streams` field lets a refreshed browser re-attach to its own in-flight stream after the WebSocket reconnects. See `specs-reference/3-llm/streaming.md` § Stream resumption snapshot for the per-entry field semantics; see `specs4/3-llm/streaming.md` § Stream Resumption After Reconnect for the behavioral contract.
 
 `MessageDict` shape matches the JSONL record schema in `specs-reference/3-llm/history.md` § JSONL record schema. For in-memory use, the `id`, `session_id`, and `timestamp` fields may be absent; the core triad is `{role, content, system_event?}`.
 

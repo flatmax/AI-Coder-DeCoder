@@ -157,6 +157,16 @@ export class ContextTab extends RpcMixin(LitElement) {
      * the user's choice survives across sessions.
      */
     _sortMode: { type: String, state: true },
+    /**
+     * Cache-warmer status — ``{enabled, seconds_remaining,
+     * interval_seconds, last_disabled_reason}`` from the
+     * backend, or ``null`` when not yet fetched. Refreshed
+     * every second while the Cache sub-view is active so
+     * the always-on countdown stays smooth. The floating
+     * ``ac-cache-warmup-progress`` overlay handles the loud
+     * 30 s heads-up; this row is the ambient companion.
+     */
+    _warmerStatus: { type: Object, state: true },
   };
 
   static styles = css`
@@ -813,6 +823,70 @@ export class ContextTab extends RpcMixin(LitElement) {
     .modal-error {
       color: #f85149;
     }
+
+    /* Cache warmer status row — always visible inside the
+     * Cache sub-view header. Compact single-line layout
+     * matching the existing cache-hit-label aesthetic. */
+    .warmer-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.6rem;
+      margin-bottom: 0.75rem;
+      background: rgba(22, 27, 34, 0.4);
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-radius: 6px;
+      font-size: 0.75rem;
+    }
+    .warmer-status.enabled {
+      border-left: 3px solid var(--accent-primary, #58a6ff);
+    }
+    .warmer-status.disabled-runtime {
+      border-left: 3px solid #f85149;
+    }
+    .warmer-status.disabled-config {
+      border-left: 3px solid #8b949e;
+    }
+    .warmer-glyph {
+      flex-shrink: 0;
+      font-size: 0.875rem;
+    }
+    .warmer-label {
+      flex: 1;
+      color: var(--text-secondary, #8b949e);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .warmer-label strong {
+      color: var(--text-primary, #c9d1d9);
+      font-weight: 600;
+    }
+    .warmer-countdown {
+      flex-shrink: 0;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      color: var(--accent-primary, #58a6ff);
+      font-variant-numeric: tabular-nums;
+    }
+    .warmer-reenable-btn {
+      flex-shrink: 0;
+      background: rgba(248, 81, 73, 0.1);
+      border: 1px solid rgba(248, 81, 73, 0.35);
+      color: #f85149;
+      padding: 0.2rem 0.5rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.7rem;
+      font-family: inherit;
+    }
+    .warmer-reenable-btn:hover:not(:disabled) {
+      background: rgba(248, 81, 73, 0.2);
+      border-color: rgba(248, 81, 73, 0.6);
+    }
+    .warmer-reenable-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
   `;
 
   constructor() {
@@ -827,6 +901,29 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._budgetExpanded = this._loadBudgetExpanded();
     this._cacheFilter = '';
     this._sortMode = this._loadSortMode();
+    this._warmerStatus = null;
+    // Pending-refresh flag. When an event fires while a
+    // refresh is already in flight, ``_refresh`` would
+    // previously short-circuit on ``this._loading`` and
+    // silently drop the second event — leaving the UI
+    // showing data from the first fetch even though the
+    // backend state advanced. Common case: ``stream-complete``
+    // and ``files-changed`` (from post-response edit
+    // application) fire close together; the first refresh
+    // wins, the second drops, and the Context tab shows
+    // pre-edit tier state until the user manually clicks
+    // refresh. The flag instead schedules a second fetch
+    // immediately after the current one completes.
+    this._refreshPending = false;
+    // Polling timer for cache-warmer status. Active only
+    // while the Cache sub-view is the current view —
+    // started by ``_startWarmerPolling`` when the user
+    // switches in, cancelled by ``_stopWarmerPolling`` when
+    // they switch out or the component unmounts. 1 s tick
+    // is fast enough for a smooth countdown without paying
+    // meaningful RPC cost (the status read is a four-field
+    // dict from in-memory state).
+    this._warmerPollTimer = null;
     // Active tab ID — driven by `active-tab-changed`
     // events from the chat panel. Default 'main' so
     // the initial breakdown fetch targets the main
@@ -839,16 +936,31 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._activeTabId = 'main';
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
+    this._onPostResponseComplete = this._onPostResponseComplete.bind(this);
     this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onModeChanged = this._onModeChanged.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onActiveTabChanged = this._onActiveTabChanged.bind(this);
+    this._onCompactionEvent = this._onCompactionEvent.bind(this);
+    this._onAgentsSpawned = this._onAgentsSpawned.bind(this);
+    this._onAgentClosed = this._onAgentClosed.bind(this);
+    this._onAgentModeChanged = this._onAgentModeChanged.bind(this);
     this._onModalKeyDown = this._onModalKeyDown.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
+    // post-response-complete fires after _post_response
+    // finishes (tier state settled, compaction done). The
+    // earlier stream-complete event races _update_stability
+    // and yields stale tier data; this one is the "now
+    // it's consistent" signal. Both listeners are kept —
+    // the _refreshPending queue collapses overlapping
+    // fetches automatically.
+    window.addEventListener(
+      'post-response-complete', this._onPostResponseComplete,
+    );
     window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('mode-changed', this._onModeChanged);
     // session-changed fires on startup after _restore_last_session
@@ -866,16 +978,48 @@ export class ContextTab extends RpcMixin(LitElement) {
     window.addEventListener(
       'active-tab-changed', this._onActiveTabChanged,
     );
+    // Compaction events — when the compactor fires, history
+    // tracker entries get wiped and replaced. The tier state
+    // shifts: graduated history items move to L3, recent
+    // items stay in active, and the summary message takes
+    // their place. Without this listener, the Cache sub-view
+    // shows pre-compaction history entries that no longer
+    // exist on the tracker until the next stream-complete.
+    window.addEventListener(
+      'compaction-event', this._onCompactionEvent,
+    );
+    // Agent lifecycle — these change the live-agents roster
+    // shown in the Budget sub-view (the ``agents-roster``
+    // section). Without these listeners, the roster goes
+    // stale after a spawn/close until the next event from
+    // a different channel triggers a refresh.
+    window.addEventListener('agents-spawned', this._onAgentsSpawned);
+    window.addEventListener('agent-closed', this._onAgentClosed);
+    window.addEventListener(
+      'agent-mode-changed', this._onAgentModeChanged,
+    );
     window.addEventListener('keydown', this._onModalKeyDown);
   }
 
   disconnectedCallback() {
+    this._stopWarmerPolling();
     window.removeEventListener('stream-complete', this._onStreamComplete);
+    window.removeEventListener(
+      'post-response-complete', this._onPostResponseComplete,
+    );
     window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener('mode-changed', this._onModeChanged);
     window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener(
       'active-tab-changed', this._onActiveTabChanged,
+    );
+    window.removeEventListener(
+      'compaction-event', this._onCompactionEvent,
+    );
+    window.removeEventListener('agents-spawned', this._onAgentsSpawned);
+    window.removeEventListener('agent-closed', this._onAgentClosed);
+    window.removeEventListener(
+      'agent-mode-changed', this._onAgentModeChanged,
     );
     window.removeEventListener('keydown', this._onModalKeyDown);
     super.disconnectedCallback();
@@ -883,6 +1027,14 @@ export class ContextTab extends RpcMixin(LitElement) {
 
   onRpcReady() {
     this._refresh();
+    // If the persisted sub-view is Cache, start the
+    // warmer-status poll loop now that RPC is up.
+    // _setSubview's polling toggle only runs on user
+    // switches; the initial render needs an explicit
+    // start.
+    if (this._subview === 'cache') {
+      this._startWarmerPolling();
+    }
   }
 
   /**
@@ -917,6 +1069,18 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._refresh();
   }
 
+  _onPostResponseComplete() {
+    // Authoritative tier-state refresh. Fires AFTER
+    // _post_response runs _update_stability, so the
+    // breakdown returns post-update tier state. The
+    // _refreshPending queue collapses this with the
+    // earlier stream-complete-driven fetch into "first
+    // fetch + one queued fetch" — exactly what we want:
+    // the queued fetch reads the now-consistent state
+    // and the UI updates without a manual refresh click.
+    this._refresh();
+  }
+
   _onFilesChanged() {
     this._refresh();
   }
@@ -937,8 +1101,49 @@ export class ContextTab extends RpcMixin(LitElement) {
     this._refresh();
   }
 
+  _onCompactionEvent(event) {
+    // Only refresh on stages that actually mutate tracker
+    // state. The "compacting" stage is a heads-up that work
+    // is starting; the breakdown at that point still
+    // reflects pre-compaction state. The "compacted" stage
+    // fires after history is replaced and tracker history
+    // entries are purged — that's the moment the breakdown
+    // needs to update. "compaction_error" leaves state
+    // unchanged so no refresh is needed.
+    const stage = event?.detail?.event?.stage;
+    if (stage === 'compacted') {
+      this._refresh();
+    }
+  }
+
+  _onAgentsSpawned() {
+    this._refresh();
+  }
+
+  _onAgentClosed() {
+    this._refresh();
+  }
+
+  _onAgentModeChanged() {
+    this._refresh();
+  }
+
   async _refresh() {
-    if (this._loading) return;
+    // When a refresh is already in flight, mark a follow-up
+    // and return. The in-flight call's ``finally`` block
+    // checks ``_refreshPending`` and re-fires once. This
+    // collapses any number of overlapping events into "one
+    // current fetch + one queued fetch", which is enough
+    // because the queued fetch always reads the latest
+    // backend state. Without this, ``stream-complete``
+    // followed quickly by ``files-changed`` (from
+    // post-response edit application) would silently drop
+    // the second event and leave the UI showing pre-edit
+    // tier state until the next manual refresh.
+    if (this._loading) {
+      this._refreshPending = true;
+      return;
+    }
     if (!this.rpcConnected) return;
     this._loading = true;
     // Resolve the active tab into an agent_tag for the
@@ -977,6 +1182,15 @@ export class ContextTab extends RpcMixin(LitElement) {
       }
     } finally {
       this._loading = false;
+      // Drain any pending refresh that arrived while this
+      // one was in flight. Single follow-up — multiple
+      // events that fired during the in-flight window all
+      // collapse into one re-fire, since each subsequent
+      // event just re-sets the already-true flag.
+      if (this._refreshPending) {
+        this._refreshPending = false;
+        this._refresh();
+      }
     }
   }
 
@@ -1067,6 +1281,112 @@ export class ContextTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Cache warmer status (cache sub-view only)
+  // ---------------------------------------------------------------
+  //
+  // Always-on indicator showing whether the warmer is active
+  // and when it'll next fire. The floating overlay
+  // (``ac-cache-warmup-progress``) handles the visible 30 s
+  // heads-up; this row covers the silent 240 s before that
+  // and the disabled state. Polled at 1 s while the Cache
+  // sub-view is open; idle otherwise so we don't waste RPCs
+  // on an inactive view.
+
+  _startWarmerPolling() {
+    if (this._warmerPollTimer !== null) return;
+    this._fetchWarmerStatus();
+    this._warmerPollTimer = setInterval(
+      () => this._fetchWarmerStatus(),
+      1000,
+    );
+  }
+
+  _stopWarmerPolling() {
+    if (this._warmerPollTimer === null) return;
+    clearInterval(this._warmerPollTimer);
+    this._warmerPollTimer = null;
+  }
+
+  async _fetchWarmerStatus() {
+    if (!this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.get_cache_warmer_status',
+      );
+      if (result && typeof result === 'object' && !result.error) {
+        this._warmerStatus = result;
+      }
+    } catch (err) {
+      // Method may not exist on older backends — degrade
+      // silently. The status row will stay hidden.
+      const msg = err?.message || '';
+      if (!msg.includes('method not found')) {
+        console.warn(
+          '[context-tab] get_cache_warmer_status failed', err,
+        );
+      }
+    }
+  }
+
+  async _reEnableWarmer() {
+    if (!this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract(
+        'LLMService.enable_cache_warmer',
+      );
+      if (result && typeof result === 'object' && result.error) {
+        const isRestricted = result.error === 'restricted';
+        this._emitToast(
+          isRestricted
+            ? (result.reason || 'Re-enable is localhost-only')
+            : `Re-enable failed: ${result.error}`,
+          isRestricted ? 'info' : 'error',
+        );
+        return;
+      }
+      // Backend returns the actual post-enable state. When
+      // the warmer is unplugged at the entry point, enable()
+      // is a no-op and `result.enabled` stays false; surface
+      // the disabled reason so the user sees what actually
+      // happened rather than a misleading success message.
+      const actuallyEnabled = !!(
+        result && typeof result === 'object' && result.enabled
+      );
+      if (actuallyEnabled) {
+        this._emitToast('Cache warmer re-enabled', 'success');
+      } else {
+        const reason = result?.last_disabled_reason
+          || 'warmer is currently disabled';
+        this._emitToast(
+          `Cache warmer stayed disabled: ${reason}`,
+          'info',
+        );
+      }
+      this._fetchWarmerStatus();
+    } catch (err) {
+      const msg = err?.message || String(err);
+      this._emitToast(`Re-enable failed: ${msg}`, 'error');
+    }
+  }
+
+  /**
+   * Format ``seconds_remaining`` as a ``M:SS`` countdown,
+   * or ``Ns`` when under a minute. ``null`` returns an
+   * em-dash placeholder.
+   */
+  _formatWarmerCountdown(seconds) {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
+      return '—';
+    }
+    if (seconds < 60) {
+      return `${Math.ceil(seconds)}s`;
+    }
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.ceil(seconds - mins * 60);
+    return `${mins}:${String(secs).padStart(2, '0')}`;
+  }
+
+  // ---------------------------------------------------------------
   // Map-block modal (item click → view index block)
   // ---------------------------------------------------------------
   //
@@ -1148,6 +1468,14 @@ export class ContextTab extends RpcMixin(LitElement) {
     try {
       localStorage.setItem(_SUBVIEW_KEY, v);
     } catch (_) {}
+    // Cache sub-view shows the warmer status row with a
+    // 1 Hz countdown; budget sub-view doesn't. Start
+    // polling on entry to cache, stop on exit.
+    if (v === 'cache') {
+      this._startWarmerPolling();
+    } else {
+      this._stopWarmerPolling();
+    }
   }
 
   /**
@@ -1724,6 +2052,8 @@ export class ContextTab extends RpcMixin(LitElement) {
         </button>
       </div>
 
+      ${this._renderWarmerStatus()}
+
       <div class="cache-header">
         <div class="cache-hit-label">
           <span>Cache Performance</span>
@@ -1879,7 +2209,14 @@ export class ContextTab extends RpcMixin(LitElement) {
 
   _renderCacheItem(item, block, tierColor) {
     const icon = _TYPE_ICONS[item.type] || '📋';
-    const hasN = typeof item.n === 'number' && typeof item.threshold === 'number';
+    // History items piggyback on file graduation — they
+    // don't age on their own N counter, so showing N/
+    // threshold for them would be misleading. Suppress
+    // the bar and label for type=history regardless of
+    // what the backend reports.
+    const hasN = item.type !== 'history'
+      && typeof item.n === 'number'
+      && typeof item.threshold === 'number';
     const nPct = hasN && item.threshold > 0
       ? Math.min(100, (item.n / item.threshold) * 100)
       : 0;
@@ -1909,6 +2246,84 @@ export class ContextTab extends RpcMixin(LitElement) {
             `
           : ''}
         <span class="tier-item-tokens">${_fmtTokens(item.tokens || 0)}</span>
+      </div>
+    `;
+  }
+
+  _renderWarmerStatus() {
+    const s = this._warmerStatus;
+    if (!s) {
+      // Pre-first-fetch — render a placeholder so the row
+      // doesn't pop in after a 1 s delay. Also covers the
+      // case where the backend RPC isn't available
+      // (older builds) and the status will never land.
+      return html`
+        <div class="warmer-status">
+          <span class="warmer-glyph" aria-hidden="true">🌡️</span>
+          <span class="warmer-label">Cache warmer status…</span>
+        </div>
+      `;
+    }
+    const enabled = !!s.enabled;
+    const reason = s.last_disabled_reason;
+    const remaining = s.seconds_remaining;
+    const interval = s.interval_seconds || 270;
+    if (enabled) {
+      // Active — show "next firing in M:SS" or "warming…"
+      // when the timer is null but enabled (between
+      // firing and reschedule, briefly). The interval is
+      // shown as a hint so the user knows the cadence.
+      const countdown = this._formatWarmerCountdown(remaining);
+      const intervalMin = Math.round(interval / 60 * 10) / 10;
+      return html`
+        <div
+          class="warmer-status enabled"
+          title="Cache warmer keeps the provider's prompt cache hot during idle periods. Fires every ${intervalMin} min."
+        >
+          <span class="warmer-glyph" aria-hidden="true">🌡️</span>
+          <span class="warmer-label">
+            <strong>Cache warmer active</strong> — next firing in
+          </span>
+          <span class="warmer-countdown">${countdown}</span>
+        </div>
+      `;
+    }
+    if (reason) {
+      // Auto-disabled by runtime failure. Show the reason
+      // and a Re-enable button. The reason text comes from
+      // the backend verbatim — typically "warm-up failed:
+      // <classification>" or "retry budget exceeded — ...".
+      return html`
+        <div
+          class="warmer-status disabled-runtime"
+          title="The cache warmer auto-disabled after a runtime failure. Click Re-enable to restart it."
+        >
+          <span class="warmer-glyph" aria-hidden="true">⚠️</span>
+          <span class="warmer-label">
+            <strong>Warmer disabled</strong> — ${reason}
+          </span>
+          <button
+            class="warmer-reenable-btn"
+            ?disabled=${!this.rpcConnected}
+            @click=${() => this._reEnableWarmer()}
+            title="Restart the cache warmer"
+          >Re-enable</button>
+        </div>
+      `;
+    }
+    // Disabled by config — no reason populated, just the
+    // enabled flag is false. No re-enable button (the user
+    // must edit app.json and reload, which is a different
+    // flow).
+    return html`
+      <div
+        class="warmer-status disabled-config"
+        title="The cache warmer is disabled in app.json. Edit cache_warmup.enabled to turn it on."
+      >
+        <span class="warmer-glyph" aria-hidden="true">🌡️</span>
+        <span class="warmer-label">
+          <strong>Warmer disabled</strong> in config
+        </span>
       </div>
     `;
   }

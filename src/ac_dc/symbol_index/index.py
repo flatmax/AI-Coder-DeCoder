@@ -544,6 +544,102 @@ class SymbolIndex:
         return self._cache.get_signature_hash(rel)
 
     # ------------------------------------------------------------------
+    # Per-directory accessors (D36 dir-blocks)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dir_of(rel_path: str) -> str:
+        """Return the directory portion of a repo-relative path.
+
+        Top-level files use the empty string as their directory
+        key — `_format_dir_label` renders that as `<root>` so
+        the rendered block has a non-empty header.
+        """
+        idx = rel_path.rfind("/")
+        if idx == -1:
+            return ""
+        return rel_path[:idx]
+
+    def get_indexed_directories(self) -> list[str]:
+        """Return a sorted list of directories with at least one indexed file.
+
+        Used by the stability tracker at init time to enumerate
+        the universe of `symbols:<dir>` keys.
+        """
+        dirs: set[str] = set()
+        for path in self._all_symbols:
+            dirs.add(self._dir_of(path))
+        return sorted(dirs)
+
+    def get_dir_symbols_block(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Render the directory's symbol-table block.
+
+        Concatenates each indexed file's compact block (from
+        :meth:`get_file_symbol_block`) for files in the directory,
+        excluding those currently in Active full-text. Returns
+        empty string when the directory has no eligible files.
+
+        D36 dir-block — one entry per source file in the directory
+        minus any currently in Active full-text.
+        """
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._all_symbols
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        if not files:
+            return ""
+        blocks: list[str] = []
+        for path in files:
+            block = self.get_file_symbol_block(path)
+            if block:
+                blocks.append(block)
+        return "\n\n".join(blocks)
+
+    def get_dir_signature_hash(
+        self,
+        directory: str,
+        exclude_active: set[str] | None = None,
+    ) -> str:
+        """Return a stable hash over the directory's symbol-table contents.
+
+        Concatenates per-file signature hashes in sorted filename
+        order, then SHA-256s the result. Excludes any file in
+        Active full-text — content moving in or out of Active
+        therefore changes the directory's hash, demoting the
+        block to Active to re-ride flux on the next freeze.
+        """
+        import hashlib
+
+        excluded = exclude_active or set()
+        files = sorted(
+            path for path in self._all_symbols
+            if self._dir_of(path) == directory
+            and path not in excluded
+        )
+        h = hashlib.sha256()
+        for path in files:
+            sig = self._cache.get_signature_hash(path) or ""
+            h.update(path.encode("utf-8"))
+            h.update(b"\0")
+            h.update(sig.encode("utf-8"))
+            h.update(b"\0")
+        return h.hexdigest()
+
+    def get_indexed_files(self) -> list[str]:
+        """Return all repo-relative paths currently indexed.
+
+        Sorted for determinism. Used by the stability tracker to
+        partition files into dir-blocks.
+        """
+        return sorted(self._all_symbols.keys())
+
+    # ------------------------------------------------------------------
     # LSP queries
     # ------------------------------------------------------------------
 

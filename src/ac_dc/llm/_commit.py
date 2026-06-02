@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from ac_dc.llm._helpers import (
     _classify_litellm_error,
     _resolve_max_output_tokens,
+    retry_litellm_completion,
 )
 from ac_dc.token_counter import TokenCounter
 
@@ -114,8 +115,28 @@ async def commit_all_background(
             return
 
         # Generate commit message via the smaller model.
+        # ``None`` signals the aux LLM call failed (network
+        # error, auth, model unreachable, etc.). In that case
+        # we must NOT commit with a fallback message — the
+        # user explicitly clicked "commit" expecting a real
+        # generated message, and silently committing with
+        # "chore: update files" hides the failure. Surface it
+        # so they can retry or fix their config.
         message = await generate_commit_message(service, diff)
-        if not message:
+        if message is None:
+            await service._broadcast_event_async(
+                "commitResult",
+                {
+                    "error": (
+                        "Could not reach the commit-message model. "
+                        "Check your LLM configuration and network "
+                        "connection, then try again. Your staged "
+                        "changes are unchanged."
+                    )
+                },
+            )
+            return
+        if not message.strip():
             message = "chore: update files"
 
         # Commit.
@@ -168,19 +189,25 @@ async def commit_all_background(
 async def generate_commit_message(
     service: "LLMService",
     diff: str,
-) -> str:
+) -> str | None:
     """Generate a commit message via the smaller model.
 
     Runs the blocking LiteLLM call in the aux executor.
-    Failures (rate limit, auth, context overflow, unknown
-    model) are classified and logged at WARNING; returns
-    empty string on any failure so the caller substitutes
-    a default message.
+    Returns the generated message on success, or ``None``
+    when the LLM call could not be made or failed (rate
+    limit, auth, context overflow, unknown model, missing
+    litellm). The caller treats ``None`` as a hard error
+    and surfaces it to the user rather than committing
+    with a fallback message.
+
+    A successful call that returns empty content is
+    returned as ``""`` — the caller may choose to
+    substitute a default in that narrow case.
     """
     try:
         import litellm
     except ImportError:
-        return ""
+        return None
 
     prompt = service._config.get_commit_prompt()
     assert service._main_loop is not None
@@ -196,15 +223,26 @@ async def generate_commit_message(
 
     def _call() -> str:
         try:
-            response = litellm.completion(
-                model=service._config.smaller_model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": diff},
-                ],
-                stream=False,
-                max_tokens=max_output,
-                timeout=service._config.aux_request_timeout_seconds,
+            # Retry via :func:`retry_litellm_completion` rather
+            # than LiteLLM's ``num_retries=`` for predictable
+            # exponential backoff + Retry-After honoring. See
+            # the matching comment in ``_streaming.py``.
+            def _commit_completion() -> Any:
+                return litellm.completion(
+                    model=service._config.smaller_model,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": diff},
+                    ],
+                    stream=False,
+                    max_tokens=max_output,
+                    timeout=service._config.aux_request_timeout_seconds,
+                )
+            response = retry_litellm_completion(
+                litellm,
+                _commit_completion,
+                max_attempts=service._config.num_retries + 1,
+                context="commit message",
             )
             return response.choices[0].message.content or ""
         except Exception as exc:
@@ -217,7 +255,7 @@ async def generate_commit_message(
                 info.get("model"),
                 info.get("message"),
             )
-            return ""
+            return None
 
     return await loop.run_in_executor(service._aux_executor, _call)
 

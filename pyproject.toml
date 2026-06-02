@@ -50,6 +50,10 @@ dependencies = [
     "trafilatura>=1.12",
     # AWS SDK — required for Bedrock LLM providers.
     "boto3>=1.34",
+    # Retry/backoff library — LiteLLM uses this when num_retries > 0.
+    # Not declared as a hard dependency by litellm itself, but required
+    # in practice because AC-DC always passes num_retries into completion().
+    "tenacity>=8.0",
 ]
 
 [project.optional-dependencies]

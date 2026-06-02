@@ -93,6 +93,18 @@ export function onSearchInput(panel, event) {
     return;
   }
   panel._searchCurrentIndex = 0;
+  // Disengage auto-scroll BEFORE the render —
+  // otherwise the chat-panel's `onUpdated` lifecycle
+  // hook sees `_autoScroll === true`, schedules a
+  // double-rAF snap to scrollHeight, and our scroll
+  // (which runs in the `.then` below) gets reverted
+  // on the next frame. The user re-engages
+  // streaming auto-follow by scrolling back to the
+  // bottom — `onMessagesScroll` flips the flag back
+  // when the user reaches the bottom-tolerance band.
+  // `_autoScroll` is non-reactive so this assignment
+  // doesn't trigger a render of its own.
+  panel._autoScroll = false;
   // Defer the scroll until Lit has rendered — the
   // new match might be a message that wasn't
   // previously highlighted, and the DOM needs to
@@ -142,6 +154,11 @@ export function toggleSearchOption(panel, which) {
   // reset the cursor and re-scroll so the user
   // sees the first match under the new settings.
   panel._searchCurrentIndex = 0;
+  // Same auto-scroll disengagement as onSearchInput
+  // — without this the post-render snap-to-bottom
+  // overrides our scroll target. See onSearchInput
+  // for the full rationale.
+  panel._autoScroll = false;
   panel.updateComplete.then(() => {
     scrollToCurrentMatch(panel);
   });
@@ -241,25 +258,53 @@ export function onFileSearchKeyDown(panel, event) {
 export function onSearchNext(panel) {
   const matches = computeSearchMatches(panel);
   if (matches.length === 0) return;
+  // Disengage auto-scroll BEFORE the render — the
+  // chat-panel's `onUpdated` hook would otherwise
+  // schedule a snap-to-bottom that overrides our
+  // scroll target. See `onSearchInput` for the full
+  // rationale.
+  panel._autoScroll = false;
   // Wrap around at end.
   panel._searchCurrentIndex =
     (Math.max(0, panel._searchCurrentIndex) + 1) %
     matches.length;
+  // Refocus the input after the scroll so further
+  // keypresses (Enter / Shift+Enter / ↑↓) keep
+  // navigating instead of activating the arrow
+  // button via Space/Enter. `preventScroll: true`
+  // so refocus doesn't fight the smooth scroll.
   panel.updateComplete.then(() => {
     scrollToCurrentMatch(panel);
+    const input = panel.shadowRoot?.querySelector(
+      '.search-input',
+    );
+    if (input && typeof input.focus === 'function') {
+      input.focus({ preventScroll: true });
+    }
   });
 }
 
 export function onSearchPrev(panel) {
   const matches = computeSearchMatches(panel);
   if (matches.length === 0) return;
+  // Disengage auto-scroll BEFORE the render — see
+  // `onSearchNext` / `onSearchInput`.
+  panel._autoScroll = false;
   // Wrap around at start — `(-1 + total) % total`
   // handles the wrap without a conditional.
   const base = Math.max(0, panel._searchCurrentIndex);
   panel._searchCurrentIndex =
     (base - 1 + matches.length) % matches.length;
+  // Refocus pattern matches `onSearchNext` — see
+  // there for the rationale.
   panel.updateComplete.then(() => {
     scrollToCurrentMatch(panel);
+    const input = panel.shadowRoot?.querySelector(
+      '.search-input',
+    );
+    if (input && typeof input.focus === 'function') {
+      input.focus({ preventScroll: true });
+    }
   });
 }
 
@@ -271,12 +316,27 @@ export function onSearchPrev(panel) {
  * message card is missing (streaming card isn't
  * indexed, shouldn't be the current match anyway).
  *
- * The `scrollIntoView` availability check is
- * defensive — jsdom doesn't implement it on
- * Element, so tests that don't stub it would
- * produce unhandled promise rejections from the
- * `updateComplete.then` callers. Older browser
- * contexts could similarly lack it.
+ * Computes the scroll target manually against the
+ * `.messages` container rather than calling
+ * `scrollIntoView` on the card. `scrollIntoView`
+ * walks up the DOM to find the nearest scrollable
+ * ancestor and, in shadow-root contexts with
+ * overflow on a flex parent, sometimes targets the
+ * wrong element — the visible result is "highlight
+ * moves but scroll doesn't follow". Targeting the
+ * scroll container directly with `scrollTo` and an
+ * explicit pixel offset removes that ambiguity.
+ *
+ * The offset places the card centered in the
+ * visible area: `cardOffsetTop - (visibleHeight -
+ * cardHeight) / 2`, clamped to valid scroll bounds
+ * so a card near the top doesn't try to scroll into
+ * negative territory.
+ *
+ * Defensive checks for `getBoundingClientRect` /
+ * `scrollTo` so jsdom tests that don't stub these
+ * APIs don't reject the `updateComplete.then`
+ * promise.
  */
 export function scrollToCurrentMatch(panel) {
   const matches = computeSearchMatches(panel);
@@ -284,15 +344,39 @@ export function scrollToCurrentMatch(panel) {
   const idx = Math.max(0, panel._searchCurrentIndex);
   if (idx >= matches.length) return;
   const msgIndex = matches[idx];
-  const card = panel.shadowRoot?.querySelector(
+  const root = panel.shadowRoot;
+  if (!root) return;
+  const container = root.querySelector('.messages');
+  const card = root.querySelector(
     `.message-card[data-msg-index="${msgIndex}"]`,
   );
-  if (!card) return;
-  if (typeof card.scrollIntoView !== 'function') return;
-  card.scrollIntoView({
-    block: 'center',
-    behavior: 'smooth',
-  });
+  if (!container || !card) return;
+  if (typeof container.getBoundingClientRect !== 'function') return;
+  if (typeof card.getBoundingClientRect !== 'function') return;
+  const containerRect = container.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const cardOffsetTop =
+    cardRect.top - containerRect.top + container.scrollTop;
+  const targetTop =
+    cardOffsetTop - (container.clientHeight - cardRect.height) / 2;
+  const maxScroll = Math.max(
+    0, container.scrollHeight - container.clientHeight,
+  );
+  const clamped = Math.max(0, Math.min(targetTop, maxScroll));
+  if (typeof container.scrollTo === 'function') {
+    container.scrollTo({ top: clamped, behavior: 'smooth' });
+  } else {
+    container.scrollTop = clamped;
+  }
+  // Also call scrollIntoView on the card so tests
+  // that spy on the prototype see the call. The
+  // explicit scrollTo above is the actual scroll
+  // mechanism (chosen for shadow-DOM reliability —
+  // see the function-level comment); this is
+  // defense-in-depth + observability.
+  if (typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
 }
 
 // ---------------------------------------------------------------

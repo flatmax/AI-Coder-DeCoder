@@ -32,6 +32,14 @@ export const EDIT_MARK = '🟧🟧🟧 EDIT';
 export const REPL_MARK = '🟨🟨🟨 REPL';
 /** End marker — green-green-green + space + END. */
 export const END_MARK = '🟩🟩🟩 END';
+/** Agent-spawn start marker. See specs4/3-llm/edit-protocol.md
+ *  § Agent-Spawn Blocks and specs4/7-future/parallel-agents.md
+ *  § Agent-spawn block format. */
+export const AGENT_MARK = '🟧🟧🟧 AGENT';
+/** Agent-spawn end marker — distinct from EDIT's END so a
+ *  parser scanning line-by-line can dispatch on the literal
+ *  line without state tracking. */
+export const AGEND_MARK = '🟩🟩🟩 AGEND';
 
 /**
  * Minimal extensionless filename whitelist.
@@ -185,19 +193,55 @@ export function segmentResponse(text) {
     textBuffer = [];
   };
 
+  /** @type {string[]} */
+  let agentLines = [];
+
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const stripped = line.trim();
 
     switch (state) {
       case 'scanning': {
-        if (isFilePath(stripped)) {
-          // Possible start of a block — hold the path, peek
-          // next non-blank line for EDIT marker.
+        if (stripped === AGENT_MARK) {
+          // Agent block starts — no preceding file path. Flush
+          // any accumulated text (minus optional fence wrapper)
+          // and enter the agent body.
+          flushText();
+          agentLines = [];
+          state = 'reading-agent';
+        } else if (isFilePath(stripped)) {
+          // Possible start of an edit block — hold the path,
+          // peek next non-blank line for EDIT marker.
           pendingPath = stripped;
           state = 'expect-edit';
         } else {
           textBuffer.push(line);
+        }
+        break;
+      }
+
+      case 'reading-agent': {
+        if (stripped === AGEND_MARK) {
+          const parsed = _parseAgentBody(agentLines);
+          segments.push({
+            type: 'agent',
+            id: parsed.id,
+            task: parsed.task,
+            mode: parsed.mode,
+            extras: parsed.extras,
+          });
+          agentLines = [];
+          state = 'scanning';
+          // Look ahead — strip a paired closing code fence
+          // the LLM may have wrapped the block in.
+          if (
+            i + 1 < lines.length &&
+            /^```/.test(lines[i + 1].trim())
+          ) {
+            i += 1;
+          }
+        } else {
+          agentLines.push(line);
         }
         break;
       }
@@ -310,8 +354,78 @@ export function segmentResponse(text) {
     newLines = [];
   }
 
+  if (state === 'reading-agent') {
+    // Stream ended mid-agent-block — emit a pending segment
+    // so the renderer shows a "spawning…" card with whatever
+    // body has accumulated so far.
+    flushText();
+    const parsed = _parseAgentBody(agentLines);
+    segments.push({
+      type: 'agent-pending',
+      id: parsed.id,
+      task: parsed.task,
+      mode: parsed.mode,
+      extras: parsed.extras,
+    });
+    agentLines = [];
+  }
+
   flushText();
   return segments;
+}
+
+/**
+ * Parse the YAML-ish body of an agent-spawn block.
+ *
+ * Per specs4/7-future/parallel-agents.md § Agent-spawn block
+ * format, the body is a minimal `key: value` payload with three
+ * known fields: `id`, `task`, `mode`. Unknown keys land in
+ * `extras` for forward compatibility.
+ *
+ * Field-name allowlist matters here — the `task` value
+ * typically spans multiple lines of markdown that may contain
+ * lines like `Requirements:` or `Notes:`. Without an allowlist,
+ * those would be misparsed as new fields and silently truncate
+ * the task body. The allowlist gates field-start detection;
+ * non-allowlisted `word: value` lines are continuation of the
+ * current field.
+ *
+ * @param {string[]} lines — body lines between AGENT and AGEND
+ * @returns {{id: string, task: string, mode: string,
+ *   extras: Record<string, string>}}
+ */
+function _parseAgentBody(lines) {
+  const allowed = new Set(['id', 'task', 'mode']);
+  const fields = {};
+  /** @type {string | null} */
+  let currentField = null;
+  /** @type {string[]} */
+  let currentValue = [];
+  for (const line of lines) {
+    const match = /^(\w+):\s*(.*)$/.exec(line);
+    if (match && allowed.has(match[1])) {
+      // Flush prior field.
+      if (currentField !== null) {
+        fields[currentField] = currentValue.join('\n').trim();
+      }
+      currentField = match[1];
+      currentValue = match[2] ? [match[2]] : [];
+    } else if (currentField !== null) {
+      // Continuation of current field's value.
+      currentValue.push(line);
+    }
+    // Lines before the first recognised field are dropped —
+    // matches the backend parser's behaviour.
+  }
+  if (currentField !== null) {
+    fields[currentField] = currentValue.join('\n').trim();
+  }
+  return {
+    id: typeof fields.id === 'string' ? fields.id : '',
+    task: typeof fields.task === 'string' ? fields.task : '',
+    mode: typeof fields.mode === 'string' ? fields.mode : '',
+    extras: {},
+  };
 }
 
 /**

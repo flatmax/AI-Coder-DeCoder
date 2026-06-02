@@ -645,6 +645,37 @@ class ConfigManager:
         return value if value > 0 else 60.0
 
     @property
+    def num_retries(self) -> int:
+        """Number of LiteLLM retries on retryable errors.
+
+        LiteLLM retries with exponential backoff on the typed
+        subset of exceptions it considers transient —
+        ``RateLimitError``, ``APIConnectionError``,
+        ``ServiceUnavailableError``, ``Timeout``, and provider-
+        specific 5xx wrappers. Non-retryable errors
+        (``AuthenticationError``, ``BadRequestError``,
+        ``ContextWindowExceededError``, ``NotFoundError``) fail
+        immediately regardless of this setting.
+
+        For streaming calls the retry applies only to the
+        initial connection — LiteLLM can't replay a partial
+        response. The Bedrock rate-limit pattern we see in
+        practice ("Too many requests, please wait") raises
+        BEFORE any tokens stream, so this catches it cleanly.
+
+        Default 10. A burst of parallel agents against a
+        provider with tight per-minute limits can produce
+        several 429s back-to-back; 10 retries with exponential
+        backoff covers the typical clear window. Non-positive
+        values are clamped to 0 (no retry).
+        """
+        try:
+            value = int(self.llm_config.get("num_retries", 10))
+        except (TypeError, ValueError):
+            return 10
+        return value if value >= 0 else 0
+
+    @property
     def cache_buffer_multiplier(self) -> float:
         """Multiplier applied to the cache minimum to compute target.
 
@@ -853,10 +884,62 @@ class ConfigManager:
         effort = effort_raw.strip().lower()
         if effort not in ("low", "medium", "high"):
             effort = "medium"
+        # First-chunk watchdog override for reasoning calls.
+        # Adaptive-thinking models (Opus 4.5+, Bedrock Opus 4.7
+        # in particular) can take several minutes between
+        # ``litellm.completion`` returning the stream iterator
+        # and the first SSE content chunk arriving — the
+        # provider runs the entire reasoning pass before
+        # yielding any tokens. The default 60s first-chunk
+        # watchdog is correct for non-reasoning calls (a 60s
+        # silence after stream-open really does mean a hung
+        # connection) but trips spuriously on reasoning calls
+        # of any non-trivial complexity.
+        #
+        # Default 900s (15 min). Adaptive-thinking calls on
+        # Opus + xhigh effort with large contexts are
+        # observed taking up to ~15 minutes between
+        # stream-open and the first content chunk; the
+        # whole reasoning pass runs server-side before any
+        # token streams. Lower in user config if you want a
+        # tighter safety net and don't run xhigh reasoning;
+        # non-positive values fall back to the default.
+        try:
+            first_chunk_reasoning = float(
+                section.get("first_chunk_timeout_seconds", 900)
+            )
+        except (TypeError, ValueError):
+            first_chunk_reasoning = 900.0
+        if first_chunk_reasoning <= 0:
+            first_chunk_reasoning = 900.0
+        # Overall request-timeout override for reasoning
+        # calls. ``litellm.completion`` is given this as
+        # its ``timeout`` kwarg — the absolute wall-clock
+        # cap on the request, including the long pre-stream
+        # reasoning phase. Must be >= the first-chunk
+        # watchdog above, otherwise LiteLLM aborts the call
+        # before the watchdog gets a chance to fire and the
+        # finer-grained diagnostic is lost.
+        #
+        # Default 1200s (20 min) — first-chunk watchdog
+        # default + 5 min headroom for the post-first-chunk
+        # streaming phase itself. Lower in user config if
+        # you've also lowered the first-chunk watchdog;
+        # non-positive values fall back to the default.
+        try:
+            request_reasoning = float(
+                section.get("request_timeout_seconds", 1200)
+            )
+        except (TypeError, ValueError):
+            request_reasoning = 1200.0
+        if request_reasoning <= 0:
+            request_reasoning = 1200.0
         return {
             "enabled": bool(section.get("enabled", False)),
             "budget_tokens": budget,
             "effort": effort,
+            "first_chunk_timeout_seconds": first_chunk_reasoning,
+            "request_timeout_seconds": request_reasoning,
         }
 
     @property
@@ -885,6 +968,173 @@ class ConfigManager:
         Anthropic).
         """
         return self.reasoning_config["effort"]
+
+    @property
+    def reasoning_first_chunk_timeout_seconds(self) -> float:
+        """Convenience — first-chunk watchdog for reasoning calls.
+
+        Used by the streaming pipeline when ``thinking`` is
+        active on the request. See ``reasoning_config`` for
+        the prose rationale.
+        """
+        return self.reasoning_config["first_chunk_timeout_seconds"]
+
+    @property
+    def reasoning_request_timeout_seconds(self) -> float:
+        """Convenience — overall request-timeout for reasoning calls.
+
+        Used by the streaming pipeline when ``thinking`` is
+        active on the request. Passed to
+        ``litellm.completion`` as its ``timeout`` kwarg —
+        the absolute wall-clock cap. See
+        ``reasoning_config`` for the prose rationale.
+        """
+        return self.reasoning_config["request_timeout_seconds"]
+
+    @property
+    def cache_warmup_config(self) -> dict[str, Any]:
+        """Cache warm-keeper section with defaults filled in.
+
+        Drives the periodic warm-up call that keeps the
+        provider's prompt cache hot during user idle
+        periods. Two fields:
+
+        - ``enabled`` — whether the warmer runs at all.
+          Default True. Auto-disable on failure or retry-
+          budget exhaustion is independent of this config
+          value (the warmer flips its own runtime flag);
+          re-enabling after auto-disable requires a manual
+          toggle via the future RPC.
+        - ``interval_seconds`` — seconds of idle time
+          before each warm-up firing. Default 270 (4:30),
+          well inside Anthropic's 5-minute cache TTL with
+          margin for retry waits. Values <= 0 fall back to
+          the default — a zero-interval warmer would burn
+          continuous cycles for no benefit.
+
+        Spec: ``cache_warmup`` section of ``app.json``.
+        """
+        section = self.app_config.get("cache_warmup", {})
+        if not isinstance(section, dict):
+            section = {}
+        try:
+            interval = int(section.get("interval_seconds", 270))
+        except (TypeError, ValueError):
+            interval = 270
+        if interval <= 0:
+            interval = 270
+        return {
+            "enabled": bool(section.get("enabled", True)),
+            "interval_seconds": interval,
+        }
+
+    @property
+    def cache_tiering_config(self) -> dict[str, Any]:
+        """Cache-tiering (membrane / flux controller) section.
+
+        Drives the rectified-GHK flux controller that manages
+        promotion across the Active → L3 → L2 → L1 membranes.
+        See ``specs4/3-llm/cache-tiering.md`` and
+        ``specs4/impl-history/decisions.md`` D35. Only the
+        rectified-GHK variant is supported — the linear and
+        bidirectional-GHK forms from earlier revisions are
+        retired.
+
+        Fields:
+
+        - ``flux_threshold`` — accumulator unit charge before
+          a promotion fires. Default 1.0. Values <= 0 fall
+          back to 1.0 (a non-positive threshold would fire
+          unboundedly).
+        - ``membranes`` — list of three per-membrane
+          parameter dicts, one each for Active→L3, L3→L2,
+          L2→L1 (in that order). The L1→L0 membrane is
+          intentionally absent (L0 is content-typed, D27).
+          Each entry is a dict with ``P`` (permeability,
+          float), ``V_T`` (soft-knee voltage scale, float),
+          ``n_admit`` (integer minimum-age admission floor),
+          ``pick_mode`` (``"smallest"`` or ``"oldest"``), and
+          ``admission_only`` (bool — when True the membrane
+          fires whenever an aged-enough mover exists, with no
+          flux equation; used on Active→L3, where V coupling
+          degenerates because active is structurally lighter
+          than the cache).
+          Missing entries are filled with defaults; entries
+          past index 2 are ignored.
+
+        Defaults sourced from the synth-tuner's headline fit
+        (``runs/opt-run2/best_params.json`` in
+        ``~/flatmax/personal.work/research/cache.tiering``):
+        ``P = 1.616399379428934e-06``,
+        ``V_T = 98952.34312610888``, ``n_admit = 3`` and
+        ``admission_only = True`` on Active→L3, plain flux
+        with ``n_admit = 0`` elsewhere.
+
+        Spec: ``cache_tiering`` section of ``app.json``.
+        """
+        section = self.app_config.get("cache_tiering", {})
+        if not isinstance(section, dict):
+            section = {}
+
+        try:
+            threshold = float(section.get("flux_threshold", 1.0))
+        except (TypeError, ValueError):
+            threshold = 1.0
+        if threshold <= 0.0:
+            threshold = 1.0
+
+        default_p = 1.616399379428934e-06
+        default_vt = 98952.34312610888
+        membrane_defaults = [
+            {"P": default_p, "V_T": default_vt, "n_admit": 3,
+             "pick_mode": "oldest", "admission_only": True},
+            {"P": default_p, "V_T": default_vt, "n_admit": 0,
+             "pick_mode": "smallest", "admission_only": False},
+            {"P": default_p, "V_T": default_vt, "n_admit": 0,
+             "pick_mode": "smallest", "admission_only": False},
+        ]
+        raw_list = section.get("membranes", [])
+        if not isinstance(raw_list, list):
+            raw_list = []
+        membranes: list[dict[str, Any]] = []
+        for idx, default in enumerate(membrane_defaults):
+            entry = raw_list[idx] if idx < len(raw_list) else {}
+            if not isinstance(entry, dict):
+                entry = {}
+            try:
+                p_val = float(entry.get("P", default["P"]))
+            except (TypeError, ValueError):
+                p_val = default["P"]
+            try:
+                vt_val = float(entry.get("V_T", default["V_T"]))
+            except (TypeError, ValueError):
+                vt_val = default["V_T"]
+            try:
+                n_admit = int(entry.get("n_admit", default["n_admit"]))
+            except (TypeError, ValueError):
+                n_admit = default["n_admit"]
+            if n_admit < 0:
+                n_admit = 0
+            pick = entry.get("pick_mode", default["pick_mode"])
+            if pick not in {"smallest", "oldest"}:
+                pick = default["pick_mode"]
+            admission_only = bool(
+                entry.get("admission_only", default["admission_only"])
+            )
+            membranes.append(
+                {
+                    "P": p_val,
+                    "V_T": vt_val,
+                    "n_admit": n_admit,
+                    "pick_mode": pick,
+                    "admission_only": admission_only,
+                }
+            )
+
+        return {
+            "flux_threshold": threshold,
+            "membranes": membranes,
+        }
 
     @property
     def agents_config(self) -> dict[str, Any]:

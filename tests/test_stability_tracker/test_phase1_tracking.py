@@ -11,7 +11,7 @@ from ac_dc.stability_tracker import (
     TrackedItem,
 )
 
-from .conftest import _active_item, _drive_n_unchanged
+from .conftest import _active_item, _drive_n_unchanged, xfail_legacy_cascade
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ class TestActiveItemTracking:
         tracker.update({"file:a.py": _active_item("h1", 150)})
         assert tracker.get_all_items()["file:a.py"].tokens == 150
 
+    @xfail_legacy_cascade
     def test_change_log_records_demotion(self) -> None:
         """Hash change after graduation is recorded in change log."""
         tracker = StabilityTracker()
@@ -166,19 +167,14 @@ class TestDepartedItemCleanup:
 class TestStaleRemoval:
     """Items whose file no longer exists are dropped."""
 
-    def test_stale_file_becomes_marker(self) -> None:
-        """file:* for deleted path transitions to a deletion marker.
+    def test_stale_file_removed(self) -> None:
+        """file:* for deleted path is removed from the tracker.
 
-        Under the L0-content-typed model (D27), ``file:``
-        entries don't disappear on disk-deletion — they
-        become deletion markers so the LLM continues to see
-        a representation of the file (the constant marker
-        text) until the next ``rebuild_cache`` re-extracts
-        L0's aggregate maps. Dedicated coverage of the
-        marker contract lives in
-        :class:`TestDeletionMarkerInPhase0`; this test pins
-        the membership half of the invariant — the entry
-        stays present after Phase 0 sees the deletion.
+        Under D36 the deletion-marker mechanism is gone — when
+        a file's path leaves the existing_files set, the
+        ``file:`` entry simply leaves the tracker. The parent
+        directory's dir-block re-renders without the missing
+        file's signature on the next turn.
         """
         tracker = StabilityTracker()
         tracker.update(
@@ -186,40 +182,20 @@ class TestStaleRemoval:
             existing_files={"a.py"},
         )
         tracker.update(
-            {"file:a.py": _active_item()},
+            {},
             existing_files=set(),  # a.py deleted
         )
-        assert tracker.has_item("file:a.py") is True
-        assert tracker.is_deleted("file:a.py") is True
+        assert tracker.has_item("file:a.py") is False
 
-    def test_stale_symbol_removed(self) -> None:
-        """symbol:* for deleted path is dropped."""
+    def test_dir_block_unaffected_by_stale_check(self) -> None:
+        """Dir-block keys (no file path) are not subject to stale removal."""
         tracker = StabilityTracker()
         tracker.update(
-            {"symbol:a.py": _active_item()},
-            existing_files={"a.py"},
+            {"symbols:src": _active_item()},
+            existing_files=set(),
         )
-        tracker.update({}, existing_files=set())
-        assert tracker.has_item("symbol:a.py") is False
-
-    def test_stale_doc_removed(self) -> None:
-        """doc:* for deleted path is dropped."""
-        tracker = StabilityTracker()
-        tracker.update(
-            {"doc:a.md": _active_item()},
-            existing_files={"a.md"},
-        )
-        tracker.update({}, existing_files=set())
-        assert tracker.has_item("doc:a.md") is False
-
-    def test_system_key_not_affected_by_stale_check(self) -> None:
-        """system:* keys have no file path; stale check skips them."""
-        tracker = StabilityTracker()
-        tracker.update(
-            {"system:prompt": _active_item()},
-            existing_files=set(),  # empty — but system still stays
-        )
-        assert tracker.has_item("system:prompt") is True
+        # Dir-block keys aren't validated against existing_files.
+        assert tracker.has_item("symbols:src") is True
 
     def test_url_key_not_affected_by_stale_check(self) -> None:
         """url:* keys have no file path; stale check skips them."""
@@ -242,17 +218,13 @@ class TestStaleRemoval:
     def test_stale_removal_change_logged(self) -> None:
         """Stale-handling fires a change-log entry.
 
-        For ``symbol:`` / ``doc:`` entries the legacy
-        "removed (stale)" wording is preserved; ``file:``
-        entries log the marker transition instead. We assert
-        the symbol-removal wording here since this test sits
-        in the legacy-removal class. Marker-specific log
-        content is covered by
-        :class:`TestDeletionMarkerInPhase0`.
+        Under D36 ``file:`` entries log a "stale" removal when
+        their path leaves the existing_files set — there's no
+        more deletion-marker transition.
         """
         tracker = StabilityTracker()
         tracker.update(
-            {"symbol:a.py": _active_item()},
+            {"file:a.py": _active_item()},
             existing_files={"a.py"},
         )
         tracker.update({}, existing_files=set())

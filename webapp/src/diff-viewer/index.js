@@ -66,6 +66,10 @@ import {
 } from './constants.js';
 import { DIFF_VIEWER_STYLES } from './styles.js';
 import {
+  copyPreviewAsHtml,
+  exportPreviewAsHtml,
+} from './export.js';
+import {
   fetchFileContent,
 } from './fetch.js';
 import {
@@ -137,6 +141,13 @@ export class DiffViewer extends LitElement {
      * the overlay.
      */
     _previewMode: { type: Boolean, state: true },
+    /**
+     * Whether the export-actions dropdown is open.
+     * Surfaces only when preview mode is active and the
+     * file is markdown. Dismissed by outside-click,
+     * Escape, or selecting an action.
+     */
+    _exportMenuOpen: { type: Boolean, state: true },
   };
 
   static styles = DIFF_VIEWER_STYLES;
@@ -151,6 +162,7 @@ export class DiffViewer extends LitElement {
     this._openingGeneration = 0;
     this._dirty = false;
     this._previewMode = false;
+    this._exportMenuOpen = false;
 
     // Monaco editor instance. Created on first openFile
     // or loadPanel; disposed when both slots clear.
@@ -194,6 +206,8 @@ export class DiffViewer extends LitElement {
     this._onEditorScroll = this._onEditorScroll.bind(this);
     this._onPreviewScroll = this._onPreviewScroll.bind(this);
     this._onPreviewClick = this._onPreviewClick.bind(this);
+    this._onExportMenuDocumentClick =
+      this._onExportMenuDocumentClick.bind(this);
   }
 
   // ---------------------------------------------------------------
@@ -498,6 +512,114 @@ export class DiffViewer extends LitElement {
   _currentContent() { return currentContent(this); }
 
   // ---------------------------------------------------------------
+  // Export menu
+  // ---------------------------------------------------------------
+
+  /**
+   * Toggle the export-actions dropdown. Called by the
+   * "⋯" affordance next to the Preview button.
+   */
+  _toggleExportMenu() {
+    if (this._exportMenuOpen) {
+      this._closeExportMenu();
+    } else {
+      this._openExportMenu();
+    }
+  }
+
+  _openExportMenu() {
+    this._exportMenuOpen = true;
+    // Capture-phase listener so an outside click closes
+    // the menu before any other handler reacts to it.
+    document.addEventListener(
+      'mousedown',
+      this._onExportMenuDocumentClick,
+      true,
+    );
+  }
+
+  _closeExportMenu() {
+    this._exportMenuOpen = false;
+    document.removeEventListener(
+      'mousedown',
+      this._onExportMenuDocumentClick,
+      true,
+    );
+  }
+
+  _onExportMenuDocumentClick(event) {
+    // composedPath includes shadow-DOM ancestors, so we
+    // can detect clicks inside our own menu.
+    const path = event.composedPath?.() || [];
+    if (path.includes(this)) {
+      // Click was inside the diff viewer — let the
+      // menu's own click handlers decide whether to
+      // close. Outside clicks dismiss.
+      return;
+    }
+    this._closeExportMenu();
+  }
+
+  async _onExportPreviewAsHtml() {
+    this._closeExportMenu();
+    const result = await exportPreviewAsHtml(this);
+    if (!result.ok) {
+      this.dispatchEvent(
+        new CustomEvent('show-toast', {
+          detail: {
+            message: `Export failed: ${result.error || 'unknown'}`,
+            type: 'error',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
+    }
+    let message = `Exported ${result.filename}`;
+    if (result.unresolvedImages?.length) {
+      const n = result.unresolvedImages.length;
+      message += ` (${n} unresolved image${n === 1 ? '' : 's'})`;
+    }
+    this.dispatchEvent(
+      new CustomEvent('show-toast', {
+        detail: { message, type: 'success' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  async _onCopyPreviewAsHtml() {
+    this._closeExportMenu();
+    const result = await copyPreviewAsHtml(this);
+    if (!result.ok) {
+      this.dispatchEvent(
+        new CustomEvent('show-toast', {
+          detail: {
+            message: `Copy failed: ${result.error || 'unknown'}`,
+            type: 'error',
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
+    }
+    const richNote = result.mode === 'rich' ? '' : ' (plain text)';
+    this.dispatchEvent(
+      new CustomEvent('show-toast', {
+        detail: {
+          message: `Copied preview as HTML${richNote}`,
+          type: 'success',
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  // ---------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------
 
@@ -517,6 +639,8 @@ export class DiffViewer extends LitElement {
       this._file !== null && isPreviewableFile(this._file);
     const showStatusLed = this._file !== null;
     if (this._previewMode && showPreviewButton) {
+      const showExportMenu =
+        this._file !== null && isMarkdownFile(this._file);
       return html`
         <div class="split-root">
           <div class="editor-pane">
@@ -528,12 +652,45 @@ export class DiffViewer extends LitElement {
             role="region"
             aria-label="Markdown preview"
           ></div>
-          <button
-            class="preview-button preview-button-split"
-            @click=${this._togglePreview}
-            title="Exit preview"
-            aria-label="Exit preview"
-          >✕ Preview</button>
+          ${showExportMenu
+            ? html`<div class="preview-button-group
+                preview-button-group-split">
+                <button
+                  class="preview-button preview-button-main"
+                  @click=${this._togglePreview}
+                  title="Exit preview"
+                  aria-label="Exit preview"
+                >📝</button>
+                <button
+                  class="preview-button preview-button-chevron"
+                  @click=${this._toggleExportMenu}
+                  title="More preview actions"
+                  aria-label="More preview actions"
+                  aria-haspopup="menu"
+                  aria-expanded=${this._exportMenuOpen}
+                >▾</button>
+              </div>`
+            : html`<button
+                class="preview-button preview-button-split"
+                @click=${this._togglePreview}
+                title="Exit preview"
+                aria-label="Exit preview"
+              >📝</button>`}
+          ${showExportMenu && this._exportMenuOpen
+            ? html`<div class="export-menu export-menu-split"
+                role="menu">
+                <button
+                  class="export-menu-item"
+                  role="menuitem"
+                  @click=${this._onExportPreviewAsHtml}
+                >Export as HTML…</button>
+                <button
+                  class="export-menu-item"
+                  role="menuitem"
+                  @click=${this._onCopyPreviewAsHtml}
+                >Copy as HTML</button>
+              </div>`
+            : ''}
           ${showStatusLed
             ? html`<div
                 class="status-led ${ledClass}"

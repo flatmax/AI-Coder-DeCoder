@@ -28,8 +28,25 @@ export function onNavigateFile(host, event) {
   const detail = event.detail || {};
   const path = detail.path;
   if (typeof path !== 'string' || !path) return;
-  const target = viewerForPath(path);
+  let target = viewerForPath(path);
   if (!target) return;
+  // Edit-block clicks on SVG files carry a scroll hint
+  // (`searchText` from the edit anchor, or a `line`).
+  // The visual SVG viewer can't honor those — its
+  // openFile signature has no notion of "scroll to this
+  // text" — so the anchor would be dropped and the user
+  // would land on the canvas with no indication of where
+  // the edit happened. Route to the text diff viewer
+  // instead when a scroll hint is present, matching what
+  // happens on every other file type. The user can
+  // toggle back to the visual editor from the diff
+  // viewer's mode switch if they want.
+  const hasScrollHint =
+    (typeof detail.searchText === 'string' && detail.searchText)
+    || typeof detail.line === 'number';
+  if (target === 'svg' && hasScrollHint) {
+    target = 'diff';
+  }
   // Save viewport of the current file before navigating
   // away (so switching files preserves the prior file's
   // scroll state in localStorage).
@@ -46,6 +63,17 @@ export function onNavigateFile(host, event) {
   if (!detail._fromNav && !detail._refresh) {
     const nav = host._getFileNav();
     if (nav) nav.openFile(path);
+  }
+  // Flip the active viewer to match the resolved target
+  // so the text diff is actually visible when we routed
+  // an SVG path there. Without this, the SVG viewer
+  // stays foregrounded and the diff viewer's openFile
+  // happens behind it. Only set when the routing
+  // diverges from the path's natural viewer — for
+  // non-SVG files, `active-file-changed` from the diff
+  // viewer takes care of foregrounding.
+  if (target === 'diff' && viewerForPath(path) === 'svg') {
+    host._activeViewer = 'diff';
   }
   // Defer until the viewers exist in the DOM. Normally
   // they're rendered from the first template commit and
@@ -86,6 +114,41 @@ export function onLoadDiffPanel(host, event) {
       return;
     }
     viewer.loadPanel(content, panel, label);
+  });
+}
+
+/**
+ * Route a `load-svg-panel` event to the SVG viewer's
+ * loadPanel method. Dispatched by the file picker's
+ * "Open in left/right panel" actions when the file is
+ * an SVG — the user wants a rendered visual comparison
+ * rather than the XML source. Shows the SVG viewer so
+ * the result is immediately visible.
+ *
+ * Two successive calls (one per panel) populate the
+ * left and right panes of the SVG viewer's existing
+ * two-pane layout, replacing whatever HEAD/working
+ * comparison was previously shown.
+ */
+export function onLoadSvgPanel(host, event) {
+  const detail = event.detail || {};
+  const { content, panel, label, path } = detail;
+  if (typeof content !== 'string') return;
+  if (panel !== 'left' && panel !== 'right') return;
+  host._activeViewer = 'svg';
+  host.updateComplete.then(() => {
+    const viewer =
+      host.shadowRoot?.querySelector('ac-svg-viewer');
+    if (!viewer || typeof viewer.loadPanel !== 'function') {
+      return;
+    }
+    // Path is optional — historical callers (or the
+    // history browser, which loads from session
+    // archives without an on-disk source) may pass
+    // null. The viewer treats absence as "no save
+    // target" and falls back to the in-memory
+    // snapshot semantics.
+    viewer.loadPanel(content, panel, label, path || null);
   });
 }
 

@@ -144,6 +144,67 @@ Broadcast to all connected clients before the stream starts, so collaborators se
 
 The sending client ignores this broadcast (it already added the message optimistically).
 
+### Cache warmer events — server → browser (broadcast)
+
+Four server-push callbacks driven by the cache warmer (see `specs4/3-llm/cache-tiering.md` § Cache Warmer for lifecycle). All four take a single `payload` dict argument; the frontend re-dispatches each as a window CustomEvent with `detail = payload`.
+
+#### `cacheWarmupCountdown(payload)`
+
+Fired once per second during the visible 30-second countdown phase before a warm-up call. The frontend renders a progress bar matching the retry-banner UX.
+
+| Field | Type | Notes |
+|---|---|---|
+| `seconds_remaining` | int | Counts down from `total` to 1 (1 is the last tick before firing) |
+| `total` | int | Initial countdown length in seconds. Drives the progress-bar denominator |
+
+#### `cacheWarmupFiring(payload)`
+
+Fired the moment the warm-up call goes out, after the countdown completes. Frontend flips the progress bar from countdown to spinner state. Empty payload `{}`.
+
+#### `cacheWarmupComplete(payload)`
+
+Fired after the warm-up call resolves. Frontend shows a brief flash and then fades out. On success, additional fields carry the warm-up's token counts so the Token HUD can render a per-warmup view; the same counts have already been accumulated into `_session_totals` server-side via `_accumulate_usage`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `success` | bool | `true` for a successful provider response. `false` for any exception (including retry-budget exhaustion) |
+| `reason` | string | Present when `success: false`. Human-readable failure description suitable for display |
+| `prompt_tokens` | int | Present when `success: true`. Total prompt tokens (cached + uncached) the provider charged for this warm-up |
+| `cache_read_tokens` | int | Present when `success: true`. Tokens read from the provider's prompt cache. High value indicates the warmer is working as intended |
+| `cache_write_tokens` | int | Present when `success: true`. Tokens written to the provider's prompt cache. Non-zero on the priming warm-up; ideally zero on subsequent warm-ups within the cache TTL |
+| `elapsed_seconds` | float | Present when `success: true`. Wall-clock duration of the call |
+
+A `success: false` event is followed by an automatic warmer disable — no further `cacheWarmup*` events fire until application restart or explicit re-enable.
+
+Backwards-compatible extension: clients that ignore the new token fields continue to work. The Token HUD's warm-up listener uses these fields to populate a `🌡️ Cache warmup`-headered HUD identical in shape to the per-turn HUD.
+
+#### `cacheWarmupCancelled(payload)`
+
+Fired when the visible countdown is aborted. Frontend dismisses the progress bar without a flash.
+
+| Field | Type | Notes |
+|---|---|---|
+| `reason` | string | `"user-activity"` (a user-initiated stream cancelled the timer) or `"stream-active"` (a stream was already in flight when the visible phase began) |
+
+### Stream resumption snapshot
+
+The `get_current_state` RPC response carries an `active_streams` field — one entry per in-flight stream — so a refreshed browser can re-attach to its own stream rather than receive the opaque single-stream-guard rejection. Schema for the RPC envelope itself lives in `specs-reference/1-foundation/rpc-inventory.md` § Service: LLMService; this section pins the per-entry field shape.
+
+Per-entry shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `request_id` | string | The stream's request ID. Frontend stamps this onto the resumed tab so subsequent `streamChunk` and `streamComplete` events route correctly via the existing request-ID lookup |
+| `agent_id` | string \| null | The owning agent's LLM-chosen id when the stream runs under an agent scope; `null` for the main user-facing scope. Frontend uses this to pick the target tab — `null` → main tab, otherwise the agent tab keyed by id |
+| `accumulated_content` | string | The chunks received so far, joined into one accumulated string (matches `streamChunk`'s "full content per chunk" semantics). Frontend installs this as the resumed tab's `streamingContent` so the partial response is visible immediately rather than waiting for the next chunk to arrive |
+
+Empty list when no stream is in flight. Child agent request IDs (the `{parent-id}-agent-NN` format) are emitted as their own entries with `agent_id` set to the agent's id; the frontend resolves them to the agent tab without reconstructing the parent relationship.
+
+Backed by two backend fields:
+
+- `_active_request_to_agent: dict[str, str | None]` — reverse map populated alongside the single-stream guard in `chat_streaming`, cleared in the streaming pipeline's `finally` block. Authoritative source of "is this request id currently in flight, and who owns it".
+- `_request_accumulators: dict[str, str]` — per-request accumulated content, populated by the worker thread on every chunk. Already used internally for terminal HUD output and post-response work; surfaced here so the resume snapshot can include partial response bytes.
+
 ### `commitResult(result)` — server → browser (broadcast)
 
 Broadcast to all clients when a commit completes.
@@ -255,6 +316,50 @@ The streaming pipeline guards against hung LLM calls with three independent time
 
 **Cancellation responsiveness.** The watchdog's `stream.close()` mechanism doubles as a faster cancellation path. The `_cancelled_requests` check inside the loop only fires between chunks, so a hung read would otherwise ignore a user's Stop click until the next chunk arrived — by which point the watchdog itself has fired anyway. Users see their terminal back within `chunk_timeout_seconds` worst-case regardless of whether they clicked Stop.
 
+### Retry schedule for `litellm.completion`
+
+Every `litellm.completion(...)` call is wrapped in an explicit retry loop with exponential backoff — LiteLLM's built-in `num_retries=` kwarg is NOT passed (stacking both layers would multiply waits and mask provider retry hints).
+
+| Parameter | Value | Notes |
+|---|---|---|
+| Max attempts | `config.num_retries + 1` | From `llm.json`; default `10 + 1 = 11` attempts total |
+| Base wait | 2.0s | First retry waits `2s + jitter` |
+| Growth | Exponential, base 2 | Attempt N waits `min(max, base × 2^N)` |
+| Max wait per attempt | 60s | Ceiling so total budget stays bounded |
+| Jitter | uniform(0, 1.5s) | Added to each computed wait |
+| `Retry-After` floor | Header value when present | Computed wait is used only when it exceeds the header value |
+
+Retryable error types (from `_classify_litellm_error`):
+
+- `rate_limit`
+- `api_connection`
+- `service_unavailable`
+- `timeout`
+
+Non-retryable types fail fast on the first attempt:
+
+- `authentication`
+- `bad_request`
+- `context_window_exceeded`
+- `not_found`
+- `llm_error` (unrecognized exceptions)
+
+**Streaming caveat.** For streaming calls, the retry applies only to stream establishment — the `litellm.completion(..., stream=True)` call itself, before any chunk is yielded. Once chunks start flowing, a mid-stream failure can't be replayed because the partial response has already been delivered to the UI through `streamChunk` events. The 429 pattern this wrapper protects against raises before any chunk arrives, so the retry still catches it cleanly.
+
+**Exhaustion behavior.** After `max_attempts` failures, the final exception is re-raised unchanged. The caller's existing error-classification path (`run_completion_sync` for streaming; the per-site try/except for commit + detector) handles the post-retry exception as it would have handled the original.
+
+**Log output.** Each retry emits a WARNING:
+
+```
+{context} attempt N/M failed (type=rate_limit); sleeping X.Ys before retry
+```
+
+Where `{context}` is the call-site label (`streaming completion`, `commit message`, `topic detector`). Final exhaustion emits:
+
+```
+{context} retries exhausted after M attempts: type=rate_limit provider=bedrock msg=...
+```
+
 ### Post-response compaction delay
 
 Compaction runs after `streamComplete` with a brief delay:
@@ -339,6 +444,8 @@ The assistant message card additionally renders the error via `_formatErrorBody`
 ### Aux LLM call classification
 
 The same classifier runs for aux calls (`_generate_commit_message`, topic detector). Those paths don't surface `error_info` to the browser — they degrade to safe defaults (empty commit message falls back to `"chore: update files"`; topic detection falls back to summarize case). Classification runs only to enrich the log line so operators can distinguish rate-limit failures from auth failures from context overflows across all LiteLLM call sites.
+
+Aux calls do not interact with the cache warmer. The warmer's `cancel`/`reset` hooks are wired only to the streaming lifecycle (top and bottom of `stream_chat`); commit-message generation and topic-boundary detection use a different model with an independent provider cache, so touching the main-model warmer's timer on an aux call would shift the next firing later for no caching benefit. See `specs4/3-llm/cache-tiering.md` § Cache Warmer / Scope.
 
 ## Dependency quirks
 

@@ -6,13 +6,15 @@ Search is integrated into the Files tab's chat panel action bar rather than occu
 
 The search area shares the chat panel's action bar with session buttons. It consists of:
 
-- Mode toggle (message / file) on the left of the input
+- Segmented mode control (💬 messages / 📁 files) on the left of the input — both buttons always visible when the search bar has focus; active mode highlighted with the accent halo treatment used by the code/doc primary-mode toggle. Clicking the inactive button switches modes; clicking the active button refocuses the input rather than toggling, since modes are mutually exclusive and re-clicking the active mode shouldn't change anything
 - Search input with inline toggle buttons on the right edge (ignore case, regex, whole word)
 - Match counter showing current position or total count
 - Navigation arrows (previous / next)
 - Session buttons (new session, history browser) — hidden when file search is active
 
 The input and its inline toggles share a single border. Focus-within highlights the border.
+
+When the search bar does not have focus, every affordance except the input itself collapses — segmented control, option toggles, counter, and nav arrows all hide via CSS (`.search-bar:not(:focus-within)`). The placeholder text (`Search messages…` or `Search files…`) indicates the active mode in the resting state. Clicking the input restores the full toolbar via the symmetric `:focus-within` rule. The collapsed rest state matches the intent of the action-bar `.search-collapsible` pattern: when the user is searching, search dominates the row; when they aren't, search yields its space to neighbouring controls.
 
 ## Dual Mode
 
@@ -42,7 +44,7 @@ Three toggle buttons inside the input's right edge:
 - Regex — default off; when on, the query is interpreted as a regular expression
 - Whole word — default off; when on, only whole-word matches count
 
-Toggle states persisted to localStorage under individual keys. Applied to both message and file search modes.
+Toggle states persisted to localStorage under individual keys. Applied to both message and file search modes. Active toggles use the same accent halo treatment (background tint, 1px ring, soft outer halo) as the segmented mode control — keeping the visual language consistent across every icon-only button in the action bar (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo) for the shared rule).
 
 ## File Search Overlay
 
@@ -109,7 +111,7 @@ When file search exits, the full tree is restored. Expand state from before the 
 
 File search mode can be activated by:
 
-- Clicking the mode toggle button in the action bar
+- Clicking the 📁 button in the segmented mode control — only switches when not already in file mode; otherwise refocuses the input
 - Pressing Ctrl+Shift+F — routed through the dialog → files tab → chat panel's activate method
 - Calling the activate method programmatically, which optionally prefills the query from a text selection
 

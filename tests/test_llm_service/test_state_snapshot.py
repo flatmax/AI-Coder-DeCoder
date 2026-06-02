@@ -25,6 +25,7 @@ class TestStateSnapshot:
             "messages",
             "selected_files",
             "streaming_active",
+            "active_streams",
             "session_id",
             "repo_name",
             "init_complete",

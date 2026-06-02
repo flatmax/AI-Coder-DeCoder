@@ -137,6 +137,8 @@ describe('SvgEditor multi-selection: rendering', () => {
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 

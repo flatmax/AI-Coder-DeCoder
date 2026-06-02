@@ -279,6 +279,34 @@ async def run_enrichment_background(
     )
 
     for idx, rel_path in enumerate(queue, start=1):
+        # Log BEFORE dispatching so any mid-file crash
+        # (OOM kill, segfault in the native KeyBERT /
+        # torch / OpenBLAS stack, joblib worker death)
+        # leaves a clear "last attempted file" trace.
+        # Without this, a mid-file crash looks like a
+        # crash after the previous file's success log.
+        #
+        # RSS is logged per file because the OOM mode
+        # observed in the field — kernel SIGKILL during
+        # KeyBERT's MMR cosine-similarity step on a
+        # 1.4MB SVG prose block — manifested as a single
+        # transient spike on top of the steady-state
+        # baseline. Per-file RSS lets us tell a creeping
+        # leak (would climb across many files) from a
+        # one-shot allocation spike (jumps on a single
+        # large input) at a glance.
+        #
+        # Steady-state RSS for KeyBERT + sentence-
+        # transformers is ~1.2GB after the first few
+        # files — PyTorch's caching allocator and
+        # joblib's loky workers reach their working set
+        # and plateau. That's not a leak; it's the cost
+        # of running the model in-process.
+        rss_mb = _rss_mb()
+        logger.info(
+            "Enrichment: starting file %d/%d (rss=%dMB): %s",
+            idx, total, rss_mb, rel_path,
+        )
         try:
             await loop.run_in_executor(
                 service._aux_executor,
@@ -290,6 +318,11 @@ async def run_enrichment_background(
             logger.warning(
                 "Enrichment failed for %s: %s",
                 rel_path, exc,
+            )
+        else:
+            logger.debug(
+                "Enrichment: completed file %d/%d: %s",
+                idx, total, rel_path,
             )
 
         percent = int((idx / total) * 100)
@@ -312,6 +345,28 @@ async def run_enrichment_background(
     )
 
 
+def _rss_mb() -> int:
+    """Best-effort resident-set-size in megabytes.
+
+    Reads /proc/self/status on Linux. Returns 0 on platforms
+    without /proc or when the file is unreadable — the log
+    line still fires with rss=0 and per-file timing data is
+    preserved. We avoid pulling in psutil to keep the import
+    surface small; the /proc parse is trivial.
+    """
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    # Format: "VmRSS:    123456 kB"
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
 def enrich_one_file_sync(
     service: "LLMService",
     rel_path: str,
@@ -329,6 +384,17 @@ def enrich_one_file_sync(
     """
     if service._repo is None:
         return
+    # Bracket the enrichment call with PID/TID logs so a
+    # segfault in the native KeyBERT/sentence-transformers
+    # stack leaves a "last seen alive" marker for this
+    # specific file. Logged at debug to avoid spamming the
+    # steady-state log.
+    import os as _os
+    import threading as _threading
+    logger.debug(
+        "enrich_one_file_sync: enter rel_path=%s pid=%d tid=%d",
+        rel_path, _os.getpid(), _threading.get_ident(),
+    )
     try:
         source_text = service._repo.get_file_content(rel_path)
     except Exception as exc:
@@ -337,9 +403,28 @@ def enrich_one_file_sync(
             rel_path, exc,
         )
         return
-    service._doc_index.enrich_single_file(
-        rel_path, source_text=source_text
-    )
+    # Log source size before dispatch so a one-shot spike
+    # on an unusually large file is attributable to the
+    # input rather than to model state. Threshold of 100KB
+    # is well above ordinary markdown sections; SVG
+    # extracts that exceed it are the prime suspects for
+    # the memory profile that triggers OOM.
+    size_kb = len(source_text) // 1024
+    if size_kb > 100:
+        logger.info(
+            "enrich_one_file_sync: large input rel_path=%s "
+            "size=%dKB",
+            rel_path, size_kb,
+        )
+    try:
+        service._doc_index.enrich_single_file(
+            rel_path, source_text=source_text
+        )
+    finally:
+        logger.debug(
+            "enrich_one_file_sync: exit rel_path=%s pid=%d tid=%d",
+            rel_path, _os.getpid(), _threading.get_ident(),
+        )
 
 
 # ---------------------------------------------------------------------------

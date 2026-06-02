@@ -158,6 +158,23 @@ class Mode(str, Enum):
     DOC = "doc"
 
 
+def _sanitise_text_block(text: str) -> str:
+    """Replace blank text with a single space.
+
+    Bedrock rejects empty/whitespace-only text content blocks
+    with a 400 error: "The text field in the ContentBlock object
+    is blank." This happens when a user submits an image-only
+    turn (text input empty, image attached). Anthropic-direct
+    and OpenAI tolerate blank text; Bedrock does not.
+
+    Returns the input unchanged when non-blank, else a single
+    space. Idempotent.
+    """
+    if isinstance(text, str) and text.strip():
+        return text
+    return " "
+
+
 # ---------------------------------------------------------------------------
 # Budget enforcement — module constants
 # ---------------------------------------------------------------------------
@@ -940,6 +957,52 @@ class ContextManager:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _sanitise_message_text_blocks(msg: dict[str, Any]) -> dict[str, Any]:
+        """Replace blank text blocks and blank string content.
+
+        Bedrock rejects ``{"type": "text", "text": ""}`` content
+        blocks with a 400 error, and also rejects user messages
+        whose top-level ``content`` is an empty string. Both
+        shapes can occur in replayed history when a past turn
+        was an image-only user message (text prompt was empty
+        but an image was attached). Anthropic-direct and OpenAI
+        tolerate empty text; Bedrock is strict.
+
+        Two cases handled:
+
+        - Plain-string content that's blank or whitespace-only
+          for a user message — substituted with a single space.
+          Assistant messages are left alone (they may legitimately
+          have empty content during streaming).
+        - Multimodal list content with blank text blocks —
+          each blank text block's ``text`` field replaced with
+          a single space.
+
+        Idempotent — non-blank text passes through unchanged.
+
+        Substitutes a single space rather than dropping the block:
+        some providers require at least one text block per user
+        message, and a space minimises any steering effect on the
+        model.
+        """
+        content = msg.get("content")
+        if isinstance(content, str):
+            if msg.get("role") == "user" and not content.strip():
+                msg["content"] = " "
+            return msg
+        if not isinstance(content, list):
+            return msg
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+            ):
+                text = block.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    block["text"] = " "
+        return msg
+
+    @staticmethod
     def _with_cache_control(msg: dict[str, Any]) -> dict[str, Any]:
         """Wrap a message's content in the structured cache-control form.
 
@@ -989,12 +1052,11 @@ class ContextManager:
         self,
         user_prompt: str,
         images: list[str] | None = None,
-        symbol_map: str = "",
         symbol_legend: str = "",
         doc_legend: str = "",
-        secondary_map: str = "",
-        file_tree: str = "",
         tiered_content: dict[str, dict[str, Any]] | None = None,
+        *,
+        skip_active: bool = False,
     ) -> list[dict[str, Any]]:
         """Assemble the tiered message array for the LLM.
 
@@ -1002,6 +1064,14 @@ class ContextManager:
         markers at tier boundaries. Each non-empty cached tier
         (L0–L3) gets exactly one breakpoint so the provider can
         reuse the preceding prefix across requests.
+
+        Under D36 dir-blocks the aggregate symbol/doc map and
+        the flat file-tree section have been replaced by
+        per-directory dir-block tracker entries that ride flux
+        through the four cached tiers — there is no longer a
+        ``symbol_map`` / ``secondary_map`` / ``file_tree``
+        parameter. Their content arrives as ``symbols`` /
+        ``files`` strings on each tier's content dict.
 
         Parameters
         ----------
@@ -1012,32 +1082,15 @@ class ContextManager:
             Optional list of base64 data URIs. When present, the
             final user message becomes a multimodal content block
             list instead of a plain string.
-        symbol_map:
-            The symbol or doc map body (excluding graduated
-            file blocks — those live in their tier's content
-            instead). Empty when no map is available.
         symbol_legend:
             The primary index's legend block — goes under
             :data:`REPO_MAP_HEADER` when in code mode, or
-            :data:`DOC_MAP_HEADER` when in document mode.
+            :data:`DOC_MAP_HEADER` when in document mode. Sits
+            before L0 as a non-flux head anchor.
         doc_legend:
             Optional secondary legend for cross-reference mode.
             When non-empty, appended to L0 under the *opposite*
             mode's header.
-        secondary_map:
-            Optional secondary aggregate map for cross-reference
-            mode. When non-empty, rendered after ``doc_legend``
-            in L0's system message — so the LLM sees both
-            structural maps. Per ``specs4/3-llm/modes.md`` §
-            Cross-Reference Mode: "Both legends included in
-            the L0 cache block". Cross-reference is L0-only
-            under the L0-content-typed model (D27); no
-            per-file tracker entries are created for the
-            secondary index.
-        file_tree:
-            The flat file-tree text produced by the streaming
-            handler. Rendered as its own uncached user/assistant
-            pair.
         tiered_content:
             Dict keyed by tier name (``"L0"``, ``"L1"``, ``"L2"``,
             ``"L3"``) mapping to per-tier content dicts with keys
@@ -1081,16 +1134,12 @@ class ContextManager:
         l0_history = l0.get("history") or []
 
         system_parts: list[str] = [self._system_prompt]
-        if symbol_legend or l0_symbols or symbol_map:
+        if symbol_legend or l0_symbols:
             system_parts.append(primary_header + symbol_legend)
             if l0_symbols:
                 system_parts.append(l0_symbols)
-            if symbol_map:
-                system_parts.append(symbol_map)
-        if doc_legend or secondary_map:
+        if doc_legend:
             system_parts.append(cross_ref_header + doc_legend)
-            if secondary_map:
-                system_parts.append(secondary_map)
         if l0_files:
             system_parts.append(FILES_L0_HEADER + l0_files)
         system_content = "\n\n".join(p for p in system_parts if p)
@@ -1101,7 +1150,7 @@ class ContextManager:
                 "content": system_content,
             })
             for i, msg in enumerate(l0_history):
-                copied = dict(msg)
+                copied = self._sanitise_message_text_blocks(dict(msg))
                 if i == len(l0_history) - 1:
                     messages.append(self._with_cache_control(copied))
                 else:
@@ -1145,7 +1194,9 @@ class ContextManager:
                     "content": "Ok.",
                 })
             for msg in tier_history:
-                tier_messages.append(dict(msg))
+                tier_messages.append(
+                    self._sanitise_message_text_blocks(dict(msg))
+                )
 
             # Mark the last message of the tier as the breakpoint.
             if tier_messages:
@@ -1154,69 +1205,74 @@ class ContextManager:
                 )
                 messages.extend(tier_messages)
 
-        # File tree — uncached user/assistant pair.
-        if file_tree:
-            messages.append({
-                "role": "user",
-                "content": FILE_TREE_HEADER + file_tree,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok.",
-            })
+        # File tree, URL context, review context — uncached
+        # user/assistant pairs that sit AFTER the last
+        # cache_control marker. Skipped for cache-warmer calls
+        # alongside Active files / history: they're pure
+        # post-cache overhead and billed as fresh input on
+        # every warm-up firing. ``skip_active`` is the unified
+        # "skip everything after the last cache_control marker
+        # except the user prompt" flag.
+        if not skip_active:
+            if self._url_context:
+                messages.append({
+                    "role": "user",
+                    "content": URL_CONTEXT_HEADER + "\n---\n".join(
+                        self._url_context
+                    ),
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok, I've reviewed the URL content.",
+                })
 
-        # URL context — uncached user/assistant pair. Joined with a
-        # blank-line separator when multiple parts are present.
-        if self._url_context:
-            messages.append({
-                "role": "user",
-                "content": URL_CONTEXT_HEADER + "\n---\n".join(
-                    self._url_context
-                ),
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok, I've reviewed the URL content.",
-            })
-
-        # Review context — uncached user/assistant pair when active.
-        if self._review_context:
-            messages.append({
-                "role": "user",
-                "content": REVIEW_CONTEXT_HEADER + self._review_context,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok, I've reviewed the code changes.",
-            })
+            if self._review_context:
+                messages.append({
+                    "role": "user",
+                    "content": REVIEW_CONTEXT_HEADER + self._review_context,
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok, I've reviewed the code changes.",
+                })
 
         # Active files — files not graduated to any cached tier.
         # The file context's insertion order is preserved.
-        active_files_text = self._format_active_files(
-            tiered_content
-        )
-        if active_files_text:
-            messages.append({
-                "role": "user",
-                "content": FILES_ACTIVE_HEADER + active_files_text,
-            })
-            messages.append({
-                "role": "assistant",
-                "content": "Ok.",
-            })
+        # Skipped for cache-warmer calls: Active sits after the
+        # last cache_control marker, so omitting it preserves
+        # the cached prefix bytes (cache hits still land) while
+        # avoiding fresh-input billing on every warm-up firing.
+        if not skip_active:
+            active_files_text = self._format_active_files(
+                tiered_content
+            )
+            if active_files_text:
+                messages.append({
+                    "role": "user",
+                    "content": FILES_ACTIVE_HEADER + active_files_text,
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": "Ok.",
+                })
 
-        # Active history — messages whose index is not in any
-        # cached tier's graduated indices.
-        history = self._history
-        for i, msg in enumerate(history):
-            if i in all_graduated_history:
-                continue
-            # Strip the last user message — that's the one we're
-            # about to render with images. The streaming handler
-            # added it before calling assembly.
-            if i == len(history) - 1 and msg.get("role") == "user":
-                continue
-            messages.append(dict(msg))
+            # Active history — messages whose index is not in any
+            # cached tier's graduated indices.
+            history = self._history
+            for i, msg in enumerate(history):
+                if i in all_graduated_history:
+                    continue
+                # Strip the last user message — that's the one we're
+                # about to render with images. The streaming handler
+                # added it before calling assembly.
+                if (
+                    i == len(history) - 1
+                    and msg.get("role") == "user"
+                ):
+                    continue
+                messages.append(
+                    self._sanitise_message_text_blocks(dict(msg))
+                )
 
         # Current user message — text-only or multimodal.
         messages.append(self._build_user_message(user_prompt, images))
@@ -1233,6 +1289,19 @@ class ContextManager:
         ``graduated_files`` list, then renders every file context
         entry whose path is not in that set. Order is the file
         context's insertion order (preserved across requests).
+
+        Also walks the stability tracker for active-tier
+        ``file:<path>`` entries that have transitioned to
+        deletion markers but aren't in FileContext (because
+        ``sync_file_context`` removed them when the file
+        vanished from disk). Per
+        specs4/3-llm/cache-tiering.md § Deletion Markers,
+        the marker text MUST appear in the prompt wherever
+        the file would have been; otherwise L0's stale
+        aggregate symbol/doc map references a phantom with
+        no full-text counterpart and the LLM has no way to
+        resolve the contradiction. The tracker is the
+        source of truth for marker state.
         """
         graduated: set[str] = set()
         for tier_name in _CACHED_TIERS:
@@ -1241,6 +1310,7 @@ class ContextManager:
                 graduated.add(path)
 
         blocks: list[str] = []
+        rendered_paths: set[str] = set()
         for path in self._file_context.get_files():
             if path in graduated:
                 continue
@@ -1248,6 +1318,14 @@ class ContextManager:
             if content is None:
                 continue
             blocks.append(f"{path}\n```\n{content}\n```")
+            rendered_paths.add(path)
+
+        # Under D36 deletion markers no longer exist —
+        # tracker entries for files removed from disk are
+        # dropped outright by the stale-removal pass during
+        # ``StabilityTracker.update``. Files that vanish
+        # mid-session simply disappear from the prompt on
+        # the next turn.
         return "\n\n".join(blocks)
 
     def _build_user_message(
@@ -1259,7 +1337,7 @@ class ContextManager:
         if not images:
             return {"role": "user", "content": user_prompt}
         content_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": user_prompt}
+            {"type": "text", "text": _sanitise_text_block(user_prompt)}
         ]
         for uri in images:
             if isinstance(uri, str) and uri.startswith("data:"):

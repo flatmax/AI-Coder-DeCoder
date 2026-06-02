@@ -38,7 +38,37 @@ Returned payload:
 - Session totals — prompt, completion, total, cache read, cache write
 A separate provider-cache-rate field is computed from cumulative session data when available; more accurate than the tier-based estimate since it reflects actual provider behavior. HUD and Context tab prefer provider-cache-rate when non-null, falling back to the local rate.
 ## Context Tab
-The Context tab contains two sub-views selectable via a Budget / Cache pill toggle. Active sub-view persisted to localStorage. Both share stale-detection and refresh-on-visible behavior. Both listen for stream-complete, files-changed, and mode-changed window events — when visible, refresh immediately; when hidden, set a stale flag and refresh on next visibility.
+The Context tab contains two sub-views selectable via a Budget / Cache pill toggle. Active sub-view persisted to localStorage. Both share stale-detection and refresh-on-visible behavior.
+
+### Refresh Triggers
+
+The tab subscribes to multiple window events that signal "the breakdown payload may have changed". On every event, the tab calls `_refresh()` regardless of visibility — Context state should be current the moment the user switches to it, not after a deferred fetch resolves.
+
+| Event | Source | Why it triggers a refresh |
+|---|---|---|
+| `stream-complete` | `streamComplete` JRPC callback | Token usage, edit results, file count may have changed |
+| `post-response-complete` | `postResponseComplete` JRPC callback | Tier state has settled — authoritative tier display refresh |
+| `files-changed` | `filesChanged` JRPC callback | Selected files set changed, file content tokens differ |
+| `mode-changed` | `modeChanged` JRPC callback | Mode/cross-ref switched; whole breakdown shape changes |
+| `session-changed` | `sessionChanged` JRPC callback | New session; history tokens reset |
+| `active-tab-changed` | Chat panel agent-tab switch | Breakdown is per-context-manager; agent tab switches re-target |
+| `compaction-event` (stage `compacted`) | Backend compaction completion | History entries wiped and replaced; tier state shifts |
+| `agents-spawned` / `agent-closed` / `agent-mode-changed` | Backend agent lifecycle | Live-agents roster (Budget sub-view) changes |
+
+### Refresh Queue
+
+A naive "skip when already loading" guard silently drops overlapping refresh triggers. Common case: `stream-complete` and `post-response-complete` fire close together; the first refresh wins, the second drops, and the Context tab shows pre-tier-update state until the next manual refresh click.
+
+Instead, the tab tracks a `_refreshPending` flag. When a refresh is already in flight, an incoming event sets the flag and returns. After the in-flight fetch completes, the `finally` block checks the flag and re-fires once. This collapses any number of overlapping events into "one current fetch + one queued fetch" — sufficient because the queued fetch always reads the latest backend state.
+
+The two-event ordering for a typical successful turn:
+
+1. `streamComplete` broadcast → `_refresh()` starts a fetch (reads pre-`_update_stability` state)
+2. `postResponseComplete` broadcast → fetch is in flight, sets `_refreshPending`
+3. First fetch returns → `finally` block sees the flag, fires a second fetch
+4. Second fetch reads post-`_update_stability` state — the UI updates with current tier data
+
+The user never sees the intermediate stale state because both fetches resolve fast (single RPC, no LLM call).
 ### Budget Sub-View
 #### Layout
 - Header with current model and cache hit rate
@@ -233,3 +263,5 @@ Mode-aware labels — "Symbol Map" in code mode, "Doc Map" in document mode. Whe
 - Startup init HUD is printed exactly once per server start, after stability tracker initialization completes
 - Cache sub-view Rebuild button is visible to all clients but rejected server-side for non-localhost callers; the restricted-error toast path is exercised rather than silently allowing a client-side dispatch
 - Rebuild button is disabled during both its own in-flight state and a concurrent context-breakdown refresh — the two reads of tracker state never overlap
+- Context tab refreshes on `post-response-complete`, not `stream-complete`, for tier-state-dependent data — `stream-complete` fires before `_update_stability` runs and would yield pre-update tracker state
+- Overlapping refresh triggers are queued via the `_refreshPending` flag rather than dropped — guarantees the final fetch sees the latest backend state regardless of how many events fired during the in-flight window

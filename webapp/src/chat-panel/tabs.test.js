@@ -79,16 +79,17 @@ describe('ChatPanel tab strip rendering', () => {
     const mainBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="main"]',
     );
-    // Tabs render the label followed by inline icons —
-    // 📊 (Context) on every tab, ✕ (close) on agent
-    // tabs only. Strip both from the trailing edge to
-    // recover the visible label text. The `u` flag is
-    // required because 📊 is outside the BMP — without
-    // it, the character class treats the emoji as two
+    // Tabs render the 📊 (Context) icon BEFORE the
+    // label and the ✕ (close) icon AFTER it (agent
+    // tabs only). Strip both edges to recover the
+    // visible label text. The `u` flag is required
+    // because 📊 is outside the BMP — without it,
+    // the character class treats the emoji as two
     // surrogate code units and leaves a stray
     // \uD83D behind.
     const labelText = mainBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('Main');
   });
@@ -102,17 +103,15 @@ describe('ChatPanel tab strip rendering', () => {
     const agentBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="agent-0"]',
     );
-    // Tabs render the label followed by inline icons —
-    // 📊 (Context) and ✕ (close on agent tabs only).
-    // Strip both from the trailing edge to isolate the
-    // visible label text. The `u` flag is required so
-    // 📊 (outside the BMP) is treated as one
-    // codepoint inside the character class. Two passes
-    // handle the 📊-then-✕ ordering — first pass
-    // strips ✕, second strips 📊.
+    // Tabs render the 📊 (Context) icon BEFORE the
+    // label and the ✕ (close) icon AFTER it on agent
+    // tabs. Strip both edges to isolate the visible
+    // label text. The `u` flag is required so 📊
+    // (outside the BMP) is treated as one codepoint
+    // inside the character class.
     const labelText = agentBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('Agent 0: refactor auth');
   });
@@ -126,13 +125,13 @@ describe('ChatPanel tab strip rendering', () => {
     const orphanBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="orphan-tab"]',
     );
-    // Strip trailing 📊 and ✕ icons before comparing —
-    // see "renders custom labels" for rationale (the
-    // `u` flag is required for 📊 to match as one
-    // codepoint).
+    // Strip leading 📊 and trailing ✕ icons before
+    // comparing — see "renders custom labels" for
+    // rationale (the `u` flag is required for 📊 to
+    // match as one codepoint).
     const labelText = orphanBtn.textContent
-      .replace(/[📊✕]\s*$/gu, '')
-      .replace(/[📊✕]\s*$/gu, '')
+      .replace(/^\s*[📊✕]\s*/gu, '')
+      .replace(/\s*[📊✕]\s*$/gu, '')
       .trim();
     expect(labelText).toBe('orphan-tab');
   });
@@ -743,6 +742,13 @@ describe('ChatPanel tab strip overflow — cleanup', () => {
 // ---------------------------------------------------------------------------
 
 describe('ChatPanel tab close — rendering', () => {
+  // Per specs4/5-webapp/agent-browser.md § Tab
+  // Strip, no per-tab ✕ close affordance is
+  // rendered. `onTabClose` stays as the internal
+  // primitive the `agent-closed` event handler
+  // invokes during `new_session` fan-out; tests
+  // for that pathway live in the "behavior" group
+  // below.
   it('main tab does not render a close button', async () => {
     const p = mountPanel();
     await settle(p);
@@ -755,7 +761,7 @@ describe('ChatPanel tab close — rendering', () => {
     expect(mainBtn.querySelector('.tab-close')).toBeNull();
   });
 
-  it('agent tabs render a close button', async () => {
+  it('agent tabs do not render a close button', async () => {
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
@@ -764,39 +770,18 @@ describe('ChatPanel tab close — rendering', () => {
     const agentBtn = p.shadowRoot.querySelector(
       '.tab-strip-tab[data-tab-id="agent-0"]',
     );
-    const close = agentBtn.querySelector('.tab-close');
-    expect(close).toBeTruthy();
-    expect(close.textContent.trim()).toBe('✕');
+    expect(agentBtn.querySelector('.tab-close')).toBeNull();
   });
 
-  it('close button carries accessible label', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTab(p, 'agent-0', 'Agent 0: refactor');
-    p.requestUpdate();
-    await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    expect(close.getAttribute('aria-label')).toBe(
-      'Close Agent 0: refactor',
-    );
-  });
-
-  it('close button has role=button and keyboard affordance', async () => {
-    // Span (not nested button) — same screen-reader
-    // semantics, no parser interference.
+  it('no close button anywhere in the tab strip', async () => {
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
+    seedLabeledTab(p, 'agent-1', 'Agent 1');
     p.requestUpdate();
     await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    expect(close.tagName).toBe('SPAN');
-    expect(close.getAttribute('role')).toBe('button');
-    expect(close.getAttribute('tabindex')).toBe('0');
+    const closes = p.shadowRoot.querySelectorAll('.tab-close');
+    expect(closes.length).toBe(0);
   });
 
   it('overflow menu items have no close affordance', async () => {
@@ -817,7 +802,15 @@ describe('ChatPanel tab close — rendering', () => {
 });
 
 describe('ChatPanel tab close — behavior', () => {
-  it('clicking close removes the tab from _tabs', async () => {
+  // The close pathway is reachable only via
+  // `_onTabClose(tabId)` programmatic invocation.
+  // The `agent-closed` event handler calls it
+  // once per dismissed agent during
+  // `new_session` fan-out (see
+  // specs4/5-webapp/agent-browser.md § Tab
+  // Lifetime). These tests drive it directly to
+  // verify the close primitive still works.
+  it('_onTabClose removes the tab from _tabs', async () => {
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
@@ -825,26 +818,20 @@ describe('ChatPanel tab close — behavior', () => {
     p.requestUpdate();
     await settle(p);
     expect(p._tabs.has('agent-0')).toBe(true);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.click();
+    p._onTabClose('agent-0');
     await settle(p);
     expect(p._tabs.has('agent-0')).toBe(false);
     expect(p._tabs.has('agent-1')).toBe(true);
     expect(p._tabs.has('main')).toBe(true);
   });
 
-  it('removes from _tabLabels too', async () => {
+  it('_onTabClose removes from _tabLabels too', async () => {
     const p = mountPanel();
     await settle(p);
     seedLabeledTab(p, 'agent-0', 'Agent 0');
     p.requestUpdate();
     await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.click();
+    p._onTabClose('agent-0');
     await settle(p);
     expect(p._tabLabels.has('agent-0')).toBe(false);
   });
@@ -857,10 +844,7 @@ describe('ChatPanel tab close — behavior', () => {
     await settle(p);
     p._activeTabId = 'agent-0';
     await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.click();
+    p._onTabClose('agent-0');
     await settle(p);
     expect(p._activeTabId).toBe('main');
     expect(p._tabs.has('agent-0')).toBe(false);
@@ -875,36 +859,9 @@ describe('ChatPanel tab close — behavior', () => {
     await settle(p);
     p._activeTabId = 'agent-1';
     await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.click();
+    p._onTabClose('agent-0');
     await settle(p);
     expect(p._activeTabId).toBe('agent-1');
-  });
-
-  it('close click does not flip activeTabId to the closing tab', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTab(p, 'agent-0', 'Agent 0');
-    seedLabeledTab(p, 'agent-1', 'Agent 1');
-    p.requestUpdate();
-    await settle(p);
-    p._activeTabId = 'agent-1';
-    await settle(p);
-    const listener = vi.fn();
-    p.addEventListener('active-tab-changed', listener);
-    try {
-      const close = p.shadowRoot.querySelector(
-        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-      );
-      close.click();
-      await settle(p);
-      expect(listener).not.toHaveBeenCalled();
-      expect(p._activeTabId).toBe('agent-1');
-    } finally {
-      p.removeEventListener('active-tab-changed', listener);
-    }
   });
 
   it('dispatches close-tab event with tabId', async () => {
@@ -916,10 +873,7 @@ describe('ChatPanel tab close — behavior', () => {
     const listener = vi.fn();
     p.addEventListener('close-tab', listener);
     try {
-      const close = p.shadowRoot.querySelector(
-        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-      );
-      close.click();
+      p._onTabClose('agent-0');
       await settle(p);
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail).toEqual({
@@ -942,11 +896,7 @@ describe('ChatPanel tab close — behavior', () => {
       outerListener,
     );
     try {
-      p.shadowRoot
-        .querySelector(
-          '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-        )
-        .click();
+      p._onTabClose('agent-0');
       await settle(p);
       expect(outerListener).toHaveBeenCalledOnce();
     } finally {
@@ -955,44 +905,6 @@ describe('ChatPanel tab close — behavior', () => {
         outerListener,
       );
     }
-  });
-
-  it('Enter key on the close button fires close', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTab(p, 'agent-0', 'Agent 0');
-    p.requestUpdate();
-    await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-      }),
-    );
-    await settle(p);
-    expect(p._tabs.has('agent-0')).toBe(false);
-  });
-
-  it('Space key on the close button fires close', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTab(p, 'agent-0', 'Agent 0');
-    p.requestUpdate();
-    await settle(p);
-    const close = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-    );
-    close.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: ' ',
-        bubbles: true,
-      }),
-    );
-    await settle(p);
-    expect(p._tabs.has('agent-0')).toBe(false);
   });
 
   it('strip remains visible when last agent tab closes', async () => {
@@ -1006,11 +918,7 @@ describe('ChatPanel tab close — behavior', () => {
     expect(
       p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
     ).toBe(2);
-    p.shadowRoot
-      .querySelector(
-        '.tab-strip-tab[data-tab-id="agent-0"] .tab-close',
-      )
-      .click();
+    p._onTabClose('agent-0');
     await settle(p);
     expect(p.shadowRoot.querySelector('.tab-strip')).toBeTruthy();
     const buttons = p.shadowRoot.querySelectorAll(
@@ -1283,6 +1191,14 @@ describe('ChatPanel tab tooltip enrichment', () => {
 // ---------------------------------------------------------------------------
 
 describe('ChatPanel close-tab backend wiring', () => {
+  // No UI gesture binds to `_onTabClose`. The
+  // `agent-closed` event handler invokes it once
+  // per dismissed agent during `new_session`
+  // fan-out (per
+  // specs4/5-webapp/agent-browser.md § Tab
+  // Lifetime). These tests drive `_onTabClose`
+  // directly to verify the close primitive still
+  // fires the RPC.
   it('fires close_agent_context with the agent id', async () => {
     const close = vi
       .fn()
@@ -1297,10 +1213,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p._tabLabels.set(agentTabId, 'frontend-trivial');
     p.requestUpdate();
     await settle(p);
-    const closeBtn = p.shadowRoot.querySelector(
-      `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-    );
-    closeBtn.click();
+    p._onTabClose(agentTabId);
     await settle(p);
     expect(close).toHaveBeenCalledOnce();
     expect(close.mock.calls[0]).toEqual(['frontend-trivial']);
@@ -1320,11 +1233,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p._tabLabels.set(agentTabId, 'auth_v2-refactor');
     p.requestUpdate();
     await settle(p);
-    p.shadowRoot
-      .querySelector(
-        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-      )
-      .click();
+    p._onTabClose(agentTabId);
     await settle(p);
     expect(close.mock.calls[0]).toEqual(['auth_v2-refactor']);
   });
@@ -1344,11 +1253,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p.requestUpdate();
     await settle(p);
     expect(p._tabs.has(agentTabId)).toBe(true);
-    p.shadowRoot
-      .querySelector(
-        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-      )
-      .click();
+    p._onTabClose(agentTabId);
     await settle(p);
     expect(p._tabs.has(agentTabId)).toBe(false);
     expect(p._tabLabels.has(agentTabId)).toBe(false);
@@ -1372,11 +1277,7 @@ describe('ChatPanel close-tab backend wiring', () => {
       p._tabLabels.set(agentTabId, 'Agent 00');
       p.requestUpdate();
       await settle(p);
-      p.shadowRoot
-        .querySelector(
-          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-        )
-        .click();
+      p._onTabClose(agentTabId);
       await settle(p);
       expect(p._tabs.has(agentTabId)).toBe(false);
     } finally {
@@ -1402,11 +1303,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     const toastListener = vi.fn();
     window.addEventListener('ac-toast', toastListener);
     try {
-      p.shadowRoot
-        .querySelector(
-          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-        )
-        .click();
+      p._onTabClose(agentTabId);
       await settle(p);
       const warnings = toastListener.mock.calls
         .map((c) => c[0].detail)
@@ -1439,11 +1336,7 @@ describe('ChatPanel close-tab backend wiring', () => {
       const toastListener = vi.fn();
       window.addEventListener('ac-toast', toastListener);
       try {
-        p.shadowRoot
-          .querySelector(
-            `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-          )
-          .click();
+        p._onTabClose(agentTabId);
         await settle(p);
         expect(toastListener).not.toHaveBeenCalled();
       } finally {
@@ -1463,11 +1356,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p.requestUpdate();
     await settle(p);
     expect(() => {
-      p.shadowRoot
-        .querySelector(
-          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-        )
-        .click();
+      p._onTabClose(agentTabId);
     }).not.toThrow();
     await settle(p);
     expect(p._tabs.has(agentTabId)).toBe(false);
@@ -1490,11 +1379,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     const closeTabListener = vi.fn();
     p.addEventListener('close-tab', closeTabListener);
     try {
-      p.shadowRoot
-        .querySelector(
-          `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-        )
-        .click();
+      p._onTabClose(agentTabId);
       await settle(p);
       expect(closeTabListener).toHaveBeenCalledOnce();
       expect(closeTabListener.mock.calls[0][0].detail).toEqual({
@@ -1521,11 +1406,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p._activeTabId = agentTabId;
     p.requestUpdate();
     await settle(p);
-    p.shadowRoot
-      .querySelector(
-        `.tab-strip-tab[data-tab-id="${agentTabId}"] .tab-close`,
-      )
-      .click();
+    p._onTabClose(agentTabId);
     await settle(p);
     expect(close).toHaveBeenCalledOnce();
     expect(p._activeTabId).toBe('main');
@@ -1557,25 +1438,6 @@ describe('ChatPanel close-tab backend wiring', () => {
     await settle(p);
     expect(close).not.toHaveBeenCalled();
     expect(p._tabs.has(agentTabId)).toBe(true);
-  });
-
-  it('programmatic _onTabClose also fires RPC', async () => {
-    const close = vi
-      .fn()
-      .mockResolvedValue({ status: 'ok', closed: true });
-    publishFakeRpc({
-      'LLMService.close_agent_context': close,
-    });
-    const p = mountPanel();
-    await settle(p);
-    const agentTabId = 'turn_abc/agent-00';
-    p._tabs.set(agentTabId, p._makeTabState());
-    p._tabLabels.set(agentTabId, 'Agent 00');
-    p.requestUpdate();
-    await settle(p);
-    p._onTabClose(agentTabId);
-    await settle(p);
-    expect(close).toHaveBeenCalledOnce();
   });
 
   it('calling _onTabClose on main does not fire RPC', async () => {

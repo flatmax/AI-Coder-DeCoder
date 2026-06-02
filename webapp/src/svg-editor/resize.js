@@ -7,13 +7,52 @@
 // minimum constant (which moved to constants.js) use the
 // imported names.
 
-import { _MIN_RESIZE_DIMENSION } from './constants.js';
+import { _MIN_RESIZE_DIMENSION, _ROTATE_SNAP_DEGREES } from './constants.js';
 import {
   _parseNum,
   _parsePathData,
   _parsePoints,
   _serializePathData,
 } from './geometry.js';
+
+/**
+ * Map a point in SVG root user-coordinate space into the
+ * coordinate space of `el`'s parent. The element's own
+ * `transform` attribute is applied AFTER positional
+ * attributes (and after any prepended transform we write),
+ * so a `rotate(θ cx cy)` we write into `el.transform` runs
+ * in the PARENT's space — the pivot must be expressed
+ * there, not in the root's space.
+ *
+ * Math: parentCtm maps parent-space → screen; rootCtm
+ * maps root-space → screen. So rootToParent =
+ * inverse(parentCtm) * rootCtm. Apply that to the
+ * root-space point.
+ *
+ * Returns null when CTMs aren't computable (detached
+ * element, zero-size SVG); callers should fall back to
+ * the root-space point as a best-effort, which works
+ * correctly for elements at the SVG root.
+ */
+function _rootPointToParentSpace(el, svgRoot, rootX, rootY) {
+  const parent = el.parentNode;
+  if (!parent || parent === svgRoot) {
+    return { x: rootX, y: rootY };
+  }
+  const parentCtm = parent.getCTM?.();
+  const rootCtm = svgRoot.getCTM?.();
+  if (!parentCtm || !rootCtm) return null;
+  let m;
+  try {
+    m = parentCtm.inverse().multiply(rootCtm);
+  } catch (_) {
+    return null;
+  }
+  return {
+    x: m.a * rootX + m.c * rootY + m.e,
+    y: m.b * rootX + m.d * rootY + m.f,
+  };
+}
 
 export default {
   /**
@@ -600,5 +639,138 @@ export default {
     try {
       this._svg.setPointerCapture(event.pointerId);
     } catch (_) {}
+  },
+
+  /**
+   * Start a rotate drag on the selected element. Captures
+   * the element's existing `transform` attribute verbatim
+   * so we can prepend a `rotate(θ cx cy)` on each move
+   * and restore the original on cancel.
+   *
+   * The pivot is the bbox center in SVG root coords —
+   * computed once at drag start and frozen for the drag's
+   * duration. Using a frozen pivot means the angle math
+   * stays stable as the element rotates (the bbox would
+   * otherwise track the rotated geometry and the pivot
+   * would drift).
+   *
+   * Single-selection only — the rotate handle isn't
+   * rendered in multi-selection mode.
+   */
+  _beginRotateDrag(event) {
+    if (!this._selected) return;
+    if (this._selectedSet.size !== 1) return;
+    const bbox = this._elementBBoxInSvgRoot(this._selected);
+    if (!bbox) return;
+    const origin = this._screenToSvg(event.clientX, event.clientY);
+    // Pivot in SVG root space — used for the angle math
+    // (the pointer coords from `_screenToSvg` are in root
+    // space too, so the angle stays consistent).
+    const pivotRootX = bbox.x + bbox.width / 2;
+    const pivotRootY = bbox.y + bbox.height / 2;
+    // Pivot in the element's parent's coordinate space —
+    // used for the `rotate(θ cx cy)` write. SVG applies
+    // the rotate in the parent's space, so a root-space
+    // pivot would rotate around the wrong point whenever
+    // the element lives inside a transformed ancestor
+    // (Y-flip, scale, translate — common for diagrams
+    // exported from CAD or hand-authored with a
+    // matrix(1,0,0,-1,...) root flip).
+    const pivotParent = _rootPointToParentSpace(
+      this._selected,
+      this._svg,
+      pivotRootX,
+      pivotRootY,
+    ) || { x: pivotRootX, y: pivotRootY };
+    const startAngle = Math.atan2(
+      origin.y - pivotRootY,
+      origin.x - pivotRootX,
+    );
+    this._drag = {
+      mode: 'rotate',
+      role: 'rotate',
+      pointerId: event.pointerId,
+      startX: origin.x,
+      startY: origin.y,
+      // Root-space pivot for angle computation in
+      // `_applyRotateDelta`.
+      pivotX: pivotRootX,
+      pivotY: pivotRootY,
+      // Parent-space pivot for the transform write.
+      pivotParentX: pivotParent.x,
+      pivotParentY: pivotParent.y,
+      startAngle,
+      originTransform: this._selected.getAttribute('transform') || '',
+      committed: false,
+    };
+    try {
+      this._svg.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  },
+
+  /**
+   * Apply a rotation delta during a rotate drag. The
+   * delta is the angle from the pivot to the current
+   * pointer minus the angle from the pivot to the
+   * drag-start pointer. Shift held → snap to
+   * `_ROTATE_SNAP_DEGREES` increments.
+   *
+   * Writes `rotate(θ cx cy) <existing>` to the
+   * `transform` attribute. Prepending (rather than
+   * appending) means the rotate operates in the parent's
+   * coordinate space — same rationale as the move-drag
+   * transform branch. The element's own pre-existing
+   * transform stays in place, applied first; then our
+   * rotate spins the result around the pivot.
+   *
+   * `dx` and `dy` are the unused move delta (kept for
+   * signature symmetry with the other apply functions);
+   * the actual angle computation uses the absolute pointer
+   * position from `event` indirectly via `startX + dx`.
+   *
+   * `snap` (truthy) → round the rotation to
+   * `_ROTATE_SNAP_DEGREES` increments. The caller maps
+   * Ctrl/Cmd to this flag; see `_onPointerMove` in
+   * index.js for why Shift can't be used.
+   */
+  _applyRotateDelta(dx, dy, snap) {
+    if (!this._drag || !this._selected) return;
+    if (this._drag.mode !== 'rotate') return;
+    const px = this._drag.startX + dx;
+    const py = this._drag.startY + dy;
+    const currentAngle = Math.atan2(
+      py - this._drag.pivotY,
+      px - this._drag.pivotX,
+    );
+    let deltaRad = currentAngle - this._drag.startAngle;
+    let deltaDeg = (deltaRad * 180) / Math.PI;
+    if (snap) {
+      deltaDeg = Math.round(deltaDeg / _ROTATE_SNAP_DEGREES) *
+        _ROTATE_SNAP_DEGREES;
+    }
+    const base = this._drag.originTransform.trim();
+    // Pivot is in the parent's coord space — see
+    // `_beginRotateDrag` for the rationale. Angle math
+    // above used the root-space pivot to stay consistent
+    // with the pointer coords from `_screenToSvg`.
+    const rot = `rotate(${deltaDeg} ${this._drag.pivotParentX} ${this._drag.pivotParentY})`;
+    const combined = base ? `${rot} ${base}` : rot;
+    this._selected.setAttribute('transform', combined);
+  },
+
+  /**
+   * Restore the element's pre-rotate transform on cancel.
+   * Mirror of `_restoreDragAttributes` for the transform
+   * branch — empty string clears the attribute entirely
+   * (we don't want to leave `transform=""` on elements
+   * that didn't have one originally).
+   */
+  _restoreRotateAttributes(el, originTransform) {
+    if (!el) return;
+    if (originTransform) {
+      el.setAttribute('transform', originTransform);
+    } else {
+      el.removeAttribute('transform');
+    }
   },
 };

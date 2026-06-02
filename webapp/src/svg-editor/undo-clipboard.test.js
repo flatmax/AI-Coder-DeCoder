@@ -206,7 +206,10 @@ describe('SvgEditor copy/paste', () => {
     editor.setSelection(r1);
     editor.copySelection();
     expect(editor._clipboard.length).toBe(1);
-    expect(editor._clipboard[0]).toContain('rect');
+    // Clipboard entries are { html, parent } objects so
+    // paste can restore each duplicate as a sibling of
+    // the original (preserves ancestor transforms).
+    expect(editor._clipboard[0].html).toContain('rect');
   });
 
   it('paste inserts element with offset', () => {

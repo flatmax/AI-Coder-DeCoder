@@ -11,73 +11,29 @@
 //   - the backend via main / agent split RPC dispatch
 //     (parseAgentTabId on the active tab id)
 //
-// Modified-file pin: a file with working-tree or
-// staged changes can't be deselected — the cache-
-// tiering invariant pins them into lower tiers (D27)
-// and the picker checkbox should reflect that. The
-// pin check runs inside `applySelection` because every
-// path to mutate the selection passes through there.
-// Untracked / deleted files don't pin.
+// Under the membrane / flux cache model, deselected
+// files (including those with working-tree or staged
+// changes) are simply removed from context — the parent
+// directory's symbol/doc dir-block continues to carry
+// their structural presence, and re-selection brings
+// the full text back. No pin protection is needed.
 
 import { parseAgentTabId } from '../chat-panel/index.js';
 
 /**
  * Apply a new selection set. Single entry point — every
  * selection mutation routes through here so the
- * modified-file pin and the set-equality short-circuit
- * are honoured uniformly.
+ * set-equality short-circuit is honoured uniformly.
  *
  * `notifyServer` flag: false when applying a server
  * broadcast (avoids loopback), true when applying a
  * user action.
  */
 export function applySelection(host, newSelection, notifyServer) {
-  // Modified-file pin — see module docstring.
-  const sd = host._latestStatusData;
-  let pinnedReverted = false;
-  if (sd) {
-    const pinned = [];
-    for (const path of host._selectedFiles) {
-      if (newSelection.has(path)) continue;
-      if (sd.modified?.has(path) || sd.staged?.has(path)) {
-        pinned.push(path);
-      }
-    }
-    if (pinned.length > 0) {
-      const next = new Set(newSelection);
-      for (const p of pinned) next.add(p);
-      newSelection = next;
-      pinnedReverted = true;
-      const label =
-        pinned.length === 1
-          ? pinned[0]
-          : `${pinned.length} modified files`;
-      host._showToast(
-        `${label} cannot be removed from context while modified — commit or discard changes first.`,
-        'warning',
-      );
-    }
-  }
   // Fast-path no-op when the set hasn't actually changed.
   // Prevents loopback from the server broadcast doing
   // another round-trip for our own update.
-  //
-  // Exception: when we just reverted a pinned-file
-  // removal, the corrected `newSelection` equals our
-  // current state — but the picker's optimistic local
-  // state still shows the unticked checkbox from the
-  // user's click. We must push the corrected selection
-  // to the picker (below) so the checkbox snaps back
-  // on. The server doesn't need notification because
-  // its state hasn't changed.
   if (host._setsEqual(host._selectedFiles, newSelection)) {
-    if (pinnedReverted) {
-      const picker = host._picker();
-      if (picker) {
-        picker.selectedFiles = new Set(newSelection);
-        picker.requestUpdate();
-      }
-    }
     return;
   }
   host._selectedFiles = newSelection;

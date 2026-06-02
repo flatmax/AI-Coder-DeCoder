@@ -55,6 +55,7 @@ from ac_dc.llm._helpers import (
     _extract_response_cost,
     _resolve_max_output_tokens,
     build_thinking_kwargs,
+    retry_litellm_completion,
 )
 from ac_dc.llm._types import _URL_PER_MESSAGE_LIMIT
 
@@ -99,6 +100,28 @@ async def stream_chat(
     """
     if scope is None:
         scope = service._default_scope()
+    # Reset the cache warmer's idle clock to the moment of
+    # user send. Two effects:
+    #
+    # - The next firing is scheduled 240s from now (user
+    #   activity), not 240s from stream-end. Streams of
+    #   any duration produce a predictable cadence relative
+    #   to user interaction.
+    # - For long reasoning turns that exceed Anthropic's
+    #   5-minute cache TTL, the warmer is allowed to fire
+    #   *during* the active stream — its per-tick stream-
+    #   active checks have been removed. A reasoning run
+    #   at T=350+ will see the warmer fire at T=240,
+    #   keeping the cache hot through the in-flight call's
+    #   completion so follow-up turns hit a warm cache.
+    #   This is parallel to the user's main stream, not
+    #   serialised with it; Anthropic supports concurrent
+    #   requests on the same key, and a 2-token warm-up
+    #   ping is negligible against an in-flight reasoning
+    #   call.
+    warmer = getattr(service, "_cache_warmer", None)
+    if warmer is not None:
+        warmer.reset("user-send")
     error: str | None = None
     full_content = ""
     cancelled = False
@@ -552,6 +575,10 @@ async def stream_chat(
     service._cancelled_requests.discard(request_id)
     # Drop accumulator slot after all reads complete.
     service._request_accumulators.pop(request_id, None)
+    # Drop the request → agent map entry. Done last so
+    # any final-chunk consumers that need to look up the
+    # owning agent can still do so.
+    service._active_request_to_agent.pop(request_id, None)
 
     # Post-response housekeeping — only on normal completion.
     if error is None and not cancelled:
@@ -734,6 +761,17 @@ def run_completion_sync(
     thinking_kwargs = build_thinking_kwargs(
         service._config, reasoning,
     )
+    # Track the resolved reasoning state so the cache
+    # warmer mirrors it on subsequent firings. The UI
+    # toggle (per-request via ``reasoning`` arg, not
+    # config) is the authoritative user-facing control;
+    # the warmer needs to match the same slot the
+    # provider's prompt cache keyed against, otherwise
+    # reasoning user calls land cold-writes even when
+    # the warmer is "working". Set on every call so
+    # toggling on/off in the UI propagates to the warmer
+    # within one user-call cycle.
+    service._last_reasoning_used = bool(thinking_kwargs)
     if thinking_kwargs:
         # Log shape varies by model family — adaptive
         # payloads carry no budget field, legacy ones do.
@@ -747,19 +785,94 @@ def run_completion_sync(
                 payload.get("budget_tokens", 0),
             )
 
-    request_timeout = service._config.request_timeout_seconds
-    first_chunk_timeout = service._config.first_chunk_timeout_seconds
+    # Reasoning-aware overall request timeout. Same rationale
+    # as the first-chunk watchdog override below — adaptive-
+    # thinking calls can spend many minutes server-side
+    # before any byte streams. The 300s default would abort
+    # the call before reasoning finishes; the reasoning
+    # override (1200s default) gives the provider room.
+    if thinking_kwargs:
+        request_timeout = (
+            service._config.reasoning_request_timeout_seconds
+        )
+        logger.info(
+            "Request timeout: %.0fs (reasoning override)",
+            request_timeout,
+        )
+    else:
+        request_timeout = service._config.request_timeout_seconds
+    # Reasoning-aware first-chunk watchdog. Adaptive-thinking
+    # providers (notably Bedrock Opus on xhigh effort) run the
+    # full reasoning pass before emitting any SSE content, and
+    # 60s between stream-open and first chunk is routinely
+    # exceeded. Use the reasoning override when ``thinking`` is
+    # active; the default tight 60s applies to non-reasoning
+    # calls where it's still the correct safety net.
+    if thinking_kwargs:
+        first_chunk_timeout = (
+            service._config.reasoning_first_chunk_timeout_seconds
+        )
+        logger.info(
+            "First-chunk watchdog: %.0fs (reasoning override)",
+            first_chunk_timeout,
+        )
+    else:
+        first_chunk_timeout = service._config.first_chunk_timeout_seconds
     chunk_timeout = service._config.chunk_timeout_seconds
+    num_retries = service._config.num_retries
 
     try:
-        stream = litellm.completion(
-            model=service._config.model,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},
-            max_tokens=max_output,
-            timeout=request_timeout,
-            **thinking_kwargs,
+        # Explicit retry wrapper with exponential backoff +
+        # Retry-After honoring. Replaces LiteLLM's internal
+        # ``num_retries=`` kwarg — stacking the two would
+        # multiply waits and mask provider retry hints.
+        #
+        # For streaming, the retry applies only to stream
+        # establishment — once chunks start flowing, a
+        # mid-stream failure can't be replayed because the
+        # partial response has already been delivered to the
+        # UI. The Bedrock 429 pattern we're protecting against
+        # raises BEFORE any chunk is received, so this catches
+        # it cleanly.
+        def _open_stream() -> Any:
+            return litellm.completion(
+                model=service._config.model,
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+                max_tokens=max_output,
+                timeout=request_timeout,
+                **thinking_kwargs,
+            )
+
+        # Broadcast retry events to the UI so the user sees
+        # progress during the exponential backoff (which can
+        # run to minutes on pathological provider behaviour).
+        # Callback runs in the worker thread; schedule the
+        # async broadcast onto the main event loop so jrpc-oo
+        # serialises the send correctly.
+        def _on_retry(info: dict[str, Any]) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    service._broadcast_event_async(
+                        "streamRetry",
+                        request_id,
+                        info,
+                    ),
+                    loop,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "streamRetry broadcast schedule failed: %s",
+                    exc,
+                )
+
+        stream = retry_litellm_completion(
+            litellm,
+            _open_stream,
+            max_attempts=num_retries + 1,
+            context="streaming completion",
+            on_retry=_on_retry,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")

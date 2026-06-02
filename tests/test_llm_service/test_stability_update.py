@@ -8,6 +8,11 @@ Covers:
 - :class:`TestUpdateStabilityExcludedFiles` — the step-0a
   defensive excluded-files removal pass and its companion
   guards in steps 3 and 4.
+- :class:`TestPlainFilesExcludesIndexed` — files covered by
+  the symbol or doc index are subtracted from the
+  ``plain_files:<dir>`` block listing for that directory.
+  When every file in a directory is indexed, the entry is
+  omitted entirely from the seed.
 """
 
 from __future__ import annotations
@@ -468,14 +473,17 @@ class TestUpdateStabilityExcludedFiles:
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Excluded files whose tracker entries survived get removed.
+        """Excluded files whose ``file:`` entries survived get removed.
 
-        Simulates drift: a file was indexed, got a tracker
-        entry at L2, and was later excluded. The one-shot
-        removal in set_excluded_index_files should have caught
-        it — but if it didn't (tracker re-populated after the
-        exclusion set change, e.g., from a cross-ref enable),
-        step 0a cleans it up on the next update cycle.
+        Simulates drift: a file got a ``file:`` tracker entry
+        at L2, and was later excluded. The one-shot removal in
+        set_excluded_index_files should have caught it — but if
+        it didn't (tracker re-populated after the exclusion set
+        change), step 0a cleans it up on the next update cycle.
+
+        Under D36 only ``file:`` keys are subject to the
+        defensive sweep; per-file ``symbol:``/``doc:`` keys
+        don't exist as tracker entries.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -486,9 +494,9 @@ class TestUpdateStabilityExcludedFiles:
         # Set exclusion DIRECTLY on the attribute, bypassing
         # set_excluded_index_files to simulate the drift case.
         svc._excluded_index_files = ["excluded.py"]
-        # Seed a stale tracker entry at L2.
-        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
-            key="symbol:excluded.py",
+        # Seed a stale ``file:`` tracker entry at L2.
+        svc._stability_tracker._items["file:excluded.py"] = TrackedItem(
+            key="file:excluded.py",
             tier=Tier.L2,
             n_value=6,
             content_hash="h",
@@ -499,15 +507,21 @@ class TestUpdateStabilityExcludedFiles:
 
         # Entry gone after the update cycle.
         all_keys = set(svc._stability_tracker.get_all_items().keys())
-        assert "symbol:excluded.py" not in all_keys
+        assert "file:excluded.py" not in all_keys
 
-    def test_step_0a_removes_all_three_prefixes(
+    def test_step_0a_removes_excluded_file_entry(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Removal pass covers symbol:, doc:, and file: prefixes."""
+        """Removal pass covers ``file:`` entries.
+
+        Under D36 the per-file index prefixes (``symbol:``,
+        ``doc:``) are no longer tracker entries — only
+        ``file:`` keys exist for per-file content. The
+        defensive sweep targets that prefix.
+        """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
         svc = self._make_service_with_both_indexes(
@@ -515,14 +529,6 @@ class TestUpdateStabilityExcludedFiles:
         )
         svc._excluded_index_files = ["multi.md"]
         tracker = svc._stability_tracker
-        tracker._items["symbol:multi.md"] = TrackedItem(
-            key="symbol:multi.md", tier=Tier.L1,
-            n_value=3, content_hash="h", tokens=10,
-        )
-        tracker._items["doc:multi.md"] = TrackedItem(
-            key="doc:multi.md", tier=Tier.L2,
-            n_value=6, content_hash="h", tokens=20,
-        )
         tracker._items["file:multi.md"] = TrackedItem(
             key="file:multi.md", tier=Tier.L3,
             n_value=3, content_hash="h", tokens=30,
@@ -531,8 +537,6 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         all_keys = set(tracker.get_all_items().keys())
-        assert "symbol:multi.md" not in all_keys
-        assert "doc:multi.md" not in all_keys
         assert "file:multi.md" not in all_keys
 
     def test_step_0a_marks_tiers_broken(
@@ -551,9 +555,7 @@ class TestUpdateStabilityExcludedFiles:
         top of the cycle, so we can't observe the flag after
         a full update. Instead we verify the REMOVAL happened
         at all — if step 0a's tier-marking didn't run, the
-        entry would still be there after step 3 (which doesn't
-        touch tracker state for excluded-but-indexed paths in
-        a way that removes prior entries).
+        entry would still be there.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -562,8 +564,8 @@ class TestUpdateStabilityExcludedFiles:
             symbol_paths=["excluded.py"],
         )
         svc._excluded_index_files = ["excluded.py"]
-        svc._stability_tracker._items["symbol:excluded.py"] = TrackedItem(
-            key="symbol:excluded.py",
+        svc._stability_tracker._items["file:excluded.py"] = TrackedItem(
+            key="file:excluded.py",
             tier=Tier.L2,
             n_value=6,
             content_hash="h",
@@ -576,7 +578,7 @@ class TestUpdateStabilityExcludedFiles:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        assert "symbol:excluded.py" not in all_keys
+        assert "file:excluded.py" not in all_keys
 
     def test_no_per_file_symbol_entries_regardless_of_exclusion(
         self,
@@ -793,7 +795,7 @@ class TestUpdateStabilityExcludedFiles:
         # Phase 1: exclude.
         svc.set_excluded_index_files(["drifted.py"])
         # Tracker should have no entry at this point.
-        assert "symbol:drifted.py" not in (
+        assert "file:drifted.py" not in (
             svc._stability_tracker.get_all_items()
         )
 
@@ -801,14 +803,14 @@ class TestUpdateStabilityExcludedFiles:
         # entry. In production this could be a rebuild or a
         # cross-ref enable that iterates the index without
         # checking the exclusion set.
-        svc._stability_tracker._items["symbol:drifted.py"] = TrackedItem(
-            key="symbol:drifted.py",
+        svc._stability_tracker._items["file:drifted.py"] = TrackedItem(
+            key="file:drifted.py",
             tier=Tier.L1,
             n_value=3,
             content_hash="h",
             tokens=20,
         )
-        assert "symbol:drifted.py" in (
+        assert "file:drifted.py" in (
             svc._stability_tracker.get_all_items()
         )
 
@@ -816,6 +818,566 @@ class TestUpdateStabilityExcludedFiles:
         svc._update_stability()
 
         # Entry gone.
-        assert "symbol:drifted.py" not in (
+        assert "file:drifted.py" not in (
             svc._stability_tracker.get_all_items()
         )
+
+
+class TestPlainFilesExcludesIndexed:
+    """``plain_files:<dir>`` blocks omit files covered by an index.
+
+    Per ``specs4/3-llm/cache-tiering.md`` § Content Categories
+    Tracked, ``plain_files:<dir>`` is "list of filenames in
+    ``<dir>`` for files that have neither a symbol table nor
+    a doc index". Files already represented in
+    ``symbols:<dir>`` or ``docs:<dir>`` are subtracted from
+    the plain-files listing — their filenames are already
+    visible to the LLM through the corresponding index block,
+    and listing them again would duplicate tokens for no gain.
+
+    When every file in a directory is indexed, the
+    ``plain_files:<dir>`` entry is omitted entirely from the
+    seed (rather than being seeded with an empty block).
+
+    These tests exercise the seeding paths in
+    :func:`ac_dc.llm._stability._enumerate_dir_blocks` and
+    :func:`ac_dc.llm._rebuild.seed_dir_blocks_for_rebuild`,
+    plus the per-turn refresh in
+    :func:`ac_dc.llm._stability._dir_block_active_items`.
+    """
+
+    def _make_service(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        symbol_paths: list[str] | None = None,
+        doc_paths: list[str] | None = None,
+    ) -> LLMService:
+        """Service with controlled symbol/doc indexes.
+
+        ``symbol_paths`` populates ``_all_symbols`` (the only
+        attribute the seeding code reads). ``doc_paths``
+        populates ``_doc_index._all_outlines`` via the
+        markdown extractor so outlines are well-formed.
+        """
+        symbol_paths = symbol_paths or []
+        doc_paths = doc_paths or []
+
+        class _SymbolIndexStub:
+            def __init__(self, paths: list[str]) -> None:
+                self._all_symbols = {p: None for p in paths}
+
+            def get_dir_symbols_block(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                # Render a non-empty block so seeding records
+                # a positive token count for symbol dirs.
+                files = sorted(
+                    p for p in self._all_symbols
+                    if (
+                        p[: p.rfind("/")] if "/" in p else ""
+                    ) == directory
+                )
+                if not files:
+                    return ""
+                return "\n".join(f"sym-line-for-{f}" for f in files)
+
+            def get_dir_signature_hash(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                return f"sym-sig-{directory}"
+
+            def get_legend(self) -> str:
+                return ""
+
+            def get_symbol_map(
+                self, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexStub(symbol_paths),
+        )
+
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in doc_paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+        return svc
+
+    def test_seed_omits_plain_files_when_dir_fully_indexed(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A directory where every file is symbol-indexed → no plain_files entry.
+
+        The classic case: ``webapp/src/chat-panel/`` — every
+        ``.js`` file appears in the symbol index, so the
+        ``symbols:webapp/src/chat-panel`` block already
+        lists them. Adding ``plain_files:webapp/src/chat-panel``
+        with the same filenames is pure duplication.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        # Repo holds two files in the same directory.
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        # Symbol index covers both.
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        # Stage the files so get_files_by_directory sees them.
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" in kinds
+        assert "plain_files:src" not in kinds
+
+    def test_seed_includes_plain_files_for_uncovered_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Directory with mixed coverage → plain_files holds leftovers only.
+
+        ``a.py`` is symbol-indexed; ``data.json`` is not.
+        The ``plain_files:src`` block should list
+        ``data.json`` only — ``a.py`` already rides via
+        ``symbols:src``.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "data.json").write_text("{}\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py"],
+        )
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        plain = [k for k, _, _ in keys if k == "plain_files:src"]
+        assert plain  # entry exists
+        # The block content (rebuilt to verify) must mention
+        # data.json and not a.py.
+        from ac_dc.llm._stability import _indexed_paths_in_dir
+        covered = _indexed_paths_in_dir(svc, "src")
+        files_in_dir = repo.get_files_by_directory().get("src", [])
+        leftover = sorted(f for f in files_in_dir if f not in covered)
+        assert "src/data.json" in leftover
+        assert "src/a.py" not in leftover
+
+    def test_seed_includes_plain_files_for_fully_uncovered_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Pure-asset directory → plain_files:<dir> entry as before.
+
+        Regression guard for the unchanged case: a directory
+        with no indexed files at all should still produce a
+        ``plain_files:`` entry.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "plain_files:assets" in kinds
+
+    def test_doc_index_coverage_also_subtracts(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A doc-indexed file is also subtracted from plain_files.
+
+        Symmetric case to symbol-index coverage. ``README.md``
+        appears in the doc index, so it should not show up
+        again in ``plain_files:`` for its directory.
+        """
+        from ac_dc.llm._stability import _indexed_paths_in_dir
+
+        (repo_dir / "docs").mkdir(exist_ok=True)
+        (repo_dir / "docs" / "README.md").write_text("# r\n")
+        (repo_dir / "docs" / "config.toml").write_text("x=1\n")
+        svc = self._make_service(
+            config, repo,
+            doc_paths=["docs/README.md"],
+        )
+        repo._run_git(["add", "-A"])
+
+        covered = _indexed_paths_in_dir(svc, "docs")
+        assert "docs/README.md" in covered
+        assert "docs/config.toml" not in covered
+
+    def test_per_turn_refresh_subtracts_indexed_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """The per-turn ``_dir_block_active_items`` recomputation also subtracts.
+
+        If a ``plain_files:<dir>`` entry exists in the
+        tracker, its per-turn hash and tokens come from
+        :func:`_dir_block_active_items`. That recomputation
+        must apply the same subtraction so the block content
+        stays consistent with what the seed produced.
+        """
+        from ac_dc.llm._stability import _dir_block_active_items
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "data.json").write_text("{}\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py"],
+        )
+        repo._run_git(["add", "-A"])
+
+        # Seed a plain_files:src tracker entry directly so
+        # the per-turn refresh picks it up.
+        svc._stability_tracker._items["plain_files:src"] = TrackedItem(
+            key="plain_files:src",
+            tier=Tier.L3,
+            n_value=3,
+            content_hash="placeholder",
+            tokens=0,
+        )
+
+        scope = svc._default_scope()
+        items = _dir_block_active_items(svc, scope)
+
+        assert "plain_files:src" in items
+        # The block's tokens reflect a single-file listing
+        # (data.json), not two — a.py was subtracted.
+        # Verify by reproducing the expected content.
+        expected_block = "src/data.json"
+        expected_tokens = svc._counter.count(expected_block)
+        assert items["plain_files:src"]["tokens"] == expected_tokens
+
+
+class TestDirBlockExcludesUserExcludedFiles:
+    """Picker-excluded files don't seed dir-blocks.
+
+    When the file picker excludes every file under a
+    directory (the three-state checkbox sends every
+    descendant file path), seeding must skip the
+    corresponding ``symbols:<dir>`` / ``docs:<dir>`` /
+    ``plain_files:<dir>`` entry. Otherwise the cache
+    viewer fills with directories the user explicitly
+    removed from the index.
+
+    Mirror tests run against
+    :func:`ac_dc.llm._stability._enumerate_dir_blocks`
+    (initial init + per-mode init), the
+    :func:`ac_dc.llm._stability._dir_block_active_items`
+    refresh path (per-turn rebuild of block hash and
+    tokens), and
+    :func:`ac_dc.llm._rebuild.seed_dir_blocks_for_rebuild`
+    (manual rebuild). All three call sites must filter
+    by the same set so excluded directories never appear
+    as tracker entries.
+    """
+
+    def _make_service(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        symbol_paths: list[str] | None = None,
+        doc_paths: list[str] | None = None,
+    ) -> LLMService:
+        """Service with a controllable symbol index and seeded doc outlines.
+
+        Same shape as ``TestPlainFilesExcludesIndexed._make_service``
+        — duplicated rather than shared so a future change to
+        either class's stub doesn't accidentally cross-couple.
+        """
+        symbol_paths = symbol_paths or []
+        doc_paths = doc_paths or []
+
+        class _SymbolIndexStub:
+            def __init__(self, paths: list[str]) -> None:
+                self._all_symbols = {p: None for p in paths}
+
+            def get_dir_symbols_block(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                files = sorted(
+                    p for p in self._all_symbols
+                    if (
+                        p[: p.rfind("/")] if "/" in p else ""
+                    ) == directory
+                )
+                if not files:
+                    return ""
+                return "\n".join(f"sym-line-for-{f}" for f in files)
+
+            def get_dir_signature_hash(
+                self,
+                directory: str,
+                exclude_active: set[str] | None = None,
+            ) -> str:
+                return f"sym-sig-{directory}"
+
+            def get_legend(self) -> str:
+                return ""
+
+            def get_symbol_map(
+                self, exclude_files: set[str] | None = None
+            ) -> str:
+                return ""
+
+        svc = LLMService(
+            config=config,
+            repo=repo,
+            symbol_index=_SymbolIndexStub(symbol_paths),
+        )
+
+        from ac_dc.doc_index.extractors.markdown import (
+            MarkdownExtractor,
+        )
+        from pathlib import Path as _Path
+
+        extractor = MarkdownExtractor()
+        for path in doc_paths:
+            outline = extractor.extract(
+                _Path(path),
+                f"# Heading for {path}\n\nbody.\n",
+            )
+            svc._doc_index._all_outlines[path] = outline
+
+        return svc
+
+    def test_seed_skips_fully_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A symbol-indexed directory with every file excluded is dropped."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        # User excludes every file in src/.
+        svc._excluded_index_files = ["src/a.py", "src/b.py"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" not in kinds
+        # And no plain_files:src either — every file is
+        # in the symbol index (covered) so leftover is
+        # empty regardless of exclusions.
+        assert "plain_files:src" not in kinds
+
+    def test_seed_keeps_partially_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """One non-excluded file is enough to keep the symbols block."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        # Only one file excluded; the other still warrants
+        # a symbols:src entry.
+        svc._excluded_index_files = ["src/a.py"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "symbols:src" in kinds
+
+    def test_seed_skips_fully_excluded_docs_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """A doc-indexed directory with every file excluded is dropped."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "docs").mkdir(exist_ok=True)
+        (repo_dir / "docs" / "a.md").write_text("# a\n")
+        (repo_dir / "docs" / "b.md").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            doc_paths=["docs/a.md", "docs/b.md"],
+        )
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["docs/a.md", "docs/b.md"]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "docs:docs" not in kinds
+        assert "plain_files:docs" not in kinds
+
+    def test_seed_subtracts_excluded_from_plain_files(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Excluded files are dropped from the plain_files listing.
+
+        Mixed case: a directory with no index coverage at
+        all, partial exclusion. The leftover list excludes
+        the user's excluded files and produces a block
+        only over the remainder.
+        """
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["assets/data.json"]
+
+        keys = _enumerate_dir_blocks(svc)
+        plain = [k for k, _, _ in keys if k == "plain_files:assets"]
+        assert plain  # entry survives — logo.svg still present
+
+    def test_seed_drops_plain_files_when_all_excluded(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Plain-files dir with every file excluded is omitted entirely."""
+        from ac_dc.llm._stability import _enumerate_dir_blocks
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = [
+            "assets/logo.svg", "assets/data.json",
+        ]
+
+        keys = _enumerate_dir_blocks(svc)
+        kinds = {k for k, _, _ in keys}
+        assert "plain_files:assets" not in kinds
+
+    def test_per_turn_refresh_subtracts_excluded(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """The per-turn refresh path filters excluded files too.
+
+        If a ``plain_files:<dir>`` tracker entry already
+        exists (seeded before exclusion or by some other
+        path), the per-turn rebuild of its hash and
+        tokens must apply the same exclusion filter so
+        the rendered content matches the seed contract.
+        """
+        from ac_dc.llm._stability import _dir_block_active_items
+        from ac_dc.stability_tracker import Tier, TrackedItem
+
+        (repo_dir / "assets").mkdir(exist_ok=True)
+        (repo_dir / "assets" / "logo.svg").write_text("<svg/>\n")
+        (repo_dir / "assets" / "data.json").write_text("{}\n")
+        svc = self._make_service(config, repo)
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["assets/data.json"]
+
+        svc._stability_tracker._items["plain_files:assets"] = TrackedItem(
+            key="plain_files:assets",
+            tier=Tier.L3,
+            n_value=3,
+            content_hash="placeholder",
+            tokens=0,
+        )
+
+        scope = svc._default_scope()
+        items = _dir_block_active_items(svc, scope)
+
+        assert "plain_files:assets" in items
+        # Block tokens reflect logo.svg only — data.json
+        # is excluded.
+        expected_block = "assets/logo.svg"
+        expected_tokens = svc._counter.count(expected_block)
+        assert items["plain_files:assets"]["tokens"] == expected_tokens
+
+    def test_rebuild_seed_skips_fully_excluded_symbols_dir(
+        self,
+        config: ConfigManager,
+        repo: Repo,
+        repo_dir: Path,
+    ) -> None:
+        """Manual rebuild's seeding path applies the same filter.
+
+        The bug that triggered this work: clicking Rebuild
+        re-populated the tracker from the indexes without
+        consulting ``_excluded_index_files``, so the cache
+        view filled with directories the user had
+        excluded. After the fix, rebuild's seed must skip
+        them too.
+        """
+        from ac_dc.llm._rebuild import seed_dir_blocks_for_rebuild
+
+        (repo_dir / "src").mkdir(exist_ok=True)
+        (repo_dir / "src" / "a.py").write_text("# a\n")
+        (repo_dir / "src" / "b.py").write_text("# b\n")
+        svc = self._make_service(
+            config, repo,
+            symbol_paths=["src/a.py", "src/b.py"],
+        )
+        repo._run_git(["add", "-A"])
+        svc._excluded_index_files = ["src/a.py", "src/b.py"]
+
+        seed_dir_blocks_for_rebuild(svc)
+
+        all_keys = set(svc._stability_tracker.get_all_items().keys())
+        assert "symbols:src" not in all_keys
+        assert "plain_files:src" not in all_keys

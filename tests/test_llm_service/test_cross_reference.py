@@ -327,20 +327,19 @@ class TestCrossReferenceLifecycle:
         assert result["cross_ref_enabled"] is False
         assert svc._cross_ref_enabled is False
 
-    def test_disable_legacy_sweep_clears_stale_doc_entries(
+    def test_disable_clears_opposite_index_dir_blocks(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Defensive sweep clears any pre-D27 ``doc:`` entries.
+        """Disable strips opposite-mode dir-blocks from the tracker.
 
-        ``remove_cross_reference_items`` is a no-op stub
-        under D27, but it still runs the legacy-sweep pass
-        — any ``doc:{path}`` (or ``symbol:{path}``) entries
-        left over from a session that started under
-        pre-D27 code get cleaned up on the next disable.
-        Migration insurance, not part of normal operation.
+        Under D36 cross-reference seeds opposite-mode
+        dir-blocks (``docs:<dir>`` in code mode,
+        ``symbols:<dir>`` in doc mode). Disable removes them
+        so the next prompt assembly doesn't render their
+        content.
         """
         from ac_dc.stability_tracker import Tier, TrackedItem
 
@@ -351,40 +350,44 @@ class TestCrossReferenceLifecycle:
         )
         svc._doc_index_ready = True
 
-        # Manually inject a stale doc: entry as if it had been
-        # left behind by a pre-D27 session.
-        svc._stability_tracker._items["doc:legacy.md"] = (
+        # Inject an opposite-mode dir-block entry as if cross-ref
+        # had seeded it.
+        svc._stability_tracker._items["docs:src"] = (
             TrackedItem(
-                key="doc:legacy.md",
+                key="docs:src",
                 tier=Tier.L2,
                 n_value=4,
-                content_hash="legacy",
+                content_hash="h",
                 tokens=100,
             )
         )
 
-        # Toggle on then off — the off path runs the sweep.
-        svc.set_cross_reference(True)
+        # Disable runs the sweep.
+        svc._cross_ref_enabled = True
         svc.set_cross_reference(False)
 
-        # Stale entry gone.
+        # Opposite-mode dir-block entry gone.
         all_items = svc._stability_tracker.get_all_items()
-        assert "doc:legacy.md" not in all_items
+        assert "docs:src" not in all_items
 
-    def test_assembly_includes_secondary_map_when_enabled(
+    def test_assembly_includes_secondary_legend_when_enabled(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Code mode + cross-ref → secondary doc map in L0 system message.
+        """Code mode + cross-ref → secondary doc legend in L0 system message.
 
-        Under D27 the cross-ref body lives in L0's system
-        message, not in lower-tier tracker entries. This is
-        the headline assembly-side observation.
+        Under D36 dir-block content rides L0–L3 as
+        ``docs:<dir>`` tracker entries (rendered live from the
+        doc index per turn) — but the secondary *legend*
+        (column descriptions) still sits as a non-flux head
+        anchor before L0 alongside the primary legend.
+        Cross-ref toggles whether the secondary legend
+        appears.
 
-        Spec: ``specs4/3-llm/modes.md`` § Cross-Reference
-        Mode — "Both legends included in the L0 cache block".
+        Spec: ``specs-reference/3-llm/cache-tiering`` and
+        ``specs-reference/3-llm/modes`` § Cross-Reference Mode.
         """
         from ac_dc.context_manager import DOC_MAP_HEADER
 
@@ -398,12 +401,10 @@ class TestCrossReferenceLifecycle:
 
         # Build a minimal tiered-content fixture and ask the
         # assembler to render. We only need the system
-        # message — the rest is irrelevant here. Skipping
-        # ``_try_initialize_stability`` because the symbol
-        # index stub doesn't implement ``index_repo``; the
-        # assembler doesn't depend on init.
+        # message — the rest is irrelevant here.
         empty_tier = {
             "symbols": "",
+            "plain_files": "",
             "files": "",
             "history": [],
             "graduated_files": [],
@@ -419,8 +420,6 @@ class TestCrossReferenceLifecycle:
         )
         # System message is first.
         sys_msg = messages[0]
-        # Content may be plain string or a list of blocks; pull
-        # text out either way.
         content = sys_msg["content"]
         if isinstance(content, list):
             text = "\n".join(
@@ -430,13 +429,9 @@ class TestCrossReferenceLifecycle:
             )
         else:
             text = content
-        # Secondary header present in code mode (means doc map
-        # was rendered into L0).
+        # Secondary header present in code mode (means doc legend
+        # was attached as the cross-reference secondary).
         assert DOC_MAP_HEADER in text
-        # Doc map content present too (paths from the
-        # outline-seeded files).
-        assert "guide.md" in text
-        assert "README.md" in text
 
     def test_assembly_omits_secondary_map_when_disabled(
         self,
@@ -484,18 +479,21 @@ class TestCrossReferenceLifecycle:
         # Secondary header absent — only the primary appears.
         assert DOC_MAP_HEADER not in text
 
-    def test_breakdown_includes_secondary_meta_row_when_enabled(
+    def test_breakdown_reports_cross_ref_flag_when_enabled(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Breakdown synthesizes ``meta:doc_map`` in L0 alongside ``meta:repo_map``.
+        """Breakdown payload exposes the cross-reference flag.
 
-        The cache viewer renders these synthetic rows so
-        users can see (and click) both maps. Under cross-ref
-        in code mode, both must appear together in L0's
-        contents list.
+        Under D36 there is no synthetic ``meta:repo_map`` /
+        ``meta:doc_map`` row — repo structure rides as
+        first-class ``symbols:<dir>`` / ``docs:<dir>``
+        per-directory dir-block tracker entries. The
+        cross-reference state is surfaced via the breakdown
+        payload's ``cross_ref_enabled`` field, which the
+        cache viewer uses to render the secondary legend.
         """
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
@@ -504,31 +502,18 @@ class TestCrossReferenceLifecycle:
         )
         svc._doc_index_ready = True
         svc.set_cross_reference(True)
-        # Init seeds ``system:prompt`` into L0 so the
-        # tier-loop body runs and the meta-row synthesis
-        # fires. Without an L0 tracker item the breakdown's
-        # ``if not tier_items: continue`` skips L0
-        # entirely.
         svc._try_initialize_stability()
 
         breakdown = svc.get_context_breakdown()
-        l0_block = next(
-            (b for b in breakdown["blocks"] if b["name"] == "L0"),
-            None,
-        )
-        assert l0_block is not None
-        names = [c["name"] for c in l0_block["contents"]]
-        # Both meta rows present in L0 under cross-ref.
-        assert "meta:repo_map" in names
-        assert "meta:doc_map" in names
+        assert breakdown["cross_ref_enabled"] is True
 
-    def test_breakdown_omits_secondary_meta_row_when_disabled(
+    def test_breakdown_reports_cross_ref_flag_when_disabled(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
     ) -> None:
-        """Cross-ref off → only primary ``meta:repo_map`` in L0."""
+        """Cross-ref off → ``cross_ref_enabled`` is False in breakdown."""
         svc = self._make_service_with_both_indexes(
             config, repo, fake_litellm,
             symbol_paths=["a.py"],
@@ -539,15 +524,7 @@ class TestCrossReferenceLifecycle:
         svc._try_initialize_stability()
 
         breakdown = svc.get_context_breakdown()
-        l0_block = next(
-            (b for b in breakdown["blocks"] if b["name"] == "L0"),
-            None,
-        )
-        assert l0_block is not None
-        names = [c["name"] for c in l0_block["contents"]]
-        # Primary meta row present, secondary absent.
-        assert "meta:repo_map" in names
-        assert "meta:doc_map" not in names
+        assert breakdown["cross_ref_enabled"] is False
 
     def test_mode_switch_resets_cross_ref_flag(
         self,

@@ -328,13 +328,18 @@ class TestPdfSvgTextPreservation:
     These tests pin both sides of the rule.
     """
 
-    def test_direct_pdf_strips_svg_text_when_page_has_text(
+    def test_direct_pdf_preserves_all_text_in_svg(
         self, doc_convert, scan_root
     ):
-        """Direct-PDF page with text + image strips SVG <text>.
+        """SVG keeps every ``<text>`` element verbatim.
 
-        The paragraph lands in the markdown as prose; the SVG
-        keeps only the graphics (image ref, vector drawings).
+        Body prose appears in both the markdown (extracted
+        paragraphs) and the SVG (PyMuPDF's text elements).
+        Duplication is the deliberate trade-off — the
+        bbox-scoped strip pass was removed because PyMuPDF's
+        text-anchor coordinate space and figure-bbox space
+        differ, and any heuristic strip silently dropped
+        diagram labels.
         """
         _require_pymupdf()
         png = _make_png_bytes()
@@ -350,16 +355,58 @@ class TestPdfSvgTextPreservation:
         md_content = (
             scan_root / "doc.md"
         ).read_text(encoding="utf-8")
-        # Phrase must appear in the markdown (grep, LLM ctx).
+        # Phrase must appear in the markdown.
         assert "Distinctive unique phrase abc123" in md_content
-        # And must NOT appear in the SVG — dedup invariant.
-        assert "Distinctive unique phrase abc123" not in svg_content
-        # And the SVG should have no <text>/<tspan> elements
-        # at all (PyMuPDF emits every glyph as one of these
-        # tags when text_as_path=0, so zero is the right
-        # post-strip count).
-        assert "<text" not in svg_content
-        assert "<tspan" not in svg_content
+        # And must ALSO appear in the SVG.
+        assert "Distinctive unique phrase abc123" in svg_content
+
+    def test_direct_pdf_keeps_all_text_inside_and_outside_figures(
+        self, doc_convert, scan_root
+    ):
+        """Both body prose and figure labels appear in the SVG.
+
+        The earlier bbox-scoped strip pass tried to keep
+        labels and drop body prose; this test pinned the
+        positive half of that contract. With stripping
+        removed entirely, both kinds of text now appear in
+        the SVG verbatim. The markdown still carries
+        everything PyMuPDF can extract.
+        """
+        _require_pymupdf()
+        import fitz
+
+        png = _make_png_bytes()
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        # Body text near the top, well outside the image.
+        page.insert_text(
+            (72, 72), "Body prose alpha beta", fontsize=12,
+        )
+        # Figure region (image) in the middle of the page.
+        rect = fitz.Rect(100, 300, 500, 600)
+        page.insert_image(rect, stream=png)
+        # A "figure label" inside the image bbox.
+        page.insert_text(
+            (200, 450),
+            "FigureLabel inside box",
+            fontsize=10,
+        )
+        doc.save(str(scan_root / "doc.pdf"))
+        doc.close()
+
+        doc_convert.convert_files(["doc.pdf"])
+        svg_content = (
+            scan_root / "doc" / "01_page.svg"
+        ).read_text(encoding="utf-8")
+        md_content = (
+            scan_root / "doc.md"
+        ).read_text(encoding="utf-8")
+        # Both texts appear in the markdown.
+        assert "Body prose alpha beta" in md_content
+        assert "FigureLabel inside box" in md_content
+        # And both appear in the SVG verbatim.
+        assert "Body prose alpha beta" in svg_content
+        assert "FigureLabel inside box" in svg_content
 
     def test_direct_pdf_figure_only_page_keeps_svg_text(
         self, doc_convert, scan_root

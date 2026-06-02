@@ -23,15 +23,18 @@ installCleanup();
 
 describe('SvgEditor resize handle rendering', () => {
   /**
-   * Extract handle dots (children of the handle group
-   * with a role attribute) from the selected element's
-   * handle overlay.
+   * Extract resize handle dots from the selected element's
+   * handle overlay. Excludes the rotate handle, which has
+   * role "rotate" — these tests pin the resize-handle
+   * count specifically.
    */
   function getHandles(svg) {
     const group = svg.querySelector(`#svg-editor-handles`);
     if (!group) return [];
     return Array.from(
       group.querySelectorAll('[data-handle-role]'),
+    ).filter(
+      (h) => h.getAttribute('data-handle-role') !== 'rotate',
     );
   }
 

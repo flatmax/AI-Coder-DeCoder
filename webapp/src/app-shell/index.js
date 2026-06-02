@@ -34,6 +34,7 @@ import '../file-nav.js';
 import '../token-hud.js';
 import '../compaction-progress.js';
 import '../doc-index-progress.js';
+import '../cache-warmup-progress.js';
 
 import { APP_SHELL_STYLES } from './styles.js';
 import {
@@ -59,7 +60,7 @@ import {
   flushAltArrowPending, onGlobalKeyDown,
 } from './file-nav.js';
 import {
-  onNavigateFile, onLoadDiffPanel, onToggleSvgMode,
+  onNavigateFile, onLoadDiffPanel, onLoadSvgPanel, onToggleSvgMode,
   onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
 } from './viewers.js';
 import {
@@ -351,6 +352,7 @@ export class AppShell extends JRPCClient {
     this._onNavigateFile = this._onNavigateFile.bind(this);
     this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
     this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
+    this._onLoadSvgPanel = this._onLoadSvgPanel.bind(this);
     this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
     this._onGridKeyDown = this._onGridKeyDown.bind(this);
     this._onGridKeyUp = this._onGridKeyUp.bind(this);
@@ -462,6 +464,17 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'load-diff-panel',
       this._onLoadDiffPanel,
+    );
+    // load-svg-panel is the SVG-viewer counterpart,
+    // dispatched by the file picker's "Open in left/right
+    // panel" actions when the file is an SVG. Routes to
+    // the SVG viewer's loadPanel for a rendered visual
+    // comparison instead of the raw XML in the diff
+    // viewer. See files-tab/context-menu.js
+    // dispatchLoadInPanel for the dispatch site.
+    window.addEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
     );
     window.addEventListener('beforeunload', this._onBeforeUnload);
     window.addEventListener('resize', this._onWindowResize);
@@ -586,6 +599,10 @@ export class AppShell extends JRPCClient {
     window.removeEventListener(
       'load-diff-panel',
       this._onLoadDiffPanel,
+    );
+    window.removeEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
     );
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     window.removeEventListener('mode-changed', this._onModeChanged);
@@ -814,6 +831,97 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  /**
+   * Server-push callback fired by ``_post_response`` after
+   * tier state, compaction, and any other post-stream
+   * housekeeping has fully settled. Distinct from
+   * ``streamComplete`` (fired earlier for chat-panel UX
+   * latency reasons): this event signals that the
+   * breakdown RPC will now return consistent data.
+   *
+   * Re-dispatched as a window event so the Context tab
+   * can listen without coupling to AppShell. See
+   * specs4/3-llm/streaming.md § Post-Response.
+   */
+  postResponseComplete(requestId) {
+    window.dispatchEvent(new CustomEvent('post-response-complete', {
+      detail: { requestId },
+    }));
+    return true;
+  }
+
+  /**
+   * Cache-warmup countdown tick. Fired once per second
+   * during the visible 30-second lead-in to a warm-up
+   * call. Payload: {seconds_remaining, total}. Re-
+   * dispatched as a window event so
+   * <ac-cache-warmup-progress> can render a progress
+   * bar matching the retry-banner UX.
+   */
+  cacheWarmupCountdown(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-countdown', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired the moment the warm-up call goes out, after
+   * the countdown completes. Frontend flips the bar
+   * from countdown to spinner state.
+   */
+  cacheWarmupFiring(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-firing', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired after the warm-up call resolves. Payload
+   * carries {success: bool, reason?: str}. On
+   * failure the warmer auto-disables — the chat
+   * panel surfaces a toast separately.
+   */
+  cacheWarmupComplete(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-complete', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Fired when the visible countdown is aborted —
+   * either by a user-initiated stream (the warmer
+   * defers to the real request) or by an explicit
+   * cancel. Payload: {reason}.
+   */
+  cacheWarmupCancelled(payload) {
+    window.dispatchEvent(new CustomEvent('cache-warmup-cancelled', {
+      detail: payload || {},
+    }));
+    return true;
+  }
+
+  /**
+   * Server-push callback fired by the retry wrapper in
+   * `retry_litellm_completion` before each sleep. Carries
+   * {attempt, max_attempts, error_type, wait_seconds,
+   * message, provider, context}. Re-dispatched as a
+   * window event so the chat panel can surface a toast
+   * with the backoff countdown — without this, a 10-minute
+   * exponential retry looks like a frozen UI.
+   *
+   * See specs-reference/3-llm/streaming.md § Retry
+   * schedule for the emitted payload shape.
+   */
+  streamRetry(requestId, info) {
+    window.dispatchEvent(new CustomEvent('stream-retry', {
+      detail: { requestId, info },
+    }));
+    return true;
+  }
+
   filesChanged(selectedFiles) {
     window.dispatchEvent(new CustomEvent('files-changed', {
       detail: { selectedFiles },
@@ -843,35 +951,64 @@ export class AppShell extends JRPCClient {
 
   binaryFilesSkipped(data) {
     // Fired during sync_file_context when one or more
-    // selected files fail binary detection. The picker's
-    // selection state is unchanged — the file stays
-    // checked — but the LLM never sees the file's
-    // content because the repo layer refuses to decode
-    // binary bytes as text. Without this toast the
-    // rejection is invisible to the user.
+    // selected files are dropped from context. Two distinct
+    // causes share this channel:
+    //
+    //   - kind="binary" (default when absent): the file is
+    //     selected but the repo layer refused to decode its
+    //     bytes as text. Selection state is unchanged
+    //     server-side until the trim broadcast that
+    //     accompanies this event.
+    //   - kind="deleted": the file was removed from disk
+    //     outside the application (terminal `rm`, another
+    //     editor, branch checkout). The backend trims it
+    //     from selected_files and the stability tracker
+    //     transitions the entry to a deletion marker on
+    //     the next update cycle.
+    //
+    // Both paths fire a `filesChanged` broadcast just
+    // before this one, so the picker checkbox is already
+    // clearing by the time the toast renders. The
+    // `binary-files-skipped` window event is dispatched
+    // for any subscriber that wants the path list — the
+    // detail carries `kind` so subscribers can branch too.
     //
     // Spec: specs4/5-webapp/file-picker.md
     // § Binary File Selection
+    // Spec: specs4/3-llm/cache-tiering.md
+    // § Item Removal and § Deletion Markers
     // Spec: specs-reference/5-webapp/shell.md
     // § binaryFilesSkipped server-push event
     const paths = Array.isArray(data?.paths) ? data.paths : [];
     if (paths.length === 0) return true;
+    const kind = typeof data?.kind === 'string' ? data.kind : 'binary';
     window.dispatchEvent(new CustomEvent('binary-files-skipped', {
-      detail: { paths },
+      detail: { paths, kind },
     }));
     // Toast wording: lead with the first file, append a
     // "(+N more)" suffix when the list is long. Keeps the
-    // toast a single line. The Doc Convert hint is
-    // appended unconditionally since that's the standard
-    // resolution path.
+    // toast a single line.
     const head = paths[0];
     const extra = paths.length > 1
       ? ` (+${paths.length - 1} more)`
       : '';
-    this._showToast(
-      `Binary file not loaded: ${head}${extra}. Convert via the Doc Convert tab.`,
-      'warning',
-    );
+    let message;
+    if (kind === 'deleted') {
+      // Deleted files: the LLM will see a deletion marker
+      // in place of the file's content on the next turn.
+      // No "convert via Doc Convert" hint — the resolution
+      // is to either restore the file or accept the marker.
+      message = (
+        `File removed from context (deleted from disk): `
+        + `${head}${extra}.`
+      );
+    } else {
+      message = (
+        `Binary file not loaded: ${head}${extra}. `
+        + `Convert via the Doc Convert tab.`
+      );
+    }
+    this._showToast(message, 'warning');
     return true;
   }
 
@@ -1160,6 +1297,10 @@ export class AppShell extends JRPCClient {
 
   _onLoadDiffPanel(event) {
     return onLoadDiffPanel(this, event);
+  }
+
+  _onLoadSvgPanel(event) {
+    return onLoadSvgPanel(this, event);
   }
 
   _onToggleSvgMode(event) {

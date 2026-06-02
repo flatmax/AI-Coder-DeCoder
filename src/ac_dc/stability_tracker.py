@@ -2,9 +2,11 @@
 
 Drives the prompt-cache breakpoint placement that makes AC-DC's
 large-context usage affordable. Content that stays structurally
-unchanged across requests graduates into higher tiers (L3 → L2 →
-L1 → L0), which map to provider cache breakpoints. Content that
-changes demotes to ``active`` and pays the re-ingestion cost.
+unchanged across requests promotes upward across tier membranes
+(Active → L3 → L2 → L1 → L0), driven by the rectified-flux
+controller in :mod:`ac_dc.cache_membrane`. Content whose content
+hash changes teleports to ``active`` with ``n=0`` and re-climbs
+from there.
 
 This module owns tier assignments only. The streaming handler
 (Layer 3.6) builds the active-items list each request and calls
@@ -15,8 +17,14 @@ Governing specs:
 
 - ``specs4/3-llm/cache-tiering.md`` — the contract-level spec
 - ``specs-reference/3-llm/cache-tiering.md`` — the numeric detail
-  reference (entry N and promotion thresholds, cascade order,
-  anchoring algorithm)
+  reference
+- ``specs4/impl-history/decisions.md`` D36 — L0 is no longer
+  content-typed; every tier participates in flux uniformly,
+  and aggregate L0 maps are replaced by per-directory dir-blocks
+- ``specs4/impl-history/decisions.md`` D35 — the membrane / flux
+  controller landed; rectified-GHK is the only supported variant
+- https://github.com/flatmax/membrane.cache — public reference
+  implementation of the flux approach to tiered cache management
 
 Design points pinned by the test suite and spec:
 
@@ -27,40 +35,46 @@ Design points pinned by the test suite and spec:
   points at — each mode preserves its own tier state when
   inactive.
 
-- **Key prefixes dispatch by content type.** ``system:``,
-  ``file:``, ``symbol:``, ``doc:``, ``url:``, ``history:``. The
-  tracker itself doesn't interpret content — it just tracks the
-  keys. Downstream consumers (prompt assembler, cache viewer)
-  dispatch rendering on the prefix.
+- **Key prefixes dispatch by content type.** ``file:``,
+  ``symbols:<dir>``, ``docs:<dir>``, ``plain_files:<dir>``,
+  ``url:``, ``history:``. The system prompt sits before L0 as
+  the only non-flux head anchor and is NOT a tracker entry.
+  The tracker itself doesn't interpret content — it just
+  tracks the keys. Downstream consumers (prompt assembler,
+  cache viewer) dispatch rendering on the prefix.
 
-- **The N value measures consecutive unchanged appearances.**
-  Incremented when an item's content hash is unchanged across a
-  request; reset to 0 when the hash changes (demotion to active).
-  N ≥ 3 triggers graduation from active into L3.
+- **`n` is a pure age counter** — turns since last edit. Aged
+  ``+1`` on every item every cycle. Reset to ``0`` only by
+  hash mismatch (the edit invariant). The Active → L3 membrane
+  has an admission floor ``n_admit`` (default 3) so newly-
+  registered items cannot graduate until they have aged.
 
-- **Cascade is bottom-up L3 → L2 → L1 → L0.** Processed once per
-  update cycle, up to a few iterations until stable. Only broken
-  tiers promote items into them — a stable tier blocks promotions
-  to keep its cache breakpoint valid.
+- **Promotion is rectified flux across membranes.** Each turn,
+  the relaxation loop iterates to local equilibrium across the
+  four live membranes (Active→L3, L3→L2, L2→L1, L1→L0). Under
+  D36 the L1→L0 membrane participates uniformly — L0 is no
+  longer content-typed.
 
-- **Anchoring prevents cache-target drain.** When a tier holds
-  more tokens than ``cache_target_tokens``, items below the
-  threshold are anchored — their N is frozen and they cannot
-  promote until the tier shrinks. Prevents a cascade of
-  promotions from emptying a tier below its caching threshold.
+- **Direction and quiescence are intrinsic to the flux
+  equation.** The rectification clamp pins direction (Φ ≥ 0
+  — controller is upward-only); the deadband threshold
+  absorbs steady-state noise so quiet turns with V ≈ 0 across
+  all membranes self-arrest on the first pass without firing.
+  The broken-tier set survives as a HUD diagnostic and as the
+  gate for history-piggyback graduation, but no longer feeds
+  the flux loop.
 
-- **N cap at promotion threshold when tier above is stable.**
-  An item past the anchoring threshold increments N normally
-  but caps at the promotion-N value when the tier above is
-  stable — otherwise N would grow unbounded on long-lived stable
-  content, eventually causing a spurious promotion when the tier
-  above gets invalidated.
+- **Edit invariant.** A hash mismatch teleports the file to
+  Active with ``n = 0``. The membrane / flux model handles
+  the rest — when the file is deselected, its parent
+  directory's dir-block continues to carry its structural
+  presence, and re-selection brings the full text back.
 
-- **Post-cascade underfill demotion.** Any tier below
-  ``cache_target_tokens`` (except L0 and tiers broken this
-  cycle) has items demoted one level. Prevents wasting a cache
-  breakpoint on an under-full tier that won't actually be
-  cached by the provider.
+Anchoring, N-cap-at-stable-above, and post-cascade underfill
+demotion are all removed — the membrane controller subsumes the
+first two, and prompt assembly handles the third (cache target
+is consulted at breakpoint emission time, not by rearranging
+tier contents).
 """
 
 from __future__ import annotations
@@ -69,6 +83,17 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from ac_dc.cache_membrane import (
+    ACTIVE_IDX,
+    L0_IDX,
+    L1_IDX,
+    L2_IDX,
+    L3_IDX,
+    LIVE_MEMBRANES,
+    FluxConfig,
+    relax,
+)
 
 if TYPE_CHECKING:
     # Reference index is consumed for initialisation only; the
@@ -103,81 +128,48 @@ class Tier(str, Enum):
     L0 = "L0"
 
 
-# Per-tier entry N and promotion N thresholds, from specs3. These
-# are the canonical numbers — the spec table and the cascade
-# algorithm both depend on exactly these values.
+# Per-tier ``entry_n`` — the age stamp assigned to an item when
+# it is *placed* at this tier by init / rebuild / cross-reference
+# seeding paths. Under the membrane model these values are
+# effectively decorative: ``n`` is a pure age counter, and the
+# only place ``n`` is read in the relaxation loop is the
+# Active → L3 admission floor (``n_admit``, configured per-
+# membrane). Items seeded at L3 / L2 / L1 / L0 by init paths
+# bypass the admission gate entirely (they're already past the
+# membrane it gates).
 #
-# - ``entry_n``: the N value an item is assigned when it enters
-#   the tier (on graduation from below, or on promotion from a
-#   lower tier).
-# - ``promote_n``: the N value at which the item becomes eligible
-#   for promotion to the tier above. L0 has no promotion (it's
-#   terminal); we use a sentinel large value rather than None so
-#   the N-cap arithmetic stays simple.
-_L0_PROMOTE_SENTINEL = 9_999_999
-
+# Per D37 (and D35 retiring the N-counter cascade), only Active
+# carries a ``promote_n`` field — its value is the admission gate
+# (``n_admit``, default 3) for the Active → L3 membrane. L0 / L1 /
+# L2 / L3 no longer carry ``promote_n``: the legacy "L3→L2 at N=6,
+# L2→L1 at N=9, L1→L0 at N=12" thresholds are gone. ``entry_n``
+# survives on every tier because :mod:`ac_dc.llm._rebuild` and
+# :mod:`ac_dc.llm._breakdown` still consult it to assign a fresh
+# item's N value at its target tier (so a new L0-seeded item
+# starts above zero rather than triggering an immediate demotion
+# on first measurement). Above the Active → L3 admission gate the
+# membrane controller in :mod:`ac_dc.cache_membrane` drives every
+# promotion via the rectified GHK flux equation; new code should
+# reach for the membrane parameters via :class:`FluxConfig`.
 _TIER_CONFIG: dict[Tier, dict[str, int]] = {
-    # Active is the entry tier for new items. Graduation to L3
-    # happens at N ≥ 3.
     Tier.ACTIVE: {"entry_n": 0, "promote_n": 3},
-    Tier.L3: {"entry_n": 3, "promote_n": 6},
-    Tier.L2: {"entry_n": 6, "promote_n": 9},
-    Tier.L1: {"entry_n": 9, "promote_n": 12},
-    # L0 is terminal — no promotion path. Entry N stays 12 so an
-    # item that promotes from L1 lands with the documented value.
-    Tier.L0: {"entry_n": 12, "promote_n": _L0_PROMOTE_SENTINEL},
+    Tier.L3: {"entry_n": 3},
+    Tier.L2: {"entry_n": 6},
+    Tier.L1: {"entry_n": 9},
+    Tier.L0: {"entry_n": 12},
 }
 
 
-# Cascade processing order — bottom-up. L3 processes incoming
-# graduates from active, L2 handles L3's promotions, L1 handles
-# L2's. Active is processed separately in Phase 1; L0 is
-# DELIBERATELY EXCLUDED from the cascade.
-#
-# L0 is content-typed under the new model (D27): it holds the
-# system prompt and the aggregate symbol/doc map, both of which
-# are regenerated from the index at assembly time, not driven
-# by the N-counter cascade. The cascade does not place items
-# into L0, does not rewrite L0 entries, and does not consider
-# L0 for promotion targets. L0 invalidation happens only via
-# application restart or explicit ``rebuild_cache``.
-#
-# Spec: ``specs4/3-llm/cache-tiering.md`` § L0 Stability
-# Contract and § Tier Structure.
-_CASCADE_ORDER: tuple[Tier, ...] = (Tier.L3, Tier.L2, Tier.L1)
-
-# Adjacency map — the tier above each cached tier. Used for
-# promotion targeting.
-#
-# L1's "tier above" is None under the L0-content-typed model
-# (D27): cascade-mobile content (file:, url:, history:) is
-# ineligible for L0. The cascade processes L3 → L2 → L1 and
-# stops there. L1 is the terminal tier for promoted concrete
-# content; L0 is reserved for the system prompt and aggregate
-# maps and is reached only via explicit init / rebuild paths,
-# not via the cascade.
-#
-# L0 itself stays in the map for consistency (it never tries
-# to promote upward — there's nothing above it — and the
-# cascade code paths that read this map for L0 entries simply
-# see None and short-circuit).
-_TIER_ABOVE: dict[Tier, Tier | None] = {
-    Tier.ACTIVE: Tier.L3,
-    Tier.L3: Tier.L2,
-    Tier.L2: Tier.L1,
-    Tier.L1: None,
-    Tier.L0: None,
+# Mapping between the :class:`Tier` enum and the integer indices
+# the membrane controller uses. Higher index = more stable.
+_TIER_TO_IDX: dict[Tier, int] = {
+    Tier.ACTIVE: ACTIVE_IDX,
+    Tier.L3: L3_IDX,
+    Tier.L2: L2_IDX,
+    Tier.L1: L1_IDX,
+    Tier.L0: L0_IDX,
 }
-
-# Adjacency map — the tier below each cached tier. Used for
-# underfill demotion. Active has no tier below.
-_TIER_BELOW: dict[Tier, Tier | None] = {
-    Tier.L0: Tier.L1,
-    Tier.L1: Tier.L2,
-    Tier.L2: Tier.L3,
-    Tier.L3: Tier.ACTIVE,
-    Tier.ACTIVE: None,
-}
+_IDX_TO_TIER: dict[int, Tier] = {idx: tier for tier, idx in _TIER_TO_IDX.items()}
 
 
 # Placeholder content hash assigned during initialisation from the
@@ -186,62 +178,11 @@ _TIER_BELOW: dict[Tier, Tier | None] = {
 _PLACEHOLDER_HASH = ""
 
 
-# Deletion-marker text rendered into the prompt when a file is
-# deleted during the session. The marker preserves the file's
-# tracker entry (path-keyed) but replaces its content with this
-# fixed string. Constant text means a constant hash, so deletion
-# markers don't churn the cascade — they're stable from the
-# tracker's perspective and survive until the next
-# ``rebuild_cache`` (which re-extracts L0's aggregate maps from
-# the now-current index, dropping references to the deleted file).
-#
-# Byte-identity matters: keep this string verbatim. The cache
-# breakpoint hashes content directly and any wording variation
-# would produce a different hash, defeating the
-# stable-across-deletions invariant. Multiple deleted files
-# legitimately share the same marker representation — that's
-# the design.
-#
-# Spec: ``specs4/3-llm/cache-tiering.md`` § Deletion Markers.
-# Reference: ``specs-reference/3-llm/cache-tiering.md`` §
-# Deletion marker content.
-DELETION_MARKER_TEXT = (
-    "[deleted in this session — see L0 symbol/doc map for "
-    "last-known structure]"
-)
-
-
-# Pre-computed hash of :data:`DELETION_MARKER_TEXT`. Cached at
-# import time so the cascade doesn't re-hash the same constant
-# on every Phase 0 deletion check.
-def _compute_deletion_marker_hash() -> str:
-    import hashlib
-
-    return hashlib.sha256(
-        DELETION_MARKER_TEXT.encode("utf-8")
-    ).hexdigest()
-
-
-_DELETION_MARKER_HASH = _compute_deletion_marker_hash()
-
 # Placeholder token count — during initialisation we don't have
 # real token counts (the formatted blocks haven't been rendered
-# yet). A small per-entry estimate is used so L0 seeding doesn't
-# over-fill. Real counts replace these on the first update cycle
-# or via :meth:`_measure_tokens`.
-#
-# Chosen as a deliberate underestimate of real symbol/doc block
-# sizes. Typical per-file symbol blocks measure at 80-300 tokens
-# after rendering; typical doc blocks at 50-200. Using a
-# conservative 100 here means L0 seeding packs ~4x as many files
-# into L0 as a 400-token estimate would, so after measurement
-# L0's real token total lands closer to the cache target rather
-# than dramatically undershooting. The post-measurement backfill
-# catches any remaining shortfall, but starting closer to target
-# reduces the number of items backfill has to promote (each
-# promotion marks a source tier broken and triggers a cascade
-# pass on the next request — cheaper to over-seed initially than
-# to churn tiers on the first cold-start).
+# yet). A small per-entry estimate is used so dir-block seeding
+# doesn't over-fill any single tier. Real counts replace these
+# on the first update cycle or via :meth:`measure_tokens`.
 _PLACEHOLDER_TOKENS = 100
 
 
@@ -314,6 +255,7 @@ class StabilityTracker:
     def __init__(
         self,
         cache_target_tokens: int = 0,
+        flux_config: FluxConfig | None = None,
     ) -> None:
         """Initialise an empty tracker.
 
@@ -324,12 +266,19 @@ class StabilityTracker:
             Per specs, this is ``max(cache_min_tokens,
             min_cacheable_tokens) × buffer_multiplier`` — computed
             by :meth:`ConfigManager.cache_target_tokens_for_model`
-            and passed in. Zero disables anchoring and underfill
-            demotion (tests use 0 when they want to exercise the
-            simple promote/demote path without anchoring
-            interference).
+            and passed in. Read by prompt assembly to decide
+            whether to emit a cache breakpoint; **does not**
+            enter the flux equation under the membrane model
+            (D35).
+        flux_config:
+            The membrane / flux controller configuration. When
+            None, defaults to :class:`FluxConfig` (rectified-GHK
+            with the synth-tuner's headline parameters). Tests
+            construct explicit configs to exercise specific
+            parameter values.
         """
         self._cache_target_tokens = cache_target_tokens
+        self._flux_config = flux_config if flux_config is not None else FluxConfig()
         self._items: dict[str, TrackedItem] = {}
         self._changes: list[str] = []
         # Per-cycle registration log. Distinct from
@@ -343,6 +292,12 @@ class StabilityTracker:
         # of each :meth:`update`.
         self._registrations: list[str] = []
         self._broken_tiers: set[Tier] = set()
+        # Set of keys pinned by the edit invariant — protected
+        # from flux moves so a mid-session edit can keep its
+        # truthful current text in cache without competing
+        # for promotion. Cleared on rebuild (see
+        # :mod:`ac_dc.llm._rebuild`).
+        self._pinned_keys: set[str] = set()
         # Parallel diagnostic map — every entry in
         # ``_broken_tiers`` has matching reason strings here.
         # Set membership and reasons are kept in lockstep via
@@ -461,6 +416,66 @@ class StabilityTracker:
         }
 
     # ------------------------------------------------------------------
+    # Edit-invariant pinning
+    # ------------------------------------------------------------------
+
+    def pin_file(self, key: str) -> None:
+        """Pin a tracked key so flux cannot move it.
+
+        Used by the edit invariant: when a ``file:<path>``
+        entry's content hash changes mid-session, the truthful
+        current text must stay cached without competing for
+        promotion against unedited content. Pinning excludes
+        the key from the relax loop's mover pool.
+
+        No-op for unknown keys — callers that pin defensively
+        before the entry exists won't crash.
+
+        Cleared by manual cache rebuild (see :mod:`ac_dc.llm
+        ._rebuild`); the user's "fresh start" gesture
+        supersedes per-file edit history.
+        """
+        self._pinned_keys.add(key)
+
+    def unpin_file(self, key: str) -> None:
+        """Remove a pin. No-op for unpinned keys."""
+        self._pinned_keys.discard(key)
+
+    def is_pinned(self, key: str) -> bool:
+        """Return True when ``key`` is pinned (or has the legacy ``_pinned`` flag).
+
+        The first form is the public API — pins set via
+        :meth:`pin_file`. The second form supports tests and
+        any caller that attaches ``_pinned = True`` directly
+        to a :class:`TrackedItem` instance (rebuild's pin-
+        clear path was originally written against this older
+        shape; we keep both readable until that path is
+        rewritten).
+        """
+        if key in self._pinned_keys:
+            return True
+        item = self._items.get(key)
+        if item is not None and getattr(item, "_pinned", False):
+            return True
+        return False
+
+    def clear_all_pins(self) -> None:
+        """Drop every pin — the edit-invariant reset hook.
+
+        Called by manual cache rebuild. Also strips any legacy
+        ``_pinned`` attributes from :class:`TrackedItem`
+        instances so the two pin representations agree on the
+        empty state.
+        """
+        self._pinned_keys.clear()
+        for item in self._items.values():
+            if hasattr(item, "_pinned"):
+                try:
+                    delattr(item, "_pinned")
+                except AttributeError:
+                    pass
+
+    # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
 
@@ -497,117 +512,6 @@ class StabilityTracker:
         full item.
         """
         return key in self._items
-
-    # ------------------------------------------------------------------
-    # Pin flag and deletion marker helpers (L0-content-typed model)
-    # ------------------------------------------------------------------
-
-    def pin_file(self, key: str) -> bool:
-        """Mark a ``file:`` entry as edit-pinned.
-
-        Pinned entries are protected from automatic eviction
-        — stale-cleanup and underfill demotion skip them. The
-        edit invariant in the L0-content-typed model says: when
-        a file's content hash changes during the session, its
-        full text must remain present in some cached tier
-        until application restart or explicit ``rebuild_cache``,
-        even if the user deselects it. Pinning is the
-        mechanism.
-
-        Only ``file:`` keys can be pinned; calling on other
-        prefixes is a no-op (returns False). Calling on an
-        unknown key is also a no-op (returns False).
-
-        Returns True when the pin was applied (or was already
-        in place), False when the call had no effect.
-
-        Spec: ``specs4/3-llm/cache-tiering.md`` § Edit Invariant.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        item._pinned = True  # type: ignore[attr-defined]
-        return True
-
-    def unpin_file(self, key: str) -> bool:
-        """Clear the edit-pin flag on a ``file:`` entry.
-
-        Used by ``rebuild_cache`` to clear all pins as part of
-        the explicit reset — the user's "fresh start" gesture
-        supersedes per-file edit history. Returns True when the
-        pin was cleared, False when the entry was unknown or
-        was not previously pinned.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        had_pin = bool(getattr(item, "_pinned", False))
-        item._pinned = False  # type: ignore[attr-defined]
-        return had_pin
-
-    def is_pinned(self, key: str) -> bool:
-        """Return True when ``key`` is a pinned ``file:`` entry."""
-        item = self._items.get(key)
-        if item is None:
-            return False
-        return bool(getattr(item, "_pinned", False))
-
-    def mark_deleted(self, key: str) -> bool:
-        """Convert a ``file:`` entry to a deletion marker.
-
-        Replaces the item's content hash with the constant
-        :data:`_DELETION_MARKER_HASH` and updates its token
-        count to the marker text's measured length. Tier and
-        N value are preserved — the entry rides the cascade
-        from wherever it was (typically demoted to ACTIVE on
-        the next update because the hash changed, then
-        graduating upward as it stabilises).
-
-        Pin flag is cleared because deletion markers are
-        intrinsically stable (constant hash) and don't need
-        pin-protection — only ``rebuild_cache`` and
-        application restart clear them, and both already
-        clear pin flags as part of their reset semantics.
-
-        Returns True on success, False when the key is
-        unknown or doesn't have a ``file:`` prefix.
-
-        Spec: ``specs4/3-llm/cache-tiering.md`` §
-        Deletion Markers and § Item Removal.
-        """
-        if not key.startswith("file:"):
-            return False
-        item = self._items.get(key)
-        if item is None:
-            return False
-        item.content_hash = _DELETION_MARKER_HASH
-        # Token count for the marker text. We measure it once
-        # at module load if a counter is available; otherwise
-        # fall back to a coarse character count. The exact
-        # number doesn't matter much for cascade dynamics —
-        # the marker text is short — but rendering accuracy
-        # for the cache viewer expects a real-ish count.
-        item.tokens = len(DELETION_MARKER_TEXT)
-        item._pinned = False  # type: ignore[attr-defined]
-        item._deleted = True  # type: ignore[attr-defined]
-        return True
-
-    def is_deleted(self, key: str) -> bool:
-        """Return True when ``key`` is a deletion-marker entry.
-
-        Distinct from :meth:`is_pinned` — a deletion marker
-        is NOT pinned (the constant hash provides the
-        protection that pinning would). The two flags never
-        overlap; :meth:`mark_deleted` clears any prior pin.
-        """
-        item = self._items.get(key)
-        if item is None:
-            return False
-        return bool(getattr(item, "_deleted", False))
 
     def get_changes(self) -> list[str]:
         """Return change-log entries for the most recent update.
@@ -763,38 +667,25 @@ class StabilityTracker:
                 active_items, existing_files
             )
 
-        # Phase 1 — process active items. Hash compare, N
-        # increment or reset, cleanup of file:*/history:* items
-        # no longer present.
-        graduates = self._process_active_items(active_items)
-
-        # Phase 2 — place graduates into L3 as entry N.
-        self._place_graduates(graduates)
+        # Phase 1 — process active items. Hash compare, uniform
+        # age increment, edit teleport, cleanup of file:*/history:*
+        # items no longer present. No graduation happens here —
+        # Active→L3 is decided by the relaxation loop in Phase 4.
+        self._process_active_items(active_items)
 
         # Phase 2b — controlled history graduation. History is
-        # immutable so the N-based progression that drives file
-        # and symbol graduation is the wrong signal. Per
-        # specs4/3-llm/cache-tiering.md § "History Graduation",
-        # history graduates only when:
-        #
-        #   - cache_target_tokens > 0 (otherwise history stays
-        #     active permanently), AND
-        #   - either L3 is already broken this cycle (piggyback
-        #     on an invalidation that's going to rebuild the L3
-        #     cache block anyway — free ride), OR
-        #   - eligible history tokens exceed the cache target
-        #     (token-threshold rule; keeps the verbatim window
-        #     bounded regardless of cache state).
-        #
-        # Runs AFTER _place_graduates so the file/symbol graduates
-        # that just marked L3 broken unlock the piggyback path.
-        # Runs BEFORE _run_cascade so any history additions to L3
-        # participate in the cascade's anchor/cap/promote logic
-        # uniformly with other L3 content.
+        # immutable so the flux equation's V/c imbalance is the
+        # wrong signal. Per specs4/3-llm/cache-tiering.md §
+        # "History Graduation", history graduates only when L3
+        # is already broken this cycle — a piggyback on an
+        # invalidation that's going to rebuild the L3 cache block
+        # anyway. Runs BEFORE the relaxation loop so any history
+        # additions to L3 participate uniformly in the flux
+        # equation.
         self._graduate_history_if_eligible()
 
-        # Phase 3 — cascade. Bottom-up pass, anchoring,
-        # promotion, post-cascade underfill demotion.
+        # Phase 4/5 — run relax loop, clear broken-tiers
+        # diagnostic state. Replaces the legacy cascade.
         self._run_cascade()
 
         # Prepend the pre-cycle changes (external mutations
@@ -810,53 +701,39 @@ class StabilityTracker:
     # ------------------------------------------------------------------
 
     def _remove_stale(self, existing_files: set[str]) -> None:
-        """Handle tracked items whose underlying file no longer exists.
+        """Drop tracked items whose underlying file no longer exists.
 
-        Two paths under the L0-content-typed model:
+        Under D36 there is no deletion marker. When a file is
+        deleted during the session:
 
-        - ``file:`` entries (pinned or not) transition to
-          deletion-marker entries via :meth:`mark_deleted`.
-          The entry stays in the tracker but its content and
-          hash become the constant marker representation.
-          The marker rides the cascade like a normal ``file:``
-          entry; its constant hash means subsequent cycles
-          see no change and N grows normally. Survives until
-          the next ``rebuild_cache`` re-extracts L0's
-          aggregate maps and removes the file from the
-          structural index entirely.
-        - ``symbol:`` and ``doc:`` entries are removed
-          normally. These are tracker entries that haven't
-          existed in the L0-content-typed model since
-          startup-distribution was dropped (commit 3
-          onward); the path is kept here for defensive
-          cleanup of any leftover entries from earlier
-          cycles or migrations.
+        - Its ``file:<path>`` tracker entry (if any) is removed
+          outright. The file is no longer renderable.
+        - Its presence in any ``symbols:<dir>`` / ``docs:<dir>``
+          / ``plain_files:<dir>`` block is owned by the dir-block
+          indexer; removing the file from that block produces a
+          new block hash, which Phase 1 detects and teleports
+          the block to Active to re-ride the flux.
 
-        ``system:``, ``url:``, ``history:`` keys have no
-        filesystem dependency and are left alone.
+        ``url:`` and ``history:`` keys have no filesystem
+        dependency and are left alone. Dir-block keys
+        (``symbols:``, ``docs:``, ``plain_files:``) reference
+        directories rather than individual files; their stale
+        cleanup is handled by the indexer's own per-turn
+        rebuild, not here.
 
-        Any tier that loses an item (or transitions a marker)
-        is marked broken so the cascade pass reconsiders it.
+        Any tier that loses an item is marked broken so the
+        cascade pass reconsiders it.
 
-        Spec: ``specs4/3-llm/cache-tiering.md`` § Item
-        Removal and § Deletion Markers.
+        Spec: ``specs4/3-llm/cache-tiering.md`` § Item Removal.
         """
         to_remove: list[str] = []
-        to_mark_deleted: list[str] = []
         for key, item in self._items.items():
             path = self._path_from_key(key)
             if path is None:
                 continue
             if path in existing_files:
                 continue
-            if key.startswith("file:"):
-                # Transition to deletion marker — preserves
-                # the entry's tier and N, replaces content
-                # with the constant marker hash.
-                to_mark_deleted.append(key)
-            else:
-                # symbol: / doc: — remove as before.
-                to_remove.append(key)
+            to_remove.append(key)
 
         for key in to_remove:
             item = self._items.pop(key)
@@ -865,28 +742,20 @@ class StabilityTracker:
                 f"{item.tier.value} → removed (stale): {key}"
             )
 
-        for key in to_mark_deleted:
-            item = self._items.get(key)
-            if item is None:
-                continue
-            tier_label = item.tier.value
-            self.mark_deleted(key)
-            self._mark_broken(item.tier, "file deleted (marker)")
-            self._log_change(
-                f"{tier_label} → marker: {key} (file deleted)"
-            )
-
     @staticmethod
     def _path_from_key(key: str) -> str | None:
-        """Extract the file path suffix from a file-ish key.
+        """Extract the file path suffix from a per-file key.
 
-        Returns None for keys that don't reference a file path
-        (``system:``, ``url:``, ``history:``). Used by Phase 0
-        stale removal and by tests.
+        Returns None for keys that don't reference a single
+        file path. Under D36 only ``file:`` keys reference
+        individual files; dir-block keys (``symbols:``,
+        ``docs:``, ``plain_files:``) reference directories
+        and are not subject to per-file stale removal.
+        ``url:``, ``history:`` keys have no filesystem
+        dependency. Used by Phase 0 stale removal and by tests.
         """
-        for prefix in ("file:", "symbol:", "doc:"):
-            if key.startswith(prefix):
-                return key[len(prefix):]
+        if key.startswith("file:"):
+            return key[len("file:"):]
         return None
 
     @classmethod
@@ -918,16 +787,31 @@ class StabilityTracker:
     def _process_active_items(
         self,
         active_items: dict[str, dict[str, Any]],
-    ) -> list[str]:
-        """Compare hashes, update N values, clean up departed items.
+    ) -> None:
+        """Compare hashes, age every tracked item, clean up departed.
 
-        Returns the list of keys that should graduate into L3
-        this cycle (items with N ≥ 3 in active, plus items
-        leaving active with N ≥ 3). History graduation is
-        controlled — see the "controlled history graduation"
-        paragraph later.
+        Per ``specs4/3-llm/cache-tiering.md`` § Per-Item State, ``n``
+        increments by 1 per cycle for every tracked item — the
+        membrane model treats it as a pure age counter, decoupled
+        from promotion eligibility above the Active→L3 admission
+        floor. Items present in ``active_items`` then have their
+        hash and tokens reconciled; mismatch teleports them to
+        Active with ``n=0`` (the only downward force in the
+        rectified variants). Active→L3 graduation is no longer
+        threshold-driven here — the relaxation loop in
+        :func:`ac_dc.cache_membrane.relax` decides flux moves
+        based on token-mass imbalance and the per-membrane
+        ``n_admit`` floor.
         """
-        graduates: list[str] = []
+        # Uniform age increment — every tracked item, including
+        # cached-tier residents that don't appear in active_items
+        # this cycle, ages by one. The flux equation reads tokens
+        # and counts, but the Active→L3 admission floor reads
+        # ``n``, and pinned/marker entries that sit in upper
+        # tiers without an active_items appearance must still
+        # age so their pick-rule tiebreakers stay stable.
+        for item in self._items.values():
+            item.n_value += 1
 
         # Step 1 — process every currently-active item.
         for key, payload in active_items.items():
@@ -961,7 +845,11 @@ class StabilityTracker:
 
             # Existing item — update tokens (always — tokens may
             # change due to re-rendering without a structural
-            # change), then decide on hash comparison.
+            # change), then decide on hash comparison. Aging
+            # (``n_value += 1``) was already applied uniformly
+            # at the top of this method; the only paths that
+            # touch n_value here are first-measurement (no
+            # change) and hash-mismatch (reset to 0).
             existing.tokens = new_tokens
 
             if existing.content_hash == _PLACEHOLDER_HASH:
@@ -971,132 +859,48 @@ class StabilityTracker:
                 # Without this, every initialised item would
                 # demote on the first request after startup.
                 existing.content_hash = new_hash
-                # Still increment N — the item is unchanged from
-                # the tracker's perspective (it had no prior
-                # real hash to compare to).
-                existing.n_value += 1
             elif existing.content_hash != new_hash:
-                # Hash changed — demote to active, reset N.
+                # Hash changed — teleport to active, reset N.
+                # Per spec § Edit Invariant: this is the only
+                # downward force in the rectified variants.
                 old_tier = existing.tier
                 existing.content_hash = new_hash
                 existing.n_value = 0
-                # Edit invariant — when a ``file:`` entry's
-                # hash changes during the session, the file
-                # has been edited and its full text must
-                # remain cached until the next
-                # ``rebuild_cache`` or application restart.
-                # The pin flag prevents stale cleanup and
-                # underfill demotion from removing it. The
-                # transition out of a deletion marker
-                # (file recreated at the same path) does NOT
-                # pin — only edits to existing files do.
-                #
-                # Spec: ``specs4/3-llm/cache-tiering.md`` §
-                # Edit Invariant.
-                was_marker = bool(
-                    getattr(existing, "_deleted", False)
-                )
-                if key.startswith("file:") and not was_marker:
-                    existing._pinned = True  # type: ignore[attr-defined]
-                if was_marker:
-                    # Re-creation: clear the deletion-marker
-                    # flag. The file exists again; the entry
-                    # behaves as a normal active item from
-                    # here on.
-                    existing._deleted = False  # type: ignore[attr-defined]
                 if old_tier != Tier.ACTIVE:
                     existing.tier = Tier.ACTIVE
                     self._mark_broken(old_tier, "hash changed")
                     self._log_change(
                         f"{old_tier.value} → active: {key} (hash changed)"
                     )
-            else:
-                # Unchanged — increment N. Cap is applied later
-                # in the cascade phase (it depends on whether the
-                # tier above is stable).
-                existing.n_value += 1
-
-            # Graduation check — items at or above the active
-            # promote threshold are candidates for L3. History
-            # is excluded: per specs4/3-llm/cache-tiering.md
-            # § "History Graduation", history is immutable so
-            # N-based progression is the wrong signal. History
-            # graduation is controlled separately — piggyback
-            # on L3 invalidation, or token-threshold-driven —
-            # and runs in a dedicated phase after _place_graduates
-            # via _graduate_history_if_eligible.
-            if (
-                existing.tier == Tier.ACTIVE
-                and existing.n_value >= _TIER_CONFIG[Tier.ACTIVE]["promote_n"]
-                and not key.startswith("history:")
-            ):
-                graduates.append(key)
+            # Else: unchanged hash. Aging already applied at
+            # the top of this method. The relaxation loop
+            # decides flux promotion below.
 
         # Step 2 — clean up file:* and history:* items that are
         # no longer in the active list. These departed from
-        # context (file deselected, history compacted). symbol:*
-        # and doc:* items are NOT cleaned up this way — they
-        # represent repo structure and persist in their earned
-        # tier even when not actively referenced this request.
+        # context (file deselected, history compacted). Dir-block
+        # entries (symbols:*, docs:*, plain_files:*) are NOT
+        # cleaned up this way — they represent repo structure
+        # and persist in their earned tier even when not
+        # actively referenced this request.
         #
-        # Pinned ``file:`` entries (the edit invariant — see
-        # above) and deletion-marker entries are also exempt:
-        # they must survive deselection until the next
-        # ``rebuild_cache`` or application restart. The
-        # truthful current text of an edited file, or the
-        # marker for a deleted-this-session file, stays in
-        # the prompt regardless of selection state.
+        # Under the membrane / flux cache model, deselected
+        # files no longer need pin protection — the parent
+        # directory's ``symbols:<dir>`` / ``docs:<dir>`` /
+        # ``plain_files:<dir>`` block continues to represent
+        # the file's structural presence, and the user can
+        # re-select to pull the full text back into context.
         for key in list(self._items.keys()):
             if key in active_items:
                 continue
             if not (key.startswith("file:") or key.startswith("history:")):
                 continue
             item = self._items[key]
-            if key.startswith("file:") and (
-                getattr(item, "_pinned", False)
-                or getattr(item, "_deleted", False)
-            ):
-                # Pinned or marker — protected from departure
-                # cleanup. Stays in its current tier. Active
-                # items list will see it again on subsequent
-                # cycles via the orchestrator's
-                # ``file_context.get_files()`` (selected files)
-                # OR via the deletion marker's path-keyed
-                # presence in the tracker.
-                continue
             self._items.pop(key)
             self._mark_broken(item.tier, "item departed")
             self._log_change(
                 f"{item.tier.value} → removed: {key} (not in active)"
             )
-
-        return graduates
-
-    # ------------------------------------------------------------------
-    # Phase 2 — place graduates into L3
-    # ------------------------------------------------------------------
-
-    def _place_graduates(self, graduates: list[str]) -> None:
-        """Move graduated items from active to L3.
-
-        Each graduate gets L3's entry N (=3). The source tier
-        (active) doesn't need to be marked broken — active isn't
-        cached. L3 is marked broken because new content arriving
-        invalidates any prior cache state on that tier.
-        """
-        if not graduates:
-            return
-        for key in graduates:
-            item = self._items.get(key)
-            if item is None:
-                continue
-            old_tier = item.tier
-            item.tier = Tier.L3
-            item.n_value = _TIER_CONFIG[Tier.L3]["entry_n"]
-            self._log_change(
-                f"{old_tier.value} → L3: {key} (graduated)"
-            )
-        self._mark_broken(Tier.L3, "graduation incoming")
 
     # ------------------------------------------------------------------
     # Phase 2b — controlled history graduation
@@ -1150,8 +954,35 @@ class StabilityTracker:
             return
 
         # Piggyback gate — only fires when L3 is already being
-        # rebuilt this cycle. Nothing else.
-        if Tier.L3 not in self._broken_tiers:
+        # rebuilt this cycle by some *other* cause. Nothing else.
+        #
+        # The original gate was "L3 in broken_tiers". That
+        # misfires when ``purge_history`` (called by
+        # compaction, new_session, session-load) wipes
+        # history items from L3 — purge marks L3 broken with
+        # reason "history purge", and on the next update the
+        # gate naively passes, dragging the freshly-registered
+        # post-compaction history straight into L3 and
+        # defeating the verbatim window. The compaction work
+        # was wasted: the user's recent messages, which
+        # compaction took care to keep verbatim, get cached
+        # away on the very next turn.
+        #
+        # The intent is "free ride on someone *else's*
+        # invalidation". History-caused invalidations
+        # (history purge, history piggyback itself) are
+        # excluded — they're not free rides, they're history
+        # paying its own freight. ``hash changed`` /
+        # ``stale file removal`` / ``flux move`` /
+        # ``cross-ref seed`` / ``item departed`` from
+        # non-history items all qualify; ``history purge``
+        # and ``history piggyback`` do not.
+        l3_reasons = self._broken_reasons.get(Tier.L3, ())
+        non_history_reasons = [
+            r for r in l3_reasons
+            if "history" not in r
+        ]
+        if not non_history_reasons:
             return
 
         # Collect active history items and sort newest → oldest
@@ -1207,832 +1038,374 @@ class StabilityTracker:
             self._mark_broken(Tier.L3, "history piggyback")
 
     # ------------------------------------------------------------------
-    # Phase 3 — cascade (the complex bit)
+    # Phases 2/3/4/5 — relaxation cascade
     # ------------------------------------------------------------------
 
     def _run_cascade(self) -> None:
-        """Run the bottom-up cascade until no more promotions occur.
+        """Drive the membrane / flux relaxation loop.
 
-        Each pass processes each tier once in L3 → L0 order:
+        Replaces the legacy N-counter cascade. The relaxation
+        loop iterates to within-turn flux equilibrium across
+        the four live membranes (Active→L3, L3→L2, L2→L1,
+        L1→L0). Under D36 every tier participates in flux
+        uniformly; L0 is no longer content-typed.
 
-        1. Anchoring — items below the cache-target anchor line
-           freeze their N this cycle (cannot promote). Items
-           above the line are unanchored and increment N
-           normally. N is NOT capped — letting it grow means
-           items above the anchor stay promotion-eligible every
-           turn rather than bouncing between promote_n and
-           promote_n+1 under stable upstream conditions.
-        2. Promotion — items with N ≥ promote_n move up into
-           tiers that are broken or empty at cascade entry.
-           Cascade happens every turn for every eligible item —
-           the cache block's re-ingestion cost is the price of
-           letting content flow upward to where it belongs.
+        Pipeline (matches ``specs4/3-llm/cache-tiering.md`` §
+        Order of Operations Phases 3–5):
 
-        Post-cascade — any tier below cache_target (except L0
-        and broken tiers) demotes one item level as underfill
-        cleanup.
-
-        Tracked via ``processed`` set so anchoring and cap math
-        run at most once per tier per cascade cycle, even when
-        multiple passes happen.
-
-        Promotion gating uses a snapshot of ``_broken_tiers``
-        taken at cascade entry. Per the spec's Ripple Promotion
-        rule — "if a tier is stable, nothing promotes into it
-        and tiers below remain cached" — one external
-        invalidation opens exactly one upward promotion path,
-        not a chain. Mutations to ``_broken_tiers`` made during
-        the cascade (for external consumers and the L0 backfill
-        probe) are preserved but do not feed back into
-        promotion gating within the same cycle. Without the
-        snapshot, an external L1 invalidation would mark L2
-        broken when L2→L1 promotes, then mark L3 broken when
-        L3→L2 follows, cascading a single user action into
-        full-stack drain.
+        - **Phase 3** — already done in :meth:`update` before
+          this call (history piggyback graduation).
+        - **Phase 4** — call :func:`ac_dc.cache_membrane.relax`
+          with the live ``_items`` and the configured
+          :class:`FluxConfig`. Direction is fixed by the
+          rectification clamp (Φ ≥ 0); the deadband threshold
+          absorbs steady-state noise so quiet turns
+          self-arrest. Each move logs to ``_changes`` and
+          marks both source and destination tiers broken
+          (HUD diagnostic).
+        - **Phase 5** — clear ``_broken_tiers`` and
+          ``_broken_reasons``. External callers will repopulate
+          between turns.
         """
-        # Snapshot the broken-tiers set at cascade entry. All
-        # promotion gating below reads from this snapshot; the
-        # live self._broken_tiers set continues to receive
-        # updates during the cascade (for the L0 backfill probe,
-        # _demote_underfilled, and the post-cascade clear) but
-        # those updates do not feed back into _try_promote_from.
-        cascade_broken = set(self._broken_tiers)
-        # Also snapshot which tiers were EMPTY at entry. The
-        # promotion gate accepts "broken OR empty" destinations
-        # — and emptiness must be frozen at entry too, not
-        # recomputed per-iteration. Without this snapshot, a
-        # tier that was stable (populated, not broken) at entry
-        # but becomes empty mid-cascade (because its own
-        # residents promoted upward) would start accepting
-        # content from the tier below, recreating the
-        # chain-cascade bug through a different path. The spec's
-        # "tiers below remain cached" rule is that one external
-        # invalidation opens exactly one upward path — and that
-        # path is pinned by BOTH the broken set and the empty
-        # set, captured at the same instant.
-        cascade_empty: set[Tier] = set()
-        for tier in _CASCADE_ORDER + (Tier.ACTIVE,):
-            has_items = any(
-                it.tier == tier for it in self._items.values()
+        stats = relax(
+            list(self._items.values()),
+            config=self._flux_config,
+            tier_of=lambda f: _TIER_TO_IDX[f.tier],
+            set_tier=self._apply_relax_move,
+            n_of=lambda f: f.n_value,
+            tokens_of=lambda f: f.tokens,
+            key_of=lambda f: f.key,
+            # ``history:*`` items are excluded from regular flux —
+            # they only enter L3 via the piggyback path
+            # (:meth:`_graduate_history_if_eligible`), which fires
+            # only when L3 is already broken by another mutation.
+            # Otherwise the conversation would churn the L3 cache
+            # block on every stable turn.
+            #
+            # Pinned items (edit invariant — see :meth:`pin_file`)
+            # are also protected: a file edited mid-session keeps
+            # its truthful current text in its current tier until
+            # the next manual rebuild clears the pin.
+            is_protected=lambda f: (
+                f.key.startswith("history:")
+                or self.is_pinned(f.key)
+            ),
+            # D37 — history is also excluded from V/c
+            # accumulation, not just mover selection. Bytes still
+            # sit in L3 (and the prompt is truthful), but the
+            # flux equation does not interpret a long L3 history
+            # block as pressure. Pinned files do NOT match here:
+            # their mass is real and contributes to V even though
+            # they cannot move.
+            is_balance_excluded=lambda f: f.key.startswith("history:"),
+        )
+        if stats.iters >= 1000:
+            logger.warning(
+                "stability_tracker: relax loop did not converge "
+                "(iters=%d, moves=%d)",
+                stats.iters,
+                len(stats.moves),
             )
-            if not has_items:
-                cascade_empty.add(tier)
-        # Did external mutations invalidate any tier at cascade
-        # entry? When yes, the cascade is permitted to piggyback
-        # an L0 backfill probe on the existing invalidation —
-        # the cache block is going to be rebuilt regardless, so
-        # topping L0 up costs nothing extra. When no, the
-        # cascade must NOT invent a fresh L0 invalidation: doing
-        # so would chain L1 → L0, then L2 → L1, then L3 → L2
-        # every turn that L0 happened to sit a few hundred
-        # tokens below cache_target, draining cached tiers
-        # without any structural reason. Permanent L0 underfill
-        # is the dedicated job of
-        # :meth:`backfill_l0_after_measurement`, called once at
-        # init / cache rebuild — not the per-turn cascade.
-        had_external_invalidation = bool(cascade_broken)
 
-        # Up to 8 iterations — real cascades converge in 1–2,
-        # cap is defensive against logic bugs creating a cycle.
-        #
-        # Note the L0-content-typed model: the cascade does NOT
-        # touch L0. There is no per-cycle L0-backfill probe
-        # because L0 is invariant under routine events
-        # (selection toggles, edits, URL fetches, history
-        # compaction). The legacy "L0 underfilled →
-        # piggyback-promote from L1" path is removed; L0
-        # population is the responsibility of init / rebuild
-        # paths and the optional cross-reference seed, never
-        # the cascade.
-        #
-        # Spec: ``specs4/3-llm/cache-tiering.md`` § L0
-        # Stability Contract.
-        del had_external_invalidation  # no longer drives gating
-        processed: set[Tier] = set()
-        for _ in range(8):
-            made_progress = False
-            for tier in _CASCADE_ORDER:
-                if tier in processed:
-                    # Re-visit only to check promotion eligibility
-                    # based on a newly-broken upper tier; skip
-                    # the anchor/cap pass which we already did.
-                    if self._try_promote_from(
-                        tier, cascade_broken, cascade_empty
-                    ):
-                        made_progress = True
-                    continue
-                # First visit — full processing.
-                self._process_tier_veterans(tier)
-                processed.add(tier)
-                if self._try_promote_from(
-                    tier, cascade_broken, cascade_empty
-                ):
-                    made_progress = True
-            if not made_progress:
-                break
-
-        # Post-cascade underfill demotion. Runs in reverse cascade
-        # order (L0 → L1 → L2 → L3) so a demotion from L1 into L2
-        # can flow through to L2's own underfill check in the
-        # same call.
-        self._demote_underfilled()
-
-        # Cascade has consumed the broken-tier signals. Clear the
-        # set so the next cycle starts fresh — external mutations
-        # between now and the next :meth:`update` will repopulate
-        # it. Note: _demote_underfilled may have added entries
-        # (its own source/destination marks), so we clear AFTER
-        # it runs. The next update's cascade will see an empty
-        # set plus whatever external paths added since.
+        # Phase 5 — broken-tier signals consumed. Next cycle
+        # starts fresh; external mutations between now and the
+        # next :meth:`update` repopulate the set.
         self._broken_tiers.clear()
         self._broken_reasons.clear()
 
-    def _process_tier_veterans(self, tier: Tier) -> None:
-        """Anchor items below cache target; cap N above it.
+    def _apply_relax_move(self, item: TrackedItem, new_idx: int) -> None:
+        """Set-tier callback used by :func:`relax`.
 
-        Only runs when cache_target_tokens > 0 AND the tier's
-        total tokens exceed cache_target. Otherwise no items
-        are anchored and no caps are applied — the simple
-        promote-when-N-reaches-threshold path handles it.
-
-        The anchoring flag is attached dynamically via
-        ``_anchored`` attribute — transient per-cycle state that
-        doesn't persist between updates.
+        Records the change-log entry, marks both source and
+        destination tiers broken, and resets ``n_value`` to 0
+        on the destination so the per-membrane ``n_admit``
+        floor on a *subsequent* turn applies cleanly. (For
+        upward moves the floor is only meaningful on the
+        Active→L3 membrane; resetting on every move keeps the
+        semantics uniform.)
         """
-        if self._cache_target_tokens <= 0:
-            # Anchoring disabled — clear any stale flags and
-            # return.
-            for item in self._items.values():
-                if item.tier == tier:
-                    item._anchored = False  # type: ignore[attr-defined]
-            return
-
-        tier_items = [
-            item for item in self._items.values() if item.tier == tier
-        ]
-        total_tokens = sum(item.tokens for item in tier_items)
-
-        if total_tokens <= self._cache_target_tokens:
-            # Tier under cache target — no anchoring this cycle.
-            for item in tier_items:
-                item._anchored = False  # type: ignore[attr-defined]
-            return
-
-        # Sort by N ascending — items with the lowest N get
-        # anchored first. Ties broken by key for determinism
-        # (crucial for test stability — otherwise the anchoring
-        # boundary drifts per-run).
-        tier_items.sort(key=lambda it: (it.n_value, it.key))
-
-        # Accumulate tokens; items consumed before reaching
-        # cache_target are anchored (N frozen this cycle).
-        accumulated = 0
-        for item in tier_items:
-            if accumulated < self._cache_target_tokens:
-                # Below the line — anchored. N is frozen this
-                # cycle; the item cannot promote and stays
-                # pinned to the bottom of the tier keeping the
-                # cache block valid.
-                item._anchored = True  # type: ignore[attr-defined]
-            else:
-                # Above the line — not anchored. N is NOT
-                # capped here; letting it grow means items
-                # above the anchor stay promotion-eligible
-                # every turn rather than bouncing between
-                # promote_n and promote_n+1 under stable
-                # upstream conditions.
-                item._anchored = False  # type: ignore[attr-defined]
-            accumulated += item.tokens
-
-    def _try_promote_from(
-        self,
-        tier: Tier,
-        cascade_broken: set[Tier] | None = None,
-        cascade_empty: set[Tier] | None = None,
-    ) -> bool:
-        """Promote eligible items from ``tier`` to the tier above.
-
-        Promotion is gated on the destination tier being
-        broken or empty — ripple-promotion per
-        specs4/3-llm/cache-tiering.md § Ripple Promotion.
-        When the upper tier's cache block is already
-        invalidated (or doesn't exist), moving veterans in
-        costs nothing extra. When it's stable, we leave it
-        alone — disturbing a cached tier for a steady-state
-        promotion would trash the cache on every turn.
-
-        The ``cascade_broken`` and ``cascade_empty`` parameters
-        are snapshots of the broken-tiers set and the set of
-        empty tiers, taken at cascade entry (see
-        :meth:`_run_cascade`) and then augmented during the
-        cascade to track **structural** invalidations — tiers
-        that became broken because their own residents
-        promoted upward and drained them. When provided,
-        gating reads from these augmented snapshots rather
-        than the live tracker state.
-
-        The subtle point: two kinds of invalidation exist, and
-        they chain differently.
-
-        - **External** invalidation (user deselects a file,
-          a file's hash changes, the orchestrator marks a
-          tier broken before calling :meth:`update`) must
-          NOT chain. Per spec § Ripple Promotion, one
-          external invalidation opens exactly one upward
-          path. Without this constraint, a single deselect
-          of an L1 item would cascade L2→L1, L3→L2, active
-          graduation, potentially drain L0 — tearing down
-          the whole cache.
-
-        - **Structural** invalidation (a tier's cache block
-          needs rebuilding because its own residents just
-          promoted out, leaving the tier's token content
-          changed) MUST chain. This is the legitimate Ripple
-          Promotion the spec describes: L2 veterans promote
-          into broken L1, L2 is now structurally broken,
-          L3 veterans flow into L2, and so on up the chain.
-          Stopping at the external invalidation point
-          instead of propagating structural invalidations
-          leaves tiers stranded — L3 veterans ready to flow
-          upward but the cascade blocks them because "L2
-          wasn't broken at cascade entry".
-
-        The snapshots handle both cases: they start with
-        only the external invalidations (what ``_broken_tiers``
-        held at cascade entry) and what was empty at entry.
-        When a promotion succeeds, the source tier is added
-        to the snapshot — subsequent iterations see it as
-        broken and allow the chain to continue. The
-        destination tier is NOT added to the snapshot (it
-        was the target of the invalidation, not a new source
-        of one) — this preserves the "external L1
-        invalidation doesn't drain L0" guarantee, because
-        the L1 destination mark never feeds back into
-        gating.
-
-        When either snapshot is None (callers outside the
-        cascade, plus tests), gating falls back to the live
-        ``self._broken_tiers`` set and a live emptiness
-        probe — preserves the prior contract for direct
-        callers who don't need cycle-stable gating.
-
-        An item is eligible when:
-
-        - The tier above was broken OR empty at cascade entry,
-          OR the tier above became structurally broken
-          earlier in this cascade (per augmented snapshot),
-          AND
-        - It is not anchored (above the cache-target anchor
-          line within its current tier), AND
-        - Its N ≥ the tier's promote_n threshold
-
-        Returns True if any items promoted. The cascade uses
-        this to decide whether another pass is needed.
-        """
-        above = _TIER_ABOVE[tier]
-        if above is None:
-            # L0 — no tier above, can't promote.
-            return False
-
-        # Gate: only promote into tiers that were broken OR
-        # empty at cascade entry. Both signals are snapshotted
-        # so mid-cascade mutations (source-tier marking after
-        # promotion, a tier emptying because its residents just
-        # promoted upward) do not feed back into gating. See
-        # docstring for why both snapshots matter.
-        broken_gate = cascade_broken if cascade_broken is not None else self._broken_tiers
-        if cascade_empty is not None:
-            empty_gate = above in cascade_empty
-        else:
-            # Live fallback for non-cascade callers — probe
-            # the current state.
-            empty_gate = not any(
-                it.tier == above for it in self._items.values()
-            )
-        upper_broken = above in broken_gate
-        if not upper_broken and not empty_gate:
-            return False
-
-        promote_n = _TIER_CONFIG[tier]["promote_n"]
-        candidates = [
-            item
-            for item in self._items.values()
-            if item.tier == tier
-            and not getattr(item, "_anchored", False)
-            and item.n_value >= promote_n
-        ]
-        if not candidates:
-            return False
-
-        promoted_any = False
-        for item in candidates:
-            item.tier = above
-            item.n_value = _TIER_CONFIG[above]["entry_n"]
-            self._log_change(
-                f"{tier.value} → {above.value}: {item.key} (promoted)"
-            )
-            promoted_any = True
-
-        if promoted_any:
-            # Source tier shed items → its cache block needs
-            # rebuilding. Destination tier gained items → its
-            # cache block also needs rebuilding. Mark both in
-            # the live set so external consumers (prompt
-            # assembler, underfill demotion which skips broken
-            # tiers) see the structural change.
-            self._mark_broken(tier, "promoted out")
-            self._mark_broken(above, "promoted in")
-
-            # Structural invalidation propagation — the
-            # source tier just lost residents, so its cache
-            # block is genuinely broken for the remainder of
-            # this cascade. Add it to the snapshot so the
-            # next iteration's gate sees the invalidation
-            # and allows the tier below to chain into it.
-            # This is the spec's Ripple Promotion: L1
-            # invalidation opens L2→L1, which opens L3→L2,
-            # which opens active→L3.
-            #
-            # The DESTINATION tier is deliberately NOT added
-            # to ``cascade_broken``. The destination received
-            # content — it's being rebuilt because it was
-            # already broken (the precondition of this
-            # promotion firing). Adding it to the snapshot
-            # would re-open a path that was just closed by
-            # this very promotion, producing the chain-
-            # cascade bug that the snapshot was introduced
-            # to prevent: external L1 invalidation would
-            # mark L0 "broken" when L1→L0 promotes, letting
-            # L2 promote up through the chain without any
-            # L0-side invalidation having occurred.
-            if cascade_broken is not None:
-                cascade_broken.add(tier)
-
-        return promoted_any
-
-    def _demote_underfilled(self) -> None:
-        """Demote items from tiers that are below the cache target.
-
-        Wastes a cache breakpoint to hold a tier below
-        cache_target — the provider won't cache it. Each
-        under-full tier (excluding L0 which is terminal and
-        tiers broken this cycle, which we already reprocessed)
-        demotes one item level.
-
-        Iterates L0 → L1 → L2 → L3 so a demoted item can
-        participate in its new tier's underfill check on the
-        next outer iteration. L3 is processed with demotion
-        target ``active``, which absorbs without limit.
-
-        Each item demotes AT MOST ONCE per call to avoid
-        cascading double-demotions within a single pass.
-        """
-        if self._cache_target_tokens <= 0:
-            return
-
-        # Items we've already demoted this pass — prevent
-        # re-demotion if a tier becomes under-full after its
-        # demoted items have already left.
-        demoted_this_call: set[str] = set()
-
-        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-            if tier == Tier.L0:
-                # L0 is terminal — never demoted via underfill.
-                # An under-full L0 is the "backfill" scenario;
-                # the cascade's normal L1→L0 promotion path tops
-                # it up when L1 is invalidated, not this demotion
-                # path.
-                continue
-            if tier in self._broken_tiers:
-                # Broken tiers received promotions this cycle —
-                # don't immediately undo them.
-                continue
-
-            below = _TIER_BELOW[tier]
-            if below is None:
-                continue
-
-            tier_items = [
-                item
-                for item in self._items.values()
-                if item.tier == tier and item.key not in demoted_this_call
-            ]
-            total = sum(item.tokens for item in tier_items)
-            if total >= self._cache_target_tokens:
-                continue
-            if not tier_items:
-                continue
-
-            # Demote every item except pinned files and
-            # deletion markers — those are protected from
-            # automatic eviction by the L0-content-typed
-            # model's edit invariant. Their N is preserved
-            # for the items that do demote; they may
-            # re-promote on the next cycle if the tier above
-            # stabilises.
-            #
-            # Spec: ``specs4/3-llm/cache-tiering.md`` § Edit
-            # Invariant and § Item Removal.
-            demoted_any = False
-            for item in tier_items:
-                if getattr(item, "_pinned", False) or getattr(
-                    item, "_deleted", False
-                ):
-                    # Pinned or marker — skip. The entry
-                    # stays at its current tier even though
-                    # the tier is below cache target.
-                    continue
-                item.tier = below
-                demoted_this_call.add(item.key)
-                demoted_any = True
-                self._log_change(
-                    f"{tier.value} → {below.value}: {item.key} "
-                    f"(underfill demotion)"
-                )
-            if demoted_any:
-                # Both tiers experience structural change
-                # only when something actually demoted.
-                self._mark_broken(tier, "underfill demotion (source)")
-                self._mark_broken(below, "underfill demotion (dest)")
+        old_tier = item.tier
+        new_tier = _IDX_TO_TIER[new_idx]
+        item.tier = new_tier
+        # ``n`` resets on every flux move — the age counter
+        # measures residency-since-last-edit-or-move, which
+        # is what the Active→L3 admission floor wants. For
+        # higher membranes (n_admit=0) the reset is harmless.
+        item.n_value = 0
+        self._mark_broken(old_tier, "flux move (source)")
+        self._mark_broken(new_tier, "flux move (destination)")
+        self._log_change(
+            f"{old_tier.value} → {new_tier.value}: "
+            f"{item.key} (flux)"
+        )
 
     # ------------------------------------------------------------------
-    # Initialisation from reference graph (startup seeding)
+    # Initialisation — mtime-based dir-block seeding
     # ------------------------------------------------------------------
 
-    def initialize_from_reference_graph(
+    def initialize_dir_blocks(
         self,
-        ref_index: Any,
-        files: list[str],
-        l0_target_tokens: int | None = None,
+        keys_with_mtimes: list[tuple[str, float] | tuple[str, float, int]],
     ) -> None:
-        """Seed tier assignments from connectivity.
+        """Seed dir-block entries across L0–L3 by directory mtime.
 
-        Called at startup by the orchestrator. Runs the
-        reference-graph clustering algorithm and distributes
-        files across L1/L2/L3 based on connected components.
-        Most-referenced files are seeded into L0 to meet the
-        cache target on the first request.
+        Under D36 the cache initialisation strategy is mtime-
+        based rather than reference-graph clustering. The
+        seed direction is **edit-cost-aware**: hot directories
+        (recently-modified) seed *cooler* tiers so they sit
+        near the bottom of the cache, and cold directories
+        (untouched in a long time) seed *warmer* tiers up to
+        and including L0.
+
+        The reasoning: an mtime-hot directory is the most
+        likely to be edited again soon. When that edit lands,
+        the affected dir-block teleports to Active (the
+        rectified membrane's only downward force), invalidating
+        whichever cached tier it currently occupies. Tearing
+        down a small L3 cache block on every edit is cheap;
+        tearing down L0 is expensive — L0 is the largest
+        cached block, sits closest to the prefix root, and a
+        misplaced hot block at L0 forces the rest of L0 to be
+        re-cached on every churn. Seeding hot content at L3
+        absorbs the churn near the membrane's entry point.
+
+        Cold content at L0 is the right invariant: it's
+        unlikely to be edited soon, so the L0 cache block
+        survives across many turns. If a cold directory
+        suddenly *does* get edited, it teleports to Active
+        and re-rides the flux — same cost as any other edit.
+        The bet is that "recently edited" predicts "likely to
+        be edited again soon" more often than not, which
+        matches typical interactive coding (sessions are
+        usually continuations of recent work, not pivots to
+        long-untouched code).
+
+        The membrane controller takes over from there: across
+        the next few request cycles, the rectified-flux loop
+        rebalances based on real token mass and aging signals,
+        and the initial mtime-based seed becomes incidental.
 
         Parameters
         ----------
-        ref_index:
-            Object implementing :meth:`connected_components` and
-            :meth:`file_ref_count`. Layer 2.4's
-            :class:`ReferenceIndex` matches this shape, as does
-            the doc-reference index.
-        files:
-            List of repo-relative file paths. Keys are built as
-            ``symbol:{path}`` by default — callers that want doc
-            mode should adjust keys before calling (or pass a
-            pre-built items list; covered by
-            :meth:`initialize_with_keys`).
-        l0_target_tokens:
-            Optional override for L0 seed capacity. Defaults to
-            ``cache_target_tokens`` — which is the right choice
-            for production but tests override it to exercise
-            specific seed quantities.
+        keys_with_mtimes:
+            List of ``(key, mtime)`` or ``(key, mtime, tokens)``
+            tuples for every dir-block to seed. ``key`` is a
+            fully-prefixed tracker key (``symbols:<dir>``,
+            ``docs:<dir>``, ``plain_files:<dir>``). ``mtime``
+            is the directory's most recent file mtime (seconds
+            since epoch) — :meth:`Repo.get_directory_mtime`
+            returns ``max(file.stat().st_mtime for file in
+            dir)``, so a directory with one freshly-edited
+            file and many cold files registers as hot. 0.0
+            for empty / non-existent directories. ``tokens``
+            is the rendered block's real token count when the
+            caller has measured it — passing it here avoids
+            the Context-tab-before-first-turn window where
+            every seeded item shows a placeholder count. When
+            omitted the placeholder
+            (:data:`_PLACEHOLDER_TOKENS`) is used as a stop-
+            gap until the first :meth:`update` cycle replaces
+            it with a measured value.
 
-        Per specs3 — items initialised this way get placeholder
-        tokens and empty hash; Phase 1 accepts their first real
+        Tier assignment walks the mtime-sorted list hottest-
+        first and advances tiers by **cumulative token mass**
+        against an arithmetic-descending share schedule
+        ``[L3 = 10%, L2 = 20%, L1 = 30%, L0 = 40%]`` of total
+        mass. Hottest content still lands in **L3**, coldest
+        in **L0** — the direction is unchanged from the
+        equal-count quartile rule it replaces. The split rule
+        change is the only difference: under equal-count, when
+        hot directories happen to be the *largest* (typical:
+        active source trees are both hot and big), L3 ends up
+        carrying the bulk of the cache mass and L0 ends up
+        thin. The membrane controller then sees V > 0 on every
+        membrane at the seeded state and fires upward churn
+        across the first several turns.
+
+        The mass-share split inverts the resulting profile:
+        a few big hot dirs fill L3's small share, more
+        mid-mtime dirs fill L1/L2, and the long tail of
+        small cold dirs piles into L0. The seed shape is
+        roughly L0 ≥ L1 ≥ L2 ≥ L3 by mass — V ≤ 0 on every
+        membrane at construction, the rectified flux equation
+        evaluates to zero, and the controller stays quiescent
+        until real edits arrive. Ties on mtime fall back to
+        alphabetical key ordering for determinism.
+
+        When the input does not carry tokens (2-tuple form,
+        e.g. tests) every entry uses ``_PLACEHOLDER_TOKENS`` and
+        the mass-share schedule splits by item count weighted
+        by the per-tier shares (so 4 items → one per tier;
+        many items → cold-heavy at L0).
+
+        A floor rule guarantees every tier receives at least
+        one item when the population permits: when the
+        remaining items equal the remaining tiers, the loop
+        forces a tier advance regardless of mass. This avoids
+        the pathological "one huge hot block fills L3 and
+        empties L1/L2" outcome.
+
+        Items receive an empty hash regardless; Phase 1 of
+        the next :meth:`update` cycle accepts the first real
         hash without demoting.
         """
-        self.initialize_with_keys(
-            ref_index,
-            keys=[f"symbol:{path}" for path in files],
-            files=files,
-            l0_target_tokens=l0_target_tokens,
-        )
-
-    def initialize_with_keys(
-        self,
-        ref_index: Any,
-        keys: list[str],
-        files: list[str],
-        l0_target_tokens: int | None = None,
-    ) -> None:
-        """Seed with explicit keys — used by doc mode and tests.
-
-        Distributes every key across all four cached tiers
-        (L0/L1/L2/L3) by clustering connected components in the
-        reference graph, then ranking clusters by aggregate
-        incoming reference count, then bin-packing into tiers
-        with the smallest current token total.
-
-        **Why four-tier even split.** Earlier revisions seeded
-        a target number of files into L0 up to
-        ``cache_target_tokens`` and distributed the remainder
-        across L1/L2/L3. On a sufficiently large repo that
-        works, but on medium repos it under-fills L0 (because
-        placeholder tokens overestimate real token counts —
-        real measured tokens come in well under the 400-token
-        placeholder, so L0's real post-measurement size lands
-        way below the cache target). The four-tier split side-
-        steps the problem: each tier gets ~25% of the repo's
-        placeholder token budget, and the cascade sorts out
-        which items genuinely deserve L0 residency via
-        promotion/demotion over the next few request cycles.
-
-        **Why stability-ranked cluster ordering.** Within the
-        clustering pass, clusters are ranked by aggregate
-        incoming ref count (sum of ``file_ref_count`` across
-        the cluster's members) so the most-referenced
-        structural clusters land in L0 on day one. Orphan
-        files (no edges in the reference graph) sort last and
-        fill whichever tier still has room. This gives the
-        cascade a reasonable starting point — the anchor/cap/
-        promote logic doesn't have to unwind bad initial
-        placements across many turns before the provider cache
-        becomes useful.
-
-        **Ties — clusters of equal size and equal ref count**
-        break deterministically by sorted member tuple so test
-        fixtures see stable output across runs.
-
-        The ``l0_target_tokens`` parameter is accepted for
-        backwards compatibility with callers that pass the
-        cache target; it is now ignored because the four-tier
-        split makes it unnecessary. L0 ends up sized by fair-
-        share budget, not by an explicit target.
-        """
-        if not keys:
+        if not keys_with_mtimes:
             return
-        if len(keys) != len(files):
-            raise ValueError(
-                f"keys length ({len(keys)}) must match "
-                f"files length ({len(files)})"
-            )
 
-        # Unused — retained in signature for compatibility.
-        del l0_target_tokens
+        # Sort hottest-first; ties broken by key for
+        # determinism so test fixtures see stable output.
+        # Sort key uses mtime + key, ignoring the optional
+        # tokens slot.
+        ranked = sorted(
+            keys_with_mtimes,
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        n = len(ranked)
+        # Hot → L3, cold → L0. Edit invalidations are cheapest
+        # at L3 and most expensive at L0; recently-modified
+        # dirs are the most likely to be edited again soon.
+        tier_order = (Tier.L3, Tier.L2, Tier.L1, Tier.L0)
 
-        path_to_key = dict(zip(files, keys))
-        all_paths = set(files)
+        # Mass-share schedule per tier: L3 = 10%, L2 = 20%,
+        # L1 = 30%, L0 = 40% of total token mass. Walk hot →
+        # cold; advance the current tier *before* placing
+        # when (a) adding the item would push the tier past
+        # its target share (mass advance), or (b) the
+        # remaining items aren't enough to give every
+        # downstream tier at least one entry (1:1 floor).
+        # Single-advance per item — a single oversized hot
+        # dir cannot skip past L2/L1 into L0. Final tier L0
+        # never advances; it absorbs whatever remains.
+        #
+        # The 1:1 floor is gated on ``n >= len(tier_order)``
+        # so the historical "few items → top tiers only"
+        # contract is preserved (1 item → L3, 2 items → L3
+        # then L2, etc.). Inputs without measured tokens
+        # (2-tuple form) treat every entry as one placeholder
+        # unit, so mass advance fires once per item and the
+        # behaviour reduces to the equal-count quartile rule.
+        share_per_tier = (0.10, 0.20, 0.30, 0.40)
+        token_list = [
+            entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
+            for entry in ranked
+        ]
+        total_tokens = sum(token_list)
+        targets = [total_tokens * s for s in share_per_tier]
+        floor_active = n >= len(tier_order)
 
-        # Step 1 — gather connected components from the
-        # reference graph and filter to the paths we're
-        # actually placing. Components already seen (e.g. from
-        # a prior init pass) are intentionally re-built here —
-        # initialisation is a clean-slate operation.
-        components = ref_index.connected_components()
-        filtered_components: list[set[str]] = []
-        seen_in_components: set[str] = set()
-        for comp in components:
-            filtered = {p for p in comp if p in all_paths}
-            if filtered:
-                filtered_components.append(filtered)
-                seen_in_components.update(filtered)
+        cum_in_tier = 0
+        tier_idx = 0
+        for idx, entry in enumerate(ranked):
+            key = entry[0]
+            tokens = token_list[idx]
 
-        # Step 2 — orphan files (no edges in the reference
-        # graph) become singleton "clusters" for the bin
-        # packer. Without this, files with no references never
-        # register.
-        orphan_paths = all_paths - seen_in_components
-        for p in sorted(
-            orphan_paths,
-            key=lambda pp: (-ref_index.file_ref_count(pp), pp),
-        ):
-            filtered_components.append({p})
-
-        # Step 3 — rank clusters by aggregate stability. Sum
-        # the incoming reference count across each cluster's
-        # members so a five-file cluster where each member has
-        # 3 incoming refs (aggregate 15) outranks a ten-file
-        # cluster of orphans (aggregate 0). The ``-`` negates
-        # for descending sort. Ties break by cluster size
-        # descending (prefer placing larger clusters first so
-        # the bin packer balances by token budget) and finally
-        # by sorted member tuple for determinism.
-        def _cluster_rank(
-            comp: set[str],
-        ) -> tuple[int, int, tuple[str, ...]]:
-            aggregate = sum(
-                ref_index.file_ref_count(p) for p in comp
-            )
-            return (-aggregate, -len(comp), tuple(sorted(comp)))
-
-        filtered_components.sort(key=_cluster_rank)
-
-        # Step 4 — bin-pack across all four cached tiers.
-        # Greedy: each cluster goes to the tier with the
-        # smallest current token total. Since we walk clusters
-        # in descending-aggregate order, the first few (highest
-        # ref count) clusters spread across L0/L1/L2/L3 before
-        # any tier fills — but the L0 slot fills first on ties
-        # because ``min`` picks in insertion order and L0 is
-        # listed first below. Later, lower-ranked clusters
-        # cluster toward whichever tier hasn't filled yet.
-        tier_sizes = {
-            Tier.L0: 0,
-            Tier.L1: 0,
-            Tier.L2: 0,
-            Tier.L3: 0,
-        }
-        tier_contents: dict[Tier, list[str]] = {
-            Tier.L0: [],
-            Tier.L1: [],
-            Tier.L2: [],
-            Tier.L3: [],
-        }
-        tier_order_for_ties = {
-            Tier.L0: 0,
-            Tier.L1: 1,
-            Tier.L2: 2,
-            Tier.L3: 3,
-        }
-
-        for comp in filtered_components:
-            target_tier = min(
-                tier_sizes,
-                key=lambda t: (
-                    tier_sizes[t],
-                    tier_order_for_ties[t],
-                ),
-            )
-            for path in sorted(comp):
-                key = path_to_key.get(path)
-                if key is None:
-                    continue
-                tier_contents[target_tier].append(key)
-            # Token budget uses placeholder tokens — real counts
-            # replace these via :meth:`measure_tokens` after the
-            # formatted blocks are rendered for the first time.
-            tier_sizes[target_tier] += (
-                len(comp) * _PLACEHOLDER_TOKENS
-            )
-
-        # Step 5 — instantiate TrackedItems at each tier's
-        # entry N. Placeholder hash marks them as never-yet-
-        # measured so the next :meth:`update` cycle accepts
-        # their first real hash without demoting.
-        for tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3):
-            for key in tier_contents[tier]:
-                self._items[key] = TrackedItem(
-                    key=key,
-                    tier=tier,
-                    n_value=_TIER_CONFIG[tier]["entry_n"],
-                    content_hash=_PLACEHOLDER_HASH,
-                    tokens=_PLACEHOLDER_TOKENS,
+            if tier_idx < len(tier_order) - 1:
+                items_left_after_this = n - idx - 1
+                tiers_below_current = len(tier_order) - tier_idx - 1
+                floor_advance = (
+                    floor_active
+                    and items_left_after_this < tiers_below_current
                 )
+                mass_advance = (
+                    cum_in_tier > 0
+                    and cum_in_tier + tokens > targets[tier_idx]
+                )
+                if floor_advance or mass_advance:
+                    tier_idx += 1
+                    cum_in_tier = 0
 
-    def distribute_keys_by_clustering(
+            tier = tier_order[tier_idx]
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=tier,
+                n_value=_TIER_CONFIG[tier]["entry_n"],
+                content_hash=_PLACEHOLDER_HASH,
+                tokens=tokens,
+            )
+            cum_in_tier += tokens
+
+    def cross_ref_seed_dir_blocks(
         self,
-        ref_index: Any,
-        keys: list[str],
-        files: list[str],
+        keys_with_mtimes: list[tuple[str, float] | tuple[str, float, int]],
     ) -> None:
-        """Append keys to the tracker, distributed across L1/L2/L3.
+        """Append cross-ref dir-block keys, distributed across L1–L3.
 
         Used by cross-reference enable to seed opposite-index
-        items into cached tiers on activation, mirroring how the
-        primary index is distributed at startup — without the
-        L0 seeding (L0 is reserved for primary content + the
-        system prompt) and without touching any tracker entries
-        that already exist.
+        dir-blocks (the docs side in code mode, or the symbols
+        side in doc mode) into cached tiers on activation. The
+        primary index has already claimed its share via
+        :meth:`initialize_dir_blocks`; the cross-ref pass adds
+        the secondary set without touching any existing entries
+        and without competing for L0 (reserved as the warmest
+        tier for primary content).
 
         Keys already present in the tracker are skipped —
         preserves accumulated tier / N state from a prior
-        cross-ref session, and keeps primary-index entries
-        (``symbol:`` in code mode, ``doc:`` in doc mode) safe
-        when the caller naively passes an overlapping key list.
-
-        Uses placeholder hash and placeholder tokens; the
-        caller should immediately measure real tokens via
-        :meth:`measure_tokens` so downstream cascade passes
-        work with accurate counts.
+        cross-ref session.
 
         Parameters
         ----------
-        ref_index:
-            Object implementing :meth:`connected_components` and
-            :meth:`file_ref_count`. Same shape as
-            :meth:`initialize_from_reference_graph` consumes.
-        keys:
-            List of tracker keys (e.g. ``doc:{path}`` or
-            ``symbol:{path}``).
-        files:
-            Parallel list of repo-relative file paths.
+        keys_with_mtimes:
+            List of ``(key, mtime)`` or ``(key, mtime, tokens)``
+            tuples for every dir-block to seed. Same shape as
+            :meth:`initialize_dir_blocks` — when the caller has
+            already rendered the block, passing real tokens
+            here avoids the placeholder-count window in the
+            Context tab.
+
+        Distribution strategy mirrors
+        :meth:`initialize_dir_blocks`: hottest → **L3** (the
+        cheapest tier to invalidate when an edit lands),
+        middle → L2, coldest → **L1**. L0 stays reserved for
+        primary content on cross-reference seeding so the
+        secondary index has one membrane of climbing to do
+        before it can compete for the top slot. The cascade
+        promotes earned content upward across subsequent
+        requests.
         """
-        if not keys:
+        if not keys_with_mtimes:
             return
-        if len(keys) != len(files):
-            raise ValueError(
-                f"keys length ({len(keys)}) must match "
-                f"files length ({len(files)})"
-            )
 
-        # Skip keys already tracked — preserves existing tier
-        # state from prior cross-ref enables and protects the
-        # primary index's entries.
-        pairs = [
-            (key, path)
-            for key, path in zip(keys, files)
-            if key not in self._items
+        new_pairs = [
+            entry
+            for entry in keys_with_mtimes
+            if entry[0] not in self._items
         ]
-        if not pairs:
+        if not new_pairs:
             return
 
-        path_to_key = {path: key for key, path in pairs}
-        remaining_paths = {path for _key, path in pairs}
-
-        components = ref_index.connected_components()
-        filtered_components: list[set[str]] = []
-        seen_in_components: set[str] = set()
-        for comp in components:
-            filtered = {p for p in comp if p in remaining_paths}
-            if filtered:
-                filtered_components.append(filtered)
-                seen_in_components.update(filtered)
-
-        # Orphan files — not in any component. Each becomes its
-        # own singleton "component" for the bin-packer.
-        orphan_paths = remaining_paths - seen_in_components
-        if orphan_paths:
-            orphan_list = sorted(
-                orphan_paths,
-                key=lambda p: (-ref_index.file_ref_count(p), p),
-            )
-            for p in orphan_list:
-                filtered_components.append({p})
-
-        # Bin-pack across L1/L2/L3 — skip L0 (reserved for
-        # primary content). Greedy: assign each component
-        # (descending size) to the tier with the smallest
-        # current size.
-        tier_sizes = {Tier.L1: 0, Tier.L2: 0, Tier.L3: 0}
-        tier_contents: dict[Tier, list[str]] = {
-            Tier.L1: [],
-            Tier.L2: [],
-            Tier.L3: [],
-        }
-        filtered_components.sort(
-            key=lambda c: (-len(c), tuple(sorted(c)))
+        ranked = sorted(
+            new_pairs,
+            key=lambda pair: (-pair[1], pair[0]),
         )
-        for comp in filtered_components:
-            target_tier = min(
-                tier_sizes,
-                key=lambda t: (tier_sizes[t], t.value),
-            )
-            for path in sorted(comp):
-                key = path_to_key.get(path)
-                if key is None:
-                    continue
-                tier_contents[target_tier].append(key)
-            tier_sizes[target_tier] += len(comp)
-
-        # Instantiate. Placeholder hash so Phase 1 of the next
-        # update cycle accepts the first real hash without
-        # demoting (same contract as primary init).
+        n = len(ranked)
+        tier_order = (Tier.L3, Tier.L2, Tier.L1)
         affected_tiers: set[Tier] = set()
-        for tier in (Tier.L1, Tier.L2, Tier.L3):
-            for key in tier_contents[tier]:
-                self._items[key] = TrackedItem(
-                    key=key,
-                    tier=tier,
-                    n_value=_TIER_CONFIG[tier]["entry_n"],
-                    content_hash=_PLACEHOLDER_HASH,
-                    tokens=_PLACEHOLDER_TOKENS,
-                )
-                affected_tiers.add(tier)
+        for idx, entry in enumerate(ranked):
+            key = entry[0]
+            tokens = (
+                entry[2] if len(entry) >= 3 else _PLACEHOLDER_TOKENS
+            )
+            third = min(
+                len(tier_order) - 1,
+                idx * len(tier_order) // n,
+            )
+            tier = tier_order[third]
+            self._items[key] = TrackedItem(
+                key=key,
+                tier=tier,
+                n_value=_TIER_CONFIG[tier]["entry_n"],
+                content_hash=_PLACEHOLDER_HASH,
+                tokens=tokens,
+            )
+            affected_tiers.add(tier)
 
         # Mark destination tiers broken so the next cascade
-        # pass considers them and — critically — so the
-        # provider cache for those tiers is rebuilt with the
-        # new content included. Without this, the next
-        # request would use stale cache breakpoints that
-        # predate the seeding.
+        # rebuilds the provider cache to include the new
+        # content. Without this, the next request would use
+        # stale cache breakpoints that predate the seeding.
         for tier in affected_tiers:
             self._mark_broken(tier, "cross-ref seed")
-
-    def register_system_prompt(
-        self,
-        prompt_hash: str,
-        tokens: int,
-    ) -> None:
-        """Pin ``system:prompt`` into L0.
-
-        Called by the orchestrator after L0 seeding. The system
-        prompt is always the most stable content in the session;
-        placing it at L0 entry_n ensures it never demotes during
-        normal operation.
-
-        Re-registering with the same hash is a no-op; a different
-        hash reinstalls the item (rare — system prompt only
-        changes on mode switch or review entry/exit, both of
-        which create a fresh tracker anyway).
-        """
-        existing = self._items.get("system:prompt")
-        if existing is not None and existing.content_hash == prompt_hash:
-            # Update tokens (legend may have changed) but leave
-            # tier and N alone.
-            existing.tokens = tokens
-            return
-        self._items["system:prompt"] = TrackedItem(
-            key="system:prompt",
-            tier=Tier.L0,
-            n_value=_TIER_CONFIG[Tier.L0]["entry_n"],
-            content_hash=prompt_hash,
-            tokens=tokens,
-        )
 
     # ------------------------------------------------------------------
     # Token measurement hook
@@ -2049,164 +1422,6 @@ class StabilityTracker:
         if item is None:
             return
         item.tokens = tokens
-
-    # ------------------------------------------------------------------
-    # Post-measurement L0 backfill
-    # ------------------------------------------------------------------
-
-    def backfill_l0_after_measurement(
-        self,
-        ref_index: Any,
-        overshoot_multiplier: float = 2.0,
-        candidate_keys: set[str] | None = None,
-    ) -> int:
-        """Top up L0 with real-token-count awareness post-measurement.
-
-        The init-time placeholder (400 tokens/file) is a pessimistic
-        upper bound — once ``_measure_tracker_tokens`` (the caller,
-        on :class:`LLMService`) replaces placeholders with real
-        counts, L0's actual token total is almost always well
-        below ``cache_target_tokens``. Two consequences:
-
-        1. The provider refuses to cache L0 at all (total below
-           the provider's cache-min threshold — 4096 tokens on
-           Sonnet 4.6, 1024 on Sonnet 4.5, etc.).
-        2. L0 has no churn capacity — every item fits comfortably,
-           so the cascade's "tier exceeds cache target → anchor
-           veterans, promote above the line" path never triggers,
-           and L1 items never promote upward even after they've
-           earned it.
-
-        This method pulls additional high-ref-count items from
-        L1/L2/L3 into L0 until the real token total reaches
-        ``cache_target_tokens × overshoot_multiplier``. The
-        overshoot is deliberate — it pushes L0 well clear of
-        the cache-min floor AND gives the cascade's anchoring
-        logic something to work with, so L1 items can be
-        promoted into L0 as lower-ref content cycles out.
-
-        Ranking uses the reference index's ``file_ref_count``
-        (same signal as initial L0 seeding) so the backfill
-        preserves the "most-connected files live longest"
-        intent. Ties break by key for determinism.
-
-        Called post-measurement by both init paths
-        (:meth:`LLMService._try_initialize_stability` and
-        :meth:`LLMService._rebuild_cache_impl`). A no-op when
-        ``cache_target_tokens == 0`` (caching disabled) or
-        when no candidates exist below L0.
-
-        Parameters
-        ----------
-        ref_index:
-            Object implementing ``file_ref_count(path)``. Same
-            object used by :meth:`initialize_with_keys`.
-        overshoot_multiplier:
-            Target token total is ``cache_target_tokens ×
-            overshoot_multiplier``. Default 2.0 produces
-            ~100% headroom above the cache-min floor —
-            guarantees L0 clears the provider's cache-min
-            threshold by a comfortable margin even when
-            real measured tokens come in well under
-            placeholder estimates. Values below 1.0 would
-            leave L0 perpetually underfilled; values above
-            3.0 push too much into L0 at the expense of
-            L1-L3 distribution.
-
-        Returns
-        -------
-        int
-            The number of items promoted into L0. Useful for
-            logging / debug.
-        """
-        if self._cache_target_tokens <= 0:
-            return 0
-
-        target = int(self._cache_target_tokens * overshoot_multiplier)
-
-        # Compute current L0 token total from real (post-
-        # measurement) counts. Iterates _items rather than
-        # calling get_tier_items() to avoid the copy cost.
-        current_l0_tokens = sum(
-            item.tokens
-            for item in self._items.values()
-            if item.tier == Tier.L0
-        )
-        if current_l0_tokens >= target:
-            return 0
-
-        # Candidate pool — every item currently in L1, L2, or
-        # L3 whose key references a file path. ``system:`` and
-        # ``history:`` are L0-only or tier-protected and never
-        # backfill candidates; ``url:`` is skipped because URL
-        # content is session-scoped and shouldn't compete for
-        # the cache-anchor slot.
-        #
-        # When ``candidate_keys`` is supplied, only items in
-        # that set are eligible. Used by cross-reference
-        # enable to restrict the backfill to the keys just
-        # seeded by that pass — without the filter, a user-
-        # accumulated tier state (e.g., a deliberately-placed
-        # L2 entry from a prior session) would get promoted
-        # to L0 as a side effect of toggling cross-ref on.
-        candidates: list[TrackedItem] = []
-        for item in self._items.values():
-            if item.tier not in (Tier.L1, Tier.L2, Tier.L3):
-                continue
-            path = self._path_from_key(item.key)
-            if path is None:
-                continue
-            if candidate_keys is not None and item.key not in candidate_keys:
-                continue
-            candidates.append(item)
-
-        if not candidates:
-            return 0
-
-        # Rank by reference count descending, then by key for
-        # deterministic tie-breaking (critical for test
-        # stability and for reproducible startup behaviour).
-        def _rank_key(it: TrackedItem) -> tuple[int, str]:
-            path = self._path_from_key(it.key)
-            # path is never None here — candidate loop already
-            # filtered. Defensive fallback to empty string.
-            count = ref_index.file_ref_count(path or "")
-            return (-int(count), it.key)
-
-        candidates.sort(key=_rank_key)
-
-        # Promote until the target is met. Each promoted item
-        # keeps its content_hash and its token count (both
-        # already real post-measurement); only the tier and
-        # n_value change. L0's entry_n is used so the item
-        # lands as a fresh L0 resident, not mid-cycle.
-        promoted = 0
-        accumulated = current_l0_tokens
-        l0_entry_n = _TIER_CONFIG[Tier.L0]["entry_n"]
-        affected_source_tiers: set[Tier] = set()
-        for item in candidates:
-            if accumulated >= target:
-                break
-            source_tier = item.tier
-            item.tier = Tier.L0
-            item.n_value = l0_entry_n
-            accumulated += item.tokens
-            promoted += 1
-            affected_source_tiers.add(source_tier)
-            self._log_change(
-                f"{source_tier.value} → L0: {item.key} "
-                f"(post-measurement backfill)"
-            )
-
-        # Mark source tiers broken so the next cascade can
-        # rebalance L1/L2/L3 distribution after the promotions.
-        # L0 itself isn't marked broken — these items earned
-        # their L0 slot via ref-count ranking; we don't want
-        # the cascade immediately reconsidering them.
-        for tier in affected_source_tiers:
-            self._mark_broken(tier, "post-measurement backfill")
-
-        return promoted
 
     # ------------------------------------------------------------------
     # Internal helpers

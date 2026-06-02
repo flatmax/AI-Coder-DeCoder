@@ -67,14 +67,12 @@ def complete_deferred_init(
     # Eager stability init; failure falls through to lazy path.
     service._try_initialize_stability()
 
-    # Initial L0 freeze now that the symbol index is
-    # attached. Construction skipped this under deferred
-    # init; running it here means the next chat request
-    # reads from a populated snapshot. Doc index may still
-    # be building — its content joins the snapshot at the
-    # next L0-invalidation event (mode switch, cross-ref
-    # toggle, etc.).
-    service._freeze_l0_snapshot()
+    # Start the cache warmer now that init is complete. The
+    # warmer's first scheduling needs a running event loop;
+    # we're on one here (called from the server's startup
+    # flow), so start() can succeed even though the
+    # symmetric call in __init__ couldn't.
+    service._cache_warmer.start()
 
     # Broadcast restored session now that the event loop is up
     # and frontend subscribers are mounted.
@@ -118,10 +116,23 @@ def schedule_doc_index_build(service: "LLMService") -> bool:
 
 
 def shutdown(service: "LLMService") -> None:
-    """Release executor resources. Called on server shutdown."""
-    # wait=False so shutdown doesn't block on in-flight work;
-    # the event loop is typically already stopping at this point.
+    """Release executor resources. Called on server shutdown.
+
+    Non-blocking: cancel the cache warmer and tear down all
+    three executors with ``wait=False``. In-flight work is
+    abandoned — users see a stream interruption, the OS
+    reclaims thread/file handles on process exit.
+    """
+    warmer = getattr(service, "_cache_warmer", None)
+    if warmer is not None:
+        warmer.cancel()
+
     service._stream_executor.shutdown(wait=False)
+
+    warmer_pool = getattr(service, "_warmer_executor", None)
+    if warmer_pool is not None:
+        warmer_pool.shutdown(wait=False)
+
     service._aux_executor.shutdown(wait=False)
 
 
@@ -219,6 +230,26 @@ def get_current_state(service: "LLMService") -> dict[str, Any]:
 
     Called by the browser on WebSocket connect. Returns the
     minimal set of fields needed to rebuild the UI.
+
+    The ``active_streams`` field carries one entry per
+    in-flight stream so a refreshed browser can re-attach
+    to the live stream rather than seeing the opaque
+    "Another stream is active" rejection. Each entry::
+
+        {
+            "request_id": str,
+            "agent_id": str | None,   # None for main scope
+            "accumulated_content": str,
+        }
+
+    The request id is what the frontend uses to register
+    its tab as the chunk owner; subsequent chunks broadcast
+    on the same request id then route automatically through
+    the existing chunk-routing path. Empty list when no
+    stream is in flight. Per spec ``specs4/3-llm/streaming``
+    § Passive Stream Adoption — this is the same mechanism
+    extended to cover the originating client after
+    reconnect.
     """
     doc_convert_available = False
     try:
@@ -227,11 +258,47 @@ def get_current_state(service: "LLMService") -> dict[str, Any]:
     except Exception:
         pass
 
+    # Build the active-streams snapshot. Iterate the
+    # request → agent map (the authoritative registry of
+    # in-flight streams) and pair each entry with its
+    # accumulated content from ``_request_accumulators``.
+    # A request id present in the map but absent from
+    # accumulators means the stream registered but no
+    # chunk has arrived yet — emit it with empty content
+    # so the frontend still adopts the request id.
+    active_streams: list[dict[str, Any]] = []
+    for req_id, agent_id in service._active_request_to_agent.items():
+        # Skip child request ids — child agent streams
+        # are tracked under their parent's request via
+        # the prefix convention; the frontend resumes
+        # the parent and child chunks route through the
+        # parent's tab. (Today no child streams have
+        # entries in this map because the registration
+        # path skips child requests; this guard is
+        # belt-and-braces for future spawn paths.)
+        if (
+            service._active_user_request is not None
+            and req_id != service._active_user_request
+            and agent_id is None
+            and req_id.startswith(
+                service._active_user_request + "-"
+            )
+        ):
+            continue
+        active_streams.append({
+            "request_id": req_id,
+            "agent_id": agent_id,
+            "accumulated_content": (
+                service._request_accumulators.get(req_id, "")
+            ),
+        })
+
     return {
         "messages": service._context.get_history(),
         "selected_files": list(service._selected_files),
         "excluded_index_files": list(service._excluded_index_files),
         "streaming_active": service._active_user_request is not None,
+        "active_streams": active_streams,
         "session_id": service._session_id,
         "repo_name": service._repo.name if service._repo else "",
         "init_complete": service._init_complete,

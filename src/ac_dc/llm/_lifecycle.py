@@ -98,6 +98,19 @@ def sync_file_context(
     # toast at the end rather than one per file.
     binary_skipped: list[str] = []
 
+    # Track externally-deleted paths so we can broadcast
+    # filesChanged once after the loop completes. Under
+    # D36, files deleted from disk get pruned from the
+    # tracker by update_stability's existing_files sweep
+    # (tracker.update → _remove_stale drops their file:
+    # entries). The bug this fixes is upstream: without
+    # this trim, FileContext keeps the file's pre-deletion
+    # bytes AND scope.selected_files keeps the path, so
+    # update_stability re-registers file:<path> in
+    # active_items every turn and prompt assembly renders
+    # stale content for a file that no longer exists.
+    deleted_from_disk: list[str] = []
+
     # Add newly-selected files.
     for path in selected - current:
         if service._repo is None:
@@ -119,6 +132,113 @@ def sync_file_context(
                 "resolved.",
                 path, exc,
             )
+
+    # Refresh content for files that stayed selected across
+    # turns. Without this step, externally-edited files
+    # (changes made outside the webapp — another editor,
+    # a script, a `git checkout`) are never re-read: the
+    # membership-only diff above sees them in both `current`
+    # and `selected` and skips them. The cached L3 copy then
+    # stays stale until the user deselects + reselects, which
+    # the picker forbids while the file is dirty.
+    #
+    # We re-read every selected file every turn and let
+    # FileContext.add_file overwrite the in-memory copy. The
+    # tracker's hash-mismatch demotion in _update_stability
+    # then naturally invalidates the cached entry.
+    #
+    # Cost: one disk read per selected file per turn. Cheap
+    # next to LLM round-trip; revisit with mtime gating if
+    # large selections become a hotspot. The repo layer
+    # already enforces binary rejection, so the same
+    # exception path applies.
+    for path in selected & current:
+        if service._repo is None:
+            continue
+        # Probe disk before attempting to read. file_exists
+        # is a cheap stat (no content read) and gives us a
+        # clean signal for "user removed this file outside
+        # the app" — distinct from binary rejection or
+        # transient read errors. Without this probe, a
+        # missing file would raise RepoError from add_file,
+        # the exception handler would log a warning, and
+        # FileContext would keep its pre-deletion snapshot
+        # — leaving the prompt stale until session restart.
+        if not service._repo.file_exists(path):
+            deleted_from_disk.append(path)
+            file_context.remove_file(path)
+            logger.warning(
+                "Selected file %s was deleted from disk "
+                "outside the application; clearing from "
+                "context. The stability tracker will "
+                "transition its entry to a deletion "
+                "marker on the next update cycle.",
+                path,
+            )
+            continue
+        try:
+            old_content = file_context.get_content(path)
+            file_context.add_file(path)
+            new_content = file_context.get_content(path)
+            if old_content != new_content:
+                logger.debug(
+                    "Refreshed disk content for selected "
+                    "file %s (size %d -> %d)",
+                    path,
+                    len(old_content) if old_content else 0,
+                    len(new_content) if new_content else 0,
+                )
+        except Exception as exc:
+            if "Binary file cannot be read as text" in str(exc):
+                binary_skipped.append(path)
+            logger.warning(
+                "Selected file %s could not be refreshed "
+                "from disk: %s. The LLM may see a stale "
+                "version of this file.",
+                path, exc,
+            )
+
+    if deleted_from_disk:
+        # Mirror the binary-skip path: trim the deleted
+        # paths from scope.selected_files so the picker
+        # checkbox clears and update_stability stops
+        # seeing the path in its active_items build.
+        # The tracker's _remove_stale runs against the
+        # fresh existing_files set computed by
+        # update_stability and transitions the entry to
+        # a deletion marker. With selected_files no
+        # longer carrying the path, the next turn's
+        # active_items dict won't re-register it, so
+        # the marker survives in the tracker and prompt
+        # assembly renders the marker text instead of
+        # stale FileContext content.
+        for path in deleted_from_disk:
+            try:
+                scope.selected_files.remove(path)
+            except ValueError:
+                pass
+
+        broadcast_event(
+            service,
+            "filesChanged",
+            list(scope.selected_files),
+        )
+        # Reuse the binaryFilesSkipped channel for the
+        # toast. The frontend's app-shell handler renders
+        # a generic "files removed from context" message;
+        # we extend the payload with a kind hint so the
+        # shell can differentiate the wording. Keeping
+        # the channel shared avoids a second event type
+        # for what's structurally the same UX: "these
+        # paths just left your selection, here's why".
+        broadcast_event(
+            service,
+            "binaryFilesSkipped",
+            {
+                "paths": sorted(deleted_from_disk),
+                "kind": "deleted",
+            },
+        )
 
     if binary_skipped:
         # Trim the rejected paths from the scope's
@@ -290,6 +410,32 @@ async def post_response(
                     "messages": scope.context.get_history(),
                 },
             )
+
+    # Post-response work has settled — tier state is final,
+    # any compaction has completed, and downstream consumers
+    # can now read consistent breakdown data. Fire a
+    # dedicated event so the Context tab knows when to
+    # refetch.
+    #
+    # ``streamComplete`` fires earlier (in
+    # :func:`stream_chat`) for snappy chat-panel UX — the
+    # user sees their response finalised the moment the
+    # LLM call returns. But that broadcast races
+    # ``_update_stability``: if the Context tab refetches
+    # on ``streamComplete``, it reads pre-update tracker
+    # state and shows stale tiers. The user then has to
+    # click Refresh to see the new state, which is what
+    # they reported.
+    #
+    # ``postResponseComplete`` is the "everything is now
+    # consistent" signal. The Context tab listens to it
+    # for tier/breakdown refreshes; the chat panel
+    # continues to use ``streamComplete`` for response
+    # finalisation. Two events with two distinct purposes,
+    # neither one blocking the other's UX.
+    await service._broadcast_event_async(
+        "postResponseComplete", request_id,
+    )
 
 
 # ---------------------------------------------------------------------------

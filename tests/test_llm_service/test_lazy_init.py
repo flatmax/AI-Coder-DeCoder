@@ -1,10 +1,16 @@
 """Mode-aware lazy initialization of the stability tracker.
 
-Covers :class:`TestLazyInitModeAware` — :meth:`LLMService._try_initialize_stability`
-dispatches by current mode (code → symbol:, doc → doc:), bails
-cleanly when the doc index isn't ready, retries on the next
-request, measures real tokens, and seeds the mode-appropriate
-system prompt hash.
+Covers :class:`TestLazyInitModeAware` —
+:meth:`LLMService._try_initialize_stability` dispatches by current
+mode (code → symbol/plain_files dir-blocks, doc → doc/plain_files
+dir-blocks), bails cleanly when the doc index isn't ready, and
+retries on the next request.
+
+Under D36 dir-blocks the system prompt is no longer a tracker
+entry — it sits before L0 as a non-flux head anchor and is
+rendered live at assembly time. Initialization seeds per-directory
+``symbols:<dir>`` / ``docs:<dir>`` / ``plain_files:<dir>`` blocks
+quartile-split by mtime (hottest → L0).
 """
 
 from __future__ import annotations
@@ -22,16 +28,14 @@ from .conftest import _FakeLiteLLM, _FakeSymbolIndexWithRefs
 class TestLazyInitModeAware:
     """_try_initialize_stability dispatches by current mode.
 
-    Code mode (default): seeds the tracker from the symbol
-    index's reference graph with ``symbol:`` prefix.
+    Code mode (default): seeds dir-blocks for indexed code
+    directories (``symbols:<dir>``) and any plain-file
+    directories (``plain_files:<dir>``).
 
-    Doc mode: seeds from the doc index's reference graph with
-    ``doc:`` prefix. If doc index isn't ready yet, skips
-    cleanly — next request's lazy-init retry catches it.
-
-    Mode switches before init cause the switch's own state
-    setup to drive the tracker; this test class covers only
-    the first-call init path.
+    Doc mode: seeds dir-blocks for indexed doc directories
+    (``docs:<dir>``) and plain-file directories. If the doc
+    index isn't ready yet, skips cleanly — next request's
+    lazy-init retry catches it.
     """
 
     def _seed_doc_outlines(
@@ -84,25 +88,19 @@ class TestLazyInitModeAware:
             )
         return svc
 
-    def test_code_mode_init_registers_only_system_prompt(
+    def test_code_mode_init_seeds_dir_blocks(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Code mode init registers system:prompt and nothing else.
+        """Code mode init seeds ``symbols:<dir>`` / ``plain_files:<dir>`` entries.
 
-        Under the L0-content-typed model (D27), init does NOT
-        seed ``symbol:{path}`` entries into cascade-tracked
-        tiers. The aggregate symbol map that L0 presents to
-        the LLM is regenerated from the symbol index at
-        assembly time, not held as tracker entries. The only
-        cascade-tracked L0 entry is ``system:prompt``.
-
-        Files enter Active when selected and graduate upward
-        through the cascade as they stabilise. Users who want
-        immediate redistribution use ``rebuild_cache``.
+        Under D36 the tracker holds per-directory dir-block
+        entries quartile-split by mtime. The system prompt is
+        not a tracker entry — it's a non-flux head anchor
+        rendered live at assembly time.
         """
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -118,24 +116,27 @@ class TestLazyInitModeAware:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        # Only system:prompt — no per-file symbol: or doc:
-        # entries from init under the L0-content-typed model.
-        assert all_keys == {"system:prompt"}
+        # System prompt is NOT a tracker entry under D36.
+        assert "system:prompt" not in all_keys
+        # Dir-block entries appear with valid prefixes only.
+        for key in all_keys:
+            assert (
+                key.startswith("symbols:")
+                or key.startswith("docs:")
+                or key.startswith("plain_files:")
+            )
 
-    def test_doc_mode_init_registers_only_system_prompt(
+    def test_doc_mode_init_seeds_dir_blocks(
         self,
         config: ConfigManager,
         repo: Repo,
         fake_litellm: _FakeLiteLLM,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doc mode init registers system:prompt and nothing else.
+        """Doc mode init seeds ``docs:<dir>`` / ``plain_files:<dir>`` entries.
 
-        Symmetric to the code-mode case. Under D27, neither
-        ``doc:{path}`` nor ``symbol:{path}`` entries are
-        seeded into the tracker on init. The aggregate doc
-        map that L0 presents to the LLM is regenerated from
-        the doc index at assembly time.
+        Symmetric to the code-mode case. The system prompt is
+        rendered live at assembly time, not tracked.
         """
         svc = self._make_service(
             config, repo, fake_litellm,
@@ -156,9 +157,13 @@ class TestLazyInitModeAware:
         all_keys = set(
             svc._stability_tracker.get_all_items().keys()
         )
-        # Only system:prompt — no per-file doc: or symbol:
-        # entries from init.
-        assert all_keys == {"system:prompt"}
+        assert "system:prompt" not in all_keys
+        for key in all_keys:
+            assert (
+                key.startswith("symbols:")
+                or key.startswith("docs:")
+                or key.startswith("plain_files:")
+            )
 
     def test_doc_mode_init_skipped_when_not_ready(
         self,
@@ -189,7 +194,7 @@ class TestLazyInitModeAware:
 
         # Not initialized — next retry will pick it up.
         assert svc._stability_initialized.get(Mode.DOC, False) is False
-        # Tracker empty (system:prompt isn't seeded without init).
+        # Tracker empty (no entries seeded without init).
         assert svc._stability_tracker.get_all_items() == {}
 
     def test_doc_mode_init_retry_succeeds_after_ready(
@@ -226,81 +231,6 @@ class TestLazyInitModeAware:
         svc._try_initialize_stability()
 
         assert svc._stability_initialized.get(Mode.DOC, False) is True
-        # Under D27 the tracker holds only system:prompt
-        # post-init; doc: entries are not cascade-tracked.
-        assert "system:prompt" in (
-            svc._stability_tracker.get_all_items()
-        )
-
-    def test_doc_mode_init_uses_doc_prompt(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Doc mode init seeds with the doc system prompt hash.
-
-        The system prompt hash stored in the tracker should
-        correspond to the doc prompt, not the code prompt —
-        so when the user later switches to code mode, the
-        hash mismatch triggers a reinstall rather than a
-        silent drift.
-        """
-        import hashlib
-
-        svc = self._make_service(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            repo_files=[],
-            monkeypatch=monkeypatch,
-        )
-        self._seed_doc_outlines(svc, ["guide.md"])
-        svc._context.set_mode(Mode.DOC)
-        svc._trackers[Mode.DOC] = svc._stability_tracker
-        svc._doc_index_ready = True
-
-        svc._try_initialize_stability()
-
-        # system:prompt registered with the doc prompt's hash.
-        doc_prompt = config.get_doc_system_prompt()
-        expected_hash = hashlib.sha256(
-            doc_prompt.encode("utf-8")
-        ).hexdigest()
-        item = svc._stability_tracker.get_all_items().get(
-            "system:prompt"
-        )
-        assert item is not None
-        assert item.content_hash == expected_hash
-
-    def test_code_mode_init_uses_code_prompt(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Code mode init seeds with the code prompt's hash."""
-        import hashlib
-
-        svc = self._make_service(
-            config, repo, fake_litellm,
-            symbol_paths=["a.py"],
-            repo_files=["a.py"],
-            monkeypatch=monkeypatch,
-        )
-        # Default: code mode.
-        svc._try_initialize_stability()
-
-        code_prompt = config.get_system_prompt()
-        expected_hash = hashlib.sha256(
-            code_prompt.encode("utf-8")
-        ).hexdigest()
-        item = svc._stability_tracker.get_all_items().get(
-            "system:prompt"
-        )
-        assert item is not None
-        assert item.content_hash == expected_hash
 
     def test_code_mode_no_symbol_index_skips(
         self,
@@ -350,43 +280,3 @@ class TestLazyInitModeAware:
             svc._stability_tracker.get_all_items().keys()
         )
         assert first_items == second_items
-
-    def test_doc_mode_init_seeds_real_system_prompt_tokens(
-        self,
-        config: ConfigManager,
-        repo: Repo,
-        fake_litellm: _FakeLiteLLM,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Doc mode init seeds system:prompt with a real token count.
-
-        Under D27 init no longer seeds per-file ``doc:``
-        entries with placeholder tokens — there's nothing to
-        measure on the per-file side. The remaining
-        token-measurement contract is on ``system:prompt``:
-        :meth:`register_system_prompt` is called with the
-        result of ``counter.count(prompt + legend)``, so the
-        stored token count must reflect the actual content,
-        not a placeholder or zero.
-        """
-        svc = self._make_service(
-            config, repo, fake_litellm,
-            symbol_paths=[],
-            repo_files=[],
-            monkeypatch=monkeypatch,
-        )
-        self._seed_doc_outlines(svc, ["guide.md"])
-        svc._context.set_mode(Mode.DOC)
-        svc._trackers[Mode.DOC] = svc._stability_tracker
-        svc._doc_index_ready = True
-
-        svc._try_initialize_stability()
-
-        item = svc._stability_tracker.get_all_items().get(
-            "system:prompt"
-        )
-        assert item is not None
-        # Doc system prompt is non-trivially long; real token
-        # count is well above zero and well above the 100-token
-        # placeholder used by the legacy four-tier seed.
-        assert item.tokens > 100

@@ -159,6 +159,7 @@ async def chat_streaming(
                 )
             }
         service._active_agent_streams.add(agent_key)
+        service._active_request_to_agent[request_id] = agent_key
     else:
         if (
             service._active_user_request is not None
@@ -172,6 +173,7 @@ async def chat_streaming(
             }
         if not service._is_child_request(request_id):
             service._active_user_request = request_id
+            service._active_request_to_agent[request_id] = None
 
     # Launch the background task.
     asyncio.ensure_future(
