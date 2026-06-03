@@ -42,6 +42,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger("ac_dc.llm_service")
 
 
+def _commit_error_message(error_info: dict[str, Any] | None) -> str:
+    """Build a user-facing commit-failure message.
+
+    The generic "could not reach the model" wording is wrong
+    for failures where the model *was* reached but rejected
+    the request — most notably ``context_window_exceeded``,
+    where the staged diff is simply too large for the smaller
+    model's context. Telling the user to "check your network
+    connection" sends them down the wrong path. Tailor the
+    message off the classified ``error_type`` so the toast
+    points at the real fix; fall back to the generic wording
+    when classification is missing or unrecognised.
+    """
+    suffix = " Your staged changes are unchanged."
+    error_type = (
+        error_info.get("error_type") if error_info else None
+    )
+    if error_type == "context_window_exceeded":
+        return (
+            "The staged diff is too large for the "
+            "commit-message model's context window. Commit "
+            "fewer files at a time, or configure a "
+            "larger-context smaller model." + suffix
+        )
+    if error_type == "authentication":
+        return (
+            "The commit-message model rejected your "
+            "credentials. Check your LLM provider "
+            "authentication (API key, AWS SSO/IAM, or "
+            "marketplace subscription), then try again."
+            + suffix
+        )
+    if error_type == "rate_limit":
+        return (
+            "The commit-message model is rate-limited. Wait "
+            "a moment and try again." + suffix
+        )
+    if error_type == "not_found":
+        return (
+            "The configured commit-message (smaller) model "
+            "was not found. Check the model name in your LLM "
+            "configuration." + suffix
+        )
+    return (
+        "Could not reach the commit-message model. Check "
+        "your LLM configuration and network connection, then "
+        "try again." + suffix
+    )
+
+
 # ---------------------------------------------------------------------------
 # Commit — public RPC entry
 # ---------------------------------------------------------------------------
@@ -116,24 +166,32 @@ async def commit_all_background(
 
         # Generate commit message via the smaller model.
         # ``None`` signals the aux LLM call failed (network
-        # error, auth, model unreachable, etc.). In that case
-        # we must NOT commit with a fallback message — the
-        # user explicitly clicked "commit" expecting a real
-        # generated message, and silently committing with
-        # "chore: update files" hides the failure. Surface it
-        # so they can retry or fix their config.
+        # error, auth, model unreachable, context overflow,
+        # etc.). In that case we must NOT commit with a
+        # fallback message — the user explicitly clicked
+        # "commit" expecting a real generated message, and
+        # silently committing with "chore: update files" hides
+        # the failure. Surface it so they can retry or fix
+        # their config.
+        #
+        # ``generate_commit_message`` stashes the classified
+        # error on ``service._last_commit_error_info`` (set to
+        # ``None`` on a successful call) so we can tailor the
+        # user-facing message and forward the structured
+        # ``error_info`` to the UI — same contract as the
+        # streaming path's ``_last_error_info``.
         message = await generate_commit_message(service, diff)
         if message is None:
+            error_info = getattr(
+                service, "_last_commit_error_info", None
+            )
+            payload = {
+                "error": _commit_error_message(error_info),
+            }
+            if error_info is not None:
+                payload["error_info"] = error_info
             await service._broadcast_event_async(
-                "commitResult",
-                {
-                    "error": (
-                        "Could not reach the commit-message model. "
-                        "Check your LLM configuration and network "
-                        "connection, then try again. Your staged "
-                        "changes are unchanged."
-                    )
-                },
+                "commitResult", payload
             )
             return
         if not message.strip():
@@ -203,10 +261,28 @@ async def generate_commit_message(
     A successful call that returns empty content is
     returned as ``""`` — the caller may choose to
     substitute a default in that narrow case.
+
+    On failure, the classified error dict is stashed on
+    ``service._last_commit_error_info`` so the caller can
+    tailor the user-facing message and forward structured
+    ``error_info`` to the UI. It is cleared to ``None`` on
+    any successful return (including the empty-content case)
+    so a stale error from a prior commit never leaks into a
+    later success.
     """
+    # Reset the per-call error slot up front — a successful
+    # path leaves it None; the failure path overwrites it.
+    service._last_commit_error_info = None
     try:
         import litellm
     except ImportError:
+        # litellm missing is a hard environment error, not a
+        # classified LLM error. Synthesise a minimal info dict
+        # so the caller still forwards something structured.
+        service._last_commit_error_info = {
+            "error_type": "llm_error",
+            "message": "litellm is not installed",
+        }
         return None
 
     prompt = service._config.get_commit_prompt()
@@ -255,6 +331,9 @@ async def generate_commit_message(
                 info.get("model"),
                 info.get("message"),
             )
+            # Stash for the caller — it broadcasts a tailored
+            # message plus this structured info to the UI.
+            service._last_commit_error_info = info
             return None
 
     return await loop.run_in_executor(service._aux_executor, _call)

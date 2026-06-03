@@ -671,6 +671,18 @@ class LLMService:
         # occurred or after the last error was consumed.
         self._last_error_info: dict[str, Any] | None = None
 
+        # Same contract as ``_last_error_info`` but scoped to
+        # the commit-message generation path (the smaller
+        # model). ``generate_commit_message`` resets it to None
+        # at the start of every call and overwrites it with the
+        # classified error on failure; ``commit_all_background``
+        # reads it to tailor the user-facing ``commitResult``
+        # error and forward structured ``error_info`` to the
+        # UI. Kept separate from ``_last_error_info`` so a
+        # background commit can't clobber a streaming completion's
+        # error slot (the two run on independent code paths).
+        self._last_commit_error_info: dict[str, Any] | None = None
+
         # Snapshot of the main scope's stability-tracker
         # change log from the most recent ``_update_stability``
         # call. Populated inside ``_stability.update_stability``

@@ -85,6 +85,26 @@ class _FakeLiteLLM:
     testing sibling-exception isolation.
     """
 
+    # LiteLLM exception classes exposed on the module so
+    # ``_classify_litellm_error`` can resolve them via
+    # ``getattr(litellm, "ContextWindowExceededError")`` etc.
+    # The real module exposes these at top level; the
+    # classifier checks ``litellm`` then ``litellm.exceptions``.
+    class BadRequestError(Exception):
+        pass
+
+    class ContextWindowExceededError(BadRequestError):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    class AuthenticationError(Exception):
+        pass
+
+    class NotFoundError(Exception):
+        pass
+
     def __init__(self) -> None:
         self.streaming_chunks: list[str] = []
         self.non_streaming_reply: str = ""
@@ -96,6 +116,11 @@ class _FakeLiteLLM:
         # FIFO is empty, falls back to the single-call
         # ``streaming_chunks`` field for backward compatibility.
         self._streaming_queue: list[Any] = []
+        # When set, the next non-streaming completion() call
+        # raises this instead of returning a reply. Used to
+        # exercise the commit-message / topic-detector error
+        # paths.
+        self._non_streaming_error: BaseException | None = None
 
     def set_streaming_chunks(self, chunks: list[str]) -> None:
         """Pre-seed content for the next streaming completion.
@@ -130,6 +155,16 @@ class _FakeLiteLLM:
         """Pre-seed content for the next non-streaming call."""
         self.non_streaming_reply = reply
 
+    def set_non_streaming_error(self, exc: BaseException) -> None:
+        """Make the next non-streaming completion() raise ``exc``.
+
+        Drives the commit-message and topic-detector failure
+        paths. The exception persists across calls until
+        cleared (it isn't popped) so retry loops re-raise it
+        and exhaust against a stable error.
+        """
+        self._non_streaming_error = exc
+
     def completion(self, **kwargs: Any) -> Any:
         """Match litellm.completion's public signature."""
         self.call_count += 1
@@ -143,6 +178,8 @@ class _FakeLiteLLM:
                     raise directive
                 return self._build_stream_from(directive)
             return self._build_stream()
+        if self._non_streaming_error is not None:
+            raise self._non_streaming_error
         return self._build_response(self.non_streaming_reply)
 
     def _build_stream_from(self, chunks: list[str]):

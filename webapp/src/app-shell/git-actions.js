@@ -21,13 +21,41 @@ export function onGitAction(host, event) {
 }
 
 /**
- * Clear the _committing flag when commit_all finishes.
- * ChatPanel has its own _onCommitResult for its own
- * state; this is the header's copy. Both listen to
- * the same window event independently.
+ * Handle commit_all completion on the shell side.
+ *
+ * `LLMService.commit_all` returns `{status: "started"}`
+ * synchronously, so the real outcome — success OR error —
+ * only arrives here, via the broadcast `commit-result`
+ * window event. The synchronous error branch in `onCommit`
+ * never fires for the background pipeline's failures
+ * (staging, message generation, the commit itself).
+ *
+ * This is therefore the ONLY place the error path can be
+ * surfaced. The chat panel's `onCommitResult` deliberately
+ * returns early on `detail.error` and relies on the shell
+ * showing the toast — so an error that isn't toasted here
+ * is invisible to the user (the commit button just quietly
+ * re-enables and nothing else happens). The most common
+ * such error is the smaller model's context window being
+ * exceeded by an oversized staged diff.
+ *
+ * `error_info` (when present) carries the structured
+ * classification — error_type, provider, model — matching
+ * the streaming path's contract. We surface the human
+ * message and stash the classification for any richer
+ * recovery affordance.
+ *
+ * ChatPanel and the file picker have their own
+ * `commit-result` listeners for their own `_committing`
+ * flags; all three fire independently off the same event.
  */
-export function onCommitResultHeader(host) {
+export function onCommitResultHeader(host, event) {
   host._committing = false;
+  const detail = event?.detail;
+  if (detail && typeof detail === 'object' && detail.error) {
+    host._lastCommitErrorInfo = detail.error_info || null;
+    host._showToast(`Commit failed: ${detail.error}`, 'warning');
+  }
 }
 
 /**
