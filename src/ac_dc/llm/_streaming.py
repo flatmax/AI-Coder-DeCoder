@@ -50,6 +50,7 @@ from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import EditResult, parse_text
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm._helpers import (
+    RetryCancelled,
     _classify_litellm_error,
     _extract_finish_reason,
     _extract_response_cost,
@@ -873,6 +874,29 @@ def run_completion_sync(
             max_attempts=num_retries + 1,
             context="streaming completion",
             on_retry=_on_retry,
+            is_cancelled=lambda: (
+                request_id in service._cancelled_requests
+            ),
+        )
+    except RetryCancelled:
+        # User clicked Stop during the retry backoff. This is
+        # a successful cancellation, not an error — return
+        # ``was_cancelled=True`` so the caller persists a
+        # ``[stopped]`` placeholder and the frontend renders
+        # the muted "stopped" badge rather than the red error
+        # card. No partial content exists (the stream never
+        # opened); usage is zeros.
+        logger.info(
+            "Streaming request %s cancelled during retry "
+            "backoff",
+            request_id,
+        )
+        return (
+            "",
+            True,
+            None,
+            dict(empty_usage),
+            None,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")
