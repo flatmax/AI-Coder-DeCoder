@@ -55,6 +55,7 @@ from ac_dc.symbol_index.extractors import (
     CExtractor,
     CppExtractor,
     JavaScriptExtractor,
+    MatlabExtractor,
     PythonExtractor,
     TypeScriptExtractor,
 )
@@ -71,16 +72,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Per-language extractor classes. MATLAB is intentionally
-# absent — no maintained tree-sitter grammar, and the
-# regex-based extractor path (tree_optional = True) is
-# deferred.
+# Per-language extractor classes. MATLAB has no maintained
+# tree-sitter grammar — its extractor declares
+# tree_optional = True and works from raw source. The
+# orchestrator's _parse_and_store passes tree=None for
+# tree-optional extractors.
 _EXTRACTOR_CLASSES: tuple[type[BaseExtractor], ...] = (
     PythonExtractor,
     JavaScriptExtractor,
     TypeScriptExtractor,
     CExtractor,
     CppExtractor,
+    MatlabExtractor,
 )
 
 
