@@ -108,6 +108,7 @@ _HIGH_MIN_MODELS = (
     "opus-4-5", "opus-4.5",
     "opus-4-6", "opus-4.6",
     "opus-4-7", "opus-4.7",
+    "opus-4-8", "opus-4.8",
     "haiku-4-5", "haiku-4.5",
 )
 _HIGH_MIN_TOKENS = 4096

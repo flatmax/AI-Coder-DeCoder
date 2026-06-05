@@ -80,7 +80,7 @@ _CLAUDE_FAMILY_MARKERS = ("claude", "anthropic")
 _OUTPUT_TOKEN_CEILINGS: tuple[tuple[tuple[str, ...], int], ...] = (
     # Opus 4.5+ — 128K output window
     (("opus-4-5", "opus-4.5", "opus-4-6", "opus-4.6",
-      "opus-4-7", "opus-4.7"), 128_000),
+      "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"), 128_000),
     # Sonnet 4.5+ — 64K output window
     (("sonnet-4-5", "sonnet-4.5", "sonnet-4-6", "sonnet-4.6",
       "sonnet-4-7", "sonnet-4.7"), 64_000),
@@ -102,6 +102,8 @@ _OUTPUT_TOKEN_CEILINGS: tuple[tuple[tuple[str, ...], int], ...] = (
 _HIGH_MIN_MODELS = (
     "opus-4-5", "opus-4.5",
     "opus-4-6", "opus-4.6",
+    "opus-4-7", "opus-4.7",
+    "opus-4-8", "opus-4.8",
     "haiku-4-5", "haiku-4.5",
 )
 _HIGH_MIN_TOKENS = 4096

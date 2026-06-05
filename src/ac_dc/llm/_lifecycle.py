@@ -115,6 +115,26 @@ def sync_file_context(
     for path in selected - current:
         if service._repo is None:
             continue
+        # Probe disk before attempting to read. A file that
+        # is selected but absent from disk (deleted in git /
+        # removed by an external tool while still checked in
+        # the picker) must be trimmed from the selection, not
+        # merely logged. Without this probe the add_file below
+        # raises a generic RepoError, the handler logs a
+        # warning, and the path stays in scope.selected_files
+        # forever — leaking a meta:active_file: row for a file
+        # that no longer exists and that the LLM can never see.
+        if not service._repo.file_exists(path):
+            deleted_from_disk.append(path)
+            logger.warning(
+                "Selected file %s does not exist on disk "
+                "(deleted in git or removed externally); "
+                "clearing from selection. The stability "
+                "tracker will not register an active entry "
+                "for it.",
+                path,
+            )
+            continue
         try:
             file_context.add_file(path)
         except Exception as exc:
