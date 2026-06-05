@@ -90,7 +90,7 @@ def _indexed_paths_in_dir(
     service: "LLMService",
     directory: str,
 ) -> set[str]:
-    """Return the set of paths in ``directory`` covered by an active index.
+    """Return the set of paths in ``directory`` covered by a surfacing index.
 
     A file is "covered" when it appears as a key in an
     index that is *currently surfacing dir-blocks to the
@@ -99,37 +99,51 @@ def _indexed_paths_in_dir(
     listing its filename in ``plain_files:<directory>``
     would be pure duplication.
 
-    Mode-aware: in code mode the symbol index is primary,
-    in doc mode the doc index is primary; cross-reference
+    Mode-aware: in code mode the symbol index is surfacing,
+    in doc mode the doc index is surfacing; cross-reference
     additionally engages the opposite index on top of the
     primary one. A file covered only by an index that is
-    *not* surfacing dir-blocks this turn must remain
-    visible through plain_files.
+    *not* surfacing dir-blocks this turn is NOT counted as
+    covered — it must remain visible through plain_files.
 
     Used by both initial seeding and per-turn refresh to
     subtract indexed files from the plain-files block.
 
-    Coverage is mode-INDEPENDENT. Per
-    ``specs4/3-llm/cache-tiering.md`` § Content Categories
-    Tracked, ``plain_files:<dir>`` lists files that have
-    "neither a symbol table nor a doc index" — so a file
-    present in *either* index is subtracted from the
-    plain-files listing regardless of the active mode. A
-    doc-indexed file viewed in code mode still has its
-    filename surfaced (via the doc index when cross-ref
-    engages, or simply as a known-indexed file that
-    shouldn't be duplicated into plain_files), so listing
-    it in plain_files would be redundant either way.
+    Coverage is gated on whether the index is *surfacing*
+    dir-blocks in the current mode. Per
+    ``specs4/3-llm/cache-tiering.md`` § Index Inclusion, a
+    ``plain_files:<dir>`` entry covers files "otherwise —
+    including files that *are* indexed but whose index is
+    not currently surfacing." A ``.md`` / ``.svg`` file in
+    code mode without cross-reference is doc-indexed but
+    the doc index is NOT surfacing ``docs:<dir>`` blocks,
+    so that file must remain visible by filename through
+    ``plain_files:<dir>``. Subtracting it here — as an
+    earlier revision did, consulting both indexes
+    unconditionally — made the file vanish from the
+    structural cache entirely: not in ``docs:<dir>`` (that
+    branch is doc-mode-only) and not in ``plain_files:``
+    (subtracted as "covered"). It then only appeared if the
+    user happened to select it, as a full-text ``file:``
+    entry.
 
-    Earlier revisions gated this on the active mode
-    (``use_docs = mode == Mode.DOC or xref``), which left
-    doc-indexed files leaking into ``plain_files`` while in
-    code mode — duplicating their filenames against the
-    doc index. Both indexes are now consulted
-    unconditionally.
+    Surfacing rules:
+
+    - Symbol index surfaces in code mode, or any mode with
+      cross-reference enabled.
+    - Doc index surfaces in doc mode, or any mode with
+      cross-reference enabled.
+
+    A file covered only by a non-surfacing index is left
+    OUT of ``covered`` so it stays listed in plain_files.
     """
+    mode = service._context.mode
+    xref = getattr(service, "_cross_ref_enabled", False)
+    symbols_surfacing = mode == Mode.CODE or xref
+    docs_surfacing = mode == Mode.DOC or xref
+
     covered: set[str] = set()
-    if service._symbol_index is not None:
+    if symbols_surfacing and service._symbol_index is not None:
         try:
             for path in service._symbol_index._all_symbols.keys():
                 parent = (
@@ -139,15 +153,16 @@ def _indexed_paths_in_dir(
                     covered.add(path)
         except Exception:
             pass
-    try:
-        for path in service._doc_index._all_outlines.keys():
-            parent = (
-                path[: path.rfind("/")] if "/" in path else ""
-            )
-            if parent == directory:
-                covered.add(path)
-    except Exception:
-        pass
+    if docs_surfacing:
+        try:
+            for path in service._doc_index._all_outlines.keys():
+                parent = (
+                    path[: path.rfind("/")] if "/" in path else ""
+                )
+                if parent == directory:
+                    covered.add(path)
+        except Exception:
+            pass
     return covered
 
 

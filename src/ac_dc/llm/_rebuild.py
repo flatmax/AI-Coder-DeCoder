@@ -410,33 +410,78 @@ def seed_dir_blocks_for_rebuild(service: "LLMService") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _file_mtime(service: "LLMService", path: str) -> float:
+    """Return the on-disk mtime for ``path``, or 0.0 if unknown.
+
+    Per-file coldness signal for :func:`distribute_orphan_files`.
+    Falls back to the file's parent-directory mtime when the
+    file can't be stat'd directly (and 0.0 when even that
+    fails), so a missing stat degrades to "as cold as its
+    directory" rather than crashing the rebuild.
+    """
+    repo = service._repo
+    if repo is None:
+        return 0.0
+    try:
+        return (repo.root / path).stat().st_mtime
+    except Exception:
+        pass
+    try:
+        directory = path[: path.rfind("/")] if "/" in path else ""
+        return repo.get_directory_mtime(directory)
+    except Exception:
+        return 0.0
+
+
 def distribute_orphan_files(
     service: "LLMService",
     orphan_paths: list[str],
 ) -> None:
-    """Bin-pack orphan selected files across L1/L2/L3.
+    """Seed selected files across L0–L3 by mtime coldness.
 
-    Called by rebuild for files that are selected but aren't
-    in the primary index (non-source files — ``.md``,
-    ``.json``, images, etc.). Without this they'd land in
-    ACTIVE on the next update pass.
+    Called by rebuild for selected files (whether or not they
+    are in the primary index). Without this they'd land in
+    ACTIVE on the next update pass and have to age through the
+    admission gate before reaching a cached tier — rebuild's
+    purpose is to skip that wait.
 
-    Greedy bin-pack by current tier token count: each orphan
-    placed in whichever of L1/L2/L3 currently holds the
-    fewest tokens. L0 is excluded — L0 must be earned via
-    promotion or explicit seeding.
+    Distribution is **mtime-based, coldest-into-L0**, mirroring
+    :meth:`StabilityTracker.initialize_dir_blocks` so selected
+    files and dir-blocks share the same edit-cost-aware
+    seeding policy. Files are sorted coldest-first and walked
+    against the mass-share schedule
+    ``[L3 = 10%, L2 = 20%, L1 = 30%, L0 = 40%]`` of total
+    selected-file mass: the coldest (least-recently-modified)
+    files accumulate into L0 (most expensive tier to
+    invalidate, least likely to be edited soon), the hottest
+    into L3 (cheapest to invalidate, most likely to teleport
+    back to Active on the next edit).
+
+    This replaces the earlier greedy-min-across-L1/L2/L3 rule
+    that reserved L0 against selected files entirely. That
+    rule treated every selected file as uniformly hot; in
+    practice a heavily-selected session (many files loaded as
+    read-only reference) left L0 nearly empty while L1/L2/L3
+    carried the full selected mass, producing a large positive
+    V across the L1→L0 membrane and provoking promotion churn
+    on the first few turns. Seeding by coldness inverts the
+    post-seed token gradient — L0 heaviest, L3 lightest — so
+    V ≤ 0 across every membrane at the rebuilt state and the
+    rectified flux equation stays quiescent until a real edit
+    teleports a file to Active.
+
+    A 1:1 floor guarantees every tier receives at least one
+    file when the population permits, so a single oversized
+    cold file cannot fill L0 and strand L1/L2/L3 empty.
+
+    Spec: ``specs4/3-llm/cache-tiering.md`` § Manual Cache
+    Rebuild.
     """
     from ac_dc.stability_tracker import Tier, TrackedItem
 
     tracker = service._stability_tracker
-    target_tiers = (Tier.L1, Tier.L2, Tier.L3)
 
-    tier_tokens: dict[Tier, int] = {t: 0 for t in target_tiers}
-    for item in tracker.get_all_items().values():
-        if item.tier in tier_tokens:
-            tier_tokens[item.tier] += item.tokens
-
-    orphans_with_tokens: list[tuple[str, int, str]] = []
+    entries: list[tuple[str, float, int, str]] = []
     for path in orphan_paths:
         content = service._file_context.get_content(path)
         if content is None:
@@ -445,23 +490,55 @@ def distribute_orphan_files(
         file_hash = hashlib.sha256(
             content.encode("utf-8")
         ).hexdigest()
-        orphans_with_tokens.append((path, tokens, file_hash))
-    orphans_with_tokens.sort(key=lambda x: (-x[1], x[0]))
+        mtime = _file_mtime(service, path)
+        entries.append((path, mtime, tokens, file_hash))
 
-    for path, tokens, file_hash in orphans_with_tokens:
-        target_tier = min(
-            target_tiers,
-            key=lambda t: (tier_tokens[t], t.value),
-        )
-        entry_n = _TIER_CONFIG_LOOKUP[target_tier]["entry_n"]
+    if not entries:
+        return
+
+    # Coldest first (smallest mtime), key tiebreak for
+    # determinism. The walk places the coldest files into L0
+    # and advances toward L3 as it warms.
+    entries.sort(key=lambda e: (e[1], e[0]))
+
+    n = len(entries)
+    # Cold → L0, hot → L3. Walking coldest-first, we fill L0
+    # to its mass share, then L1, L2, and finally L3 absorbs
+    # the hottest tail.
+    tier_order = (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
+    share_per_tier = (0.40, 0.30, 0.20, 0.10)
+    total_tokens = sum(e[2] for e in entries)
+    targets = [total_tokens * s for s in share_per_tier]
+    floor_active = n >= len(tier_order)
+
+    cum_in_tier = 0
+    tier_idx = 0
+    for idx, (path, _mtime, tokens, file_hash) in enumerate(entries):
+        if tier_idx < len(tier_order) - 1:
+            items_left_after_this = n - idx - 1
+            tiers_below_current = len(tier_order) - tier_idx - 1
+            floor_advance = (
+                floor_active
+                and items_left_after_this < tiers_below_current
+            )
+            mass_advance = (
+                cum_in_tier > 0
+                and cum_in_tier + tokens > targets[tier_idx]
+            )
+            if floor_advance or mass_advance:
+                tier_idx += 1
+                cum_in_tier = 0
+
+        tier = tier_order[tier_idx]
+        entry_n = _TIER_CONFIG_LOOKUP[tier]["entry_n"]
         tracker._items[f"file:{path}"] = TrackedItem(
             key=f"file:{path}",
-            tier=target_tier,
+            tier=tier,
             n_value=entry_n,
             content_hash=file_hash,
             tokens=tokens,
         )
-        tier_tokens[target_tier] += tokens
+        cum_in_tier += tokens
 
 
 # ---------------------------------------------------------------------------
