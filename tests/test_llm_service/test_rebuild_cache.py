@@ -331,10 +331,14 @@ class TestRebuildCache:
         assert "symbol:a.py" not in all_keys
         # file: entry placed by orphan distribution.
         assert "file:a.py" in all_keys
-        # Landed in a cached tier (L1/L2/L3 — never L0 or Active).
+        # Landed in a cached tier (L0/L1/L2/L3 — never Active).
+        # Under D36 selected files seed across all four cached
+        # tiers by per-file mtime, coldest into L0.
         file_item = tracker.get_all_items()["file:a.py"]
         from ac_dc.stability_tracker import Tier
-        assert file_item.tier in (Tier.L1, Tier.L2, Tier.L3)
+        assert file_item.tier in (
+            Tier.L0, Tier.L1, Tier.L2, Tier.L3,
+        )
 
     def test_distributes_orphan_selected_files(
         self,
@@ -378,9 +382,11 @@ class TestRebuildCache:
         cfg = tracker.get_all_items().get("file:config.json")
         assert readme is not None
         assert cfg is not None
-        # Landed in L1, L2, or L3 — never ACTIVE.
-        assert readme.tier in (Tier.L1, Tier.L2, Tier.L3)
-        assert cfg.tier in (Tier.L1, Tier.L2, Tier.L3)
+        # Landed in L0/L1/L2/L3 — never ACTIVE. Under D36
+        # selected files seed across all four cached tiers by
+        # per-file mtime, coldest into L0.
+        assert readme.tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
+        assert cfg.tier in (Tier.L0, Tier.L1, Tier.L2, Tier.L3)
 
     def test_no_system_prompt_tracker_entry_after_rebuild(
         self,
@@ -797,9 +803,15 @@ class TestRebuildCache:
         )
         assert script_item is not None
         assert cfg_item is not None
-        # Both in cached tiers, never ACTIVE or L0.
-        assert script_item.tier in (Tier.L1, Tier.L2, Tier.L3)
-        assert cfg_item.tier in (Tier.L1, Tier.L2, Tier.L3)
+        # Both in cached tiers, never ACTIVE. Under D36
+        # selected files seed across L0–L3 by per-file mtime,
+        # coldest into L0.
+        assert script_item.tier in (
+            Tier.L0, Tier.L1, Tier.L2, Tier.L3,
+        )
+        assert cfg_item.tier in (
+            Tier.L0, Tier.L1, Tier.L2, Tier.L3,
+        )
 
     def test_doc_mode_rebuild_result_mode_field(
         self,
