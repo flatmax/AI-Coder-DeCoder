@@ -51,6 +51,7 @@ import {
   disposeEditor,
   getModifiedEditor,
   isDirty,
+  isHtmlFile,
   isMarkdownFile,
   isPreviewableFile,
   isSvgFile,
@@ -538,6 +539,7 @@ export class DiffViewer extends LitElement {
   _isDirty(file) { return isDirty(file); }
   _isMarkdownFile(file) { return isMarkdownFile(file); }
   _isTexFile(file) { return isTexFile(file); }
+  _isHtmlFile(file) { return isHtmlFile(file); }
   _isPreviewableFile(file) { return isPreviewableFile(file); }
   _isSvgFile(file) { return isSvgFile(file); }
   _statusLedClass() { return statusLedClass(this); }
