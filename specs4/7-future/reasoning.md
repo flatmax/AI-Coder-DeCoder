@@ -17,12 +17,26 @@ that reasoning would fix).
 
 LiteLLM normalises reasoning across providers:
 
-- Anthropic Claude models accept a `thinking` parameter:
+- Legacy Anthropic Claude models accept a `thinking` parameter:
   `{"type": "enabled", "budget_tokens": N}`
+- Adaptive-thinking Claude models (Opus 4.5+, Haiku 4.5+,
+  Sonnet 4.5+, including Opus 4.8) reject the legacy shape and
+  require `{"type": "adaptive"}` with effort supplied separately
+  as `output_config.effort`. `budget_tokens` is deprecated /
+  ignored on these models — it is mutually exclusive with the
+  adaptive+effort path.
 - OpenAI o1/o3 accept `reasoning_effort`: `"low"`, `"medium"`,
   or `"high"`
-- LiteLLM translates between the two shapes, so a single
-  config surface can drive both
+- LiteLLM normalises a single `reasoning_effort` kwarg across
+  all of these. Its accepted vocabulary is `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`, `none`; for Anthropic it
+  maps 1:1 to `output_config.effort` on adaptive models and to a
+  `budget_tokens` count on legacy ones. The higher tiers
+  (`xhigh`/`max`) are gated per-model by the LiteLLM model map's
+  `supports_*_reasoning_effort` flags — e.g. Opus 4.8 advertises
+  `xhigh`/`max`; a model that doesn't returns a `BadRequestError`.
+- LiteLLM translates between these shapes, so a single config
+  surface can drive both
 
 The backend's per-request usage extraction already handles
 `completion_tokens_details.reasoning_tokens` (see
@@ -124,6 +138,15 @@ Add a `reasoning` section to `app.json`:
 }
 ```
 
+`effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or
+`max`; unrecognised values fall back to `medium` rather than
+raising (a config typo shouldn't crash startup). On adaptive
+models the `effort` field drives behaviour and `budget_tokens`
+is ignored; on legacy models `budget_tokens` applies. The
+`xhigh`/`max` tiers only take effect on models that advertise
+them (e.g. Opus 4.8) — other models will reject them at the
+provider.
+
 Plumb through `ConfigManager.reasoning_config` (mirroring
 `compaction_config`). Read in `_run_completion_sync`; build
 the provider-appropriate kwargs; pass to `litellm.completion`.
@@ -141,6 +164,28 @@ Add a 🧠 button to the chat action bar. Reactive property
 reasoning)` to accept an explicit per-request flag; when
 `None`, fall back to the config default; when `True`/`False`,
 override.
+
+**Commit C — per-request effort dropdown.**
+
+Next to the 🧠 button (shown only while reasoning is enabled),
+render an effort selector covering LiteLLM's full vocabulary —
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Reactive
+property `_reasoningEffort`, persisted to localStorage under
+`ac-dc-reasoning-effort` (default `xhigh`). Extend
+`chat_streaming(..., reasoning, effort)` with an `effort`
+argument threaded through `stream_chat` → `run_completion_sync`
+→ `build_thinking_kwargs(config, reasoning, effort_override)`.
+
+Resolution: for adaptive-thinking models, a recognised
+`effort` wins over `config.reasoning_effort`; `None` or an
+unrecognised value defers to config. Legacy-thinking models
+ignore effort entirely (they take `budget_tokens`). The
+per-model ceiling is **not** enforced client- or
+service-side — a level the active model doesn't advertise
+(e.g. `xhigh`/`max` on an older model) is sent as-is and the
+provider returns a `BadRequestError`, surfaced to the user as
+an error toast. This keeps the UI free of a model-capability
+table that would need maintenance as models change.
 
 ## Foundation Requirements
 

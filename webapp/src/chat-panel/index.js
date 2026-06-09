@@ -97,11 +97,15 @@ import {
   _AGENT_LABEL_MAX_LENGTH,
   _DRAWER_STORAGE_KEY,
   _REASONING_STORAGE_KEY,
+  _REASONING_EFFORT_STORAGE_KEY,
+  _REASONING_EFFORT_LEVELS,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
   _SEARCH_WHOLE_WORD_KEY,
   _loadDrawerOpen,
   _loadReasoningEnabled,
+  _loadReasoningEffort,
+  _saveReasoningEffort,
   _loadSearchToggle,
   _saveDrawerOpen,
   _saveReasoningEnabled,
@@ -208,6 +212,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Reasoning toggle — restored from localStorage so
     // the user's last choice survives reload.
     this._reasoningEnabled = _loadReasoningEnabled();
+    this._reasoningEffort = _loadReasoningEffort();
 
     // Mode + cross-ref state. Hydrated from
     // get_current_state on RPC ready and kept in sync
@@ -543,8 +548,12 @@ export {
   _loadSearchToggle,
   _saveSearchToggle,
   _REASONING_STORAGE_KEY,
+  _REASONING_EFFORT_STORAGE_KEY,
+  _REASONING_EFFORT_LEVELS,
   _loadReasoningEnabled,
   _saveReasoningEnabled,
+  _loadReasoningEffort,
+  _saveReasoningEffort,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,

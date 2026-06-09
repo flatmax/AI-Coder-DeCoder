@@ -44,6 +44,11 @@ from ac_dc.llm._types import (
 # Reasoning / extended-thinking kwargs
 # ---------------------------------------------------------------------------
 
+# Accepted effort levels — mirrors LiteLLM's ``reasoning_effort``
+# vocabulary. The per-model ceiling (e.g. xhigh/max only on Opus
+# 4.8) is enforced by the provider, not here; we just gate typos.
+_VALID_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
 
 def _model_uses_adaptive_thinking(model: str) -> bool:
     """True when the model requires the ``adaptive`` thinking shape.
@@ -73,6 +78,7 @@ def _model_uses_adaptive_thinking(model: str) -> bool:
         "opus-4-5", "opus-4.5",
         "opus-4-6", "opus-4.6",
         "opus-4-7", "opus-4.7",
+        "opus-4-8", "opus-4.8",
         "haiku-4-5", "haiku-4.5",
         "sonnet-4-5", "sonnet-4.5",
     )
@@ -113,6 +119,7 @@ def _build_thinking_payload(
 def build_thinking_kwargs(
     config: "ConfigManager",
     request_override: bool | None,
+    effort_override: str | None = None,
 ) -> dict[str, Any]:
     """Build the reasoning kwargs for ``litellm.completion``.
 
@@ -141,6 +148,15 @@ def build_thinking_kwargs(
     they're guaranteed not to reason regardless of config.
     Spec § Aux call policy: aux calls should never reason
     even when the primary is configured to.
+
+    ``effort_override`` is the per-request effort level from
+    the frontend's dropdown (adaptive models only). When a
+    recognised level is supplied it wins over
+    ``config.reasoning_effort``; ``None`` or an unrecognised
+    value defers to config. The per-model ceiling (xhigh/max
+    only on models that advertise them) is enforced by the
+    provider, which raises ``BadRequestError`` for an
+    unsupported level.
     """
     if request_override is False:
         return {}
@@ -154,7 +170,10 @@ def build_thinking_kwargs(
         "thinking": _build_thinking_payload(config),
     }
     if _model_uses_adaptive_thinking(config.model):
-        kwargs["reasoning_effort"] = config.reasoning_effort
+        if effort_override in _VALID_EFFORTS:
+            kwargs["reasoning_effort"] = effort_override
+        else:
+            kwargs["reasoning_effort"] = config.reasoning_effort
     return kwargs
 
 

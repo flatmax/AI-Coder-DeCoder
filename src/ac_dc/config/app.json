@@ -30,7 +30,6 @@
     "enabled": false
   },
   "reasoning": {
-    "enabled": false,
     "budget_tokens": 10000,
     "effort": "xhigh",
     "first_chunk_timeout_seconds": 1200,

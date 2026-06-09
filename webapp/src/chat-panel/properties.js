@@ -253,6 +253,17 @@ export const PROPERTIES = {
    */
   _reasoningEnabled: { type: Boolean, state: true },
   /**
+   * Per-request reasoning effort level for adaptive-thinking
+   * models — one of ``minimal``/``low``/``medium``/``high``/
+   * ``xhigh``/``max``. Forwarded into
+   * ``LLMService.chat_streaming`` as the ``effort`` argument;
+   * the backend defers to ``config.reasoning_effort`` when it
+   * doesn't recognise the value. Component-scoped like
+   * ``_reasoningEnabled`` and persisted to localStorage under
+   * ``ac-dc-reasoning-effort`` (default ``xhigh``).
+   */
+  _reasoningEffort: { type: String, state: true },
+  /**
    * URL content dialog state. When non-null, the content
    * viewer overlay is open showing the URL's fetched
    * content. Set by the `url-view-requested` handler,

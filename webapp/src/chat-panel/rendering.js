@@ -56,7 +56,11 @@ import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderLedRow } from './led-row.js';
 import { renderTabStrip } from './tabs.js';
-import { _EXPERIMENTAL_ENABLED, parseAgentTabId } from './helpers.js';
+import {
+  _EXPERIMENTAL_ENABLED,
+  _REASONING_EFFORT_LEVELS,
+  parseAgentTabId,
+} from './helpers.js';
 import {
   computeSearchMatches,
   onFileSearchNext,
@@ -92,6 +96,7 @@ import {
   removePendingImage,
   send,
   toggleReasoning,
+  setReasoningEffort,
   toggleSnippetDrawer,
   copyMessageText,
 } from './input.js';
@@ -282,21 +287,40 @@ export function render(panel) {
         <div class="action-group search-collapsible">
           ${_EXPERIMENTAL_ENABLED
             ? html`<button
-                class="action-button reasoning-toggle ${panel
-                  ._reasoningEnabled
-                  ? 'active'
-                  : ''}"
-                @click=${() => toggleReasoning(panel)}
-                aria-label=${panel._reasoningEnabled
-                  ? 'Disable reasoning mode'
-                  : 'Enable reasoning mode'}
-                aria-pressed=${panel._reasoningEnabled}
-                title=${panel._reasoningEnabled
-                  ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
-                  : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
-              >
-                🧠
-              </button>`
+                  class="action-button reasoning-toggle ${panel
+                    ._reasoningEnabled
+                    ? 'active'
+                    : ''}"
+                  @click=${() => toggleReasoning(panel)}
+                  aria-label=${panel._reasoningEnabled
+                    ? 'Disable reasoning mode'
+                    : 'Enable reasoning mode'}
+                  aria-pressed=${panel._reasoningEnabled}
+                  title=${panel._reasoningEnabled
+                    ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
+                    : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
+                >
+                  🧠
+                </button>
+                ${panel._reasoningEnabled
+                  ? html`<select
+                      class="reasoning-effort-select"
+                      .value=${panel._reasoningEffort}
+                      @change=${(e) =>
+                        setReasoningEffort(panel, e.target.value)}
+                      aria-label="Reasoning effort level"
+                      title="Reasoning effort — higher means deeper thinking and more tokens. xhigh/max only apply on models that support them."
+                    >
+                      ${_REASONING_EFFORT_LEVELS.map(
+                        (level) => html`<option
+                          value=${level}
+                          ?selected=${level === panel._reasoningEffort}
+                        >
+                          ${level}
+                        </option>`,
+                      )}
+                    </select>`
+                  : ''}`
             : ''}
         </div>
         <div class="action-divider search-collapsible" aria-hidden="true"></div>

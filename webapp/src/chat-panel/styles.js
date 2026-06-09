@@ -896,6 +896,28 @@ export const STYLES = css`
       0 0 0 1px rgba(88, 166, 255, 0.55),
       0 0 8px rgba(88, 166, 255, 0.45);
   }
+  /* Reasoning effort dropdown — sits next to the 🧠 toggle,
+   * shown only while reasoning is enabled. Matches the
+   * action-button idiom (compact, transparent, accent on
+   * focus) so it reads as part of the same control group. */
+  .reasoning-effort-select {
+    background: transparent;
+    border: 1px solid rgba(88, 166, 255, 0.3);
+    color: var(--accent-primary, #58a6ff);
+    padding: 0.2rem 0.3rem;
+    font-size: 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .reasoning-effort-select:focus {
+    outline: none;
+    border-color: rgba(88, 166, 255, 0.55);
+    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.55);
+  }
+  .reasoning-effort-select option {
+    background: var(--bg-primary, #0d1117);
+    color: var(--text-primary, #c9d1d9);
+  }
   /* Search bar — sits inside the action bar between the
    * snippet-drawer toggle and the session buttons. Flex-1
    * to take the middle space. Inline toggles live inside

@@ -43,6 +43,8 @@ import {
   AUTO_SCROLL_TOLERANCE_PX,
   _saveDrawerOpen,
   _saveReasoningEnabled,
+  _saveReasoningEffort,
+  _REASONING_EFFORT_LEVELS,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,
@@ -246,6 +248,10 @@ export async function send(panel) {
       // fallthrough only applies when a caller
       // doesn't pass the field at all.
       panel._reasoningEnabled,
+      // 8th arg — effort level for adaptive models.
+      // Backend defers to config when it doesn't
+      // recognise the value.
+      panel._reasoningEffort,
     );
     // Response is {status: "started"} on the
     // happy path. Chunks and completion arrive
@@ -372,6 +378,20 @@ export function toggleReasoning(panel) {
       : 'Reasoning disabled',
     'info',
   );
+}
+
+/**
+ * Set the per-request reasoning effort level (adaptive
+ * models). Forwarded as the ``effort`` argument to
+ * ``LLMService.chat_streaming``; persisted globally. The
+ * provider rejects a level the active model doesn't
+ * advertise (e.g. xhigh/max on older models), surfaced as
+ * an error toast on send.
+ */
+export function setReasoningEffort(panel, effort) {
+  if (!_REASONING_EFFORT_LEVELS.includes(effort)) return;
+  panel._reasoningEffort = effort;
+  _saveReasoningEffort(effort);
 }
 
 /**
