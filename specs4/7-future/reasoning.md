@@ -165,11 +165,20 @@ reasoning)` to accept an explicit per-request flag; when
 `None`, fall back to the config default; when `True`/`False`,
 override.
 
-**Commit C — per-request effort dropdown.**
+**Commit C — per-request effort selector.**
 
-Next to the 🧠 button (shown only while reasoning is enabled),
-render an effort selector covering LiteLLM's full vocabulary —
-`minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Reactive
+Fold the effort selector *into* the 🧠 button rather than
+placing a separate dropdown beside it, so the control keeps a
+single button's footprint. While reasoning is enabled the
+button shows a small accent-colored badge in its top-right
+corner with the active effort abbreviated (`MIN`, `LO`, `MED`,
+`HI`, `XH`, `MAX` — see `_REASONING_EFFORT_ABBREV`). A native
+`<select>` is overlaid transparently on that badge corner: a
+click on the badge opens the effort menu (listing LiteLLM's
+full vocabulary — `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`), while a click on the brain glyph itself still toggles
+reasoning. The badge and overlay render only while reasoning is
+enabled, matching when the effort actually applies. Reactive
 property `_reasoningEffort`, persisted to localStorage under
 `ac-dc-reasoning-effort` (default `xhigh`). Extend
 `chat_streaming(..., reasoning, effort)` with an `effort`
