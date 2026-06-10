@@ -59,6 +59,7 @@ import { renderTabStrip } from './tabs.js';
 import {
   _EXPERIMENTAL_ENABLED,
   _REASONING_EFFORT_LEVELS,
+  _REASONING_EFFORT_ABBREV,
   parseAgentTabId,
 } from './helpers.js';
 import {
@@ -286,7 +287,8 @@ export function render(panel) {
         ${renderModeToggle(panel)}
         <div class="action-group search-collapsible">
           ${_EXPERIMENTAL_ENABLED
-            ? html`<button
+            ? html`<div class="reasoning-control">
+                <button
                   class="action-button reasoning-toggle ${panel
                     ._reasoningEnabled
                     ? 'active'
@@ -297,10 +299,16 @@ export function render(panel) {
                     : 'Enable reasoning mode'}
                   aria-pressed=${panel._reasoningEnabled}
                   title=${panel._reasoningEnabled
-                    ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
+                    ? `Reasoning enabled (effort: ${panel._reasoningEffort}) — extra thinking tokens. Click to disable.`
                     : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
                 >
                   🧠
+                  ${panel._reasoningEnabled
+                    ? html`<span class="reasoning-effort-badge"
+                        >${_REASONING_EFFORT_ABBREV[panel._reasoningEffort] ??
+                        panel._reasoningEffort}</span
+                      >`
+                    : ''}
                 </button>
                 ${panel._reasoningEnabled
                   ? html`<select
@@ -320,7 +328,8 @@ export function render(panel) {
                         </option>`,
                       )}
                     </select>`
-                  : ''}`
+                  : ''}
+              </div>`
             : ''}
         </div>
         <div class="action-divider search-collapsible" aria-hidden="true"></div>

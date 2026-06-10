@@ -235,6 +235,20 @@ export const _REASONING_EFFORT_LEVELS = [
   'max',
 ];
 
+/**
+ * Compact labels for the effort badge overlaid on the 🧠
+ * toggle. The dropdown still lists the full level names; only
+ * the badge (limited corner real estate) uses these.
+ */
+export const _REASONING_EFFORT_ABBREV = {
+  minimal: 'MIN',
+  low: 'LO',
+  medium: 'MED',
+  high: 'HI',
+  xhigh: 'XH',
+  max: 'MAX',
+};
+
 const _DEFAULT_REASONING_EFFORT = 'xhigh';
 
 export function _loadReasoningEffort() {

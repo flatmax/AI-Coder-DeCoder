@@ -896,23 +896,61 @@ export const STYLES = css`
       0 0 0 1px rgba(88, 166, 255, 0.55),
       0 0 8px rgba(88, 166, 255, 0.45);
   }
-  /* Reasoning effort dropdown — sits next to the 🧠 toggle,
-   * shown only while reasoning is enabled. Matches the
-   * action-button idiom (compact, transparent, accent on
-   * focus) so it reads as part of the same control group. */
+  /* Reasoning control — the 🧠 toggle with the effort
+   * selector folded into it. The effort is shown as a small
+   * badge over the brain's corner; a transparent native
+   * <select> is overlaid on the whole control so clicking the
+   * badge opens the effort menu. Clicking the brain glyph
+   * itself still toggles reasoning (the button sits under the
+   * badge but the select covers it — see pointer rules below).
+   * This keeps the control to a single button's footprint
+   * instead of a button + a wide dropdown. */
+  .reasoning-control {
+    position: relative;
+    display: inline-flex;
+  }
+  .reasoning-control .reasoning-toggle {
+    position: relative;
+  }
+  /* Effort badge — sits on the top-right of the brain glyph. */
+  .reasoning-effort-badge {
+    position: absolute;
+    top: -2px;
+    right: -3px;
+    font-size: 0.55rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    padding: 1px 2px;
+    border-radius: 3px;
+    background: var(--accent-primary, #58a6ff);
+    color: var(--bg-primary, #0d1117);
+    pointer-events: none;
+  }
+  /* The select overlays only the badge corner so the rest of
+   * the brain button stays clickable for toggling. It is fully
+   * transparent — the badge underneath is what the user sees. */
   .reasoning-effort-select {
+    position: absolute;
+    top: -3px;
+    right: -4px;
+    width: 1.4rem;
+    height: 0.95rem;
+    margin: 0;
+    padding: 0;
+    border: none;
     background: transparent;
-    border: 1px solid rgba(88, 166, 255, 0.3);
-    color: var(--accent-primary, #58a6ff);
-    padding: 0.2rem 0.3rem;
-    font-size: 0.75rem;
-    border-radius: 4px;
+    color: transparent;
     cursor: pointer;
+    opacity: 0;
+    appearance: none;
+    -webkit-appearance: none;
   }
   .reasoning-effort-select:focus {
     outline: none;
-    border-color: rgba(88, 166, 255, 0.55);
-    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.55);
+  }
+  .reasoning-control:focus-within .reasoning-effort-badge {
+    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.85);
   }
   .reasoning-effort-select option {
     background: var(--bg-primary, #0d1117);
