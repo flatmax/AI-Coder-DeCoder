@@ -96,6 +96,7 @@ import {
 import {
   _AGENT_LABEL_MAX_LENGTH,
   _DRAWER_STORAGE_KEY,
+  _EXPERIMENTAL_ENABLED,
   _REASONING_STORAGE_KEY,
   _REASONING_EFFORT_STORAGE_KEY,
   _REASONING_EFFORT_LEVELS,
@@ -210,8 +211,20 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this.reviewActive = false;
 
     // Reasoning toggle — restored from localStorage so
-    // the user's last choice survives reload.
-    this._reasoningEnabled = _loadReasoningEnabled();
+    // the user's last choice survives reload. Gated on
+    // ``--experimental``: the toggle/effort UI is only
+    // rendered under that flag (see rendering.js), so the
+    // persisted state must also be suppressed when it's
+    // off — otherwise a ``true``/``xhigh`` left in
+    // localStorage from a prior experimental session
+    // ships a hard per-request reasoning override on every
+    // send, forcing extended thinking the user can no
+    // longer see or toggle. (Effort still falls back to
+    // its default for the UI's sake, but it's never sent
+    // while ``_reasoningEnabled`` is false.)
+    this._reasoningEnabled = _EXPERIMENTAL_ENABLED
+      ? _loadReasoningEnabled()
+      : false;
     this._reasoningEffort = _loadReasoningEffort();
 
     // Mode + cross-ref state. Hydrated from
