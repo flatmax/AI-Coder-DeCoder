@@ -71,6 +71,7 @@
 import { LitElement } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
+import { cancelSpeech } from '../speech-synthesis.js';
 // Side-effect imports — these modules register
 // custom elements (`<ac-history-browser>`,
 // `<ac-input-history>`, `<ac-speech-to-text>`,
@@ -232,6 +233,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // via the `mode-changed` window event.
     this._mode = 'code';
     this._crossRefEnabled = false;
+
+    // Text-to-speech: index of the message currently
+    // being read aloud, or -1 when idle. Single global
+    // synthesis queue, so this is component-scoped.
+    this._speakingMsgIndex = -1;
 
     // Repo files list — pushed by files-tab for file
     // mention detection. Global to the chat panel.
@@ -426,6 +432,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
       'view-agents-requested', this._onViewAgentsRequested,
     );
     detachEventListeners(this);
+    // Stop any in-flight text-to-speech so it doesn't keep
+    // reading after the panel is torn down (tab close,
+    // navigation, test teardown) — mirrors the mic-release
+    // cleanup in speech-to-text.js.
+    cancelSpeech();
+    this._speakingMsgIndex = -1;
     super.disconnectedCallback();
   }
 

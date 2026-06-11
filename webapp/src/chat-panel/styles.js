@@ -714,6 +714,15 @@ export const STYLES = css`
   .message-action-button:active {
     transform: translateY(1px);
   }
+  /* Active text-to-speech state — accent + glow so the
+   * speaking message's button reads as engaged, matching
+   * the mic toggle's active treatment. */
+  .message-action-button.speaking {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: rgba(88, 166, 255, 0.5);
+    color: var(--accent-primary, #58a6ff);
+    box-shadow: 0 0 6px rgba(88, 166, 255, 0.4);
+  }
 
   /* Markdown-rendered content inherits the message card's
    * styling but tightens up paragraphs and adds a subtle

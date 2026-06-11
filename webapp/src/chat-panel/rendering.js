@@ -100,7 +100,9 @@ import {
   setReasoningEffort,
   toggleSnippetDrawer,
   copyMessageText,
+  speakMessage,
 } from './input.js';
+import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import {
   closeUrlViewDialog,
   onUrlFetchRequested,
@@ -810,7 +812,7 @@ export function renderMessage(panel, msg, index) {
     `;
   }
   const images = Array.isArray(msg.images) ? msg.images : [];
-  const toolbar = renderMessageToolbar(panel, msg);
+  const toolbar = renderMessageToolbar(panel, msg, index);
   const highlightClass = isHighlighted ? ' search-highlight' : '';
   // Split finish-reason placement by severity. Natural
   // completions (stop / end_turn) are positive
@@ -948,15 +950,21 @@ export function renderFinishBadge(reason) {
 
 /**
  * Render the action toolbar for a message — copy
- * raw text and paste raw text into the chat
- * input. Used at both top-right and bottom-right
- * of each message card.
+ * raw text, paste raw text into the chat input,
+ * and (when the browser supports speech synthesis)
+ * read the message aloud. Used at both top-right
+ * and bottom-right of each message card.
  *
  * Returns the same fragment for both placements
  * — Lit deduplicates the underlying event
  * bindings.
+ *
+ * `index` is the message's position in the
+ * messages array; it drives the speaker button's
+ * play/stop toggle via `panel._speakingMsgIndex`.
  */
-export function renderMessageToolbar(panel, msg) {
+export function renderMessageToolbar(panel, msg, index) {
+  const speaking = panel._speakingMsgIndex === index;
   return html`
     <button
       class="message-action-button"
@@ -982,6 +990,25 @@ export function renderMessageToolbar(panel, msg) {
     >
       ↩
     </button>
+    ${isSpeechSynthesisSupported()
+      ? html`<button
+          class="message-action-button ${speaking ? 'speaking' : ''}"
+          title=${speaking
+            ? 'Stop reading'
+            : 'Read aloud (or select text first to read just that)'}
+          aria-label=${speaking
+            ? 'Stop reading message aloud'
+            : 'Read message aloud'}
+          aria-pressed=${speaking}
+          @click=${(e) => {
+            e.stopPropagation();
+            const card = e.target.closest('.message-card');
+            speakMessage(panel, msg, index, card);
+          }}
+        >
+          ${speaking ? '⏹' : '🔊'}
+        </button>`
+      : ''}
   `;
 }
 

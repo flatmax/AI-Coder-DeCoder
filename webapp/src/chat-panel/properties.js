@@ -298,4 +298,15 @@ export const PROPERTIES = {
    * hide the tab bar since there's only one panel to show.
    */
   _urlViewTab: { type: String, state: true, noAccessor: true },
+  /**
+   * Index of the message currently being read aloud via
+   * the Web Speech synthesis API, or -1 when nothing is
+   * speaking. Drives the 🔊/⏹ toggle state on each
+   * message's speaker button. Component-scoped (not
+   * per-tab) because `speechSynthesis` is a single
+   * window-level queue — only one message speaks at a
+   * time across the whole panel. See speech-synthesis.js
+   * and `speakMessage` in input.js.
+   */
+  _speakingMsgIndex: { type: Number, state: true },
 };
