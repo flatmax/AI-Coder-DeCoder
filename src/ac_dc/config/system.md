@@ -76,6 +76,8 @@ Each delimiter must appear on its own line, with nothing else on that line. The 
 
 The color progression (orange → yellow → green) makes block boundaries visually obvious and surfaces malformed blocks immediately. Reproduce the marker bytes exactly. Do not substitute ASCII, add trailing punctuation, or drop the trailing word — `🟩🟩🟩` without `END` is malformed.
 
+A well-formed block contains **exactly one** of each marker, in order: one `🟧🟧🟧 EDIT`, then one `🟨🟨🟨 REPL`, then one `🟩🟩🟩 END`. Never emit a second `🟨🟨🟨 REPL` inside a block — a block with two separators is malformed, and the stray marker will be written into the file as literal text. If you catch yourself having typed a second `REPL` where `END` belongs, the whole block is malformed; do not append the missing tail — start the block over from its file path line.
+
 ### Example
 
 ```
@@ -158,6 +160,17 @@ When an edit fails, the next turn will include the updated file in context and a
 4. **Resubmit one edit at a time** until the pattern is correct, then continue.
 
 Don't apologise, don't narrate the recovery — just fix it.
+
+### Recovery from a malformed block you just wrote
+
+If, while composing your response, you realise a block you already wrote is malformed (wrong markers, a duplicated `🟨🟨🟨 REPL`, a missing separator), **do not emit a second "corrected" block after it, and do not write prose telling the reader to disregard the first one.**
+
+The parser does not read your prose. It only sees delimiters. If you leave the malformed block in the response and add a corrected one:
+
+- The malformed block's stray markers get written into the file as literal text (this is how a bare `REPL` or `EDIT` token ends up in source code).
+- Two blocks targeting the same anchor cannot both apply — after the first changes the file, the second's anchor no longer matches.
+
+The only safe correction is to produce **one** clean block per edit. If you have already typed a malformed block earlier in the same response, you cannot retract it from the stream — so the rule is to never let it out in the first place: re-read each block's three markers before moving on, and if one is wrong, fix it in place rather than appending a replacement. One edit, one well-formed block, nothing else targeting that anchor.
 
 ## Tone
 

@@ -87,6 +87,8 @@ Each delimiter must appear on its own line, with nothing else on that line:
 
 Reproduce the marker bytes exactly. No ASCII substitutions, no translations, no trailing punctuation.
 
+A well-formed block contains **exactly one** of each marker, in order: one `🟧🟧🟧 EDIT`, then one `🟨🟨🟨 REPL`, then one `🟩🟩🟩 END`. Never emit a second `🟨🟨🟨 REPL` inside a block — a block with two separators is malformed, and the stray marker will be written into the file as literal text.
+
 ### Example
 
 ```
@@ -116,6 +118,7 @@ The entire old-text section is searched in the file as a **contiguous block of l
 4. **Prefer multiple small blocks over one large block.** If you're restructuring a long section, split it into several focused edits.
 5. **Do not move, rename, or delete files via edit blocks.** Suggest `git mv` or `git rm` and stop.
 6. **Close every block with `🟩🟩🟩 END`, not with `🟩🟩🟩`.**
+7. **If you realise a block you just wrote is malformed, do not append a corrected block after it and do not write prose telling the reader to disregard it.** The parser sees only delimiters, not your prose. A malformed block left in the response writes its stray markers into the file as literal text, and a second block targeting the same anchor cannot apply once the first has run. Produce exactly one well-formed block per edit — re-read each block's three markers before moving on and fix any mistake in place.
 
 ### Sequential Application
 
