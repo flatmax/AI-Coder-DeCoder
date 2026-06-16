@@ -297,6 +297,19 @@ When a Context tab subscriber receives both events for the same turn (because it
 - Session ID captured synchronously before launching the background task — prevents a race where a concurrent server restart replaces the session ID, causing the commit event to persist to the wrong session
 - Session-scoped mutable state must be captured as local variables at task-launch time, passed as parameters, never read from instance attrs inside the task
 
+## Commit-Message Generation Failure
+
+Commit-message generation runs the smaller model as a non-streaming call inside the background task. It can fail like any other LLM call — and one failure mode is routine rather than exceptional: the staged diff exceeds the smaller model's context window (`context_window_exceeded`). A wholesale commit of a large working tree easily pushes the diff past a small model's 200k-token limit.
+
+The failure must always reach the user. The pipeline returns immediately with a started status, so the synchronous RPC return cannot carry the outcome — the error only travels via the `commitResult` broadcast. If that broadcast is silent or unhandled, the commit button quietly re-enables and the user sees nothing despite a logged warning. This is the contract that prevents that:
+
+- `generate_commit_message` resets a single-slot error field on the service at the start of every call, and on failure stores the classified error dict there (same shape and `error_type` vocabulary as the streaming path's error-info slot — see [Retry Policy](#retry-policy)). A successful call leaves the slot cleared, so a stale error from a prior commit never leaks into a later success. The slot is kept distinct from the streaming error-info slot so a background commit can't clobber an in-flight completion's error.
+- On a `None` return, the background task reads the slot and broadcasts `commitResult` with **both** a human-readable `error` string **and** the structured `error_info` dict — mirroring the streaming completion result's error fields so the frontend has one consistent shape to dispatch on.
+- The `error` string is tailored off `error_type` rather than always saying "could not reach the model". For `context_window_exceeded` it points at the diff size and suggests committing fewer files or configuring a larger-context smaller model — telling the user to "check your network connection" when the model was reached and rejected an oversized prompt sends them down the wrong path. Authentication, rate-limit, and not-found errors get their own tailored wording; everything else falls back to the generic "could not reach the model" message. Every variant ends by noting the staged changes are unchanged.
+- A generation failure never commits a fallback message. The user clicked commit expecting a real generated message; silently committing "chore: update files" would hide the failure.
+
+Frontend consumption of this broadcast is specified in [chat.md § Commit (Server-Driven)](../5-webapp/chat.md#commit-server-driven).
+
 ## Token Usage Extraction
 
 - Extracted from the provider's response

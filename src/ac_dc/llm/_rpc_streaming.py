@@ -81,6 +81,7 @@ async def chat_streaming(
     excluded_urls: list[str] | None = None,
     agent_tag: str | None = None,
     reasoning: bool | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """Start a streaming chat request.
 
@@ -104,6 +105,11 @@ async def chat_streaming(
     default in ``app.json``. Spec
     ``specs4/7-future/reasoning.md`` § Recommended Shape —
     Commit B.
+
+    ``effort`` is the per-request effort level (adaptive
+    models only) — one of ``minimal``/``low``/``medium``/
+    ``high``/``xhigh``/``max``. ``None`` or an unrecognised
+    value falls through to ``config.reasoning_effort``.
 
     See :meth:`LLMService.chat_streaming` for the full prose
     on single-stream guard scoping and agent_tag semantics.
@@ -186,6 +192,7 @@ async def chat_streaming(
             scope=scope,
             agent_key=agent_key,
             reasoning=reasoning,
+            effort=effort,
         )
     )
     return {"status": "started"}

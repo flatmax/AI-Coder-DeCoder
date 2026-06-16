@@ -242,11 +242,14 @@ export function onContentChange(host) {
     return;
   }
   recomputeDirty(host);
-  // Live preview — markdown re-renders on every keystroke;
-  // TeX deliberately does NOT live-update because the
-  // make4ht compile is too expensive for keystroke
-  // frequency.
-  if (host._previewMode && isMarkdownFile(host._file)) {
+  // Live preview — markdown and HTML re-render on every
+  // keystroke; TeX deliberately does NOT live-update
+  // because the make4ht compile is too expensive for
+  // keystroke frequency.
+  if (
+    host._previewMode &&
+    (isMarkdownFile(host._file) || isHtmlFile(host._file))
+  ) {
     host._updatePreview(host._file.modified);
   }
 }
@@ -337,8 +340,14 @@ export function isTexFile(file) {
   return lower.endsWith('.tex') || lower.endsWith('.latex');
 }
 
+export function isHtmlFile(file) {
+  if (!file || typeof file.path !== 'string') return false;
+  const lower = file.path.toLowerCase();
+  return lower.endsWith('.html') || lower.endsWith('.htm');
+}
+
 export function isPreviewableFile(file) {
-  return isMarkdownFile(file) || isTexFile(file);
+  return isMarkdownFile(file) || isTexFile(file) || isHtmlFile(file);
 }
 
 export function isSvgFile(file) {

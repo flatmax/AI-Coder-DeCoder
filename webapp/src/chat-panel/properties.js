@@ -253,6 +253,17 @@ export const PROPERTIES = {
    */
   _reasoningEnabled: { type: Boolean, state: true },
   /**
+   * Per-request reasoning effort level for adaptive-thinking
+   * models — one of ``minimal``/``low``/``medium``/``high``/
+   * ``xhigh``/``max``. Forwarded into
+   * ``LLMService.chat_streaming`` as the ``effort`` argument;
+   * the backend defers to ``config.reasoning_effort`` when it
+   * doesn't recognise the value. Component-scoped like
+   * ``_reasoningEnabled`` and persisted to localStorage under
+   * ``ac-dc-reasoning-effort`` (default ``xhigh``).
+   */
+  _reasoningEffort: { type: String, state: true },
+  /**
    * URL content dialog state. When non-null, the content
    * viewer overlay is open showing the URL's fetched
    * content. Set by the `url-view-requested` handler,
@@ -287,4 +298,15 @@ export const PROPERTIES = {
    * hide the tab bar since there's only one panel to show.
    */
   _urlViewTab: { type: String, state: true, noAccessor: true },
+  /**
+   * Index of the message currently being read aloud via
+   * the Web Speech synthesis API, or -1 when nothing is
+   * speaking. Drives the 🔊/⏹ toggle state on each
+   * message's speaker button. Component-scoped (not
+   * per-tab) because `speechSynthesis` is a single
+   * window-level queue — only one message speaks at a
+   * time across the whole panel. See speech-synthesis.js
+   * and `speakMessage` in input.js.
+   */
+  _speakingMsgIndex: { type: Number, state: true },
 };

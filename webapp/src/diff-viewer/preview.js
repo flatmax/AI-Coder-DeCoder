@@ -30,6 +30,7 @@ import {
 } from './fetch.js';
 import {
   disposeEditor,
+  isHtmlFile,
   isMarkdownFile,
   isPreviewableFile,
   isTexFile,
@@ -101,6 +102,10 @@ export function updatePreview(host, content) {
     renderTexPreviewFromState(host);
     return;
   }
+  if (isHtmlFile(host._file)) {
+    renderHtmlPreview(host, content || '');
+    return;
+  }
   try {
     const html = renderMarkdownWithSourceMap(content || '');
     host._previewPane.innerHTML = html;
@@ -109,6 +114,38 @@ export function updatePreview(host, content) {
   }
   host._imageResolveGeneration += 1;
   resolvePreviewImages(host, host._imageResolveGeneration);
+}
+
+/**
+ * Render an HTML file into a sandboxed iframe inside the
+ * preview pane. Repo HTML is rendered live but isolated:
+ * the `sandbox` attribute (no `allow-scripts`) disables
+ * scripts and keeps the document's own styles from
+ * leaking into the app. Relative resource refs inside the
+ * HTML won't resolve (no base URL on disk), which is an
+ * accepted limitation — the preview is for structure and
+ * inline content, not a full-fidelity browser.
+ */
+export function renderHtmlPreview(host, content) {
+  if (!host._previewPane) {
+    host._previewPane =
+      host.shadowRoot?.querySelector('.preview-pane') || null;
+  }
+  if (!host._previewPane) return;
+  if (host._file === null) return;
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.className = 'html-preview-frame';
+    iframe.setAttribute('sandbox', '');
+    iframe.setAttribute('srcdoc', content || '');
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.border = 'none';
+    host._previewPane.innerHTML = '';
+    host._previewPane.appendChild(iframe);
+  } catch (err) {
+    console.error('[diff-viewer] html preview render failed', err);
+  }
 }
 
 /**
@@ -455,4 +492,4 @@ export function onPreviewClick(host, event) {
 
 // Re-export so the host class can wire its bound
 // handlers through the same module.
-export { isMarkdownFile, isPreviewableFile, isTexFile };
+export { isHtmlFile, isMarkdownFile, isPreviewableFile, isTexFile };

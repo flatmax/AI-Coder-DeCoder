@@ -50,6 +50,7 @@ from ac_dc.context_manager import Mode
 from ac_dc.edit_protocol import EditResult, parse_text
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm._helpers import (
+    RetryCancelled,
     _classify_litellm_error,
     _extract_finish_reason,
     _extract_response_cost,
@@ -82,6 +83,7 @@ async def stream_chat(
     scope: "ConversationScope | None" = None,
     agent_key: str | None = None,
     reasoning: bool | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """Background task — the actual streaming logic.
 
@@ -97,6 +99,9 @@ async def stream_chat(
     override forwarded by the chat_streaming RPC. ``None``
     defers to ``config.reasoning_enabled``; ``True`` /
     ``False`` force the corresponding state.
+
+    ``effort`` carries the per-request effort level (adaptive
+    models only); ``None`` defers to ``config.reasoning_effort``.
     """
     if scope is None:
         scope = service._default_scope()
@@ -281,7 +286,7 @@ async def stream_chat(
         ) = await loop.run_in_executor(
             service._stream_executor,
             service._run_completion_sync,
-            request_id, messages, loop, reasoning,
+            request_id, messages, loop, reasoning, effort,
         )
         # If the LiteLLM call raised before streaming
         # started, ``run_completion_sync`` returns the
@@ -610,6 +615,7 @@ def run_completion_sync(
     messages: list[dict[str, Any]],
     loop: asyncio.AbstractEventLoop,
     reasoning: bool | None = None,
+    effort: str | None = None,
 ) -> tuple[str, bool, str | None, dict[str, Any], str | None]:
     """Blocking LLM call — runs in a worker thread.
 
@@ -638,6 +644,10 @@ def run_completion_sync(
     ``True`` / ``False`` force the corresponding state. The
     resolved ``thinking`` kwarg is passed straight into
     ``litellm.completion``.
+
+    ``effort`` is the per-request effort level (adaptive
+    models only); ``None`` or an unrecognised value defers to
+    ``config.reasoning_effort``.
 
     Three-layer timeout protection per
     ``specs-reference/3-llm/streaming.md`` § Timeouts:
@@ -759,7 +769,7 @@ def run_completion_sync(
         )
 
     thinking_kwargs = build_thinking_kwargs(
-        service._config, reasoning,
+        service._config, reasoning, effort,
     )
     # Track the resolved reasoning state so the cache
     # warmer mirrors it on subsequent firings. The UI
@@ -778,7 +788,10 @@ def run_completion_sync(
         # See _build_thinking_payload for the dispatch.
         payload = thinking_kwargs["thinking"]
         if payload.get("type") == "adaptive":
-            logger.info("Reasoning enabled — adaptive effort")
+            logger.info(
+                "Reasoning enabled — adaptive effort=%s",
+                thinking_kwargs.get("reasoning_effort", "?"),
+            )
         else:
             logger.info(
                 "Reasoning enabled — budget=%d tokens",
@@ -873,6 +886,29 @@ def run_completion_sync(
             max_attempts=num_retries + 1,
             context="streaming completion",
             on_retry=_on_retry,
+            is_cancelled=lambda: (
+                request_id in service._cancelled_requests
+            ),
+        )
+    except RetryCancelled:
+        # User clicked Stop during the retry backoff. This is
+        # a successful cancellation, not an error — return
+        # ``was_cancelled=True`` so the caller persists a
+        # ``[stopped]`` placeholder and the frontend renders
+        # the muted "stopped" badge rather than the red error
+        # card. No partial content exists (the stream never
+        # opened); usage is zeros.
+        logger.info(
+            "Streaming request %s cancelled during retry "
+            "backoff",
+            request_id,
+        )
+        return (
+            "",
+            True,
+            None,
+            dict(empty_usage),
+            None,
         )
     except Exception as exc:
         logger.exception("litellm.completion raised")

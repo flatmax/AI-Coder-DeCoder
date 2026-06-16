@@ -177,7 +177,7 @@ The `_anchored` flag is a transient per-cascade attribute set dynamically via `s
 | `file:{path}` | Selected files (Active full-text) | Full file content hash | Active, L3, L2, L1, L0 |
 | `symbols:{dir}` | Per-directory union of symbol-table blocks | Hash of the directory's rendered symbols block (excluding files currently in Active) | Active, L3, L2, L1, L0 |
 | `docs:{dir}` | Per-directory union of doc-outline blocks | Hash of the directory's rendered docs block (excluding files currently in Active) | Active, L3, L2, L1, L0 |
-| `plain_files:{dir}` | Per-directory listing of files without symbol tables or doc indexes | Hash of the directory's rendered filename listing | Active, L3, L2, L1, L0 |
+| `plain_files:{dir}` | Per-directory listing of files not covered by a *currently-surfacing* index in the active mode | Hash of the directory's rendered filename listing | Active, L3, L2, L1, L0 |
 | `history:{N}` | Conversation history | Hash of `role + content` string, where N is the integer index | Active, L3, L2, L1, L0 |
 | `url:{hash12}` | Fetched URL content | Hash of URL content; hash12 is the first 12 chars of SHA-256(url) | Active, L3, L2, L1, L0 |
 
@@ -193,9 +193,20 @@ When a file enters Active full-text, the tracker invariant guarantees it is remo
 
 Each `symbols:<dir>` / `docs:<dir>` block is hashed from the concatenation of the directory's per-file raw structural-data hashes, in stable filename order, **excluding** any file currently in Active full-text. The formatted compact output (path aliases, abbreviation rendering) is computed at assembly time but is NOT part of the hash — same rationale as the per-file symbol hash under D27 (avoid spurious demotions from purely-rendering differences).
 
-`plain_files:<dir>` blocks hash the sorted list of filenames in the directory that have neither a symbol table nor a doc index.
+`plain_files:<dir>` blocks hash the sorted list of filenames in the directory not covered by a *currently-surfacing* index (see the coverage quirk below).
 
 Consumers should use `SymbolIndex.get_dir_signature_hash(dir, active_excluded)` and `DocIndex.get_dir_signature_hash(dir, active_excluded)` (authoritative) rather than hashing rendered output themselves.
+
+### Mode-surfacing coverage for `plain_files`
+
+A file is subtracted from its directory's `plain_files:<dir>` listing only when it is covered by an index that is **currently surfacing dir-blocks in the active mode** — not whenever it appears in *any* index. The surfacing rules:
+
+- Symbol index surfaces in code mode, or any mode with cross-reference enabled.
+- Doc index surfaces in doc mode, or any mode with cross-reference enabled.
+
+A file covered only by a non-surfacing index stays in `plain_files`. The load-bearing case: a `.md` / `.svg` file in **code mode without cross-reference** is doc-indexed, but the doc index is not surfacing `docs:<dir>` blocks. If coverage were computed from both indexes unconditionally, that file would be subtracted from `plain_files` (as "covered") yet never seeded into any `docs:<dir>` block (that branch is doc-mode-only) — vanishing from the structural cache entirely, surviving only if the user happened to select it as a full-text `file:` entry. Gating coverage on surfacing keeps the file visible by filename through `plain_files:<dir>` until cross-reference toggles on or the mode switches.
+
+The implementation lives in `_indexed_paths_in_dir` (`src/ac_dc/llm/_stability.py`); it is consumed by initial seeding, manual rebuild, and per-turn `plain_files` refresh, so the gate is applied consistently across all three.
 
 ### No L0 snapshot
 

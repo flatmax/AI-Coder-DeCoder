@@ -43,6 +43,8 @@ import {
   AUTO_SCROLL_TOLERANCE_PX,
   _saveDrawerOpen,
   _saveReasoningEnabled,
+  _saveReasoningEffort,
+  _REASONING_EFFORT_LEVELS,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,
@@ -52,6 +54,11 @@ import {
 import { scheduleUrlDetection } from './urls.js';
 import { handleStreamStartError } from './streaming.js';
 import { setSearchMode } from './search.js';
+import {
+  cancelSpeech,
+  isSpeechSynthesisSupported,
+  speakText,
+} from '../speech-synthesis.js';
 
 // localStorage key for the in-progress textarea
 // draft. Persisted on every input event so a
@@ -246,6 +253,10 @@ export async function send(panel) {
       // fallthrough only applies when a caller
       // doesn't pass the field at all.
       panel._reasoningEnabled,
+      // 8th arg — effort level for adaptive models.
+      // Backend defers to config when it doesn't
+      // recognise the value.
+      panel._reasoningEffort,
     );
     // Response is {status: "started"} on the
     // happy path. Chunks and completion arrive
@@ -372,6 +383,20 @@ export function toggleReasoning(panel) {
       : 'Reasoning disabled',
     'info',
   );
+}
+
+/**
+ * Set the per-request reasoning effort level (adaptive
+ * models). Forwarded as the ``effort`` argument to
+ * ``LLMService.chat_streaming``; persisted globally. The
+ * provider rejects a level the active model doesn't
+ * advertise (e.g. xhigh/max on older models), surfaced as
+ * an error toast on send.
+ */
+export function setReasoningEffort(panel, effort) {
+  if (!_REASONING_EFFORT_LEVELS.includes(effort)) return;
+  panel._reasoningEffort = effort;
+  _saveReasoningEffort(effort);
 }
 
 /**
@@ -884,6 +909,134 @@ export function pasteMessageToPrompt(panel, msg) {
   ta.setSelectionRange(cursor, cursor);
   ta.focus();
   ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// ---------------------------------------------------------------
+// Text-to-speech (read message aloud)
+// ---------------------------------------------------------------
+
+/**
+ * Read a message aloud via the Web Speech synthesis API.
+ *
+ * Smart-scope behaviour (per the speak-control design):
+ * if the user has a non-empty text selection inside THIS
+ * message card, only the selection is read; otherwise the
+ * whole message is read.
+ *
+ * Toggles: clicking the speaker on the message that's
+ * currently playing stops playback. Because
+ * `speechSynthesis` is a single window-level queue,
+ * starting a read on any message cancels whatever was
+ * playing before (handled inside `speakText`), and
+ * `panel._speakingMsgIndex` tracks which card owns the
+ * active utterance so its button can show the stop state.
+ *
+ * `cardEl` is the `.message-card` element — passed from
+ * the toolbar click handler so we can read the rendered
+ * (markdown-stripped) text the user actually sees rather
+ * than the raw markdown source.
+ */
+export function speakMessage(panel, msg, index, cardEl) {
+  if (!isSpeechSynthesisSupported()) {
+    panel._emitToast(
+      'Text-to-speech is not supported in this browser',
+      'warning',
+    );
+    return;
+  }
+  // Clicking the active speaker stops it.
+  if (panel._speakingMsgIndex === index) {
+    cancelSpeech();
+    panel._speakingMsgIndex = -1;
+    return;
+  }
+  const text = resolveSpeechText(msg, cardEl, panel);
+  if (!text) return;
+  panel._speakingMsgIndex = index;
+  speakText(text, {
+    // onend / onerror fire from the native synthesis
+    // callbacks. Guard on the index so a stale callback
+    // from an interrupted utterance doesn't clear the
+    // state of a newer read that has since started.
+    onend: () => {
+      if (panel._speakingMsgIndex === index) {
+        panel._speakingMsgIndex = -1;
+      }
+    },
+    onerror: () => {
+      if (panel._speakingMsgIndex === index) {
+        panel._speakingMsgIndex = -1;
+      }
+    },
+  });
+}
+
+/**
+ * Resolve the text to read for a message. Prefers a
+ * selection within the card, then the rendered prose,
+ * then the raw extracted text as a last resort.
+ */
+function resolveSpeechText(msg, cardEl, panel) {
+  const selected = getSelectedTextWithin(panel, cardEl);
+  if (selected) return selected;
+  // Whole-message read: gather the rendered prose blocks
+  // (.md-content) so markdown syntax, edit-block code, and
+  // agent-card chrome are excluded — we read what the user
+  // reads, not the raw source.
+  if (cardEl) {
+    const proseNodes = cardEl.querySelectorAll('.md-content');
+    if (proseNodes.length > 0) {
+      const text = Array.from(proseNodes)
+        .map((n) => n.textContent || '')
+        .join('\n')
+        .trim();
+      if (text) return text;
+    }
+  }
+  // No rendered DOM available (e.g. unit tests) — fall back
+  // to the raw content, markdown and all.
+  return extractMessageText(msg);
+}
+
+/**
+ * Return the trimmed selected text when there's a
+ * non-empty selection that lies within `cardEl`, else ''.
+ *
+ * Shadow-DOM caveat: Chromium exposes
+ * `shadowRoot.getSelection()`, which scopes correctly to
+ * nodes inside the shadow tree. Firefox/Safari only offer
+ * `window.getSelection()`, where the anchor may be
+ * retargeted to the shadow host — in that case the
+ * containment check fails and we fall back to reading the
+ * whole message. That's the intended graceful
+ * degradation: the button always works, selection-only
+ * reading is a Chromium enhancement.
+ */
+function getSelectedTextWithin(panel, cardEl) {
+  if (!cardEl) return '';
+  let selection = null;
+  const root = panel?.shadowRoot;
+  if (root && typeof root.getSelection === 'function') {
+    selection = root.getSelection();
+  } else if (
+    typeof window !== 'undefined' &&
+    typeof window.getSelection === 'function'
+  ) {
+    selection = window.getSelection();
+  }
+  if (!selection) return '';
+  const text = selection.toString();
+  if (!text || !text.trim()) return '';
+  // Confirm the selection lies within this card so a
+  // selection in a different message isn't read when this
+  // card's speaker is clicked.
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  const within =
+    (anchor && cardEl.contains(anchor)) ||
+    (focus && cardEl.contains(focus));
+  if (!within) return '';
+  return text.trim();
 }
 
 // ---------------------------------------------------------------

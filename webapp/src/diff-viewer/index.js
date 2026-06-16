@@ -51,6 +51,7 @@ import {
   disposeEditor,
   getModifiedEditor,
   isDirty,
+  isHtmlFile,
   isMarkdownFile,
   isPreviewableFile,
   isSvgFile,
@@ -318,6 +319,16 @@ export class DiffViewer extends LitElement {
     if (this._file === null || this._file.isVirtual) return;
     if (this._virtualComparison !== null) return;
     const path = this._file.path;
+    // Capture preview state before the refetch so we can
+    // re-render the preview and restore the user's scroll
+    // position once the new on-disk content lands. Without
+    // this, an external edit (LLM write, commit, revert)
+    // refreshes the editor buffer but leaves the preview
+    // pane showing the stale render.
+    const wasPreviewOpen = this.isPreviewOpen();
+    const previewScrollTop = wasPreviewOpen
+      ? this.getPreviewScrollTop()
+      : 0;
     this._openingGeneration += 1;
     const myGeneration = this._openingGeneration;
     const fetched = await fetchFileContent(path);
@@ -333,6 +344,30 @@ export class DiffViewer extends LitElement {
     };
     this._showEditor();
     this._recomputeDirty();
+
+    // Re-render the preview from the freshly-fetched content
+    // when preview mode is active and the file is still
+    // previewable. _showEditor only rebuilds the Monaco
+    // editor; the preview pane is written directly (not via
+    // Lit) so it has to be refreshed explicitly.
+    if (
+      wasPreviewOpen &&
+      this._file !== null &&
+      isPreviewableFile(this._file)
+    ) {
+      this.updateComplete.then(() => {
+        if (isTexFile(this._file)) {
+          // TeX re-compiles from the new source; its own
+          // async path repaints the pane on completion.
+          this._compileTex(this._file);
+        } else {
+          this._updatePreview(this._file.modified);
+        }
+        if (previewScrollTop > 0) {
+          this.restorePreviewScrollTop(previewScrollTop);
+        }
+      });
+    }
   }
 
   async refreshOpenFiles() {
@@ -504,6 +539,7 @@ export class DiffViewer extends LitElement {
   _isDirty(file) { return isDirty(file); }
   _isMarkdownFile(file) { return isMarkdownFile(file); }
   _isTexFile(file) { return isTexFile(file); }
+  _isHtmlFile(file) { return isHtmlFile(file); }
   _isPreviewableFile(file) { return isPreviewableFile(file); }
   _isSvgFile(file) { return isSvgFile(file); }
   _statusLedClass() { return statusLedClass(this); }

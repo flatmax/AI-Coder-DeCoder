@@ -108,6 +108,7 @@ _HIGH_MIN_MODELS = (
     "opus-4-5", "opus-4.5",
     "opus-4-6", "opus-4.6",
     "opus-4-7", "opus-4.7",
+    "opus-4-8", "opus-4.8",
     "haiku-4-5", "haiku-4.5",
 )
 _HIGH_MIN_TOKENS = 4096
@@ -875,14 +876,18 @@ class ConfigManager:
         # param. Anthropic's adaptive-thinking models (Opus 4.5+,
         # Haiku 4.5+, Sonnet 4.5+) use this rather than a token
         # budget; LiteLLM translates to ``output_config.effort``
-        # for those backends. Unknown values fall back to
-        # "medium" rather than raising — config typos shouldn't
-        # crash startup.
+        # for those backends. The accepted set mirrors LiteLLM's
+        # own ``reasoning_effort`` vocabulary (minimal/low/medium/
+        # high/xhigh/max); the provider rejects a level a given
+        # model doesn't advertise (e.g. xhigh/max are gated by the
+        # model map's ``supports_*_reasoning_effort`` flags).
+        # Unknown values fall back to "medium" rather than raising
+        # — config typos shouldn't crash startup.
         effort_raw = section.get("effort", "medium")
         if not isinstance(effort_raw, str):
             effort_raw = "medium"
         effort = effort_raw.strip().lower()
-        if effort not in ("low", "medium", "high"):
+        if effort not in ("minimal", "low", "medium", "high", "xhigh", "max"):
             effort = "medium"
         # First-chunk watchdog override for reasoning calls.
         # Adaptive-thinking models (Opus 4.5+, Bedrock Opus 4.7
@@ -961,11 +966,13 @@ class ConfigManager:
     def reasoning_effort(self) -> str:
         """Convenience — configured reasoning effort (adaptive models).
 
-        One of ``"low"``, ``"medium"``, ``"high"``. Used by adaptive-
-        thinking models (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) where
-        a token budget isn't accepted. LiteLLM translates this to
-        the per-provider field (``output_config.effort`` for
-        Anthropic).
+        One of ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
+        ``"xhigh"``, ``"max"``. Used by adaptive-thinking models
+        (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) where a token budget
+        isn't accepted. LiteLLM translates this to the per-provider
+        field (``output_config.effort`` for Anthropic). The higher
+        tiers (``xhigh``/``max``) are only accepted on models whose
+        map entry advertises them — e.g. Opus 4.8.
         """
         return self.reasoning_config["effort"]
 

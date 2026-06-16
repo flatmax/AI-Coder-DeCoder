@@ -47,8 +47,7 @@ export class CacheWarmupProgress extends LitElement {
     :host {
       position: fixed;
       bottom: 1rem;
-      left: 50%;
-      transform: translateX(-50%);
+      right: 1rem;
       z-index: 500;
       pointer-events: none;
     }

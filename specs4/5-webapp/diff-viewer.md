@@ -8,7 +8,7 @@ For SVG files, see [svg-viewer.md](svg-viewer.md) — a dedicated side-by-side v
 ## Layout
 - Background layer filling the viewport, sibling of the dialog
 - Empty state shows a watermark (brand mark, low opacity)
-- Floating overlay buttons in the top-right corner when a file is open — status LED, preview toggle (for markdown/tex), text-diff toggle (for SVG passthroughs)
+- Floating overlay buttons in the top-right corner when a file is open — status LED, preview toggle (for markdown/tex/html), text-diff toggle (for SVG passthroughs)
 ## Status LED
 Circular indicator showing the active file's state:
 | State | Color | Behavior |
@@ -223,6 +223,15 @@ The exported document is bare — no filename header, no chrome — so the markd
 - Inline KaTeX CSS plus a minimal stylesheet (system font stack, light theme, code blocks, tables, blockquotes, headings) into a single `<style>` block in `<head>`.
 - Wrap the body in `<!DOCTYPE html>` with the source path as `<title>`.
 The dropdown is dismissed by clicking outside the diff viewer, by selecting an action, or by re-clicking the chevron. Export is markdown-only — TeX preview's pipeline (make4ht output, source-line anchors) is not currently exportable through this affordance.
+## HTML Preview
+For HTML files (`.html`, `.htm`), the same Preview button activates a live rendered preview. Unlike markdown — which is converted to HTML and injected into the preview pane's shadow DOM — HTML files are rendered inside a **sandboxed `<iframe>`**:
+- The iframe carries a `sandbox` attribute with no `allow-scripts` token, so scripts in the repo HTML do not execute and the document's own styles cannot leak into the app.
+- The HTML source is supplied via the iframe's `srcdoc` attribute; no file is written to disk and no RPC is involved beyond the normal working-copy fetch.
+- The preview updates live on every keystroke (the iframe `srcdoc` is cheap to rewrite), matching markdown and unlike TeX.
+- **Relative resource references do not resolve.** The iframe has no base URL on disk, so relative `<img src>`, `<link href>`, and `<script src>` (the last being inert anyway) will not load. The preview is suitable for viewing document structure and inline content, not full-fidelity rendering.
+- HTML preview does not participate in source-line scroll synchronization — the iframe is opaque to the anchor-collection pass, so the scroll-sync machinery simply finds no anchors and no-ops.
+- The Export-as-HTML / Copy-as-HTML affordance is markdown-only and does not appear for HTML files.
+
 ## TeX Preview
 For TeX files, the same Preview button activates a live TeX preview via make4ht compilation on the server and KaTeX rendering on the client. See [tex-preview.md](tex-preview.md) for the full specification.
 ## Event Routing

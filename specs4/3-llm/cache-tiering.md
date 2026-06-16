@@ -349,7 +349,7 @@ Atomic from the RPC caller's perspective:
 - Wipe all `file:<path>` entries and dir-block entries from L0/L1/L2/L3/Active
 - Reconstruct dir-blocks (`symbols:<dir>`, `docs:<dir>`, `plain_files:<dir>`) from the current index state
 - Seed dir-blocks across L0/L1/L2/L3 by mtime prior (see Initialization)
-- Load content for selected files into file context so real hashes and token counts can be computed; selected files land in Active as `file:<path>` entries and are removed from their dir-blocks
+- Load content for selected files into file context so real hashes and token counts can be computed; selected files are seeded across L0–L3 by **per-file mtime** (coldest into L0, hottest into L3) using the same mass-share schedule as dir-block initialization, and are removed from their dir-blocks. Seeding directly into cached tiers skips the Active→L3 graduation wait — rebuild's purpose. The coldest-into-L0 direction matches the dir-block seed (edit-cost-aware: recently-modified files are the most likely to be edited again soon, so they sit at L3 where invalidation is cheapest), and keeps tier token mass balanced (L0 heaviest) so V ≤ 0 across every membrane at the rebuilt state — no startup churn
 - If cross-reference mode is active, also seed the secondary index's dir-blocks via the same mtime prior
 - **Graduate history via piggyback** — rebuild is treated as equivalent to a fresh Active→L3 firing this cycle. Walks newest → oldest, keeping the most recent messages totalling up to the cache target in active as the verbatim window; everything older graduates to L3
 - Mark the tracker as initialized so subsequent chat requests skip the lazy-init path

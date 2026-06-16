@@ -71,6 +71,7 @@
 import { LitElement } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
+import { cancelSpeech } from '../speech-synthesis.js';
 // Side-effect imports — these modules register
 // custom elements (`<ac-history-browser>`,
 // `<ac-input-history>`, `<ac-speech-to-text>`,
@@ -96,12 +97,17 @@ import {
 import {
   _AGENT_LABEL_MAX_LENGTH,
   _DRAWER_STORAGE_KEY,
+  _EXPERIMENTAL_ENABLED,
   _REASONING_STORAGE_KEY,
+  _REASONING_EFFORT_STORAGE_KEY,
+  _REASONING_EFFORT_LEVELS,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
   _SEARCH_WHOLE_WORD_KEY,
   _loadDrawerOpen,
   _loadReasoningEnabled,
+  _loadReasoningEffort,
+  _saveReasoningEffort,
   _loadSearchToggle,
   _saveDrawerOpen,
   _saveReasoningEnabled,
@@ -206,14 +212,32 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this.reviewActive = false;
 
     // Reasoning toggle — restored from localStorage so
-    // the user's last choice survives reload.
-    this._reasoningEnabled = _loadReasoningEnabled();
+    // the user's last choice survives reload. Gated on
+    // ``--experimental``: the toggle/effort UI is only
+    // rendered under that flag (see rendering.js), so the
+    // persisted state must also be suppressed when it's
+    // off — otherwise a ``true``/``xhigh`` left in
+    // localStorage from a prior experimental session
+    // ships a hard per-request reasoning override on every
+    // send, forcing extended thinking the user can no
+    // longer see or toggle. (Effort still falls back to
+    // its default for the UI's sake, but it's never sent
+    // while ``_reasoningEnabled`` is false.)
+    this._reasoningEnabled = _EXPERIMENTAL_ENABLED
+      ? _loadReasoningEnabled()
+      : false;
+    this._reasoningEffort = _loadReasoningEffort();
 
     // Mode + cross-ref state. Hydrated from
     // get_current_state on RPC ready and kept in sync
     // via the `mode-changed` window event.
     this._mode = 'code';
     this._crossRefEnabled = false;
+
+    // Text-to-speech: index of the message currently
+    // being read aloud, or -1 when idle. Single global
+    // synthesis queue, so this is component-scoped.
+    this._speakingMsgIndex = -1;
 
     // Repo files list — pushed by files-tab for file
     // mention detection. Global to the chat panel.
@@ -408,6 +432,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
       'view-agents-requested', this._onViewAgentsRequested,
     );
     detachEventListeners(this);
+    // Stop any in-flight text-to-speech so it doesn't keep
+    // reading after the panel is torn down (tab close,
+    // navigation, test teardown) — mirrors the mic-release
+    // cleanup in speech-to-text.js.
+    cancelSpeech();
+    this._speakingMsgIndex = -1;
     super.disconnectedCallback();
   }
 
@@ -543,8 +573,12 @@ export {
   _loadSearchToggle,
   _saveSearchToggle,
   _REASONING_STORAGE_KEY,
+  _REASONING_EFFORT_STORAGE_KEY,
+  _REASONING_EFFORT_LEVELS,
   _loadReasoningEnabled,
   _saveReasoningEnabled,
+  _loadReasoningEffort,
+  _saveReasoningEffort,
   buildAmbiguousRetryPrompt,
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,

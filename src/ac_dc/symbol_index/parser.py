@@ -142,12 +142,33 @@ def _build_extension_map() -> dict[str, str]:
 _EXTENSION_MAP: dict[str, str] = _build_extension_map()
 
 
+# Tree-optional languages — those with no maintained tree-sitter
+# grammar, handled by a regex-based extractor instead. These are
+# deliberately kept OUT of LANGUAGE_MAP: that map drives grammar
+# loading (get_language / get_parser), and a tree-optional
+# language has no grammar package to import. They only need
+# extension → language resolution so the orchestrator can route
+# a file to its extractor; the extractor declares
+# ``tree_optional = True`` and works from raw source.
+#
+# Extensions here must not collide with LANGUAGE_MAP's — a
+# grammar-backed language always wins (it's resolved first).
+_TREE_OPTIONAL_EXTENSION_MAP: dict[str, str] = {
+    ".m": "matlab",
+}
+
+
 def language_for_file(path: str | os.PathLike[str]) -> str | None:
     """Return the language name for a file path, or None if unknown.
 
     Matches purely on the lowercased extension — no content sniff,
     no shebang inspection. Files without a recognised extension
     return None and the orchestrator skips them.
+
+    Grammar-backed languages (LANGUAGE_MAP) are checked first;
+    tree-optional languages (regex extractors, no tree-sitter
+    grammar) fall through to the secondary map. A grammar-backed
+    extension always wins on collision.
 
     Used by both the symbol-index walker (to decide which files
     to parse) and the extractors (to pick the right extractor for
@@ -156,7 +177,10 @@ def language_for_file(path: str | os.PathLike[str]) -> str | None:
     grammar load — don't pay the tree-sitter import cost.
     """
     ext = Path(os.fspath(path)).suffix.lower()
-    return _EXTENSION_MAP.get(ext)
+    lang = _EXTENSION_MAP.get(ext)
+    if lang is not None:
+        return lang
+    return _TREE_OPTIONAL_EXTENSION_MAP.get(ext)
 
 
 class TreeSitterParser:

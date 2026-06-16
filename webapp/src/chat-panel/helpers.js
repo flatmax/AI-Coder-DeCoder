@@ -216,6 +216,61 @@ export function _saveReasoningEnabled(enabled) {
   }
 }
 
+/** localStorage key for the reasoning effort level. */
+export const _REASONING_EFFORT_STORAGE_KEY = 'ac-dc-reasoning-effort';
+
+/**
+ * Effort levels offered in the dropdown — mirrors LiteLLM's
+ * ``reasoning_effort`` vocabulary. The per-model ceiling
+ * (xhigh/max only on models that advertise them, e.g. Opus
+ * 4.8) is enforced by the provider, which rejects an
+ * unsupported level with an error surfaced as a toast.
+ */
+export const _REASONING_EFFORT_LEVELS = [
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+/**
+ * Compact labels for the effort badge overlaid on the 🧠
+ * toggle. The dropdown still lists the full level names; only
+ * the badge (limited corner real estate) uses these.
+ */
+export const _REASONING_EFFORT_ABBREV = {
+  minimal: 'MIN',
+  low: 'LO',
+  medium: 'MED',
+  high: 'HI',
+  xhigh: 'XH',
+  max: 'MAX',
+};
+
+const _DEFAULT_REASONING_EFFORT = 'xhigh';
+
+export function _loadReasoningEffort() {
+  try {
+    const stored = localStorage.getItem(_REASONING_EFFORT_STORAGE_KEY);
+    if (_REASONING_EFFORT_LEVELS.includes(stored)) {
+      return stored;
+    }
+  } catch (_) {
+    // Fall through to default.
+  }
+  return _DEFAULT_REASONING_EFFORT;
+}
+
+export function _saveReasoningEffort(effort) {
+  try {
+    localStorage.setItem(_REASONING_EFFORT_STORAGE_KEY, effort);
+  } catch (_) {
+    // Best-effort persistence.
+  }
+}
+
 export function _loadDrawerOpen() {
   try {
     return localStorage.getItem(_DRAWER_STORAGE_KEY) === 'true';

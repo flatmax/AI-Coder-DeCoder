@@ -1391,8 +1391,8 @@ export class AppShell extends JRPCClient {
     return onGitAction(this, event);
   }
 
-  _onCommitResultHeader() {
-    return onCommitResultHeader(this);
+  _onCommitResultHeader(event) {
+    return onCommitResultHeader(this, event);
   }
 
   _onReviewStateChanged(event) {

@@ -20,7 +20,7 @@ from ac_dc.config import ConfigManager
 from ac_dc.history_store import HistoryStore
 from ac_dc.llm_service import LLMService
 
-from .conftest import _FakeLiteLLM
+from .conftest import _FakeLiteLLM, _RecordingEventCallback
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +166,77 @@ class TestCommitFlow:
         assert commit_entries, (
             "commit event not persisted to captured session"
         )
+
+    async def test_generation_failure_broadcasts_error(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+        event_cb: _RecordingEventCallback,
+    ) -> None:
+        """A failed message generation surfaces via commitResult.
+
+        Regression: a context-window (or any classified) error
+        from the smaller model used to be logged and swallowed —
+        the background task returned None, broadcast a generic
+        error, and the UI showed nothing useful. The commitResult
+        event must carry both a tailored ``error`` string and the
+        structured ``error_info`` so the frontend can toast it.
+        """
+        (repo_dir / "big.md").write_text("content")
+        fake_litellm.set_non_streaming_error(
+            _FakeLiteLLM.ContextWindowExceededError(
+                "prompt is too long: 200733 tokens > 200000 maximum"
+            )
+        )
+
+        result = await service.commit_all()
+        assert result == {"status": "started"}
+        await asyncio.sleep(0.3)
+
+        commit_results = [
+            args[0]
+            for name, args in event_cb.events
+            if name == "commitResult"
+        ]
+        assert commit_results, "no commitResult event broadcast"
+        payload = commit_results[-1]
+        # Tailored message — points at the diff size, not the
+        # network, since the model WAS reached.
+        assert "too large" in payload["error"].lower()
+        assert "network" not in payload["error"].lower()
+        # Structured classification forwarded to the UI.
+        assert payload["error_info"]["error_type"] == (
+            "context_window_exceeded"
+        )
+        # The error slot is left populated for the caller; the
+        # commit itself never happened.
+        assert service._committing is False
+
+    async def test_generation_success_clears_error_info(
+        self,
+        service: LLMService,
+        repo_dir: Path,
+        fake_litellm: _FakeLiteLLM,
+    ) -> None:
+        """A successful commit leaves no stale error info behind.
+
+        ``generate_commit_message`` resets the slot at the start
+        of every call so a prior failure can't leak into a later
+        success's broadcast.
+        """
+        # Pre-dirty the slot as if a previous commit had failed.
+        service._last_commit_error_info = {
+            "error_type": "rate_limit",
+        }
+        (repo_dir / "ok.md").write_text("content")
+        fake_litellm.set_non_streaming_reply("feat: add ok.md")
+
+        result = await service.commit_all()
+        assert result == {"status": "started"}
+        await asyncio.sleep(0.3)
+
+        assert service._last_commit_error_info is None
 
 
 # ---------------------------------------------------------------------------

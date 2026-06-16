@@ -558,16 +558,11 @@ export class ContextTab extends RpcMixin(LitElement) {
     }
 
     /* Cache sub-view */
-    .cache-actions {
-      display: flex;
-      justify-content: flex-end;
-      margin-bottom: 0.75rem;
-    }
     .rebuild-btn {
       background: rgba(88, 166, 255, 0.08);
       border: 1px solid rgba(88, 166, 255, 0.3);
       color: var(--accent-primary, #58a6ff);
-      padding: 0.35rem 0.75rem;
+      padding: 0.2rem 0.5rem;
       border-radius: 4px;
       cursor: pointer;
       font-size: 0.75rem;
@@ -1655,6 +1650,14 @@ export class ContextTab extends RpcMixin(LitElement) {
           : ''}
         <div class="toolbar-spacer"></div>
         ${this._stale ? html`<span class="stale-badge">● stale</span>` : ''}
+        ${this._subview === 'cache'
+          ? html`<button
+              class="rebuild-btn"
+              ?disabled=${this._rebuilding || this._loading || !this.rpcConnected}
+              @click=${() => this._rebuild()}
+              title="Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
+            >${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}</button>`
+          : ''}
         <button
           class="refresh-btn"
           ?disabled=${this._loading || !this.rpcConnected}
@@ -2041,17 +2044,6 @@ export class ContextTab extends RpcMixin(LitElement) {
     const noMatches = filterQuery && blocks.length === 0;
 
     return html`
-      <div class="cache-actions">
-        <button
-          class="rebuild-btn"
-          ?disabled=${this._rebuilding || this._loading || !this.rpcConnected}
-          @click=${() => this._rebuild()}
-          title="Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
-        >
-          ${this._rebuilding ? '⏳ Rebuilding…' : '🔄 Rebuild'}
-        </button>
-      </div>
-
       ${this._renderWarmerStatus()}
 
       <div class="cache-header">

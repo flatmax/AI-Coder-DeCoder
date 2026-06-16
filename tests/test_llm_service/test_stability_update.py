@@ -1036,6 +1036,15 @@ class TestPlainFilesExcludesIndexed:
         )
         repo._run_git(["add", "-A"])
 
+        # Doc index only surfaces — and therefore only subtracts
+        # from plain_files coverage — in doc mode (or with
+        # cross-reference). In code mode without cross-ref the
+        # doc index is not surfacing, so a doc-indexed file
+        # stays visible by filename via plain_files. Switch to
+        # doc mode to exercise the subtraction.
+        svc._context.set_mode(Mode.DOC)
+        svc._trackers[Mode.DOC] = svc._stability_tracker
+
         covered = _indexed_paths_in_dir(svc, "docs")
         assert "docs/README.md" in covered
         assert "docs/config.toml" not in covered

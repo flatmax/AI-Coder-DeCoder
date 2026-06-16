@@ -671,6 +671,18 @@ class LLMService:
         # occurred or after the last error was consumed.
         self._last_error_info: dict[str, Any] | None = None
 
+        # Same contract as ``_last_error_info`` but scoped to
+        # the commit-message generation path (the smaller
+        # model). ``generate_commit_message`` resets it to None
+        # at the start of every call and overwrites it with the
+        # classified error on failure; ``commit_all_background``
+        # reads it to tailor the user-facing ``commitResult``
+        # error and forward structured ``error_info`` to the
+        # UI. Kept separate from ``_last_error_info`` so a
+        # background commit can't clobber a streaming completion's
+        # error slot (the two run on independent code paths).
+        self._last_commit_error_info: dict[str, Any] | None = None
+
         # Snapshot of the main scope's stability-tracker
         # change log from the most recent ``_update_stability``
         # call. Populated inside ``_stability.update_stability``
@@ -1541,6 +1553,7 @@ class LLMService:
         excluded_urls: list[str] | None = None,
         agent_tag: str | None = None,
         reasoning: bool | None = None,
+        effort: str | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._rpc_streaming.chat_streaming`."""
         from ac_dc.llm._rpc_streaming import chat_streaming
@@ -1553,6 +1566,7 @@ class LLMService:
             excluded_urls,
             agent_tag,
             reasoning,
+            effort,
         )
 
     @staticmethod
@@ -1594,6 +1608,7 @@ class LLMService:
         scope: ConversationScope | None = None,
         agent_key: str | None = None,
         reasoning: bool | None = None,
+        effort: str | None = None,
     ) -> dict[str, Any]:
         """Delegate to :func:`ac_dc.llm._streaming.stream_chat`.
 
@@ -1610,12 +1625,14 @@ class LLMService:
 
         ``reasoning`` is forwarded into the LiteLLM call —
         per-request override for extended-thinking mode.
+        ``effort`` is the per-request effort level (adaptive
+        models only).
         """
         from ac_dc.llm._streaming import stream_chat
         return await stream_chat(
             self, request_id, message, files, images,
             excluded_urls, scope=scope, agent_key=agent_key,
-            reasoning=reasoning,
+            reasoning=reasoning, effort=effort,
         )
 
     async def _detect_and_fetch_urls(
@@ -1673,11 +1690,13 @@ class LLMService:
         messages: list[dict[str, Any]],
         loop: asyncio.AbstractEventLoop,
         reasoning: bool | None = None,
+        effort: str | None = None,
     ) -> tuple[str, bool, str | None, dict[str, Any]]:
         """Delegate to :func:`ac_dc.llm._streaming.run_completion_sync`."""
         from ac_dc.llm._streaming import run_completion_sync
         return run_completion_sync(
-            self, request_id, messages, loop, reasoning=reasoning,
+            self, request_id, messages, loop,
+            reasoning=reasoning, effort=effort,
         )
 
     def _accumulate_usage(self, usage: Any) -> None:

@@ -34,7 +34,7 @@ classifiers = [
 # Optional integrations live under [project.optional-dependencies].
 dependencies = [
     # LLM provider abstraction (unified API for Anthropic, Bedrock, OpenAI, etc.)
-    "litellm>=1.83,<1.84",
+    "litellm>=1.88,<1.89",
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     # Tokenizer used by the token counter (all models use cl100k_base encoding).

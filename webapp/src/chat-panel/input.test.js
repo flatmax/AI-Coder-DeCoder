@@ -2670,6 +2670,226 @@ describe('ChatPanel copy action', () => {
   });
 });
 
+describe('ChatPanel speak (text-to-speech) action', () => {
+  // jsdom has no Web Speech synthesis API. Install a fake
+  // queue + utterance constructor so the speaker button
+  // renders and clicks drive deterministic behaviour.
+  class FakeUtterance {
+    constructor(text) {
+      FakeUtterance.instances.push(this);
+      this.text = text;
+      this.lang = null;
+      this.onend = null;
+      this.onerror = null;
+    }
+  }
+  FakeUtterance.instances = [];
+
+  function installFakeSynth() {
+    FakeUtterance.instances = [];
+    const synth = {
+      speakCalls: [],
+      cancelCalls: 0,
+      speak(u) {
+        this.speakCalls.push(u);
+      },
+      cancel() {
+        this.cancelCalls += 1;
+      },
+    };
+    window.speechSynthesis = synth;
+    window.SpeechSynthesisUtterance = FakeUtterance;
+    return synth;
+  }
+
+  function uninstallFakeSynth() {
+    delete window.speechSynthesis;
+    delete window.SpeechSynthesisUtterance;
+  }
+
+  function speakButton(p) {
+    // Third action button in the toolbar (after copy +
+    // paste). Only present when synthesis is supported.
+    const buttons = p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button');
+    return buttons[2] || null;
+  }
+
+  it('renders the speaker button when synthesis is supported', async () => {
+    installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'hello there' }],
+      });
+      await settle(p);
+      const buttons = p.shadowRoot
+        .querySelector('.message-toolbar.top')
+        .querySelectorAll('.message-action-button');
+      expect(buttons.length).toBe(3);
+      expect(buttons[2].getAttribute('aria-label')).toMatch(/read/i);
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('hides the speaker button when synthesis is unsupported', async () => {
+    uninstallFakeSynth();
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hello there' }],
+    });
+    await settle(p);
+    const buttons = p.shadowRoot
+      .querySelector('.message-toolbar.top')
+      .querySelectorAll('.message-action-button');
+    expect(buttons.length).toBe(2);
+  });
+
+  it('clicking speaks the rendered message text', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'use **bold** here' }],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      expect(synth.speakCalls).toHaveLength(1);
+      // Rendered prose, not raw markdown — the asterisks
+      // are gone.
+      expect(synth.speakCalls[0].text).toBe('use bold here');
+      expect(p._speakingMsgIndex).toBe(0);
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('button shows the stop state while speaking', async () => {
+    installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'hello there' }],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      const btn = speakButton(p);
+      expect(btn.classList.contains('speaking')).toBe(true);
+      expect(btn.getAttribute('aria-pressed')).toBe('true');
+      expect(btn.textContent.trim()).toBe('⏹');
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('clicking the active speaker stops playback', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'hello there' }],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(0);
+      // Second click on the same speaker stops it.
+      speakButton(p).click();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(-1);
+      expect(synth.cancelCalls).toBeGreaterThan(0);
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('resets speaking state when the utterance ends', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'hello there' }],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(0);
+      // Browser fires onend when playback finishes.
+      synth.speakCalls[0].onend();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(-1);
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('reads the whole message when there is no selection', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [
+          { role: 'assistant', content: 'first line\n\nsecond line' },
+        ],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      expect(synth.speakCalls[0].text).toContain('first line');
+      expect(synth.speakCalls[0].text).toContain('second line');
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('switching to another message stops the first', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [
+          { role: 'assistant', content: 'first message' },
+          { role: 'assistant', content: 'second message' },
+        ],
+      });
+      await settle(p);
+      const toolbars = p.shadowRoot.querySelectorAll(
+        '.message-toolbar.top',
+      );
+      // Speak message 0.
+      toolbars[0]
+        .querySelectorAll('.message-action-button')[2]
+        .click();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(0);
+      // Speak message 1 — the new read cancels the old.
+      toolbars[1]
+        .querySelectorAll('.message-action-button')[2]
+        .click();
+      await settle(p);
+      expect(p._speakingMsgIndex).toBe(1);
+      expect(synth.speakCalls).toHaveLength(2);
+      expect(synth.speakCalls[1].text).toBe('second message');
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+
+  it('cancels speech on disconnect', async () => {
+    const synth = installFakeSynth();
+    try {
+      const p = mountPanel({
+        messages: [{ role: 'assistant', content: 'hello there' }],
+      });
+      await settle(p);
+      speakButton(p).click();
+      await settle(p);
+      const before = synth.cancelCalls;
+      p.remove();
+      expect(synth.cancelCalls).toBeGreaterThan(before);
+      expect(p._speakingMsgIndex).toBe(-1);
+    } finally {
+      uninstallFakeSynth();
+    }
+  });
+});
+
 describe('ChatPanel paste-to-prompt action', () => {
   it('inserts raw text into empty textarea', async () => {
     const p = mountPanel({

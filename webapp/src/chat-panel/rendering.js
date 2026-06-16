@@ -56,7 +56,12 @@ import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderLedRow } from './led-row.js';
 import { renderTabStrip } from './tabs.js';
-import { _EXPERIMENTAL_ENABLED, parseAgentTabId } from './helpers.js';
+import {
+  _EXPERIMENTAL_ENABLED,
+  _REASONING_EFFORT_LEVELS,
+  _REASONING_EFFORT_ABBREV,
+  parseAgentTabId,
+} from './helpers.js';
 import {
   computeSearchMatches,
   onFileSearchNext,
@@ -92,9 +97,12 @@ import {
   removePendingImage,
   send,
   toggleReasoning,
+  setReasoningEffort,
   toggleSnippetDrawer,
   copyMessageText,
+  speakMessage,
 } from './input.js';
+import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import {
   closeUrlViewDialog,
   onUrlFetchRequested,
@@ -281,22 +289,49 @@ export function render(panel) {
         ${renderModeToggle(panel)}
         <div class="action-group search-collapsible">
           ${_EXPERIMENTAL_ENABLED
-            ? html`<button
-                class="action-button reasoning-toggle ${panel
-                  ._reasoningEnabled
-                  ? 'active'
-                  : ''}"
-                @click=${() => toggleReasoning(panel)}
-                aria-label=${panel._reasoningEnabled
-                  ? 'Disable reasoning mode'
-                  : 'Enable reasoning mode'}
-                aria-pressed=${panel._reasoningEnabled}
-                title=${panel._reasoningEnabled
-                  ? 'Reasoning enabled — extra thinking tokens. Click to disable.'
-                  : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
-              >
-                🧠
-              </button>`
+            ? html`<div class="reasoning-control">
+                <button
+                  class="action-button reasoning-toggle ${panel
+                    ._reasoningEnabled
+                    ? 'active'
+                    : ''}"
+                  @click=${() => toggleReasoning(panel)}
+                  aria-label=${panel._reasoningEnabled
+                    ? 'Disable reasoning mode'
+                    : 'Enable reasoning mode'}
+                  aria-pressed=${panel._reasoningEnabled}
+                  title=${panel._reasoningEnabled
+                    ? `Reasoning enabled (effort: ${panel._reasoningEffort}) — extra thinking tokens. Click to disable.`
+                    : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
+                >
+                  🧠
+                  ${panel._reasoningEnabled
+                    ? html`<span class="reasoning-effort-badge"
+                        >${_REASONING_EFFORT_ABBREV[panel._reasoningEffort] ??
+                        panel._reasoningEffort}</span
+                      >`
+                    : ''}
+                </button>
+                ${panel._reasoningEnabled
+                  ? html`<select
+                      class="reasoning-effort-select"
+                      .value=${panel._reasoningEffort}
+                      @change=${(e) =>
+                        setReasoningEffort(panel, e.target.value)}
+                      aria-label="Reasoning effort level"
+                      title="Reasoning effort — higher means deeper thinking and more tokens. xhigh/max only apply on models that support them."
+                    >
+                      ${_REASONING_EFFORT_LEVELS.map(
+                        (level) => html`<option
+                          value=${level}
+                          ?selected=${level === panel._reasoningEffort}
+                        >
+                          ${level}
+                        </option>`,
+                      )}
+                    </select>`
+                  : ''}
+              </div>`
             : ''}
         </div>
         <div class="action-divider search-collapsible" aria-hidden="true"></div>
@@ -777,7 +812,7 @@ export function renderMessage(panel, msg, index) {
     `;
   }
   const images = Array.isArray(msg.images) ? msg.images : [];
-  const toolbar = renderMessageToolbar(panel, msg);
+  const toolbar = renderMessageToolbar(panel, msg, index);
   const highlightClass = isHighlighted ? ' search-highlight' : '';
   // Split finish-reason placement by severity. Natural
   // completions (stop / end_turn) are positive
@@ -915,15 +950,21 @@ export function renderFinishBadge(reason) {
 
 /**
  * Render the action toolbar for a message — copy
- * raw text and paste raw text into the chat
- * input. Used at both top-right and bottom-right
- * of each message card.
+ * raw text, paste raw text into the chat input,
+ * and (when the browser supports speech synthesis)
+ * read the message aloud. Used at both top-right
+ * and bottom-right of each message card.
  *
  * Returns the same fragment for both placements
  * — Lit deduplicates the underlying event
  * bindings.
+ *
+ * `index` is the message's position in the
+ * messages array; it drives the speaker button's
+ * play/stop toggle via `panel._speakingMsgIndex`.
  */
-export function renderMessageToolbar(panel, msg) {
+export function renderMessageToolbar(panel, msg, index) {
+  const speaking = panel._speakingMsgIndex === index;
   return html`
     <button
       class="message-action-button"
@@ -949,6 +990,25 @@ export function renderMessageToolbar(panel, msg) {
     >
       ↩
     </button>
+    ${isSpeechSynthesisSupported()
+      ? html`<button
+          class="message-action-button ${speaking ? 'speaking' : ''}"
+          title=${speaking
+            ? 'Stop reading'
+            : 'Read aloud (or select text first to read just that)'}
+          aria-label=${speaking
+            ? 'Stop reading message aloud'
+            : 'Read message aloud'}
+          aria-pressed=${speaking}
+          @click=${(e) => {
+            e.stopPropagation();
+            const card = e.target.closest('.message-card');
+            speakMessage(panel, msg, index, card);
+          }}
+        >
+          ${speaking ? '⏹' : '🔊'}
+        </button>`
+      : ''}
   `;
 }
 

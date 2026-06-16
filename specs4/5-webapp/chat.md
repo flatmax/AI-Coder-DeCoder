@@ -315,6 +315,18 @@ Turns in which the main LLM spawned agents have an associated archive of per-age
 - A commit-in-progress guard on both client and server prevents concurrent commits
 - Chat panel shows a progress message during the commit, replaced by the result when the broadcast arrives
 
+#### Commit-Result Error Path
+
+Because the RPC returns a started status synchronously, the synchronous error branch only catches pre-launch rejections (no repo, already committing, non-localhost). Everything the background pipeline can fail at — staging, **commit-message generation**, the commit itself — surfaces only through the broadcast `commitResult` event. The broadcast carries an `error` string (and, for LLM failures, a structured `error_info` dict matching the streaming completion's error shape; see [streaming.md § Commit-Message Generation Failure](../3-llm/streaming.md#commit-message-generation-failure)).
+
+Multiple components listen to the broadcast for their own in-flight flag, but exactly one is responsible for surfacing the error:
+
+- **The shell handler** clears its commit flag and, when the broadcast carries an `error`, shows the global toast (`Commit failed: <message>`) and stashes any `error_info` for richer recovery affordances. This is the single source of the error toast.
+- **The chat-panel handler** clears its own flag and, on an error, returns without appending a system-event card — deliberately deferring the visible feedback to the shell's toast. It must not duplicate the toast.
+- **The file-picker handler** only clears its in-flight flag.
+
+The most common error here is the smaller model's context window being exceeded by an oversized staged diff; its tailored message points the user at committing fewer files rather than at their network. A regression that drops the shell's toast makes every background commit failure invisible — the button silently re-enables with no user-facing feedback.
+
 ### Reset to HEAD
 
 - Click shows a confirmation dialog

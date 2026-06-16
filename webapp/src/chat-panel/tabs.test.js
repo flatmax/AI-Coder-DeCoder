@@ -1495,9 +1495,25 @@ describe('ChatPanel agent_tag routing', () => {
     await settle(p);
     expect(started).toHaveBeenCalledOnce();
     const args = started.mock.calls[0];
-    expect(args).toHaveLength(7);
+    expect(args).toHaveLength(8);
     expect(args[5]).toBeNull();
     expect(args[6]).toBe(false);
+    // 8th arg — reasoning effort level (default xhigh).
+    expect(args[7]).toBe('xhigh');
+  });
+
+  it('sends the selected reasoning effort level', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    // Simulate the dropdown changing the effort level.
+    p._reasoningEffort = 'minimal';
+    p._input = 'hello';
+    await p._send();
+    await settle(p);
+    expect(started).toHaveBeenCalledOnce();
+    expect(started.mock.calls[0][7]).toBe('minimal');
   });
 
   it('agent tab sends its id as agent_tag', async () => {

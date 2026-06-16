@@ -44,6 +44,11 @@ from ac_dc.llm._types import (
 # Reasoning / extended-thinking kwargs
 # ---------------------------------------------------------------------------
 
+# Accepted effort levels — mirrors LiteLLM's ``reasoning_effort``
+# vocabulary. The per-model ceiling (e.g. xhigh/max only on Opus
+# 4.8) is enforced by the provider, not here; we just gate typos.
+_VALID_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
 
 def _model_uses_adaptive_thinking(model: str) -> bool:
     """True when the model requires the ``adaptive`` thinking shape.
@@ -73,6 +78,7 @@ def _model_uses_adaptive_thinking(model: str) -> bool:
         "opus-4-5", "opus-4.5",
         "opus-4-6", "opus-4.6",
         "opus-4-7", "opus-4.7",
+        "opus-4-8", "opus-4.8",
         "haiku-4-5", "haiku-4.5",
         "sonnet-4-5", "sonnet-4.5",
     )
@@ -113,6 +119,7 @@ def _build_thinking_payload(
 def build_thinking_kwargs(
     config: "ConfigManager",
     request_override: bool | None,
+    effort_override: str | None = None,
 ) -> dict[str, Any]:
     """Build the reasoning kwargs for ``litellm.completion``.
 
@@ -141,6 +148,15 @@ def build_thinking_kwargs(
     they're guaranteed not to reason regardless of config.
     Spec § Aux call policy: aux calls should never reason
     even when the primary is configured to.
+
+    ``effort_override`` is the per-request effort level from
+    the frontend's dropdown (adaptive models only). When a
+    recognised level is supplied it wins over
+    ``config.reasoning_effort``; ``None`` or an unrecognised
+    value defers to config. The per-model ceiling (xhigh/max
+    only on models that advertise them) is enforced by the
+    provider, which raises ``BadRequestError`` for an
+    unsupported level.
     """
     if request_override is False:
         return {}
@@ -154,7 +170,10 @@ def build_thinking_kwargs(
         "thinking": _build_thinking_payload(config),
     }
     if _model_uses_adaptive_thinking(config.model):
-        kwargs["reasoning_effort"] = config.reasoning_effort
+        if effort_override in _VALID_EFFORTS:
+            kwargs["reasoning_effort"] = effort_override
+        else:
+            kwargs["reasoning_effort"] = config.reasoning_effort
     return kwargs
 
 
@@ -965,6 +984,18 @@ def _compute_retry_wait(
     return jittered
 
 
+class RetryCancelled(Exception):
+    """Raised by retry_litellm_completion when the caller-supplied
+    ``is_cancelled`` predicate returns True during the backoff wait.
+
+    Distinct from the underlying LiteLLM exception so the caller can
+    tell ``user clicked Stop during retry`` apart from ``provider
+    raised the same retryable error eleven times in a row``. The
+    streaming worker maps this to ``was_cancelled=True`` rather than
+    an error result.
+    """
+
+
 def retry_litellm_completion(
     litellm_module: Any,
     call: Callable[[], T],
@@ -972,6 +1003,7 @@ def retry_litellm_completion(
     *,
     context: str = "completion",
     on_retry: Callable[[dict[str, Any]], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> T:
     """Invoke ``call`` with retry on transient LiteLLM errors.
 
@@ -999,6 +1031,15 @@ def retry_litellm_completion(
         showing retry progress during long backoff waits.
         Callback exceptions are logged at debug and swallowed so a
         faulty hook can't break retry semantics.
+    is_cancelled:
+        Optional zero-arg predicate polled during the backoff wait
+        between attempts. When it returns True, the wait is
+        interrupted and :class:`RetryCancelled` is raised — gives
+        the user's Stop button a way to break out of a long
+        rate-limit backoff (Bedrock 429s schedule waits of 30-60s,
+        and the exponential schedule can compound to minutes after
+        several attempts). Polled at 200 ms granularity so the UI
+        feels responsive without burning CPU.
 
     Returns
     -------
@@ -1006,15 +1047,51 @@ def retry_litellm_completion(
 
     Raises
     ------
+    :class:`RetryCancelled`
+        When ``is_cancelled`` returned True mid-backoff.
     The last exception from ``call()`` once retries are exhausted, or
     immediately on any non-retryable error.
     """
     if max_attempts < 1:
         max_attempts = 1
 
+    # 200 ms poll granularity — fine enough for the UI to feel
+    # responsive (a Stop click reaches the worker within a fifth
+    # of a second), coarse enough that a 60s wait costs ~300
+    # cheap predicate calls rather than 60,000.
+    _CANCEL_POLL_INTERVAL = 0.2
+
+    def _interruptible_sleep(seconds: float) -> None:
+        """Sleep ``seconds`` total, polling ``is_cancelled``.
+
+        Raises :class:`RetryCancelled` as soon as the predicate
+        returns True. Falls back to a single :func:`time.sleep`
+        when no predicate was supplied so the no-cancel path
+        keeps its current behaviour exactly.
+        """
+        if is_cancelled is None:
+            time.sleep(seconds)
+            return
+        deadline = time.monotonic() + seconds
+        while True:
+            if is_cancelled():
+                raise RetryCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(_CANCEL_POLL_INTERVAL, remaining))
+
     attempt = 0
     last_exc: BaseException | None = None
     while attempt < max_attempts:
+        # Honour cancellation BEFORE making each attempt, not
+        # only mid-sleep. Covers the edge case where Stop is
+        # clicked between when ``_interruptible_sleep`` returned
+        # and when the next ``call()`` is about to fire — a
+        # narrow window in absolute time but a guaranteed
+        # observation point under the GIL.
+        if is_cancelled is not None and is_cancelled():
+            raise RetryCancelled()
         try:
             return call()
         except Exception as exc:
@@ -1119,7 +1196,7 @@ def retry_litellm_completion(
                     logger.debug(
                         "on_retry callback raised: %s", cb_exc,
                     )
-            time.sleep(wait)
+            _interruptible_sleep(wait)
             attempt += 1
 
     # Unreachable — loop either returns or raises. Defensive
