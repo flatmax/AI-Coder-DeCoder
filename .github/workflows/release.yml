@@ -1,9 +1,10 @@
-# Release — PyInstaller binaries on merge from dev4b → master.
+# Release — PyInstaller binaries on merge from a dev4-* branch → master.
 #
-# Triggered automatically when a pull request from the `dev4-agent`
-# branch is merged into `master`. Also exposes `workflow_dispatch`
-# for manual reruns. Never triggers on direct pushes to master or
-# merges from other branches.
+# Triggered automatically when a pull request from a `dev4-*`
+# development branch (e.g. dev4-agent, dev4-membrane) is merged
+# into `master`. Also exposes `workflow_dispatch` for manual
+# reruns. Never triggers on direct pushes to master or merges
+# from other (non-dev4-) branches.
 #
 # Builds per-platform single-file binaries in parallel, then
 # attaches all artefacts to a GitHub Release. The release tag on
@@ -41,12 +42,15 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     # Gate: PR closed events only trigger the build when the PR
-    # was actually merged (not just closed) AND came from dev4b.
+    # was actually merged (not just closed) AND came from a dev4-*
+    # development branch (dev4-agent, dev4-membrane, ...). The
+    # startsWith match means renaming the active dev branch no
+    # longer silently disables releases.
     # workflow_dispatch bypasses the guard (manual trigger).
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
-       github.event.pull_request.head.ref == 'dev4-agent')
+       startsWith(github.event.pull_request.head.ref, 'dev4-'))
     strategy:
       fail-fast: false
       matrix:
