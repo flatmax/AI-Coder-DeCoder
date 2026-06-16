@@ -27,8 +27,8 @@ venv/
 # Logs
 *.log
 
-# uv lockfiles — deferred until uv workflow is chosen
-uv.lock
+# uv.lock is committed: the release workflow installs from it with
+# `uv sync --frozen` for reproducible, cross-platform builds.
 
 # Editor / tooling scratch directories
 .aicoder/

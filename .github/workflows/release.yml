@@ -77,9 +77,17 @@ jobs:
           # commit's full SHA, not a shallow stub.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      # uv (not pip): pip strictly enforces litellm's declared
+      # `Requires-Python <3.14` and refuses to install 1.88 on
+      # Python 3.14, whereas uv treats that upper cap as advisory.
+      # uv also installs from uv.lock with `--frozen`, so release
+      # builds are reproducible. Pinned to the uv version that
+      # produced the lock.
+      - uses: astral-sh/setup-uv@v5
         with:
+          version: "0.11.16"
           python-version: "3.14"
+          enable-cache: true
 
       - uses: actions/setup-node@v4
         with:
@@ -111,10 +119,10 @@ jobs:
       # docs-convert only — no sentence-transformers/torch. Ships
       # markitdown, pymupdf, python-pptx, openpyxl so real users
       # get Word/PDF/PowerPoint/Excel conversion out of the box.
+      # --frozen installs exactly what uv.lock pins (no re-resolve),
+      # so every platform's binary is built from the same versions.
       - name: Install project with build + docs-convert extras
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[build,docs-convert]"
+        run: uv sync --no-dev --extra build --extra docs-convert --frozen
 
       # PyInstaller command. Hidden-imports list enumerates every
       # ac_dc submodule; PyInstaller's static analysis misses
@@ -124,7 +132,10 @@ jobs:
         shell: bash
         run: |
           SEP="${{ matrix.pyinstaller-sep }}"
-          pyinstaller --onefile \
+          # --no-sync: use the env from the previous `uv sync` step
+          # verbatim; without it `uv run` re-syncs to the default
+          # groups (re-adding dev, dropping the extras).
+          uv run --no-sync pyinstaller --onefile \
             --name "${{ matrix.binary-name }}" \
             --add-data "src/ac_dc/VERSION${SEP}ac_dc" \
             --add-data "src/ac_dc/config${SEP}ac_dc/config" \
