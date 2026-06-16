@@ -34,7 +34,7 @@ classifiers = [
 # Optional integrations live under [project.optional-dependencies].
 dependencies = [
     # LLM provider abstraction (unified API for Anthropic, Bedrock, OpenAI, etc.)
-    "litellm>=1.88,<1.89",
+    "litellm>=1.88",
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     # Tokenizer used by the token counter (all models use cl100k_base encoding).
@@ -175,6 +175,22 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
 ]
+
+# ---------------------------------------------------------------------------
+# uv resolution constraints
+# ---------------------------------------------------------------------------
+#
+# magika is a core dependency of markitdown (docs-convert extra), and
+# from 0.6.3 it declares `onnxruntime<=1.20.1 ; sys_platform == 'win32'`.
+# onnxruntime 1.20.1 ships no cp314 wheel on ANY platform, so in a
+# universal lock that Windows cap drags onnxruntime down to 1.20.1 and
+# breaks the Python 3.14 Windows release build. magika 0.6.2 has no such
+# cap, which lets onnxruntime resolve to 1.27.0 (cp314 wheels on
+# manylinux/macos/win_amd64/win_arm64). markitdown requires
+# `magika~=0.6.1`, so <0.6.3 stays in range. Revisit once magika ships a
+# release that no longer caps onnxruntime below its first cp314 wheel.
+[tool.uv]
+constraint-dependencies = ["magika<0.6.3"]
 
 # ---------------------------------------------------------------------------
 # pytest
