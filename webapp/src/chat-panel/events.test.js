@@ -907,3 +907,70 @@ describe('ChatPanel cleanup', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Speech-player state sync
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel speech-player-state sync', () => {
+  it('lights the speaker for the active message index', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hi' }],
+    });
+    await settle(p);
+    pushEvent('speech-player-state', {
+      active: true,
+      status: 'playing',
+      ownerKey: 0,
+      index: 0,
+      total: 1,
+    });
+    await settle(p);
+    expect(p._speakingMsgIndex).toBe(0);
+  });
+
+  it('clears the speaker when playback goes idle', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hi' }],
+    });
+    await settle(p);
+    pushEvent('speech-player-state', {
+      active: true,
+      status: 'playing',
+      ownerKey: 0,
+    });
+    await settle(p);
+    expect(p._speakingMsgIndex).toBe(0);
+    pushEvent('speech-player-state', { active: false, ownerKey: null });
+    await settle(p);
+    expect(p._speakingMsgIndex).toBe(-1);
+  });
+
+  it('ignores a non-numeric ownerKey', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hi' }],
+    });
+    await settle(p);
+    pushEvent('speech-player-state', {
+      active: true,
+      status: 'playing',
+      ownerKey: 'something-else',
+    });
+    await settle(p);
+    expect(p._speakingMsgIndex).toBe(-1);
+  });
+
+  it('stops listening after disconnect', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'assistant', content: 'hi' }],
+    });
+    await settle(p);
+    p.remove();
+    pushEvent('speech-player-state', {
+      active: true,
+      status: 'playing',
+      ownerKey: 0,
+    });
+    expect(p._speakingMsgIndex).toBe(-1);
+  });
+});

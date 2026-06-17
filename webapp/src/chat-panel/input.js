@@ -54,11 +54,8 @@ import {
 import { scheduleUrlDetection } from './urls.js';
 import { handleStreamStartError } from './streaming.js';
 import { setSearchMode } from './search.js';
-import {
-  cancelSpeech,
-  isSpeechSynthesisSupported,
-  speakText,
-} from '../speech-synthesis.js';
+import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
+import { speechPlayer } from '../speech-player.js';
 
 // localStorage key for the in-progress textarea
 // draft. Persisted on every input event so a
@@ -927,9 +924,18 @@ export function pasteMessageToPrompt(panel, msg) {
  * currently playing stops playback. Because
  * `speechSynthesis` is a single window-level queue,
  * starting a read on any message cancels whatever was
- * playing before (handled inside `speakText`), and
+ * playing before (handled inside the player), and
  * `panel._speakingMsgIndex` tracks which card owns the
  * active utterance so its button can show the stop state.
+ * That index is kept in sync by the panel's
+ * `speech-player-state` listener (events.js) rather than
+ * set here, so a read started from anywhere — or stopped
+ * via the floating controls — lights the right button.
+ *
+ * Playback is delegated to `speechPlayer`, which splits
+ * the text into sentences and plays them in sequence so
+ * the floating transport (ac-speech-controls) can offer
+ * play/pause, speed, and per-sentence position.
  *
  * `cardEl` is the `.message-card` element — passed from
  * the toolbar click handler so we can read the rendered
@@ -946,29 +952,35 @@ export function speakMessage(panel, msg, index, cardEl) {
   }
   // Clicking the active speaker stops it.
   if (panel._speakingMsgIndex === index) {
-    cancelSpeech();
-    panel._speakingMsgIndex = -1;
+    speechPlayer.stop();
     return;
   }
   const text = resolveSpeechText(msg, cardEl, panel);
   if (!text) return;
-  panel._speakingMsgIndex = index;
-  speakText(text, {
-    // onend / onerror fire from the native synthesis
-    // callbacks. Guard on the index so a stale callback
-    // from an interrupted utterance doesn't clear the
-    // state of a newer read that has since started.
-    onend: () => {
-      if (panel._speakingMsgIndex === index) {
-        panel._speakingMsgIndex = -1;
-      }
-    },
-    onerror: () => {
-      if (panel._speakingMsgIndex === index) {
-        panel._speakingMsgIndex = -1;
-      }
-    },
+  // ownerKey is the message index so the panel's state
+  // listener can light this card's speaker button; label
+  // gives the floating controls a human header.
+  speechPlayer.play(text, {
+    ownerKey: index,
+    label: speechLabelFor(msg, index),
   });
+}
+
+/**
+ * Human-readable header for the floating controls — the
+ * message's role plus its position, e.g. "Assistant · #4".
+ * Falls back gracefully for system events and unknown
+ * roles.
+ */
+function speechLabelFor(msg, index) {
+  const role = msg?.system_event
+    ? 'System'
+    : msg?.role === 'assistant'
+      ? 'Assistant'
+      : msg?.role === 'user'
+        ? 'You'
+        : 'Message';
+  return `${role} · #${index + 1}`;
 }
 
 /**

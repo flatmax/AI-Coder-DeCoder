@@ -37,6 +37,7 @@
 // one place to look when adding a new event.
 
 import { normalizeMessageContent } from '../image-utils.js';
+import { SPEECH_STATE_EVENT } from '../speech-player.js';
 import { onChatTabShortcut, onTabClose } from './tabs.js';
 import {
   onAgentsSpawned,
@@ -79,6 +80,40 @@ export function bindEventHandlers(panel) {
   panel._onAgentModeChanged = (e) => onAgentModeChanged(panel, e);
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
+  panel._onSpeechPlayerState = (e) => onSpeechPlayerState(panel, e);
+}
+
+// ---------------------------------------------------------------
+// Text-to-speech state sync
+// ---------------------------------------------------------------
+
+/**
+ * Sync the per-message speaker toggle from the shared
+ * speech player's state.
+ *
+ * The 🔊/⏹ button on each message card reflects
+ * `panel._speakingMsgIndex` (rendering.js). Playback is
+ * owned by the module-level `speechPlayer` (speech-player.js)
+ * and driven from anywhere — a card's speaker button, the
+ * floating transport's stop button, or the queue finishing
+ * on its own. Rather than have each of those touch the
+ * panel's state, the player emits `speech-player-state` and
+ * we mirror its `ownerKey` (the message index passed by
+ * `speakMessage`) here.
+ *
+ * When playback is inactive, or owned by a different panel
+ * instance / non-numeric key, the index resets to -1 so no
+ * button shows the stop state.
+ */
+export function onSpeechPlayerState(panel, event) {
+  const state = event?.detail;
+  const next =
+    state && state.active && typeof state.ownerKey === 'number'
+      ? state.ownerKey
+      : -1;
+  if (panel._speakingMsgIndex !== next) {
+    panel._speakingMsgIndex = next;
+  }
 }
 
 // ---------------------------------------------------------------
@@ -261,6 +296,12 @@ export function attachEventListeners(panel) {
     panel._onModeOrReviewChanged,
   );
   window.addEventListener('commit-result', panel._onCommitResult);
+  // Mirror the shared speech player's state onto the
+  // per-message speaker toggle (see onSpeechPlayerState).
+  window.addEventListener(
+    SPEECH_STATE_EVENT,
+    panel._onSpeechPlayerState,
+  );
 }
 
 /**
@@ -314,6 +355,10 @@ export function detachEventListeners(panel) {
     panel._onModeOrReviewChanged,
   );
   window.removeEventListener('commit-result', panel._onCommitResult);
+  window.removeEventListener(
+    SPEECH_STATE_EVENT,
+    panel._onSpeechPlayerState,
+  );
   // Defensive — if the overflow menu was open
   // at unmount, release the document listeners
   // so they don't keep a stale handler alive.

@@ -75,6 +75,36 @@ export function cancelSpeech() {
 }
 
 /**
+ * Pause the in-flight utterance, leaving it resumable via
+ * resumeSpeech(). Safe to call when nothing is speaking.
+ * Wrapped in try/catch like cancelSpeech() — pause() can
+ * throw if the queue is in an odd state.
+ */
+export function pauseSpeech() {
+  const synth = _getSynth();
+  if (!synth || typeof synth.pause !== 'function') return;
+  try {
+    synth.pause();
+  } catch (_) {
+    // Harmless — nothing to pause.
+  }
+}
+
+/**
+ * Resume a previously paused utterance. Safe to call when
+ * nothing is paused (a no-op in that case).
+ */
+export function resumeSpeech() {
+  const synth = _getSynth();
+  if (!synth || typeof synth.resume !== 'function') return;
+  try {
+    synth.resume();
+  } catch (_) {
+    // Harmless — nothing to resume.
+  }
+}
+
+/**
  * Speak the given text. Cancels any current utterance
  * first (single global queue). Returns the created
  * SpeechSynthesisUtterance, or null when unsupported or

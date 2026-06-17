@@ -35,6 +35,7 @@ import '../token-hud.js';
 import '../compaction-progress.js';
 import '../doc-index-progress.js';
 import '../cache-warmup-progress.js';
+import '../speech-controls.js';
 
 import { APP_SHELL_STYLES } from './styles.js';
 import {
