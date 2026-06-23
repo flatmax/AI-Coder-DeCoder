@@ -60,6 +60,7 @@ import {
   _EXPERIMENTAL_ENABLED,
   _REASONING_EFFORT_LEVELS,
   _REASONING_EFFORT_ABBREV,
+  formatRunDuration,
   parseAgentTabId,
 } from './helpers.js';
 import {
@@ -830,6 +831,17 @@ export function renderMessage(panel, msg, index) {
     msg.finishReason && !isNaturalFinish
       ? renderFinishBadge(msg.finishReason)
       : '';
+  // Frozen run-timer badge — assistant messages only,
+  // and only when a duration was recorded at completion.
+  // Sits next to the role label, mirroring the live timer
+  // on the streaming card so the number lands in the same
+  // spot before and after the stream settles.
+  const runTimerBadge =
+    msg.role === 'assistant' &&
+    !msg.system_event &&
+    typeof msg.durationMs === 'number'
+      ? renderRunTimer(msg.durationMs, false)
+      : '';
   const bottomFinishBadge = isNaturalFinish
     ? renderFinishBadge(msg.finishReason)
     : '';
@@ -871,7 +883,7 @@ export function renderMessage(panel, msg, index) {
       data-msg-index=${index}
     >
       <div class="message-toolbar top">${toolbar}</div>
-      <div class="role-label">${roleLabel}${topFinishBadge}</div>
+      <div class="role-label">${roleLabel}${topFinishBadge}${runTimerBadge}</div>
       ${bodyHtml}
       ${images.length > 0
         ? renderMessageImages(panel, images)
@@ -946,6 +958,38 @@ export function renderFinishBadge(reason) {
     class=${classes}
     title="LLM finish reason: ${reason}"
   >${icon} ${label}</span>`;
+}
+
+/**
+ * Render the run-timer badge — how long the assistant ran
+ * for this turn.
+ *
+ * Two modes, selected by `live`:
+ *   - live (streaming card): elapsed = now - startedAt,
+ *     recomputed every render. The 250ms panel ticker
+ *     (startStreamTimerTick) drives the re-render so the
+ *     counter visibly advances. Returns '' when there's no
+ *     start stamp (defensive — the streaming card only
+ *     renders while a stream is in flight, which always
+ *     stamps).
+ *   - settled (assistant message card): `ms` is the frozen
+ *     duration baked onto the message at completion. Returns
+ *     '' when the message carries no duration (older records,
+ *     adopted collaborator streams).
+ *
+ * The ⏱ glyph plus a title make the number self-explanatory
+ * without a separate label.
+ */
+export function renderRunTimer(ms, live) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    return '';
+  }
+  const text = formatRunDuration(ms);
+  const cls = live ? 'run-timer run-timer-live' : 'run-timer';
+  const title = live
+    ? `Assistant running — ${text} elapsed`
+    : `Assistant ran for ${text}`;
+  return html`<span class=${cls} title=${title}>⏱ ${text}</span>`;
 }
 
 /**
@@ -1380,9 +1424,23 @@ function _onAgentCardClick(panel, event) {
  * state.
  */
 export function renderStreamingMessage(panel) {
+  // Live run timer — elapsed since the prompt was sent.
+  // `_streamStartedAt` is stamped on the active tab in
+  // send() (and resume / agent-spawn paths); the 250ms
+  // panel ticker re-renders this card so the counter
+  // advances. Missing stamp → no timer (defensive).
+  const startedAt = panel._streamStartedAt;
+  const elapsedMs =
+    typeof startedAt === 'number'
+      ? Math.max(0, Date.now() - startedAt)
+      : null;
   return html`
     <div class="message-card role-assistant streaming">
-      <div class="role-label">Assistant</div>
+      <div class="role-label">
+        Assistant${elapsedMs != null
+          ? renderRunTimer(elapsedMs, true)
+          : ''}
+      </div>
       ${renderAssistantBody(
         panel,
         panel._streamingContent,

@@ -45,7 +45,9 @@ import {
   onStreamComplete,
   onStreamRetry,
   onUserMessage,
+  startStreamTimerTick,
   stopRetryTick,
+  stopStreamTimerTick,
 } from './streaming.js';
 
 // ---------------------------------------------------------------
@@ -192,6 +194,14 @@ export function resumeActiveStreams(panel, activeStreams) {
     tab.streaming = true;
     tab.streamingContent = content;
     tab.streams.set(requestId, { content, sticky: true });
+    // Arm the run timer from resume time. The original
+    // send-time stamp is lost across the reconnect (the
+    // backend doesn't report when the stream began), so
+    // the resumed counter measures time-since-resume, not
+    // true turn duration. Better a live, slightly-short
+    // timer than none — and the frozen duration baked at
+    // completion will likewise reflect the visible span.
+    tab.streamStartedAt = Date.now();
     if (tabId === panel._activeTabId) {
       activeChanged = true;
     }
@@ -199,6 +209,8 @@ export function resumeActiveStreams(panel, activeStreams) {
   if (activeChanged) {
     panel.requestUpdate();
   }
+  // Kick the ticker if we armed any timer above.
+  startStreamTimerTick(panel);
 }
 
 // ---------------------------------------------------------------
@@ -393,6 +405,10 @@ export function detachEventListeners(panel) {
   // keep firing requestUpdate on a detached
   // component.
   stopRetryTick(panel);
+  // Same for the run-timer ticker — a live stream at
+  // unmount would otherwise leave its interval firing
+  // requestUpdate on a detached component.
+  stopStreamTimerTick(panel);
 }
 
 // ---------------------------------------------------------------
@@ -461,6 +477,11 @@ export function onSessionChanged(panel, event) {
   panel._currentRequestId = null;
   panel._streams.clear();
   panel._pendingChunks.clear();
+  // Session swap abandons any in-flight stream — clear the
+  // run timer and stop the ticker so it doesn't keep
+  // re-rendering against a stamp whose stream is gone.
+  panel._streamStartedAt = null;
+  stopStreamTimerTick(panel);
   panel._autoScroll = true;
   // Seed input history from the loaded session's
   // user messages.

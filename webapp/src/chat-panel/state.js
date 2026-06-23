@@ -100,6 +100,17 @@ export function makeTabState() {
     lastRequestId: null,
     streams: new Map(),
     pendingChunks: new Map(),
+    // Run-timer start stamp. Set to Date.now() the
+    // moment a turn's stream is armed on this tab
+    // (send, resume-after-reconnect, agent spawn /
+    // retask) and reset to null when the stream
+    // completes. The streaming card reads it every
+    // tick to render the live "how long the assistant
+    // has been running" elapsed counter; the settled
+    // assistant message gets the frozen duration baked
+    // onto its record at completion (msg.durationMs).
+    // null when no stream is in flight on this tab.
+    streamStartedAt: null,
     // Selection (pushed by files-tab for the main tab;
     // agents will get their own per-tab selection in a
     // later phase)
@@ -262,6 +273,12 @@ const NON_REACTIVE_FIELDS = [
   ['_currentRequestId', 'currentRequestId'],
   ['_lastRequestId', 'lastRequestId'],
   ['_pendingChunks', 'pendingChunks'],
+  // Run-timer start stamp. Non-reactive because the
+  // live elapsed counter re-renders off the panel-
+  // level 250ms ticker (see startStreamTimerTick in
+  // streaming.js), not off a per-write requestUpdate —
+  // mirrors the retryInfo / retryTickHandle pairing.
+  ['_streamStartedAt', 'streamStartedAt'],
   ['_autoScroll', 'autoScroll'],
   ['_suppressNextPaste', 'suppressNextPaste'],
   ['_activeMention', 'activeMention'],

@@ -22,6 +22,9 @@ import {
   buildInContextMismatchRetryPrompt,
   buildNotInContextRetryPrompt,
 } from '../chat-panel/index.js';
+// formatRunDuration isn't re-exported from index.js (it's an
+// internal render helper), so import it from its module.
+import { formatRunDuration } from './helpers.js';
 import './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -409,5 +412,35 @@ describe('drawer / search-toggle persistence', () => {
   it('search toggle malformed localStorage value falls back to default', () => {
     localStorage.setItem(_SEARCH_REGEX_KEY, 'maybe');
     expect(_loadSearchToggle(_SEARCH_REGEX_KEY, false)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatRunDuration
+// ---------------------------------------------------------------------------
+
+describe('formatRunDuration', () => {
+  it('renders sub-minute durations as seconds with one decimal', () => {
+    expect(formatRunDuration(0)).toBe('0.0s');
+    expect(formatRunDuration(4200)).toBe('4.2s');
+    expect(formatRunDuration(59900)).toBe('59.9s');
+  });
+
+  it('renders minute-scale durations as "Mm SSs" with padding', () => {
+    expect(formatRunDuration(60000)).toBe('1m 00s');
+    expect(formatRunDuration(64000)).toBe('1m 04s');
+    expect(formatRunDuration(125000)).toBe('2m 05s');
+  });
+
+  it('renders hour-scale durations as "Hh MMm" with padding', () => {
+    expect(formatRunDuration(3600000)).toBe('1h 00m');
+    expect(formatRunDuration(3600000 + 5 * 60000)).toBe('1h 05m');
+    expect(formatRunDuration(2 * 3600000 + 5 * 60000)).toBe('2h 05m');
+  });
+
+  it('clamps negative and non-finite inputs to zero', () => {
+    expect(formatRunDuration(-1000)).toBe('0.0s');
+    expect(formatRunDuration(NaN)).toBe('0.0s');
+    expect(formatRunDuration(Infinity)).toBe('0.0s');
   });
 });

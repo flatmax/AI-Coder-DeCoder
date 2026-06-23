@@ -312,6 +312,45 @@ export function _saveSearchToggle(key, value) {
 }
 
 /**
+ * Format a run duration (milliseconds) for the assistant
+ * run-timer display.
+ *
+ * The timer starts when the user's prompt is sent and stops
+ * when the assistant response finishes; this turns the
+ * elapsed millisecond count into a compact human-readable
+ * string shown on the streaming card (live) and on the
+ * settled assistant message (frozen).
+ *
+ * Buckets:
+ *   - < 1 min   → seconds with one decimal ("4.2s"). The
+ *                 decimal keeps the live counter visibly
+ *                 moving for short turns without flickering
+ *                 a hundredths digit.
+ *   - < 1 hour  → "Mm SSs" ("1m 04s") — seconds zero-padded
+ *                 so the width stays stable as it ticks.
+ *   - >= 1 hour → "Hh MMm" ("2h 05m").
+ *
+ * Negative or non-finite inputs clamp to 0 so a clock skew
+ * between start stamp and render never renders a negative
+ * timer.
+ */
+export function formatRunDuration(ms) {
+  const totalMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  const totalSeconds = totalMs / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  if (totalSeconds < 3600) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+}
+
+/**
  * How close to the bottom counts as "still at the bottom".
  */
 export const AUTO_SCROLL_TOLERANCE_PX = 40;

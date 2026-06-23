@@ -2,7 +2,7 @@
 // filtering, agent spawn from completion, retry-prompt
 // population, and stream-start error handling.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { computeLastEditOutcome, onStreamRetry } from './streaming.js';
 import {
@@ -111,6 +111,115 @@ describe('ChatPanel streaming events', () => {
     await settle(p);
     expect(p.messages[1].role).toBe('assistant');
     expect(p.messages[1].content).toContain('something broke');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Run timer — how long the assistant has been running
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel run timer', () => {
+  // Drive Date.now() deterministically so elapsed/frozen
+  // durations are exact rather than wall-clock dependent.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function sendAt(panel, nowMs, message = 'hi') {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    await settle(panel);
+    vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    panel._input = message;
+    await panel._send();
+    return started.mock.calls[0][0];
+  }
+
+  it('stamps the start time and shows a live timer while streaming', async () => {
+    const p = mountPanel();
+    const reqId = await sendAt(p, 1_000_000);
+    // Advance the clock; the streaming card recomputes
+    // elapsed from Date.now() - streamStartedAt on render.
+    Date.now.mockReturnValue(1_004_200);
+    pushEvent('stream-chunk', { requestId: reqId, content: 'Hi' });
+    await settle(p);
+    expect(p._streamStartedAt).toBe(1_000_000);
+    const streaming = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    const timer = streaming.querySelector('.run-timer-live');
+    expect(timer).toBeTruthy();
+    expect(timer.textContent).toContain('4.2s');
+  });
+
+  it('freezes the duration onto the settled assistant message', async () => {
+    const p = mountPanel();
+    const reqId = await sendAt(p, 2_000_000);
+    Date.now.mockReturnValue(2_007_500);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done' },
+    });
+    await settle(p);
+    expect(p.messages[1].durationMs).toBe(7500);
+    // Timer is cleared once the stream settles.
+    expect(p._streamStartedAt).toBeNull();
+    // The frozen badge renders on the settled card and the
+    // live streaming card is gone.
+    expect(
+      p.shadowRoot.querySelector('.message-card.streaming'),
+    ).toBeNull();
+    const settled = p.shadowRoot.querySelectorAll(
+      '.message-card.role-assistant',
+    );
+    const badge = settled[settled.length - 1].querySelector(
+      '.run-timer',
+    );
+    expect(badge).toBeTruthy();
+    expect(badge.textContent).toContain('7.5s');
+  });
+
+  it('records duration on errored completions too', async () => {
+    const p = mountPanel();
+    const reqId = await sendAt(p, 3_000_000);
+    Date.now.mockReturnValue(3_002_000);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { error: 'boom' },
+    });
+    await settle(p);
+    expect(p.messages[1].durationMs).toBe(2000);
+  });
+
+  it('stops the ticker once the stream completes', async () => {
+    const p = mountPanel();
+    const reqId = await sendAt(p, 4_000_000);
+    expect(p._streamTimerInterval).not.toBeNull();
+    expect(p._streamTimerInterval).toBeDefined();
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'ok' },
+    });
+    await settle(p);
+    expect(p._streamTimerInterval == null).toBe(true);
+  });
+
+  it('omits the duration when no start stamp exists', async () => {
+    // A completion for a request the tab never armed (no
+    // matching send) — e.g. an adopted collaborator stream.
+    // streamStartedAt is null, so no durationMs is recorded.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('stream-complete', {
+      requestId: 'never-sent',
+      result: { response: 'orphan' },
+    });
+    await settle(p);
+    // The orphan completion doesn't match the main tab's
+    // currentRequestId, so it produces no settled message.
+    expect(
+      p.messages.some((m) => m.durationMs !== undefined),
+    ).toBe(false);
   });
 });
 

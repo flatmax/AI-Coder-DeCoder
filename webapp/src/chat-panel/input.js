@@ -52,7 +52,11 @@ import {
   parseAgentTabId,
 } from './helpers.js';
 import { scheduleUrlDetection } from './urls.js';
-import { handleStreamStartError } from './streaming.js';
+import {
+  handleStreamStartError,
+  maybeStopStreamTimerTick,
+  startStreamTimerTick,
+} from './streaming.js';
 import { setSearchMode } from './search.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import { speechPlayer } from '../speech-player.js';
@@ -194,6 +198,16 @@ export async function send(panel) {
   panel._pendingImages = [];
   panel._streaming = true;
   panel._streamingContent = '';
+  // Stamp the run-timer start the instant the prompt is
+  // sent, and kick the panel-level ticker so the live
+  // elapsed counter on the streaming card starts moving.
+  // The stamp is frozen onto the assistant message when
+  // the response finishes (onStreamComplete) and cleared
+  // there. Stamping on the active tab's accessor writes
+  // through to the active tab's state — the same tab the
+  // stream is opened against.
+  panel._streamStartedAt = Date.now();
+  startStreamTimerTick(panel);
   panel._autoScroll = true;
   // Reset the textarea's inline height after
   // clearing. Programmatic value clears don't
@@ -281,6 +295,11 @@ export async function send(panel) {
     panel._streaming = false;
     panel._currentRequestId = null;
     panel._streams.delete(requestId);
+    // The stream never started — clear the run timer so
+    // the ticker doesn't keep firing against a stamp that
+    // will never complete.
+    panel._streamStartedAt = null;
+    maybeStopStreamTimerTick(panel);
   }
 }
 
@@ -307,6 +326,8 @@ export async function cancel(panel) {
     panel._streamingContent = '';
     panel._currentRequestId = null;
     panel._streams.clear();
+    panel._streamStartedAt = null;
+    maybeStopStreamTimerTick(panel);
   }
 }
 
