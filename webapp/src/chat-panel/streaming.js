@@ -182,6 +182,76 @@ export function computeLastEditOutcome(
 }
 
 // ---------------------------------------------------------------
+// Run timer (assistant elapsed-time display)
+// ---------------------------------------------------------------
+
+/**
+ * Re-render cadence for the live run timer, in ms. 250ms is
+ * frequent enough that the one-decimal seconds display
+ * advances smoothly to the eye, but far cheaper than the
+ * per-chunk render rate — each tick is a single
+ * requestUpdate, like the retry ticker.
+ */
+const RUN_TIMER_TICK_MS = 250;
+
+/**
+ * Start the panel-level run-timer ticker.
+ *
+ * One interval drives every tab's live elapsed counter. The
+ * render path computes elapsed from
+ * ``Date.now() - tab.streamStartedAt`` on each pass, so the
+ * tick only needs to kick a dirty-check — it never mutates
+ * state itself.
+ *
+ * Idempotent: calling it while already running is a no-op.
+ * Self-stopping: once no tab has a live ``streamStartedAt``
+ * the interval clears itself, so an idle panel holds no
+ * timer.
+ */
+export function startStreamTimerTick(panel) {
+  if (panel._streamTimerInterval != null) return;
+  panel._streamTimerInterval = setInterval(() => {
+    let anyActive = false;
+    for (const tab of panel._tabs.values()) {
+      if (tab.streamStartedAt != null && tab.streaming) {
+        anyActive = true;
+        break;
+      }
+    }
+    if (anyActive) {
+      panel.requestUpdate('_streamingContent');
+    } else {
+      stopStreamTimerTick(panel);
+    }
+  }, RUN_TIMER_TICK_MS);
+}
+
+/**
+ * Stop the panel-level run-timer ticker. Called when no tab
+ * has a live timer left, and on panel teardown from events.js's
+ * detach path.
+ */
+export function stopStreamTimerTick(panel) {
+  if (panel._streamTimerInterval != null) {
+    clearInterval(panel._streamTimerInterval);
+    panel._streamTimerInterval = null;
+  }
+}
+
+/**
+ * Stop the run-timer ticker if (and only if) no tab still has
+ * a live timer. Called from the completion / error paths after
+ * a tab's ``streamStartedAt`` is cleared so the interval doesn't
+ * outlive the last running stream.
+ */
+export function maybeStopStreamTimerTick(panel) {
+  for (const tab of panel._tabs.values()) {
+    if (tab.streamStartedAt != null && tab.streaming) return;
+  }
+  stopStreamTimerTick(panel);
+}
+
+// ---------------------------------------------------------------
 // Stream chunk routing
 // ---------------------------------------------------------------
 
@@ -298,6 +368,9 @@ export function onAgentsSpawned(panel, event) {
   if (!Array.isArray(agent_blocks)) return;
   if (agent_blocks.length === 0) return;
   spawnAgentTabs(panel, turn_id, agent_blocks, parent_request_id);
+  // spawnAgentTabs armed each agent tab's run timer — kick
+  // the panel ticker so their live counters advance.
+  startStreamTimerTick(panel);
 }
 
 // ---------------------------------------------------------------
@@ -408,12 +481,28 @@ export function onStreamComplete(panel, event) {
       agentBlocks && agentBlocks.length > 0
         ? { agent_blocks: agentBlocks }
         : {};
+    // Freeze the run duration onto the settled message.
+    // `streamStartedAt` was stamped when the turn was
+    // armed (send / resume / agent spawn); the elapsed
+    // span is how long the assistant ran for this turn.
+    // Both the success and error cards show it — an
+    // errored turn still consumed wall-clock the user
+    // may want to see. Guard against a missing stamp
+    // (defensive — a completion with no matching start,
+    // e.g. an adopted collaborator stream) by omitting
+    // the field rather than recording a bogus duration.
+    const startedAt = ownerTab.streamStartedAt;
+    const durationField =
+      typeof startedAt === 'number'
+        ? { durationMs: Math.max(0, Date.now() - startedAt) }
+        : {};
     ownerTab.messages = [
       ...ownerTab.messages,
       error
         ? {
             role: 'assistant',
             content: errorBody,
+            ...durationField,
             ...turnIdField,
           }
         : {
@@ -427,6 +516,7 @@ export function onStreamComplete(panel, event) {
             // badge. Natural reasons render muted;
             // abnormal reasons render in amber/red.
             ...(finishReason ? { finishReason } : {}),
+            ...durationField,
             ...turnIdField,
             ...agentBlocksField,
           },
@@ -454,6 +544,14 @@ export function onStreamComplete(panel, event) {
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';
     ownerTab.currentRequestId = null;
+    // Stop this tab's run timer (the frozen duration is
+    // already baked onto the message above). Stop the
+    // panel ticker too when no other tab is still
+    // running — the ticker self-stops on its next tick,
+    // but clearing eagerly here avoids one stray
+    // requestUpdate after the last stream ends.
+    ownerTab.streamStartedAt = null;
+    maybeStopStreamTimerTick(panel);
     if (ownerIsActive) {
       panel.requestUpdate('_streaming');
     } else {
@@ -491,6 +589,12 @@ export function onStreamComplete(panel, event) {
         result.agent_blocks,
         requestId,
       );
+      // The main tab's timer was just stopped above (its
+      // streamStartedAt cleared, maybeStopStreamTimerTick
+      // ran). The spawned agent tabs armed their own
+      // timers, so re-kick the ticker for their live
+      // counters.
+      startStreamTimerTick(panel);
     }
   }
 
@@ -858,6 +962,11 @@ export function handleStreamStartError(
   panel._streamingContent = '';
   panel._currentRequestId = null;
   panel._streams.delete(requestId);
+  // The stream failed to start — clear the active tab's
+  // run timer. The owning-tab branch below clears the
+  // per-tab stamp too (covers the agent-tab case where
+  // the owner isn't the active tab).
+  panel._streamStartedAt = null;
 
   // Resolve the owning tab. Per the flat-registry
   // contract, ``agentTag`` is null for the main
@@ -877,6 +986,7 @@ export function handleStreamStartError(
     ownerTab.currentRequestId = null;
     ownerTab.pendingChunks.delete(requestId);
     ownerTab.streams.delete(requestId);
+    ownerTab.streamStartedAt = null;
     // Error outcome shape matches what
     // ``computeLastEditOutcome`` produces for the
     // stream-error path so the LED row's
@@ -887,6 +997,10 @@ export function handleStreamStartError(
       failureReason: errorMsg || 'stream failed to start',
     };
   }
+  // Stream-start failed on every path below (stale-agent
+  // close or generic error) — stop the run-timer ticker
+  // if no other tab is still running.
+  maybeStopStreamTimerTick(panel);
 
   const isStaleAgent =
     errorMsg === 'agent not found' && agentTag !== null;

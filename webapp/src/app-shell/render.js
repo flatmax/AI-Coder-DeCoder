@@ -183,6 +183,8 @@ export function renderTemplate(host) {
 
     <ac-cache-warmup-progress></ac-cache-warmup-progress>
 
+    <ac-speech-controls></ac-speech-controls>
+
     <ac-token-hud></ac-token-hud>
   `;
 }

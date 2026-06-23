@@ -127,6 +127,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Hoverable toolbars at top-right and bottom-right of each message card (both ends for long messages)
 - Copy raw text to clipboard
 - Insert raw text into chat input
+- Read aloud — speaks the message via text-to-speech; toggles to a stop control while this message is the one playing. Shown only when the browser supports speech synthesis. See [speech.md § Read Aloud](speech.md#read-aloud-text-to-speech)
 - Not shown on streaming messages
 ## Scrolling
 ### Auto-Scroll
@@ -183,9 +184,9 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Click inserts at cursor
 - Open/closed state persisted to localStorage
 - Automatically closed (and state persisted) when a message is sent
-### Speech to Text
-- Toggle button for continuous voice dictation
-- Transcribed text inserted at cursor position (not appended) with automatic space separators
+### Speech
+- **Dictation** — toggle button for continuous voice dictation; transcribed text inserted at cursor position (not appended) with automatic space separators
+- **Read aloud** — the per-message speaker button (see [§ Message Action Buttons](#message-action-buttons)) reads a message back via text-to-speech, surfacing a floating play/pause/speed/position transport
 - See [speech.md](speech.md)
 ### Images
 - Supported formats — PNG, JPEG, GIF, WebP

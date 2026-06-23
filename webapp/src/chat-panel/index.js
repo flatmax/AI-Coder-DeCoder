@@ -71,7 +71,7 @@
 import { LitElement } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
-import { cancelSpeech } from '../speech-synthesis.js';
+import { speechPlayer } from '../speech-player.js';
 // Side-effect imports — these modules register
 // custom elements (`<ac-history-browser>`,
 // `<ac-input-history>`, `<ac-speech-to-text>`,
@@ -435,8 +435,11 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Stop any in-flight text-to-speech so it doesn't keep
     // reading after the panel is torn down (tab close,
     // navigation, test teardown) — mirrors the mic-release
-    // cleanup in speech-to-text.js.
-    cancelSpeech();
+    // cleanup in speech-to-text.js. Stopping the player
+    // also dismisses the floating transport. The
+    // speech-player-state listener (now detached) won't
+    // reset the index, so clear it directly too.
+    speechPlayer.stop();
     this._speakingMsgIndex = -1;
     super.disconnectedCallback();
   }

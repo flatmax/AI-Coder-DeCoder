@@ -628,6 +628,40 @@ export const STYLES = css`
     opacity: 0.6;
   }
 
+  /* Run-timer badge — how long the assistant ran for a
+   * turn. Sits next to the role label. Tabular-nums keeps
+   * the digits from jittering as the live counter ticks.
+   * The text-transform/letter-spacing resets undo the
+   * uppercase role-label styling the badge inherits as a
+   * child of .role-label. */
+  .run-timer {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    margin-left: 0.5rem;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    text-transform: none;
+    letter-spacing: normal;
+    border-radius: 3px;
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-secondary, #8b949e);
+    border: 1px solid rgba(240, 246, 252, 0.12);
+    opacity: 0.85;
+    vertical-align: middle;
+  }
+  /* Live variant — accent-coloured while the stream is
+   * still running so the moving counter reads as active,
+   * matching the streaming card's accent border. */
+  .run-timer.run-timer-live {
+    background: rgba(88, 166, 255, 0.12);
+    color: var(--accent-primary, #58a6ff);
+    border-color: rgba(88, 166, 255, 0.3);
+    opacity: 1;
+  }
+
   /* Footer slot for the natural-completion finish
    * badge — anchored bottom-left, mirroring the
    * bottom toolbar's bottom-right anchor. Sits at

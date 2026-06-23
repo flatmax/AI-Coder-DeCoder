@@ -824,6 +824,10 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
         existing.currentRequestId = childId;
         existing.streaming = true;
         existing.streamingContent = '';
+        // Arm the run timer for the retasked turn so the
+        // agent tab's streaming card shows a live elapsed
+        // counter, same as a main-tab send.
+        existing.streamStartedAt = Date.now();
       }
       // Reset prior-turn outcome so the LED reflects
       // "running again" rather than the previous
@@ -847,6 +851,9 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
     if (childId) {
       state.currentRequestId = childId;
       state.streaming = true;
+      // Arm the run timer so the freshly-spawned agent
+      // tab's streaming card shows a live elapsed counter.
+      state.streamStartedAt = Date.now();
     }
     panel._tabs.set(tabId, state);
     panel._tabLabels.set(
