@@ -195,6 +195,18 @@ export class CacheWarmupProgress extends LitElement {
   _onComplete(event) {
     const detail = event.detail || {};
     this._clearTimers();
+    if (detail.success && detail.skipped) {
+      // The warmer assembled the prompt but skipped the
+      // provider call — the cacheable prefix was below the
+      // model's minimum, so a firing would cache nothing.
+      // Close the bar quietly like a cancel: nothing
+      // happened that's worth a "Cache refreshed" flash,
+      // and the firing broadcast that would have shown the
+      // spinner never went out.
+      this._state = 'idle';
+      this._fading = false;
+      return;
+    }
     if (detail.success) {
       this._state = 'success';
       this._caption = 'Cache refreshed';

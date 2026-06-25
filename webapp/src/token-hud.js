@@ -566,6 +566,12 @@ export class TokenHud extends RpcMixin(LitElement) {
     // already shows the failure flash, and a HUD with all
     // zeros would be misleading.
     if (!detail.success) return;
+    // Skipped firings (``skipped: true``) made no provider
+    // call — the cacheable prefix was below the model's
+    // minimum. There are no token counts to show, and a
+    // zeroed HUD would read as a real warm-up that cached
+    // nothing. Stay hidden.
+    if (detail.skipped) return;
     const prompt = detail.prompt_tokens || 0;
     const cacheRead = detail.cache_read_tokens || 0;
     const cacheWrite = detail.cache_write_tokens || 0;
