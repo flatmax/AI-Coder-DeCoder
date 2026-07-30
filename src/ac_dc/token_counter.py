@@ -38,6 +38,7 @@ defaults for the concrete numbers):
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -64,49 +65,95 @@ _DEFAULT_MIN_CACHEABLE_TOKENS = 1024
 # dot-separated version styles appear in the wild.
 _CLAUDE_FAMILY_MARKERS = ("claude", "anthropic")
 
-# Per-model output token ceilings. Matched by lowercase substring
-# against the model name, first match wins. The ordering of the
-# tuple matters — more-specific patterns must come before less-
-# specific ones (e.g. ``opus-4-5`` before ``claude``). These are
-# the hard ceilings the provider accepts; user configuration can
-# lower this via ``config.max_output_tokens`` but cannot raise it.
+# Claude family + version extractor. Handles every id shape we see:
+# bare (``claude-opus-5``), Anthropic-prefixed
+# (``anthropic/claude-sonnet-4-6``), Bedrock-dotted with a regional
+# prefix (``bedrock/au.anthropic.claude-opus-5``), and either with a
+# release-date and/or revision suffix (``-20251101-v1:0``). Minor
+# separator may be a dash or a dot.
 #
-# Values from provider documentation as of 2025-01 —
-# Anthropic publishes these under "Output length" per model.
-# When a new model ships with a different ceiling, add it here
-# rather than relying on runtime provider queries (which the
-# spec forbids — silently changing ceilings would mask bugs
-# like the 4096-token truncation we had before this table).
-_OUTPUT_TOKEN_CEILINGS: tuple[tuple[tuple[str, ...], int], ...] = (
-    # Opus 4.5+ — 128K output window
-    (("opus-4-5", "opus-4.5", "opus-4-6", "opus-4.6",
-      "opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"), 128_000),
-    # Sonnet 4.5+ — 64K output window
-    (("sonnet-4-5", "sonnet-4.5", "sonnet-4-6", "sonnet-4.6",
-      "sonnet-4-7", "sonnet-4.7"), 64_000),
-    # Haiku 4.5+ — 64K output window
-    (("haiku-4-5", "haiku-4.5", "haiku-4-6", "haiku-4.6"), 64_000),
-    # GPT-4 family — 16K output window
-    (("gpt-4",), 16_384),
-    # Older Claude (3.x, 2.x, pre-4.5 4.x) — 8K output window.
-    # Catch-all for any ``claude``/``anthropic`` model that didn't
-    # match a more specific pattern above.
-    (("claude", "anthropic"), 8_192),
+# Capping the minor at two digits (with a negative lookahead) is what
+# keeps a date suffix out of the version: in
+# ``claude-opus-4-20250514`` the minor group can't swallow
+# ``20250514``, so it reads as 4.0, not 4.20. Pre-4 ids order the
+# segments the other way (``claude-3-5-sonnet``) and deliberately
+# don't match — they all sit in the oldest bucket anyway.
+_CLAUDE_MODEL_RE = re.compile(
+    r"claude-([a-z]+)-(\d{1,2})(?!\d)(?:[-._](\d{1,2})(?!\d))?"
 )
 
-# Models with a 4096 min-cacheable-tokens floor. Same family markers
-# as ``ConfigManager._model_min_cacheable_tokens`` — duplicated here
-# rather than imported, since ``ConfigManager`` is an optional
-# dependency of ``TokenCounter`` (tests construct the counter in
-# isolation).
-_HIGH_MIN_MODELS = (
-    "opus-4-5", "opus-4.5",
-    "opus-4-6", "opus-4.6",
-    "opus-4-7", "opus-4.7",
-    "opus-4-8", "opus-4.8",
-    "haiku-4-5", "haiku-4.5",
+# Per-family output token ceilings, keyed by family name and floored
+# by (major, minor) version. Each entry lists thresholds newest-first;
+# the first whose version floor is met wins. Comparing versions rather
+# than enumerating names means a new release inherits its family's
+# current ceiling instead of silently dropping to the 8192 catch-all
+# below — the failure mode that truncated Opus 5 responses to 8K.
+#
+# Values from provider documentation (Anthropic publishes these under
+# "Output length" per model; the Bedrock model cards agree). The spec
+# forbids runtime provider queries, so a genuinely new ceiling still
+# needs an edit here — but only when the number actually changes.
+_FAMILY_OUTPUT_CEILINGS: dict[str, tuple[tuple[tuple[int, int], int], ...]] = {
+    # Opus 4.5+ — 128K output window.
+    "opus": (((4, 5), 128_000),),
+    # Sonnet 5 and Sonnet 4.6 — 128K; Sonnet 4.5 — 64K.
+    "sonnet": (((4, 6), 128_000), ((4, 5), 64_000)),
+    # Haiku 4.5+ — 64K output window.
+    "haiku": (((4, 5), 64_000),),
+    # Fable / Mythos launched at 5 with a 128K window.
+    "fable": (((5, 0), 128_000),),
+    "mythos": (((5, 0), 128_000),),
+}
+
+# Non-Claude ceilings, matched by lowercase substring.
+_OTHER_OUTPUT_CEILINGS: tuple[tuple[tuple[str, ...], int], ...] = (
+    # GPT-4 family — 16K output window.
+    (("gpt-4",), 16_384),
 )
-_HIGH_MIN_TOKENS = 4096
+
+# Older Claude (3.x, 2.x, and 4.x below the per-family floors above)
+# — 8K output window. Catch-all for any ``claude``/``anthropic``
+# model that didn't resolve to a family ceiling.
+_LEGACY_CLAUDE_OUTPUT_CEILING = 8_192
+
+# Minimum cacheable prefix per family, same newest-first structure as
+# the output ceilings. Not monotonic across generations: Opus 5 halved
+# Opus 4.8's minimum, and 4.6/4.5 sit four times higher than either.
+# Getting it wrong means the provider silently declines to cache the
+# block and we eat the full ingestion cost on every request.
+#
+# This is the single copy of the table.
+# ``ConfigManager._model_min_cacheable_tokens`` delegates to
+# :func:`_min_cacheable_for` below; an earlier revision kept a second
+# copy in ``config.py`` and the two drifted (a new Opus was added to
+# one list only). The dependency runs one way — this module imports
+# nothing from ``config`` — which is what keeps ``TokenCounter``
+# constructible without a ``ConfigManager`` (tests rely on that).
+#
+# Sonnet is absent deliberately: every Sonnet generation takes the
+# 1024 default. The Bedrock prompt-caching page lists Sonnet 4.5 at
+# 4096, but Anthropic's per-model table and
+# specs-reference/1-foundation/configuration.md both say 1024, so the
+# majority reading wins.
+_FAMILY_MIN_CACHEABLE: dict[
+    str, tuple[tuple[tuple[int, int], int], ...]
+] = {
+    # Opus 5 → 512, 4.8 → 1024, 4.7 → 2048, 4.6/4.5 → 4096.
+    "opus": (
+        ((5, 0), 512),
+        ((4, 8), 1024),
+        ((4, 7), 2048),
+        ((4, 5), 4096),
+    ),
+    # Haiku 4.5 → 4096. Haiku 3.5 is nominally 2048, but its real id
+    # puts the family last (``claude-3-5-haiku-20241022``) and so
+    # never parses here; leaving it off keeps both id spellings on
+    # the same 1024 default rather than splitting them.
+    "haiku": (((4, 5), 4096),),
+    # Fable / Mythos 5 → 512, matching Opus 5.
+    "fable": (((5, 0), 512),),
+    "mythos": (((5, 0), 512),),
+}
 
 # Divisor for the char-count fallback. Empirically ~4 chars per
 # token for English prose; code runs a bit higher, JSON a bit
@@ -149,15 +196,63 @@ def _is_claude(model: str) -> bool:
     return _matches(model, _CLAUDE_FAMILY_MARKERS)
 
 
+def _parse_claude_model(model: str) -> tuple[str, tuple[int, int]] | None:
+    """Extract ``(family, (major, minor))`` from a Claude model id.
+
+    Returns None for anything without a parseable
+    ``claude-<family>-<version>`` segment: non-Claude models, and
+    pre-4 Claude ids that put the family last
+    (``claude-3-5-sonnet``). Callers fall back to their
+    lowest-tier default in that case.
+
+    A missing minor reads as 0 so bare majors order correctly —
+    ``claude-opus-5`` yields ``("opus", (5, 0))``, which clears a
+    ``(4, 8)`` floor as intended.
+    """
+    match = _CLAUDE_MODEL_RE.search(model.lower())
+    if match is None:
+        return None
+    minor = match.group(3)
+    return (
+        match.group(1),
+        (int(match.group(2)), int(minor) if minor is not None else 0),
+    )
+
+
+def _lookup_by_version(
+    model: str,
+    table: dict[str, tuple[tuple[tuple[int, int], int], ...]],
+) -> int | None:
+    """Resolve ``model`` against a family/version-floor ``table``.
+
+    Walks the family's thresholds in declaration order (newest
+    floor first) and returns the value for the first floor the
+    model's version meets or exceeds. Returns None when the model
+    isn't a parseable Claude id, its family isn't in the table, or
+    its version predates every floor — the caller supplies the
+    fallback, which differs per table.
+    """
+    parsed = _parse_claude_model(model)
+    if parsed is None:
+        return None
+    family, version = parsed
+    for floor, value in table.get(family, ()):
+        if version >= floor:
+            return value
+    return None
+
+
 def _min_cacheable_for(model: str) -> int:
     """Provider-minimum cacheable tokens for ``model``.
 
-    4096 for Opus 4.5/4.6 and Haiku 4.5; 1024 for everything else
-    (Sonnet, other Claude, GPT-4, etc.). Non-matching models fall
-    through to the default.
+    Resolved from :data:`_FAMILY_MIN_CACHEABLE` by family and
+    version — 512 on Opus/Fable/Mythos 5, 4096 on Opus 4.6/4.5 and
+    Haiku 4.5, and so on. Anything unrecognised (non-Claude, or a
+    Claude older than every listed floor) gets the 1024 default.
     """
-    if _matches(model, _HIGH_MIN_MODELS):
-        return _HIGH_MIN_TOKENS
+    resolved = _lookup_by_version(model, _FAMILY_MIN_CACHEABLE)
+    if resolved is not None:
+        return resolved
     return _DEFAULT_MIN_CACHEABLE_TOKENS
 
 
@@ -268,27 +363,35 @@ class TokenCounter:
     def max_output_tokens(self) -> int:
         """Maximum output tokens per request.
 
-        Walks :data:`_OUTPUT_TOKEN_CEILINGS` in declaration order
-        and returns the first matching ceiling. Order is load-
-        bearing — more-specific patterns (``opus-4-5``) must
-        appear before the catch-all (``claude``).
+        Resolution order:
+
+        1. :data:`_FAMILY_OUTPUT_CEILINGS` — Claude family plus
+           version floor (Opus 4.5+ → 128K, Sonnet 4.6+ → 128K,
+           and so on). A release newer than every listed floor
+           inherits its family's current ceiling.
+        2. :data:`_OTHER_OUTPUT_CEILINGS` — non-Claude substring
+           matches (GPT-4 → 16K).
+        3. :data:`_LEGACY_CLAUDE_OUTPUT_CEILING` (8192) for any
+           remaining ``claude``/``anthropic`` model — the 3.x/2.x
+           generation and unversioned names.
+        4. :data:`_DEFAULT_MAX_OUTPUT_TOKENS` (4096) for anything
+           unrecognised. Conservative — better a shorter-than-
+           possible response than a 400 for asking too much.
 
         A user-configured ``max_output_tokens`` in ``llm.json``
         can LOWER this ceiling but cannot raise it — see
         :meth:`ConfigManager.max_output_tokens`. The counter
         exposes the provider's hard ceiling; the config layer
         clamps the user's preference against it.
-
-        Falls back to :data:`_DEFAULT_MAX_OUTPUT_TOKENS` (4096)
-        for unrecognized models. Conservative default — better
-        to get a shorter-than-possible response than a 400
-        from the provider because we asked for too much.
         """
-        lowered = self._model.lower()
-        for markers, ceiling in _OUTPUT_TOKEN_CEILINGS:
-            for marker in markers:
-                if marker in lowered:
-                    return ceiling
+        resolved = _lookup_by_version(self._model, _FAMILY_OUTPUT_CEILINGS)
+        if resolved is not None:
+            return resolved
+        for markers, ceiling in _OTHER_OUTPUT_CEILINGS:
+            if _matches(self._model, markers):
+                return ceiling
+        if _is_claude(self._model):
+            return _LEGACY_CLAUDE_OUTPUT_CEILING
         return _DEFAULT_MAX_OUTPUT_TOKENS
 
     @property
@@ -308,8 +411,10 @@ class TokenCounter:
     def min_cacheable_tokens(self) -> int:
         """Provider-minimum tokens for a cache breakpoint to engage.
 
-        Model-aware per spec — 4096 for Opus 4.5/4.6 and Haiku 4.5,
-        1024 elsewhere. Used by
+        Model-aware — 512 on Opus/Fable/Mythos 5, 1024 on Opus 4.8,
+        2048 on Opus 4.7, 4096 on Opus 4.6/4.5 and Haiku 4.5, and
+        1024 everywhere else (all Sonnet, older Claude, non-Claude).
+        Used by
         :meth:`ConfigManager.cache_target_tokens_for_model` to
         compute the effective cache target.
         """

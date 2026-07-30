@@ -887,6 +887,56 @@ class CacheWarmer:
                 self._scheduled_at = None
                 self._schedule()
                 return
+        # Cacheable-prefix floor guard. Anthropic / Bedrock
+        # only honour a ``cache_control`` marker when the
+        # prefix up to that marker meets the model's minimum
+        # cacheable length — 1024 tokens for most models, 4096
+        # for Opus 4.5+ and Haiku 4.5. Early in a session, or
+        # any time the cached tiers (L0–L3) are nearly empty
+        # because the stability tracker hasn't graduated
+        # content off the Active tier yet, the warmer's
+        # cacheable prefix (system prompt + tier bodies, up to
+        # the last marker) falls below that floor. The provider
+        # then silently ignores the marker and the firing
+        # writes 0 / reads 0 — a guaranteed 0% hit that is pure
+        # cost. A real turn in the same state caches nothing
+        # either, so there is no warm cache to keep alive.
+        #
+        # Assemble once here and reuse for the firing below so
+        # the count reflects exactly the bytes we'd send. Skip
+        # and reschedule when below the floor; the warmer
+        # resumes automatically on a later cycle once the
+        # cached tiers grow past the minimum. This is a healthy
+        # state, not a failure — no strike, no disable.
+        messages = self._assemble_warmup_messages()
+        prefix_tokens = self._cacheable_prefix_tokens(messages)
+        min_cacheable = self._service._counter.min_cacheable_tokens
+        if prefix_tokens < min_cacheable:
+            logger.info(
+                "Cache warmer: cacheable prefix %d tokens < "
+                "%d-token provider minimum for %s — the "
+                "cache_control marker would be ignored (0%% "
+                "hit, pure cost). Skipping this firing; will "
+                "retry next cycle once the cached tiers grow "
+                "past the floor.",
+                prefix_tokens, min_cacheable,
+                self._service._config.model,
+            )
+            await self._broadcast(
+                "cacheWarmupComplete",
+                {
+                    "success": True,
+                    "skipped": True,
+                    "reason": (
+                        f"cacheable prefix {prefix_tokens} tokens "
+                        f"below the {min_cacheable}-token provider "
+                        f"minimum — nothing to cache yet"
+                    ),
+                },
+            )
+            self._scheduled_at = None
+            self._schedule()
+            return
         # D34a-followup diagnostic: the broadcast and
         # the executor handoff both run on the event
         # loop thread. Field traces show 80+ seconds
@@ -911,7 +961,7 @@ class CacheWarmer:
         self._last_warmup_tokens = None
         logger.info("Cache warmer: about to call _fire_warmup")
         try:
-            await self._fire_warmup()
+            await self._fire_warmup(messages)
         except asyncio.CancelledError:
             await self._broadcast(
                 "cacheWarmupCancelled",
@@ -1021,8 +1071,99 @@ class CacheWarmer:
                 event_name, exc,
             )
 
-    async def _fire_warmup(self) -> None:
+    def _assemble_warmup_messages(self) -> list[dict[str, Any]]:
+        """Assemble the warm-up message array.
+
+        Mirrors a real turn's assembly via the main scope so
+        the cached prefix bytes match byte-for-byte. Pulled
+        out of :meth:`_fire_warmup` so the firing path can
+        assemble once, count the cacheable prefix to decide
+        whether the firing is worth making, then reuse the
+        same messages for the provider call — no double
+        assembly, no risk of the counted bytes diverging from
+        the sent bytes.
+
+        ``skip_active=True`` omits the Active tier (selected
+        files + active history). Active sits after the last
+        ``cache_control`` marker, so the cached prefix bytes
+        are unchanged and L0–L3 cache hits still land. Saves
+        Active-tier input tokens on every warm-up firing.
+        """
+        service = self._service
+        scope = service._default_scope()
+        # D34a-followup diagnostic: tier assembly is
+        # synchronous on the event loop. For a 100K+ token
+        # prompt it does real work (string concatenation,
+        # token counting). Worth knowing if it's the
+        # source of the stall.
+        _ta0 = time.monotonic()
+        tiered_content = service._build_tiered_content(scope)
+        if tiered_content is None:
+            messages = service._assemble_messages_flat(
+                _WARMUP_PROMPT, [], scope, skip_active=True,
+            )
+        else:
+            messages = service._assemble_tiered(
+                _WARMUP_PROMPT, [], tiered_content, scope,
+                skip_active=True,
+            )
+        _ta1 = time.monotonic()
+        logger.info(
+            "Cache warmer: prompt assembly took %.1fs",
+            _ta1 - _ta0,
+        )
+        return messages
+
+    def _cacheable_prefix_tokens(
+        self, messages: list[dict[str, Any]]
+    ) -> int:
+        """Count tokens in the cacheable prefix of ``messages``.
+
+        The cacheable prefix is everything up to and including
+        the last message carrying a ``cache_control`` marker —
+        that's the span the provider will try to cache. Bytes
+        after the final marker (none, for a warm-up, since
+        ``skip_active`` drops the post-marker tail except the
+        ping) don't count toward the floor.
+
+        Returns 0 when no message carries a marker — there is
+        no cacheable prefix at all, which is correctly below
+        any positive floor and skips the firing.
+
+        Counting mirrors the budget path (``service._counter``)
+        so the estimate matches what other cost accounting
+        sees. The marker lives on a content block's
+        ``cache_control`` key; we scan from the end so the
+        first hit is the last marker.
+        """
+        last_marked = -1
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if isinstance(content, list) and any(
+                isinstance(block, dict)
+                and "cache_control" in block
+                for block in content
+            ):
+                last_marked = i
+        if last_marked < 0:
+            return 0
+        counter = self._service._counter
+        return sum(
+            counter.count_message(m)
+            for m in messages[: last_marked + 1]
+        )
+
+    async def _fire_warmup(
+        self, messages: list[dict[str, Any]]
+    ) -> None:
         """Issue the warm-up call, accumulate, log, and broadcast.
+
+        ``messages`` is the pre-assembled array from
+        :meth:`_assemble_warmup_messages` — the caller
+        (:meth:`_run`) assembles it once, gates the firing on
+        its cacheable-prefix size, then hands the same array
+        here so the counted bytes and the sent bytes can't
+        diverge.
 
         Restarts the heartbeat as the first action so the
         warmer's own LLM-call cycle gets a fresh diagnostic
@@ -1063,35 +1204,9 @@ class CacheWarmer:
         # a second pending timer.
         self._start_heartbeat()
         service = self._service
-        # Assemble messages exactly as a real turn would,
-        # using the main scope so the cached prefix matches.
-        # ``skip_active=True`` omits the Active tier (selected
-        # files + active history) — Active sits after the last
-        # ``cache_control`` marker, so the cached prefix bytes
-        # are unchanged and L0–L3 cache hits still land. Saves
-        # Active-tier input tokens on every warm-up firing.
-        scope = service._default_scope()
-        # D34a-followup diagnostic: tier assembly is
-        # synchronous on the event loop. For a 100K+ token
-        # prompt it does real work (string concatenation,
-        # token counting). Worth knowing if it's the
-        # source of the stall.
-        _ta0 = time.monotonic()
-        tiered_content = service._build_tiered_content(scope)
-        if tiered_content is None:
-            messages = service._assemble_messages_flat(
-                _WARMUP_PROMPT, [], scope, skip_active=True,
-            )
-        else:
-            messages = service._assemble_tiered(
-                _WARMUP_PROMPT, [], tiered_content, scope,
-                skip_active=True,
-            )
-        _ta1 = time.monotonic()
-        logger.info(
-            "Cache warmer: prompt assembly took %.1fs",
-            _ta1 - _ta0,
-        )
+        # ``messages`` is pre-assembled and prefix-gated by the
+        # caller — see :meth:`_assemble_warmup_messages` and the
+        # cacheable-prefix floor guard in :meth:`_run`.
         loop = asyncio.get_running_loop()
         started = time.time()
         # Submit to the dedicated warmer executor. ``queue_submitted``

@@ -42,14 +42,19 @@ Anthropic's prompt caching uses different minimum block sizes across the Claude 
 
 | Model family | `min_cacheable_tokens` |
 |---|---|
-| Claude Opus 4.5 | 4096 |
-| Claude Opus 4.6 | 4096 |
-| Claude Haiku 4.5 | 4096 |
-| Claude Sonnet 4, 4.5, 4.6 | 1024 |
+| Claude Opus 4.5, Opus 4.6, Haiku 4.5 | 4096 |
+| Claude Opus 4.7 | 2048 |
+| Claude Opus 4.8 | 1024 |
+| Claude Opus 5, Fable 5, Mythos 5 | 512 |
+| Claude Sonnet 4, 4.5, 4.6, 5 | 1024 |
 | Claude Opus 4, 4.1 | 1024 |
 | Other Claude models (fallback) | 1024 |
 
+**The minimum is not monotonic across generations** — it peaks at 4096 on Opus 4.5/4.6 and falls to 512 on Opus 5. Resolution parses the version out of the model id and compares against per-family floors (`TokenCounter._min_cacheable_for`), so provider prefixes, dash-or-dot minors, and date suffixes all resolve identically and a new major inherits its family's current value. See `specs-reference/1-foundation/configuration.md` § Model version parsing for limits.
+
 The cache target computation uses `max(...)` so user configuration can raise the threshold but never drop below the model's hardcoded minimum. A user who sets `cache_min_tokens = 512` on an Opus 4.6 session still gets `cache_target = max(512, 4096) × 1.1 = 4505.6` (effectively 4506 tokens after integer clamp).
+
+Where the model minimum is *below* the 1024 `cache_min_tokens` default the max() inverts: on Opus 5 the target is `max(1024, 512) × 1.1`, so the 512 doesn't shrink the target. It still matters — the cache warmer gates its firing on `TokenCounter.min_cacheable_tokens` directly, so a 512–1023-token prefix on Opus 5 is correctly treated as cacheable rather than skipped.
 
 ### Fallback cache target
 

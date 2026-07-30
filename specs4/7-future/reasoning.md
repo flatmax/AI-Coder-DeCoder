@@ -17,14 +17,24 @@ that reasoning would fix).
 
 LiteLLM normalises reasoning across providers:
 
-- Legacy Anthropic Claude models accept a `thinking` parameter:
-  `{"type": "enabled", "budget_tokens": N}`
-- Adaptive-thinking Claude models (Opus 4.5+, Haiku 4.5+,
-  Sonnet 4.5+, including Opus 4.8) reject the legacy shape and
-  require `{"type": "adaptive"}` with effort supplied separately
-  as `output_config.effort`. `budget_tokens` is deprecated /
-  ignored on these models — it is mutually exclusive with the
+- Legacy Anthropic Claude models — the 4.5 generation (Opus 4.5,
+  Sonnet 4.5, Haiku 4.5) and everything older — accept a
+  `thinking` parameter: `{"type": "enabled", "budget_tokens": N}`.
+  These models do **not** support adaptive thinking at all.
+- Adaptive-thinking Claude models — **Claude 4.6 and later**
+  (Opus 4.6/4.7/4.8/5, Sonnet 4.6/5, Fable 5, Mythos 5, Mythos
+  Preview) — require `{"type": "adaptive"}` with effort supplied
+  separately as `output_config.effort`. `budget_tokens` is
+  deprecated on Opus 4.6 / Sonnet 4.6 and **rejected with a 400**
+  on the newer ones — it is mutually exclusive with the
   adaptive+effort path.
+- The cut-over is at 4.6, not 4.5. Detection therefore parses the
+  version out of the model id and compares against `(4, 6)`
+  rather than enumerating names — see
+  `ac_dc.llm._helpers._model_uses_adaptive_thinking`. The
+  enumerated form mis-classified every model released after the
+  list was last edited, which surfaced as a Bedrock 400 on the
+  first reasoning request against Opus 5.
 - OpenAI o1/o3 accept `reasoning_effort`: `"low"`, `"medium"`,
   or `"high"`
 - LiteLLM normalises a single `reasoning_effort` kwarg across

@@ -49,40 +49,88 @@ from ac_dc.llm._types import (
 # 4.8) is enforced by the provider, not here; we just gate typos.
 _VALID_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
+# Claude ids carry family and version in a
+# ``claude-<family>-<major>[-<minor>]`` segment, optionally wrapped
+# in a provider prefix (``anthropic/``, ``bedrock/au.anthropic.``)
+# and a release date and/or Bedrock revision suffix
+# (``-20251101-v1:0``). Both dash and dot minor separators appear
+# in the wild.
+#
+# The two-digit cap plus negative lookahead on the minor keeps an
+# 8-digit date suffix from being read as a version: in
+# ``claude-opus-4-20250514`` the optional minor group cannot match
+# ``20250514``, so the model resolves to 4.0 rather than 4.20.
+# Pre-4 ids put the family last (``claude-3-5-sonnet``) and
+# deliberately don't match — every one of them is legacy-thinking.
+_CLAUDE_VERSION_RE = re.compile(
+    r"claude-[a-z]+-(\d{1,2})(?!\d)(?:[-._](\d{1,2})(?!\d))?"
+)
+
+# Adaptive thinking landed with the 4.6 generation and every
+# later Claude keeps it. Compared as a (major, minor) tuple so a
+# new major (5, 6, ...) or minor (4.10) needs no code change.
+_ADAPTIVE_MIN_VERSION = (4, 6)
+
+# Adaptive-only models whose ids carry no version number at all.
+# Matched by substring since there's nothing to parse.
+_ADAPTIVE_UNVERSIONED_MARKERS = ("mythos-preview",)
+
+
+def _parse_claude_version(model: str) -> tuple[int, int] | None:
+    """Extract ``(major, minor)`` from a Claude model id.
+
+    Returns None when ``model`` carries no parseable
+    ``claude-<family>-<version>`` segment — a non-Claude model
+    (``openai/gpt-4``), a pre-4 id whose family comes last
+    (``claude-3-5-sonnet``), or an unversioned name. Callers
+    treat None as "not an adaptive-thinking model".
+
+    A missing minor reads as 0, so bare majors compare correctly:
+    ``claude-opus-5`` → ``(5, 0)``, which sorts above
+    ``(4, 6)`` as intended.
+    """
+    match = _CLAUDE_VERSION_RE.search(model.lower())
+    if match is None:
+        return None
+    minor = match.group(2)
+    return int(match.group(1)), int(minor) if minor is not None else 0
+
 
 def _model_uses_adaptive_thinking(model: str) -> bool:
     """True when the model requires the ``adaptive`` thinking shape.
 
-    Newer Anthropic models (Opus 4.5+, Haiku 4.5+, and the
-    Sonnet 4.5+ family on some backends — notably Bedrock)
-    rejected the legacy ``{"type": "enabled", "budget_tokens": N}``
-    shape with::
+    Claude 4.6 and later reject the legacy
+    ``{"type": "enabled", "budget_tokens": N}`` shape with::
 
         "thinking.type.enabled" is not supported for this model.
         Use "thinking.type.adaptive" and "output_config.effort"
         to control thinking behavior.
 
-    For these models we emit the adaptive shape and let the
-    provider pick a default effort level. The legacy shape
-    still works for older Claude families (Sonnet 3.x, Opus 3,
-    earlier Haiku), so we keep it as the default rather than
-    flipping wholesale.
+    For these we emit ``{"type": "adaptive"}`` and convey depth
+    through ``reasoning_effort`` instead. The 4.5 generation
+    (Opus 4.5, Sonnet 4.5, Haiku 4.5) and everything older is
+    the other way round: those models don't support adaptive at
+    all and require ``budget_tokens``. See the Bedrock user
+    guide § Adaptive thinking for the authoritative split.
 
-    Match by lowercase substring against the configured model
-    name. Bedrock prefixes (``bedrock/anthropic.``), Anthropic-
-    direct prefixes (``anthropic/``), and bare model names all
-    pass through the same check.
+    Detection parses the version rather than enumerating model
+    names. The enumerated form silently mis-classified every
+    model released after the list was last edited — a new Opus
+    took the legacy branch and 400'd on the first reasoning
+    request. A version comparison means new releases and new
+    families (``claude-fable-5``) work untouched.
+
+    Provider prefixes pass through: ``bedrock/anthropic.``,
+    ``au.anthropic.``, ``anthropic/``, and bare names all
+    resolve to the same version.
     """
     lowered = model.lower()
-    adaptive_markers = (
-        "opus-4-5", "opus-4.5",
-        "opus-4-6", "opus-4.6",
-        "opus-4-7", "opus-4.7",
-        "opus-4-8", "opus-4.8",
-        "haiku-4-5", "haiku-4.5",
-        "sonnet-4-5", "sonnet-4.5",
-    )
-    return any(marker in lowered for marker in adaptive_markers)
+    if any(marker in lowered for marker in _ADAPTIVE_UNVERSIONED_MARKERS):
+        return True
+    version = _parse_claude_version(lowered)
+    if version is None:
+        return False
+    return version >= _ADAPTIVE_MIN_VERSION
 
 
 def _build_thinking_payload(
@@ -102,11 +150,13 @@ def _build_thinking_payload(
       LiteLLM's translation layer for the
       ``output_config`` field, whose kwarg surface has
       churned across releases.
-    - Legacy-thinking models: ``{"type": "enabled",
-      "budget_tokens": N}`` with N from
-      ``config.reasoning_budget_tokens``. These models
-      don't accept ``reasoning_effort`` and ignore it
-      when present, so the helper omits the kwarg below.
+    - Legacy-thinking models (Claude 4.5 and older):
+      ``{"type": "enabled", "budget_tokens": N}`` with N
+      from ``config.reasoning_budget_tokens``. These
+      models don't support the adaptive shape, so the
+      helper omits ``reasoning_effort`` below rather than
+      let LiteLLM translate it into a budget of its own
+      choosing.
     """
     if _model_uses_adaptive_thinking(config.model):
         return {"type": "adaptive"}
@@ -127,14 +177,15 @@ def build_thinking_kwargs(
 
     - ``{}`` when reasoning is disabled.
     - ``{"thinking": {...}, "reasoning_effort": "..."}`` for
-      adaptive-thinking models (Opus 4.5+/4.6+/4.7+, Haiku
-      4.5+, Sonnet 4.5+). The ``thinking`` block tells the
-      model to use adaptive mode; ``reasoning_effort`` is
-      LiteLLM's standardised param, translated to
-      ``output_config.effort`` for Anthropic backends.
+      adaptive-thinking models (Claude 4.6 and later). The
+      ``thinking`` block tells the model to use adaptive
+      mode; ``reasoning_effort`` is LiteLLM's standardised
+      param, translated to ``output_config.effort`` for
+      Anthropic backends.
     - ``{"thinking": {"type": "enabled", "budget_tokens": N}}``
-      for legacy-thinking models. ``reasoning_effort`` is
-      omitted — those models don't accept it.
+      for legacy-thinking models (Claude 4.5 and older).
+      ``reasoning_effort`` is omitted — those models don't
+      support adaptive thinking.
 
     Resolution chain (per ``specs4/7-future/reasoning.md``):
 

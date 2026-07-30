@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ac_dc.token_counter import _min_cacheable_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,34 +100,33 @@ CONFIG_TYPES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 #
 # Anthropic's prompt-caching docs specify different minimums per
-# family. Getting this wrong means the provider silently doesn't
-# cache the block and we eat the full ingestion cost.
+# family and version. Getting this wrong means the provider silently
+# doesn't cache the block and we eat the full ingestion cost.
 #
-# Match by lowercase substring — resilient to provider prefixes.
-# Both dash and dot version variants appear in the wild.
+# The table itself lives in :mod:`ac_dc.token_counter`; earlier
+# revisions duplicated it here and the two drifted (a new Opus was
+# added to one list and not the other). ``_DEFAULT_MIN_TOKENS`` stays
+# local — it's also the default for the user-facing
+# ``cache_min_tokens`` setting, which is a config concern.
 
-_HIGH_MIN_MODELS = (
-    "opus-4-5", "opus-4.5",
-    "opus-4-6", "opus-4.6",
-    "opus-4-7", "opus-4.7",
-    "opus-4-8", "opus-4.8",
-    "haiku-4-5", "haiku-4.5",
-)
-_HIGH_MIN_TOKENS = 4096
 _DEFAULT_MIN_TOKENS = 1024
 
 
 def _model_min_cacheable_tokens(model: str) -> int:
     """Return the provider's minimum cacheable token count for ``model``.
 
-    Hardcoded per Anthropic's published minimums. Non-Claude models
-    get the default (1024).
+    Hardcoded per Anthropic's published minimums, resolved by model
+    family and version — see
+    :data:`ac_dc.token_counter._FAMILY_MIN_CACHEABLE`. Non-Claude
+    models and Claude releases older than every listed floor get the
+    default (1024).
+
+    Delegates to :mod:`ac_dc.token_counter` so the table lives in
+    exactly one place. The dependency runs one way only (the counter
+    imports nothing from here), which is what lets the counter stay
+    constructible without a ``ConfigManager``.
     """
-    lowered = model.lower()
-    for pattern in _HIGH_MIN_MODELS:
-        if pattern in lowered:
-            return _HIGH_MIN_TOKENS
-    return _DEFAULT_MIN_TOKENS
+    return _min_cacheable_for(model)
 
 
 # ---------------------------------------------------------------------------
@@ -705,8 +706,12 @@ class ConfigManager:
         Example — Opus 4.6 with the default user config:
         ``max(1024, 4096) × 1.1 = 4505``.
 
-        Example — Sonnet with the default user config:
-        ``max(1024, 1024) × 1.1 = 1126``.
+        Example — Opus 5 or Sonnet with the default user config:
+        ``max(1024, 512 or 1024) × 1.1 = 1126``. The user-facing
+        ``cache_min_tokens`` floor dominates on models whose
+        provider minimum dropped below it, so Opus 5's 512 shows
+        up in :meth:`TokenCounter.min_cacheable_tokens` (which
+        gates the warmer) without shrinking the cache target.
         """
         target_model = model or self.model
         provider_min = _model_min_cacheable_tokens(target_model)
@@ -873,9 +878,9 @@ class ConfigManager:
         if budget <= 0:
             budget = 10000
         # Effort levels — LiteLLM's standardised cross-provider
-        # param. Anthropic's adaptive-thinking models (Opus 4.5+,
-        # Haiku 4.5+, Sonnet 4.5+) use this rather than a token
-        # budget; LiteLLM translates to ``output_config.effort``
+        # param. Anthropic's adaptive-thinking models (Claude 4.6
+        # and later) use this rather than a token budget; LiteLLM
+        # translates it to ``output_config.effort``
         # for those backends. The accepted set mirrors LiteLLM's
         # own ``reasoning_effort`` vocabulary (minimal/low/medium/
         # high/xhigh/max); the provider rejects a level a given
@@ -890,7 +895,7 @@ class ConfigManager:
         if effort not in ("minimal", "low", "medium", "high", "xhigh", "max"):
             effort = "medium"
         # First-chunk watchdog override for reasoning calls.
-        # Adaptive-thinking models (Opus 4.5+, Bedrock Opus 4.7
+        # Adaptive-thinking models (Bedrock Opus 4.7 and Opus 5
         # in particular) can take several minutes between
         # ``litellm.completion`` returning the stream iterator
         # and the first SSE content chunk arriving — the
@@ -968,11 +973,11 @@ class ConfigManager:
 
         One of ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
         ``"xhigh"``, ``"max"``. Used by adaptive-thinking models
-        (Opus 4.5+, Haiku 4.5+, Sonnet 4.5+) where a token budget
-        isn't accepted. LiteLLM translates this to the per-provider
+        (Claude 4.6 and later) where a token budget isn't
+        accepted. LiteLLM translates this to the per-provider
         field (``output_config.effort`` for Anthropic). The higher
         tiers (``xhigh``/``max``) are only accepted on models whose
-        map entry advertises them — e.g. Opus 4.8.
+        map entry advertises them — e.g. Opus 5 and Opus 4.6.
         """
         return self.reasoning_config["effort"]
 

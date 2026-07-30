@@ -91,13 +91,16 @@ Hardcoded constants in `TokenCounter`, not read from config:
 | Property | Value |
 |---|---|
 | `max_input_tokens` | `1_000_000` for all currently supported models |
-| `max_output_tokens` (Claude family) | `8_192` |
-| `max_output_tokens` (non-Claude) | `4_096` |
+| `max_output_tokens` (Opus 4.5+, Sonnet 4.6+, Fable 5, Mythos 5) | `128_000` |
+| `max_output_tokens` (Sonnet 4.5, Haiku 4.5+) | `64_000` |
+| `max_output_tokens` (older / unversioned Claude) | `8_192` |
+| `max_output_tokens` (`gpt-4` family) | `16_384` |
+| `max_output_tokens` (anything else) | `4_096` |
 | `max_history_tokens` | `max_input_tokens / 16` |
 | Tokenizer encoding | `cl100k_base` via `tiktoken` (used for all models regardless of provider) |
 | Fallback estimate when tokenizer unavailable | `len(text) // 4` |
 
-Model-family detection uses case-insensitive substring matching on the model name (e.g., `"claude"` → Claude family).
+Family detection lowercases the model name. The Claude ceilings and cache minimums are resolved by parsing `claude-<family>-<major>[-<minor>]` out of the id and comparing against per-family version floors, so provider prefixes (`anthropic/`, `bedrock/au.anthropic.`), dash-or-dot minors, and date/revision suffixes (`-20251101-v1:0`) all resolve identically, and a new major inherits its family's current values without a table edit. Non-Claude limits stay plain substring matches.
 
 ### Cache target computation
 
@@ -304,17 +307,24 @@ This exists because an earlier version of the config accepted camelCase (JavaScr
 
 All token counting uses `cl100k_base` regardless of the model provider. Claude models, GPT models, Bedrock models — all counted with the same encoding. This is a deliberate simplification: the per-model differences in tokenization are small enough that budget decisions stay correct, and using one encoding avoids multi-provider tokenizer dependencies. The cost is that token counts shown to the user are approximate when the actual model is non-OpenAI.
 
-### Model name substring matching for limits
+### Model version parsing for limits
 
-`TokenCounter._min_cacheable_for(model_name)` does case-insensitive substring checks:
+`TokenCounter._min_cacheable_for(model_name)` lowercases the name, parses `claude-<family>-<major>[-<minor>]` out of it, and walks that family's version floors highest-first:
 
-- `"opus-4-5"` / `"opus-4.5"` → 4096
-- `"opus-4-6"` / `"opus-4.6"` → 4096
-- `"haiku-4-5"` / `"haiku-4.5"` → 4096
-- Any other `"claude"` substring → 1024
-- Anything else → 1024
+| Family | Floor → minimum |
+|---|---|
+| `opus` | 5.0 → 512, 4.8 → 1024, 4.7 → 2048, 4.5 → 4096 |
+| `haiku` | 4.5 → 4096 |
+| `fable`, `mythos` | 5.0 → 512 |
+| anything unparsed or unlisted (all Sonnet, pre-4 Claude, non-Claude) | 1024 |
 
-Both dash and dot separators match because different providers format version numbers differently (`anthropic/claude-opus-4-5` vs `anthropic/claude-opus-4.5`). The substring check catches both.
+**The provider minimum is not monotonic across generations** — it *drops* from 4096 on Opus 4.5/4.6 to 512 on Opus 5 — so each generation needs its own entry rather than a single "newer means higher" rule. Sonnet is deliberately absent: every generation sits on the 1024 default.
+
+Version parsing replaced an earlier list of hardcoded substrings (`"opus-4-5"`, `"opus-4-6"`, `"haiku-4-5"`). The list silently mis-classified any model released after its last edit — `claude-opus-5` matched nothing, so it got the 1024 default (leaving 512–1023-token prefixes uncached) and, from the parallel ceilings list, an 8192-token output cap on a 128K model. Parsing means new majors and new families (`claude-fable-5`) resolve correctly untouched.
+
+Both dash and dot minor separators parse, because providers format version numbers differently (`anthropic/claude-opus-4-5` vs `anthropic/claude-opus-4.5`). The minor is capped at two digits with a negative lookahead so an 8-digit date suffix can't be read as a version — `claude-opus-4-20250514` is Opus 4.0, not Opus 4.20. Pre-4 ids put the family last (`claude-3-5-sonnet`) and deliberately don't parse; every one of them takes the defaults anyway.
+
+`ConfigManager._model_min_cacheable_tokens` delegates to this same function rather than keeping its own copy, so the two can't drift.
 
 ### Upgrade atomicity
 

@@ -62,13 +62,14 @@ class TestModelLimits:
     def test_claude_max_output_tokens(self) -> None:
         """Claude family ceilings — model-aware per provider docs.
 
-        The ``_OUTPUT_TOKEN_CEILINGS`` table in
-        :mod:`ac_dc.token_counter` pins specific ceilings per
-        model generation. Pattern match is lowercase substring
-        so both ``anthropic/claude-*`` and
-        ``bedrock/anthropic.claude-*`` resolve the same way.
-        Each test case documents the provider-reported value
-        for that generation.
+        The ``_FAMILY_OUTPUT_CEILINGS`` table in
+        :mod:`ac_dc.token_counter` pins a ceiling per family and
+        version floor. Version parsing tolerates every id shape
+        we see: ``anthropic/claude-*``,
+        ``bedrock/anthropic.claude-*``, regional Bedrock prefixes,
+        dot-separated minors, and date/revision suffixes. Each
+        test case documents the provider-reported value for that
+        generation.
         """
         # Opus 4.5+ — 128K output window.
         for model in (
@@ -77,13 +78,19 @@ class TestModelLimits:
             "anthropic/claude-opus-4-6",
             "anthropic/claude-opus-4.6",
             "bedrock/anthropic.claude-opus-4-6-v1:0",
+            "anthropic/claude-opus-4-8",
         ):
             assert TokenCounter(model).max_output_tokens == 128_000, model
-        # Sonnet 4.5+ — 64K output window.
+        # Sonnet 4.6+ — 128K output window.
+        for model in (
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-4.6",
+        ):
+            assert TokenCounter(model).max_output_tokens == 128_000, model
+        # Sonnet 4.5 — 64K output window.
         for model in (
             "anthropic/claude-sonnet-4-5",
             "anthropic/claude-sonnet-4.5",
-            "anthropic/claude-sonnet-4-6",
             "bedrock/anthropic.claude-sonnet-4-5-v1:0",
         ):
             assert TokenCounter(model).max_output_tokens == 64_000, model
@@ -102,8 +109,52 @@ class TestModelLimits:
         ):
             assert TokenCounter(model).max_output_tokens == 8_192, model
 
+    def test_next_generation_claude_max_output_tokens(self) -> None:
+        """A new major inherits its family's current ceiling.
+
+        Regression guard for the enumerate-every-name approach the
+        ceilings table used to take: ``claude-opus-5`` matched no
+        listed marker and silently fell through to the 8192
+        catch-all, truncating responses at 8K on a 128K model.
+        Version comparison means new majors and new families work
+        without a table edit.
+        """
+        for model in (
+            "anthropic/claude-opus-5",
+            "bedrock/au.anthropic.claude-opus-5",
+            "bedrock/global.anthropic.claude-opus-5",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-fable-5",
+            "anthropic/claude-mythos-5",
+        ):
+            assert TokenCounter(model).max_output_tokens == 128_000, model
+
+    def test_date_suffix_is_not_read_as_a_minor_version(self) -> None:
+        """An 8-digit release date must not parse as the minor.
+
+        ``claude-opus-4-20250514`` is Opus 4.0, not Opus 4.20 —
+        the version regex caps the minor at two digits so the date
+        can't be swallowed. Getting this wrong would promote a
+        pre-4.5 model into the 128K bucket and produce a provider
+        400 on long responses.
+        """
+        assert (
+            TokenCounter("anthropic/claude-opus-4-20250514")
+            .max_output_tokens == 8_192
+        )
+        # A dated 4.5+ id keeps its real ceiling — the suffix is
+        # ignored rather than blocking the match.
+        assert (
+            TokenCounter("bedrock/anthropic.claude-opus-4-5-20251101-v1:0")
+            .max_output_tokens == 128_000
+        )
+        assert (
+            TokenCounter("anthropic/claude-haiku-4-5-20251001")
+            .max_output_tokens == 64_000
+        )
+
     def test_non_claude_max_output_tokens(self) -> None:
-        """Non-Claude ceilings per the ``_OUTPUT_TOKEN_CEILINGS`` table.
+        """Non-Claude ceilings per the ``_OTHER_OUTPUT_CEILINGS`` table.
 
         GPT-4 family matches the ``gpt-4`` marker and gets
         16_384. Models with no matching marker fall through to
@@ -154,10 +205,44 @@ class TestModelLimits:
         ):
             assert TokenCounter(model).min_cacheable_tokens == 4096, model
 
+    def test_min_cacheable_is_not_monotonic_across_opus(self) -> None:
+        """Each Opus generation has its own documented floor.
+
+        The provider minimum *drops* as generations advance —
+        4096 on 4.5/4.6, 2048 on 4.7, 1024 on 4.8, 512 on Opus 5 —
+        so a single "newer means higher" rule can't express it and
+        the table has to carry one entry per generation. Treating
+        Opus 5 as 1024 (the old catch-all) would leave 512-1023
+        token prefixes uncached even though the provider would
+        have cached them.
+        """
+        assert (
+            TokenCounter("anthropic/claude-opus-4-7").min_cacheable_tokens
+            == 2048
+        )
+        assert (
+            TokenCounter("anthropic/claude-opus-4-8").min_cacheable_tokens
+            == 1024
+        )
+        for model in (
+            "anthropic/claude-opus-5",
+            "bedrock/au.anthropic.claude-opus-5",
+            "anthropic/claude-fable-5",
+            "anthropic/claude-mythos-5",
+        ):
+            assert TokenCounter(model).min_cacheable_tokens == 512, model
+
     def test_min_cacheable_default(self) -> None:
-        """Sonnet, other Claude, non-Claude — all get the 1024 default."""
+        """Sonnet, other Claude, non-Claude — all get the 1024 default.
+
+        Sonnet is deliberately absent from the per-family table:
+        every generation sits on the 1024 default, so listing it
+        would add rows that change nothing.
+        """
         for model in (
             "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-5",
             "anthropic/claude-haiku-3-5",
             "anthropic/claude-opus-4",
             "openai/gpt-4",
@@ -176,6 +261,9 @@ class TestModelLimits:
         tc = TokenCounter("ANTHROPIC/CLAUDE-OPUS-4-6")
         assert tc.max_output_tokens == 128_000
         assert tc.min_cacheable_tokens == 4096
+        tc5 = TokenCounter("BEDROCK/AU.ANTHROPIC.CLAUDE-OPUS-5")
+        assert tc5.max_output_tokens == 128_000
+        assert tc5.min_cacheable_tokens == 512
 
 
 # ---------------------------------------------------------------------------
